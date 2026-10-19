@@ -57,6 +57,12 @@ impl ChartPaneController {
         generation == self.current_generation
     }
 
+    /// A previous series may keep publishing data while its replacement is
+    /// pending, but its lifecycle state cannot settle or fail that request.
+    pub(super) fn accept_series_state(&self, generation: u64) -> bool {
+        self.pending_selection.is_none() && self.accept_publication(generation)
+    }
+
     /// A study publication without a demand belongs to the consumer's
     /// app-scoped study lifecycle; demand-bound output must match this chart.
     pub(super) fn accept_study_publication(&self, generation: Option<u64>) -> bool {
@@ -148,6 +154,21 @@ mod tests {
         assert!(pane.accept(3));
         assert!(!pane.accept_publication(1));
         assert!(pane.accept_publication(3));
+    }
+
+    #[test]
+    fn pending_selection_does_not_accept_old_series_lifecycle_states() {
+        let mut pane = ChartPaneController::default();
+        pane.request(2);
+        assert!(pane.accept_publication(1));
+        assert!(!pane.accept_series_state(1));
+        assert!(!pane.accept_series_state(2));
+        assert!(pane.reject(2));
+        assert!(pane.accept_series_state(1));
+        pane.request(3);
+        assert!(pane.accept(3));
+        assert!(!pane.accept_series_state(1));
+        assert!(pane.accept_series_state(3));
     }
 
     #[test]

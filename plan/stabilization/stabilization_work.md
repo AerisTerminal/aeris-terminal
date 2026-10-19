@@ -1302,6 +1302,17 @@ Status: pending
     MD-15 remain open; M6.3 stays unchecked pending auxiliary publication audit,
     switch-guard deletion, fixed permutations, 100+ seeded interleavings,
     cover-through-ready and guarded GUI storms.
+  - Part 21: a prior series Error delivered while a replacement request is
+    pending no longer clears the request or prevents its marker from committing.
+    The pane controller rejects lifecycle states during pending selection but
+    continues to admit the displayed series' data; after a failed request the
+    previous binding's lifecycle states are accepted again. A failing-first
+    GPUI regression and a pure controller transition test pass. All five serial
+    workspace gates passed after cleaning 28.1 GiB of generated artifacts, with
+    CARGO_BUILD_JOBS=1 for the cold build. UI-02 and MD-15 stay open; M6.3
+    remains unchecked pending auxiliary publication audit, switch-guard removal,
+    fixed permutations, 100+ seeded interleavings, cover-through-ready and
+    guarded GUI switch storms.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1654,6 +1665,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 18 fix(desktop): recovery replies carry the originating pane selection generation and cannot fail or install into a replacement chart; the GPUI retired-recovery test and all five serial workspace gates passed with CARGO_BUILD_JOBS=1 after cleaning 30.3 GiB generated artifacts. M6.3 remains unchecked pending other auxiliary fences, switch guards, interleavings and guarded GUI storms.
 - 2026-10-19 M6.3 Part 19 fix(desktop): remove the never-produced, unfenced viewport reply and pane mutation; keep generation-stamped viewport commands and initialization restore. All five workspace gates passed with CARGO_BUILD_JOBS=1 after cleaning 26.4 GiB. M6.3 remains unchecked pending auxiliary audit, switch guards, interleavings and guarded GUI storms.
 - 2026-10-19 M6.3 Part 20 fix(desktop): reject failed pending selection without advancing the displayed generation; the prior chart accepts later session publications and one deduplicated failure notice remains. Pure and GPUI regressions plus all five serial workspace gates passed after cleaning 26.2 GiB with CARGO_BUILD_JOBS=1. M6.3 remains unchecked pending auxiliary audit, switch-guard removal, exhaustive interleavings and guarded GUI storms.
+- 2026-10-19 M6.3 Part 21 fix(desktop): protect pending selections from old-series errors; failing-first GPUI and pure controller tests plus all five serial workspace gates passed after cleaning 28.1 GiB with CARGO_BUILD_JOBS=1. M6.3 remains unchecked pending auxiliary audit, switch guards, interleavings, cover-through-ready and guarded GUI storms.
 
 ## 7. Known gaps / deferred
 

@@ -4290,7 +4290,7 @@ impl WorkspaceSurface {
         message: String,
         cx: &mut Context<Self>,
     ) {
-        if self.chart_pane_controller.accept_publication(generation) {
+        if self.chart_pane_controller.accept_series_state(generation) {
             self.apply_market_state_message(state, message, cx);
         }
     }

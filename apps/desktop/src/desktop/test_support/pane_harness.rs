@@ -852,6 +852,52 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::SeriesState {
+            generation: 1,
+            state: ChartState::Error,
+            message: "retired private series failure".into(),
+        })
+        .expect("old series error");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            pane.chart_pane_controller.pending_selection(),
+            Some(sequence)
+        );
+        assert_eq!(pane.chart_state, ChartState::Loading);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+        assert_eq!(pane.chart_failure, None);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestAppContext) {
     use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketStudyRemoved};
     use std::num::NonZeroU64;
