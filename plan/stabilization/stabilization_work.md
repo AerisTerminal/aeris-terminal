@@ -1170,6 +1170,16 @@ Status: pending
     state, snapshot, update, tape and other pane messages still require exact
     binding acceptance, legacy switch guards still remain, and permutation,
     seeded interleaving, cover-through-ready and GUI storm checks are pending.
+  - Part 7: market-session statuses now carry the runtime selection generation
+    through the pane mailbox and are admitted only for the committed chart
+    binding. Initial descriptor adoption establishes that binding; selection
+    markers advance it, and instrument changes clear the previous session
+    status. A pre-commit catalog status for a different instrument is ignored.
+    A pure controller regression covers pending, committed and failed
+    selections; a GPUI PaneHarness regression delivers a retired closed
+    session after the marker and verifies only the new status is shown.
+    M6.3 stays unchecked: state, snapshots, updates, tape, other pane messages,
+    switch-guard removal, full interleavings and guarded GUI storms remain.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1510,6 +1520,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 4 fix(desktop): post-marker replacement failure leaves the prior chart Ready with one sanitized selection notice; interval and repeated instrument cases pass in GPUI PaneHarness. M6.3 stays unchecked pending exact-generation acceptance migration, switch-guard deletion, interleavings and GUI storm.
 - 2026-10-19 M6.3 Part 5 refactor(desktop): centralized exact pending-generation acceptance of selection commits and failures in ChartPaneController, removing the pane's raw pending sequence. Pure and GPUI retired-outcome checks pass. M6.3 stays unchecked pending remaining publication binding and GUI storm.
 - 2026-10-19 M6.3 Part 6 fix(desktop): fenced queued initial instrument descriptor replies against later pane selection requests; pure and GPUI same-instrument retired-descriptor regressions pass. Full gate results are recorded with the commit. M6.3 remains unchecked pending all other pane publications, switch-guard removal, seeded interleavings and guarded GUI storm.
+- 2026-10-19 M6.3 Part 7 fix(desktop): fence market-session statuses at the pane's committed selection; runtime and GPUI regressions cover pending and retired statuses. Full gate results recorded with this commit; M6.3 remains unchecked pending other pane publications and guarded GUI evidence.
 
 ## 7. Known gaps / deferred
 

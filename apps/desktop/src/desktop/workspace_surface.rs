@@ -3682,8 +3682,10 @@ impl WorkspaceSurface {
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
             }
-            MarketWorkerMessage::MarketSessionStatus(status) => {
-                self.apply_market_session_status(status, cx);
+            MarketWorkerMessage::MarketSessionStatus { generation, status } => {
+                if self.chart_pane_controller.accept_publication(generation) {
+                    self.apply_market_session_status(status, cx);
+                }
             }
             MarketWorkerMessage::OrderBook(frame) => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
@@ -3760,16 +3762,13 @@ impl WorkspaceSurface {
         generation: u64,
         instrument: InstallProviderInstrument,
     ) {
-        if !self
-            .chart_pane_controller
-            .accept_initial_instrument(generation)
-        {
-            return;
-        }
         if self.product.as_ref().is_some_and(|product| {
             product.provider == instrument.provider
                 && product.instrument_id == instrument.instrument_id
-        }) {
+        }) && self
+            .chart_pane_controller
+            .adopt_initial_instrument(generation)
+        {
             self.product = Some(instrument);
             self.chart_persistence_dirty = true;
         }
@@ -3780,7 +3779,15 @@ impl WorkspaceSurface {
         status: aeris_contracts::MarketSessionStatus,
         cx: &mut Context<Self>,
     ) {
-        // The header market indicator reads this for the selected product only.
+        // Catalog selection can announce the next instrument before its series
+        // selection commits. Do not show that session under the previous chart.
+        if self
+            .product
+            .as_ref()
+            .is_none_or(|product| product.instrument_id != status.instrument_id)
+        {
+            return;
+        }
         self.market_session_status = Some(status);
         if let Some(chart) = self.chart.clone() {
             self.apply_market_session_to_chart(&chart, cx);
@@ -4429,6 +4436,7 @@ impl WorkspaceSurface {
                 self.provider = provider;
             }
             self.product = Some(product);
+            self.market_session_status = None;
             // Price levels belong to one instrument: a product switch drops
             // the old book back to loading instead of showing BTC levels
             // under an ETH selection. Interval-only switches keep the book.

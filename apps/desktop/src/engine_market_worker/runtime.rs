@@ -235,10 +235,14 @@ fn publish_session_statuses(
         }
         let now = *now.get_or_insert_with(|| clock.wall_unix_nanos());
         let status = market.market_session_status(&record.product, now);
-        if let Err(error) = record
-            .endpoint
-            .messages
-            .send(MarketWorkerMessage::MarketSessionStatus(status))
+        if let Err(error) =
+            record
+                .endpoint
+                .messages
+                .send(MarketWorkerMessage::MarketSessionStatus {
+                    generation: record.endpoint.active_generation,
+                    status,
+                })
         {
             diagnostic!("Aeris market session status was not delivered: {error}");
         }
@@ -400,7 +404,10 @@ fn apply_received_event(
                 let status = market.market_session_status(instrument, clock.wall_unix_nanos());
                 endpoint
                     .messages
-                    .send(MarketWorkerMessage::MarketSessionStatus(status))
+                    .send(MarketWorkerMessage::MarketSessionStatus {
+                        generation: endpoint.active_generation,
+                        status,
+                    })
                     .map_err(|error| error.to_string())?;
             }
             match endpoint
@@ -609,9 +616,14 @@ mod tests {
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         let first = messages.into_iter().next().expect("first session status");
-        let MarketWorkerMessage::MarketSessionStatus(first) = first else {
+        let MarketWorkerMessage::MarketSessionStatus {
+            generation: first_generation,
+            status: first,
+        } = first
+        else {
             panic!("expected first session status");
         };
+        assert_eq!(first_generation, 1);
         assert_eq!(first, market.market_session_status(&product, first_time));
 
         clock.set_wall_unix_nanos(second_time);
@@ -619,9 +631,14 @@ mod tests {
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         let second = messages.into_iter().next().expect("second session status");
-        let MarketWorkerMessage::MarketSessionStatus(second) = second else {
+        let MarketWorkerMessage::MarketSessionStatus {
+            generation: second_generation,
+            status: second,
+        } = second
+        else {
             panic!("expected second session status");
         };
+        assert_eq!(second_generation, 1);
         assert_eq!(second, market.market_session_status(&product, second_time));
         assert_ne!(
             first, second,

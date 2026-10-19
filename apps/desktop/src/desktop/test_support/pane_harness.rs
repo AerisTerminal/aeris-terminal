@@ -192,6 +192,95 @@ impl PaneHarness {
 }
 
 #[gpui::test]
+fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut TestAppContext) {
+    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let old_status = MarketSessionStatus {
+        instrument_id: cx.read(|cx| {
+            harness
+                .pane
+                .read(cx)
+                .product
+                .as_ref()
+                .expect("product")
+                .instrument_id
+                .clone()
+        }),
+        phase: MarketSessionPhase::Closed,
+        source: MarketSessionSource::ProviderCalendar,
+        session_start_unix_nanos: None,
+        session_end_unix_nanos: None,
+        next_open_unix_nanos: None,
+    };
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection request");
+    harness
+        .publications
+        .send(MarketWorkerMessage::MarketSessionStatus {
+            generation: 1,
+            status: old_status.clone(),
+        })
+        .expect("old status while pending");
+    harness.pane.update(cx, |pane, cx| {
+        pane.poll_market_worker(cx);
+        assert_eq!(pane.market_session_status.as_ref(), Some(&old_status));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::MarketSessionStatus {
+            generation: 1,
+            status: MarketSessionStatus {
+                instrument_id: "uncommitted instrument".into(),
+                ..old_status.clone()
+            },
+        })
+        .expect("catalog status ahead of selection");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.market_session_status.as_ref(), Some(&old_status));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker");
+    harness
+        .publications
+        .send(MarketWorkerMessage::MarketSessionStatus {
+            generation: 1,
+            status: old_status.clone(),
+        })
+        .expect("queued stale status");
+    let new_status = MarketSessionStatus {
+        phase: MarketSessionPhase::Regular,
+        ..old_status.clone()
+    };
+    harness
+        .publications
+        .send(MarketWorkerMessage::MarketSessionStatus {
+            generation: sequence,
+            status: new_status.clone(),
+        })
+        .expect("new status");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 3);
+        assert_eq!(pane.market_session_status.as_ref(), Some(&new_status));
+    });
+}
+
+#[gpui::test]
 fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
     cx: &mut TestAppContext,
 ) {

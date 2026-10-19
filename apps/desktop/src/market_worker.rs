@@ -304,7 +304,10 @@ pub enum MarketWorkerMessage {
         transport_rtt_nanos: Option<u64>,
     },
     ProviderCatalog(ProviderCatalogEvent),
-    MarketSessionStatus(aeris_contracts::MarketSessionStatus),
+    MarketSessionStatus {
+        generation: u64,
+        status: aeris_contracts::MarketSessionStatus,
+    },
     OrderBook(OrderBookFrame),
     TradeTape(MarketTradeTapeSnapshot),
     PriceAlertTriggered(MarketPriceAlertTrigger),

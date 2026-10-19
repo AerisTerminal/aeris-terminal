@@ -1,9 +1,19 @@
 //! Selection outcome fence for one chart pane.
 
-#[derive(Default)]
 pub(super) struct ChartPaneController {
     pending_selection: Option<u64>,
     latest_selection: u64,
+    current_generation: u64,
+}
+
+impl Default for ChartPaneController {
+    fn default() -> Self {
+        Self {
+            pending_selection: None,
+            latest_selection: 0,
+            current_generation: 1,
+        }
+    }
 }
 
 impl ChartPaneController {
@@ -27,13 +37,28 @@ impl ChartPaneController {
             return false;
         }
         self.pending_selection = None;
+        self.current_generation = generation;
         true
+    }
+
+    /// Accept pane-scoped data only for the committed selection. While a
+    /// request is pending, the previous chart remains the displayed binding.
+    pub(super) fn accept_publication(&self, generation: u64) -> bool {
+        generation == self.current_generation
     }
 
     /// An initial instrument descriptor must not overwrite a later pane selection
     /// just because its product happens to have the same provider and symbol.
     pub(super) fn accept_initial_instrument(&self, generation: u64) -> bool {
         self.pending_selection.is_none() && generation >= self.latest_selection
+    }
+
+    pub(super) fn adopt_initial_instrument(&mut self, generation: u64) -> bool {
+        if !self.accept_initial_instrument(generation) {
+            return false;
+        }
+        self.current_generation = generation;
+        true
     }
 }
 
@@ -69,5 +94,21 @@ mod tests {
         pane.clear();
         assert!(!pane.accept_initial_instrument(2));
         assert!(pane.accept_initial_instrument(3));
+    }
+
+    #[test]
+    fn session_publications_follow_only_the_committed_selection() {
+        let mut pane = ChartPaneController::default();
+        assert!(pane.adopt_initial_instrument(3));
+        pane.request(4);
+        assert!(pane.accept_publication(3), "old chart is still displayed");
+        assert!(!pane.accept_publication(4));
+        assert!(pane.accept(4));
+        assert!(!pane.accept_publication(3));
+        assert!(pane.accept_publication(4));
+        pane.request(5);
+        pane.clear();
+        assert!(pane.accept_publication(4), "failed request kept its chart");
+        assert!(!pane.accept_publication(5));
     }
 }
