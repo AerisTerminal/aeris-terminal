@@ -4461,7 +4461,7 @@ impl WorkspaceSurface {
     }
 
     fn reject_pending_engine_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
-        if !self.rithmic_switch.is_pending() || !self.chart_pane_controller.accept(sequence) {
+        if !self.rithmic_switch.is_pending() || !self.chart_pane_controller.reject(sequence) {
             return;
         }
         let failed_interval = self.rithmic_pending_interval.take();

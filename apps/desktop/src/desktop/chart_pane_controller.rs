@@ -41,6 +41,16 @@ impl ChartPaneController {
         true
     }
 
+    /// A failed request retires its pending outcome, not the binding still
+    /// displayed by the pane. The old generation remains valid for publications.
+    pub(super) fn reject(&mut self, generation: u64) -> bool {
+        if self.pending_selection != Some(generation) {
+            return false;
+        }
+        self.pending_selection = None;
+        true
+    }
+
     /// Accept pane-scoped data only for the committed selection. While a
     /// request is pending, the previous chart remains the displayed binding.
     pub(super) fn accept_publication(&self, generation: u64) -> bool {
@@ -116,6 +126,28 @@ mod tests {
         pane.clear();
         assert!(pane.accept_publication(4), "failed request kept its chart");
         assert!(!pane.accept_publication(5));
+    }
+
+    #[test]
+    fn rejected_request_retains_the_displayed_binding_and_retired_outcomes_stay_rejected() {
+        let mut pane = ChartPaneController::default();
+        assert!(pane.adopt_initial_instrument(1));
+        pane.request(2);
+        assert!(pane.accept_publication(1));
+        assert!(!pane.accept_publication(2));
+        assert!(pane.reject(2));
+        assert!(
+            pane.accept_publication(1),
+            "failure keeps the prior binding"
+        );
+        assert!(!pane.accept_publication(2));
+        assert!(!pane.reject(2));
+        assert!(!pane.accept(2));
+        pane.request(3);
+        assert!(!pane.reject(2));
+        assert!(pane.accept(3));
+        assert!(!pane.accept_publication(1));
+        assert!(pane.accept_publication(3));
     }
 
     #[test]

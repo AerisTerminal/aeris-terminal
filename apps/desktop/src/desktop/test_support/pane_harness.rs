@@ -374,6 +374,8 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
 fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
     cx: &mut TestAppContext,
 ) {
+    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let (old_chart, old_product) = cx.read(|cx| {
@@ -383,6 +385,18 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             pane.product.clone(),
         )
     });
+    let old_status = MarketSessionStatus {
+        instrument_id: old_product
+            .as_ref()
+            .expect("initial instrument")
+            .instrument_id
+            .clone(),
+        phase: MarketSessionPhase::Regular,
+        source: MarketSessionSource::ProviderCalendar,
+        session_start_unix_nanos: None,
+        session_end_unix_nanos: None,
+        next_open_unix_nanos: None,
+    };
     for _ in 0..2 {
         harness.pane.update(cx, |pane, cx| {
             assert!(pane.select_interval(ChartInterval::Minute5, cx));
@@ -401,8 +415,15 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             .publications
             .send(MarketWorkerMessage::EngineSelectionFailed { sequence })
             .expect("selection failure enters mailbox");
+        harness
+            .publications
+            .send(MarketWorkerMessage::MarketSessionStatus {
+                generation: 1,
+                status: old_status.clone(),
+            })
+            .expect("previous chart status after rejected selection");
         harness.pane.update(cx, |pane, cx| {
-            assert_eq!(pane.poll_market_worker(cx), 1);
+            assert_eq!(pane.poll_market_worker(cx), 2);
         });
         cx.run_until_parked();
         cx.read(|cx| {
@@ -414,6 +435,7 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             assert_eq!(pane.product, old_product);
             assert_eq!(pane.interval, ChartInterval::Minute1);
             assert_eq!(pane.chart_state, ChartState::Ready);
+            assert_eq!(pane.market_session_status.as_ref(), Some(&old_status));
             let toaster = &harness.window.read(cx).toaster;
             assert_eq!(toaster.notices().len(), 1);
             assert_eq!(toaster.notices()[0].title, "Timeframe unavailable");
