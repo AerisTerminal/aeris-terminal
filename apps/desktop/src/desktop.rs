@@ -347,8 +347,16 @@ fn exit_after_account_refresh_quiesce(
             1
         }
     };
-    let _ = aeris_observability::flush_diagnostics();
+    flush_diagnostics_before_exit();
     std::process::exit(exit_code);
+}
+
+pub(crate) fn flush_diagnostics_before_exit() {
+    if !aeris_observability::flush_diagnostics() {
+        // The diagnostic writer safely reports to stderr even if its bounded
+        // file sink failed; do not attempt another flush on this exit path.
+        diagnostic!("Aeris diagnostics could not be flushed before process exit");
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -5733,7 +5741,7 @@ fn dispatch_desktop_readiness(arguments: &mut Vec<std::ffi::OsString>) -> bool {
     if let Err(error) = run_desktop_readiness_command(std::mem::take(arguments).into_iter().skip(1))
     {
         diagnostic!("Aeris desktop readiness failed: {error}");
-        let _ = aeris_observability::flush_diagnostics();
+        flush_diagnostics_before_exit();
         std::process::exit(1);
     }
     true
@@ -5811,7 +5819,7 @@ pub(super) fn run(
         Ok(context) => context,
         Err(error) => {
             diagnostic!("Aeris context owner could not start: {error}");
-            let _ = trading.shutdown(Duration::from_secs(2));
+            stop_partial_startup(&trading, None);
             fatal_startup(&account_service, "The context service could not start.");
         }
     };
@@ -5819,8 +5827,7 @@ pub(super) fn run(
         Ok(market) => market,
         Err(error) => {
             diagnostic!("Aeris market owner could not start: {error}");
-            let _ = context.shutdown(Duration::from_secs(2));
-            let _ = trading.shutdown(Duration::from_secs(2));
+            stop_partial_startup(&trading, Some(&context));
             fatal_startup(&account_service, "The market service could not start.");
         }
     };
@@ -5837,14 +5844,12 @@ pub(super) fn run(
     let configured = match configured_market_workers(command_arguments, &services) {
         Ok(Some(configured)) => configured,
         Ok(None) => {
-            let _ = context.shutdown(Duration::from_secs(2));
-            let _ = trading.shutdown(Duration::from_secs(2));
+            stop_partial_startup(&trading, Some(&context));
             exit_after_account_refresh_quiesce(&services.account_service, 0);
         }
         Err(error) => {
             diagnostic!("Aeris market worker could not start: {error}");
-            let _ = context.shutdown(Duration::from_secs(2));
-            let _ = trading.shutdown(Duration::from_secs(2));
+            stop_partial_startup(&trading, Some(&context));
             fatal_startup(
                 &services.account_service,
                 "The market service could not start.",
@@ -5885,6 +5890,20 @@ fn attach_trading_market_feed(
     })
 }
 
+fn stop_partial_startup(
+    trading: &aeris_trading_runtime::TradingService,
+    context: Option<&aeris_context_runtime::ContextService>,
+) {
+    if let Some(context) = context
+        && let Err(error) = context.shutdown(Duration::from_secs(2))
+    {
+        diagnostic!("Aeris context owner could not stop during startup cleanup: {error}");
+    }
+    if let Err(error) = trading.shutdown(Duration::from_secs(2)) {
+        diagnostic!("Aeris trading owner could not stop during startup cleanup: {error}");
+    }
+}
+
 fn fatal_startup(account_service: &aeris_account_runtime::AccountService, message: &str) -> ! {
     let diagnostics_log_path = aeris_platform_runtime::native_data_root().map_or_else(
         |_| std::path::PathBuf::from("aeris.log"),
@@ -5894,7 +5913,9 @@ fn fatal_startup(account_service: &aeris_account_runtime::AccountService, messag
         "{message}\n\nDiagnostics were written to:\n{}",
         diagnostics_log_path.display()
     );
-    let _ = aeris_platform_runtime::message_box("Aeris Terminal", &detail);
+    if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &detail) {
+        diagnostic!("Aeris startup error dialog could not open: {error}");
+    }
     exit_after_account_refresh_quiesce(account_service, 1);
 }
 
@@ -5983,7 +6004,7 @@ fn mount_desktop(
                 let blocks_exit = error.blocks_exit();
                 diagnostic!("Aeris desktop shutdown failed: {error}");
                 if blocks_exit {
-                    let _ = aeris_observability::flush_diagnostics();
+                    flush_diagnostics_before_exit();
                     std::process::exit(1);
                 }
             }

@@ -996,6 +996,23 @@ Status: pending
     invariant. M6.2 remains unchecked for profile refresh, market bridge and
     shutdown discards, connection/series feedback, deferred source/actions and
     other unwrap cleanup.
+  - Part 16: the market bridge now delivers connection/chart errors through its
+    existing bounded pane mailbox and chart-failure notice projection, diagnoses
+    saturated control sends instead of silently discarding them, and treats a
+    released presentation receiver as benign teardown. Catalog control
+    saturation returns an explicit error; endpoint removal failures reach
+    diagnostics, while released or already-acknowledged retirement waiters are
+    handled explicitly. UI diagnostics feedback is optional after its collector
+    closes. Partial-startup trading/context shutdown errors and failed startup
+    dialogs reach diagnostics; failed final diagnostic flush emits a static
+    stderr-safe diagnostic without retrying the flush. A focused mailbox test
+    covers delivery, control reserve
+    saturation and receiver retirement. M6.2 remains unchecked: the three
+    account profile-refresh requests in workspace tabs, connection/series
+    feedback, deferred Trading/OpenFolder/ConnectProvider sources/actions, and
+    remaining unwrap/discard cleanup remain. Update-process cleanup, optional
+    auth cancellation, and chart change booleans are separate follow-ups; no
+    M6.6 bridge collapse was attempted.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1324,6 +1341,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 13 fix(desktop): classified existing pane notices by pane and provider selection by the registered provider ID; added one real Retry action for chart-preference save failure through the existing toaster to TerminalApp's async save. Rendered click, keyed replacement, pane source and provider-selection tests passed; full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for Trading(RequestId), OpenFolder/ConnectProvider prerequisites, connection/series feedback and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 14 fix(desktop): handled saturated pane resource-class demand with one keyed notice and successful clear, distinguished detached shutdown and market worker full-queue retirement, and documented/diagnosed pending search, automatic study removal and empty-chart precision outcomes. PaneHarness and worker retirement regressions plus full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for GPUI owner-update, profile refresh, market bridge and shutdown discards, other source/actions, connection/series feedback and unwrap cleanup.
 - 2026-10-18 M6.2 Part 15 fix(desktop): handled weak-owner update outcomes for pane/workspace callbacks without duplicate state: released owners cancel quietly, live update failures reach diagnostics. Preserved the tested constant-layout and complete-command-registry startup invariants instead of arbitrary fallbacks. Focused timer-fence tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for profile refresh, market bridge and shutdown discards, connection/series feedback, deferred source/actions and other unwrap cleanup.
+- 2026-10-19 M6.2 Part 16 fix(desktop): classified bounded bridge send failures and retired receivers, surfaced startup/shutdown cleanup failures through stderr-safe diagnostics, and preserved chart-failure notice ownership. Focused mailbox and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for account profile refresh, connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
 
 ## 7. Known gaps / deferred
 

@@ -7,7 +7,9 @@ use super::{
     initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
     process_command,
 };
-use aeris_desktop::market_worker::ProviderCatalogEvent;
+use aeris_desktop::market_worker::{
+    MarketWorkerSendError, MarketWorkerSender, ProviderCatalogEvent,
+};
 use aeris_observability::diagnostic;
 use aeris_trading::market::MarketRoute;
 use aeris_trading_runtime::clock::Clock;
@@ -23,14 +25,21 @@ pub(super) fn run_workers(
     clock: &dyn Clock,
 ) -> Result<(), String> {
     for record in endpoints.iter() {
-        let _ = record
+        match record
             .endpoint
             .messages
             .send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Discovering,
                 message: "Connecting to market data".to_string(),
                 transport_rtt_nanos: None,
-            });
+            }) {
+            Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
+                // The UI may have retired the pane before the worker attaches.
+            }
+            Err(MarketWorkerSendError::Full) => {
+                diagnostic!("Aeris market connection status could not enter the pane mailbox");
+            }
+        }
     }
     market.attach(client_id)?;
     let owns_ticket_interest = additions.is_some();
@@ -39,9 +48,7 @@ pub(super) fn run_workers(
         diagnostic!("Aeris ticket quote interest could not be released: {error}");
     }
     for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
-        let _ = market.remove_consumer(client_id, record.endpoint.consumer_id);
-        record.endpoint.active = false;
-        let _ = record.endpoint.shutdown.try_send(());
+        retire_endpoint(market, client_id, &mut record.endpoint);
     }
     let detach_result = market.detach(client_id);
     result.and(detach_result)
@@ -76,10 +83,7 @@ fn run_attached_workers(
                             ticket_interest_dirty = true;
                         }
                         Err(error) => {
-                            let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                                state: ChartState::Error,
-                                message: error,
-                            });
+                            report_state(&record.endpoint.messages, ChartState::Error, error);
                             retire_endpoint(market, client_id, &mut record.endpoint);
                         }
                     },
@@ -95,10 +99,7 @@ fn run_attached_workers(
             let (commands, disconnected) = drain_command_batch(&record.endpoint.commands);
             for command in commands {
                 if let Err(error) = process_command(market, client_id, record, command) {
-                    let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                        state: ChartState::Error,
-                        message: error,
-                    });
+                    report_state(&record.endpoint.messages, ChartState::Error, error);
                 }
             }
             if disconnected {
@@ -298,10 +299,23 @@ fn coalesces(previous: &MarketWorkerCommand, next: &MarketWorkerCommand) -> bool
 /// reconnects are handled inside the runtime and never arrive through this path.
 fn report_runtime_failure(endpoints: &[EndpointRecord], error: &str) {
     for record in endpoints.iter().filter(|record| record.endpoint.active) {
-        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error.to_string(),
-        });
+        report_state(
+            &record.endpoint.messages,
+            ChartState::Error,
+            error.to_string(),
+        );
+    }
+}
+
+pub(super) fn report_state(messages: &MarketWorkerSender, state: ChartState, message: String) {
+    match messages.send(MarketWorkerMessage::State { state, message }) {
+        Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
+            // The receiver has gone away during pane retirement.
+        }
+        Err(MarketWorkerSendError::Full) => {
+            // A control publication should fit the reserved mailbox capacity.
+            diagnostic!("Aeris market chart state could not enter the pane mailbox");
+        }
     }
 }
 
@@ -345,10 +359,11 @@ fn apply_received_event(
             .filter(|record| record.endpoint.active)
             .map(|record| &record.endpoint)
         {
-            let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message: fault.redacted_detail.clone(),
-            });
+            report_state(
+                &endpoint.messages,
+                ChartState::Error,
+                fault.redacted_detail.clone(),
+            );
         }
         return Ok(false);
     }
@@ -388,10 +403,20 @@ fn apply_received_event(
                     .send(MarketWorkerMessage::MarketSessionStatus(status))
                     .map_err(|error| error.to_string())?;
             }
-            let _ = endpoint
+            match endpoint
                 .messages
-                .send(MarketWorkerMessage::ProviderCatalog(event));
-            return Ok(changed);
+                .send(MarketWorkerMessage::ProviderCatalog(event))
+            {
+                Ok(()) => return Ok(changed),
+                Err(MarketWorkerSendError::Disconnected) => {
+                    // A released pane cannot receive this catalog result; its
+                    // command channel closure retires the runtime consumer.
+                    return Ok(false);
+                }
+                Err(MarketWorkerSendError::Full) => {
+                    return Err("market catalog presentation mailbox is full".to_string());
+                }
+            }
         }
         None => event,
     };
@@ -421,10 +446,7 @@ fn apply_received_event(
         &endpoint.messages,
     );
     if let Err(error) = result {
-        let _ = endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error,
-        });
+        report_state(&endpoint.messages, ChartState::Error, error);
     }
     Ok(false)
 }
@@ -527,15 +549,47 @@ pub(super) fn retire_endpoint(
     client_id: u64,
     endpoint: &mut WorkerEndpoint,
 ) {
-    let _ = market.remove_consumer(client_id, endpoint.consumer_id);
+    if let Err(error) = market.remove_consumer(client_id, endpoint.consumer_id) {
+        diagnostic!("Aeris market consumer could not be removed during retirement: {error}");
+    }
     endpoint.active = false;
-    let _ = endpoint.shutdown.try_send(());
+    match endpoint.shutdown.try_send(()) {
+        Ok(()) | Err(mpsc::TrySendError::Disconnected(())) => {
+            // The UI either receives the acknowledgement or has released its waiter.
+        }
+        Err(mpsc::TrySendError::Full(())) => {
+            diagnostic!("Aeris market retirement acknowledgement was already pending");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use aeris_trading_runtime::clock::ManualClock;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn runtime_failure_uses_bounded_pane_mailbox_and_tolerates_retirement() {
+        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        report_state(&messages, ChartState::Error, "market unavailable".into());
+        let (queued, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            queued.as_slice(),
+            [MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message,
+            }] if message == "market unavailable"
+        ));
+        for _ in 0..9 {
+            report_state(&messages, ChartState::Error, "market unavailable".into());
+        }
+        report_state(&messages, ChartState::Error, "saturated pane".into());
+        assert_eq!(messages.occupancy().0, 9, "control reserve remains bounded");
+        drop(receiver);
+        report_state(&messages, ChartState::Error, "retired pane".into());
+    }
 
     #[test]
     fn market_session_publications_follow_each_desktop_clock() {

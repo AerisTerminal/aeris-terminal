@@ -7,7 +7,9 @@ use super::{
     WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams,
     provider_display_name, retire_endpoint, send_recovery,
 };
+use aeris_desktop::market_worker::MarketWorkerSendError;
 use aeris_market_runtime::{InstrumentRef, InstrumentRequest, SelectionRequest};
+use aeris_observability::diagnostic;
 
 pub(super) fn fence_recovery_command(
     endpoint: &WorkerEndpoint,
@@ -51,14 +53,21 @@ pub(super) fn initialize_endpoint(
     client_id: u64,
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
-    let _ = record
+    match record
         .endpoint
         .messages
         .send(MarketWorkerMessage::Connection {
             state: FeedConnectionState::Discovering,
             message: "Connecting to market data".to_string(),
             transport_rtt_nanos: None,
-        });
+        }) {
+        Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
+            // A retired pane may release the receiver before registration.
+        }
+        Err(MarketWorkerSendError::Full) => {
+            diagnostic!("Aeris startup market connection state could not enter the pane mailbox");
+        }
+    }
     market.register_consumer(client_id, record.workspace_id, record.endpoint.consumer_id)?;
     if record.endpoint.resource_class != ConsumerResourceClass::Foreground {
         market.set_resource_class(
@@ -77,10 +86,11 @@ fn begin_endpoint_demand(
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
     let provider_name = provider_display_name(record.product.provider.as_str());
-    let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-        state: ChartState::Loading,
-        message: format!("Loading {provider_name} history"),
-    });
+    super::runtime::report_state(
+        &record.endpoint.messages,
+        ChartState::Loading,
+        format!("Loading {provider_name} history"),
+    );
     let instrument = InstrumentRequest::startup(&record.product);
     if let Err(error) = market.select_and_demand(
         client_id,
@@ -97,10 +107,7 @@ fn begin_endpoint_demand(
             viewport: None,
         },
     ) {
-        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error,
-        });
+        super::runtime::report_state(&record.endpoint.messages, ChartState::Error, error);
         return Ok(());
     }
 
@@ -269,8 +276,8 @@ fn process_catalog_select(
 fn process_engine_select(
     market: &MarketService,
     client_id: u64,
-    product: &mut InstallProviderInstrument,
-    interval: &mut aeris_market_data::ChartInterval,
+    _product: &mut InstallProviderInstrument,
+    _interval: &mut aeris_market_data::ChartInterval,
     endpoint: &mut WorkerEndpoint,
     pending_selection: &mut Option<(
         u64,
@@ -280,13 +287,14 @@ fn process_engine_select(
     request: &aeris_desktop::market_worker::EngineSelectionRequest,
 ) -> Result<(), String> {
     cancel_pending_recovery(endpoint)?;
-    let _ = endpoint.messages.send(MarketWorkerMessage::State {
-        state: ChartState::Loading,
-        message: format!(
+    super::runtime::report_state(
+        &endpoint.messages,
+        ChartState::Loading,
+        format!(
             "Loading {} history",
             provider_display_name(&request.product.provider)
         ),
-    });
+    );
     market.select_and_demand(
         client_id,
         SelectionRequest {
@@ -305,7 +313,6 @@ fn process_engine_select(
     // The endpoint adopts the new binding only after Selected arrives ahead
     // of its first snapshot. A failure leaves the old series live.
     *pending_selection = Some((request.sequence, request.product.clone(), request.interval));
-    let _ = (product, interval);
     Ok(())
 }
 

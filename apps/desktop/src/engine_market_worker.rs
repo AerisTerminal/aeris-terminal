@@ -706,14 +706,29 @@ fn spawn_group(
                 clock.as_ref(),
             ) {
                 for record in &endpoints {
-                    let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                        state: ChartState::Error,
-                        message: error.clone(),
-                    });
+                    runtime::report_state(
+                        &record.endpoint.messages,
+                        ChartState::Error,
+                        error.clone(),
+                    );
                 }
             }
-            for record in endpoints {
-                let _ = record.endpoint.shutdown.try_send(());
+            // run_workers already acknowledged endpoints it retired. Only an
+            // early attach failure leaves active records for this final fallback.
+            for record in endpoints
+                .into_iter()
+                .filter(|record| record.endpoint.active)
+            {
+                match record.endpoint.shutdown.try_send(()) {
+                    Ok(()) | Err(mpsc::TrySendError::Disconnected(())) => {
+                        // The waiter may have been released during pane teardown.
+                    }
+                    Err(mpsc::TrySendError::Full(())) => {
+                        aeris_observability::diagnostic!(
+                            "Aeris market worker retirement acknowledgement was pending"
+                        );
+                    }
+                }
             }
         })
         .map_err(|error| error.to_string())?;
@@ -912,9 +927,10 @@ mod tests {
         let (catalog, event) = classify_provider_catalog_event(event);
         match catalog {
             Some(event) => {
-                let _ = endpoint
+                endpoint
                     .messages
-                    .send(MarketWorkerMessage::ProviderCatalog(event));
+                    .send(MarketWorkerMessage::ProviderCatalog(event))
+                    .expect("fixture catalog result enters the pane mailbox");
                 None
             }
             None => event,

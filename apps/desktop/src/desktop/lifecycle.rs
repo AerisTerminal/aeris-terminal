@@ -236,7 +236,7 @@ impl DesktopLifecycle {
                 let blocks_exit = error.blocks_exit;
                 diagnostic!("Aeris desktop shutdown failed: {error}");
                 if blocks_exit {
-                    let _ = aeris_observability::flush_diagnostics();
+                    super::flush_diagnostics_before_exit();
                     std::process::exit(1);
                 }
             }

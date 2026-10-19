@@ -1246,8 +1246,11 @@ impl MarketDataWorker {
     }
 
     pub fn send_ui_diagnostics(&self, feedback: UiDiagnosticsFeedback) {
-        if let Some(sender) = &self.ui_diagnostics {
-            let _ = sender.send(feedback);
+        if let Some(sender) = &self.ui_diagnostics
+            && sender.send(feedback).is_err()
+        {
+            // The diagnostics collector was retired with this worker. Frame
+            // feedback is optional and never blocks market presentation.
         }
     }
 
@@ -1810,7 +1813,7 @@ mod tests {
         ));
 
         drop(command_rx);
-        let _ = worker.begin_retirement();
+        drop(worker.begin_retirement());
     }
 
     #[test]
@@ -1845,7 +1848,7 @@ mod tests {
             ))
         ));
         drop(command_rx);
-        let _ = worker.begin_retirement();
+        drop(worker.begin_retirement());
     }
 
     #[test]
@@ -1904,7 +1907,7 @@ mod tests {
         ));
 
         drop(command_rx);
-        let _ = worker.begin_retirement();
+        drop(worker.begin_retirement());
     }
 
     #[test]

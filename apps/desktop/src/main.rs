@@ -14,8 +14,11 @@ fn main() {
             Err(error) => {
                 let message = format!("Aeris startup arguments are invalid: {error}");
                 aeris_observability::diagnostic!("{message}");
-                let _ = aeris_platform_runtime::message_box("Aeris Terminal", &message);
-                let _ = aeris_observability::flush_diagnostics();
+                if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &message)
+                {
+                    aeris_observability::diagnostic!("Aeris startup dialog failed: {error}");
+                }
+                desktop::flush_diagnostics_before_exit();
                 std::process::exit(2);
             }
         };
@@ -28,23 +31,27 @@ fn main() {
         Err(error) => {
             let message = format!("Aeris diagnostics path is unavailable: {error}");
             aeris_observability::diagnostic!("{message}");
-            let _ = aeris_platform_runtime::message_box("Aeris Terminal", &message);
-            let _ = aeris_observability::flush_diagnostics();
+            if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &message) {
+                aeris_observability::diagnostic!("Aeris startup dialog failed: {error}");
+            }
+            desktop::flush_diagnostics_before_exit();
             std::process::exit(1);
         }
     };
     let instance_lock = match aeris_platform_runtime::InstanceLock::acquire(data_root) {
         Ok(lock) => lock,
         Err(aeris_platform_runtime::DataRootError::AlreadyRunning) if !readiness => {
-            let _ = aeris_platform_runtime::message_box(
+            if let Err(error) = aeris_platform_runtime::message_box(
                 "Aeris Terminal",
                 "Aeris is already running for this data folder",
-            );
+            ) {
+                aeris_observability::diagnostic!("Aeris already-running dialog failed: {error}");
+            }
             return;
         }
         Err(error) => {
             aeris_observability::diagnostic!("Aeris instance lock failed: {error}");
-            let _ = aeris_observability::flush_diagnostics();
+            desktop::flush_diagnostics_before_exit();
             std::process::exit(1);
         }
     };
@@ -59,7 +66,11 @@ fn main() {
                 log_path.display()
             );
             aeris_observability::diagnostic!("{message}");
-            let _ = aeris_platform_runtime::message_box("Aeris Terminal", &message);
+            if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &message) {
+                aeris_observability::diagnostic!(
+                    "Aeris diagnostics startup dialog failed: {error}"
+                );
+            }
             return;
         }
     };
