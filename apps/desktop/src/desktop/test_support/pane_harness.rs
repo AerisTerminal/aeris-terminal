@@ -219,6 +219,14 @@ fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mu
             toaster.notices()[0].key.scope,
             harness.pane.entity_id().as_u64()
         );
+        assert_eq!(
+            toaster.notices()[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
+        assert_eq!(
+            toaster.notices()[0].severity,
+            notification_center::NoticeSeverity::Error
+        );
         assert!(
             !toaster.notices()[0]
                 .detail
@@ -291,6 +299,70 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
 }
 
 #[gpui::test]
+fn pane_harness_secret_bearing_restore_failure_redacts_notice_and_diagnostic(
+    cx: &mut TestAppContext,
+) {
+    const CHILD_FLAG: &str = "AERIS_NOTICE_DIAGNOSTIC_CHILD";
+    if std::env::var_os(CHILD_FLAG).is_none() {
+        // The production sink is process-wide. Isolate this one GPUI test so
+        // concurrent notice tests cannot contribute an identical title line.
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "desktop::pane_harness::pane_harness_secret_bearing_restore_failure_redacts_notice_and_diagnostic",
+                "--nocapture",
+            ])
+            .env(CHILD_FLAG, "1")
+            .output()
+            .expect("isolated diagnostic test starts");
+        assert!(output.status.success(), "isolated diagnostic test failed");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!(
+        "aeris-notice-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("test log directory");
+    let log_path = root.join("aeris.log");
+    let guard = aeris_observability::install_log_sink(&log_path).expect("test diagnostic sink");
+    let secret = format!("private-credential-sentinel-{}", std::process::id());
+    let restore = WorkspaceSurfaceRestore {
+        chart: Some(WorkspaceChartState {
+            time_zone: format!("{secret}/Zone"),
+            ..WorkspaceChartState::default()
+        }),
+        ..WorkspaceSurfaceRestore::default()
+    };
+    let (harness, cx) = PaneHarness::open_with_startup(restore, false, true, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Chart settings could not be restored");
+        assert!(!notices[0].detail.contains(&secret));
+        assert_eq!(
+            notices[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
+    });
+    drop(guard); // Drains the real bounded diagnostics sink before inspecting its output.
+    let log = std::fs::read_to_string(&log_path).expect("captured diagnostic");
+    let notice_lines = log
+        .lines()
+        .filter(|line| line.contains("desktop notice: Chart settings could not be restored"))
+        .collect::<Vec<_>>();
+    assert_eq!(notice_lines.len(), 1);
+    assert!(notice_lines[0].contains("Chart settings could not be restored"));
+    assert!(!notice_lines[0].contains(&secret));
+    assert!(!log.contains(&secret));
+    std::fs::remove_dir_all(root).expect("test log cleanup");
+}
+
+#[gpui::test]
 fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     cx: &mut TestAppContext,
 ) {
@@ -327,6 +399,14 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
         );
         assert_eq!(toaster.notices().len(), 1);
         assert_eq!(toaster.notices()[0].title, "Symbol search unavailable");
+        assert_eq!(
+            toaster.notices()[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
+        assert_eq!(
+            toaster.notices()[0].severity,
+            notification_center::NoticeSeverity::Error
+        );
         assert!(!toaster.notices()[0].detail.contains(credential));
         assert_eq!(
             toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
@@ -499,6 +579,10 @@ fn pane_harness_disconnected_order_book_request_renders_one_notice(cx: &mut Test
             notices[0].source,
             notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
         );
+        assert_eq!(
+            notices[0].severity,
+            notification_center::NoticeSeverity::Error
+        );
     });
     assert!(
         cx.debug_bounds("toast").is_some(),
@@ -570,6 +654,14 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
         assert_eq!(
             toaster.notices()[0].key.scope,
             harness.pane.entity_id().as_u64()
+        );
+        assert_eq!(
+            toaster.notices()[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
+        assert_eq!(
+            toaster.notices()[0].severity,
+            notification_center::NoticeSeverity::Error
         );
         assert_eq!(
             toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),

@@ -1087,6 +1087,21 @@ Status: pending
     parameter intended before claiming closure. M6.2 remains unchecked for
     these evidence gaps and the blocked Trading/OpenFolder/ConnectProvider
     sources/actions described in Part 19.
+  - Part 21: closed the literal VAL-DSK-005 evidence gap for the four
+    PaneHarness injections. Restore, order-book dispatch and symbol-search
+    failures now use `Error` severity and loss tone, matching the existing
+    price-alert processing failure. Each regression asserts exactly one
+    rendered notice after repeated failure, pane source and error severity.
+    VAL-DSK-006 now has an isolated subprocess PaneHarness regression that
+    injects a secret-bearing invalid restored chart zone through the real
+    setter, observes its sanitized rendered detail, captures the real
+    bounded observability sink, drains it and asserts exactly one diagnostic
+    notice line containing the public title and no secret. Its temporary
+    fixture is removed on success; no production logging hook or raw-error
+    diagnostic was added. M6.2 remains unchecked: VAL-DSK-007's literal
+    `selection_pending` zero-match still contradicts active selection state,
+    and Trading(RequestId), OpenFolder and ConnectProvider still lack the
+    prerequisites recorded in Part 19.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1420,6 +1435,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.2 Part 18 fix(desktop): routed stopped-connection and series-dispatch failures into the existing sanitized keyed pane notice bridge, preserved typed loading/status projection and removed unused connection/header display strings. PaneHarness repeated-error/redaction/recovery tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for deferred notice sources/actions and remaining unwrap/discard cleanup.
 - 2026-10-19 M6.2 Part 19 fix(desktop): handled chart trading/overlay/plan setter errors through one pane-keyed redacted notice and successful clear, removed a redundant context discard, and documented exact request-ID, safe-folder-opener and descriptor-connect blockers rather than fake actions. Focused PaneHarness and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains unchecked for blocked source/action variants and update-process result cleanup.
 - 2026-10-19 M6.2 Part 20 fix(desktop): classified update child cleanup, reaping and detached worker failures without GPUI waiting, and verified exited/running helper paths. Audited VAL-DSK-003..007 against the active mission contract: 005/006 have missing exact evidence, and 007's literal selection_pending zero-match conflicts with active selection state. Focused and full serial workspace fmt/check/strict Clippy/tests/naming_check passed; M6.2 remains unchecked for those gaps and deferred real source/actions.
+- 2026-10-19 M6.2 Part 21 fix(desktop): aligned four injected pane failure notices to Error severity and asserted source, single rendered card and repeated-key behavior; captured a real diagnostic sink in an isolated child test to verify secret-bearing restore errors never reach notice detail or the logged public title line. Focused and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains unchecked for active VAL-DSK-007 selection-state wording and blocked Trading/OpenFolder/ConnectProvider sources/actions.
 
 ## 7. Known gaps / deferred
 

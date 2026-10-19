@@ -1988,12 +1988,21 @@ impl WorkspaceSurface {
     }
 
     fn post_chart_restore_failure(cx: &mut Context<Self>) {
-        Self::post_indicator_failure(
-            "chart_restore",
-            "Chart settings could not be restored",
-            "Some saved chart settings could not be applied. Review this chart's settings.",
-            cx,
-        );
+        cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+            key: notification_center::NoticeKey {
+                scope: cx.entity_id().as_u64(),
+                kind: "chart_restore",
+            },
+            severity: notification_center::NoticeSeverity::Error,
+            tone: notification_center::NoticeTone::Loss,
+            source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
+            title: "Chart settings could not be restored",
+            detail: "Some saved chart settings could not be applied. Review this chart's settings."
+                .into(),
+            action: None,
+            lifetime: notification_center::NoticeLifetime::UntilCleared,
+        }));
+        cx.notify();
     }
 
     pub(super) fn retire_market_worker(&mut self, cx: &App) {
@@ -5175,8 +5184,8 @@ impl WorkspaceSurface {
                 scope: cx.entity_id().as_u64(),
                 kind: "symbol_search",
             },
-            severity: notification_center::NoticeSeverity::Warning,
-            tone: notification_center::NoticeTone::Warning,
+            severity: notification_center::NoticeSeverity::Error,
+            tone: notification_center::NoticeTone::Loss,
             source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
             title: "Symbol search unavailable",
             detail: detail.into(),
@@ -5559,8 +5568,8 @@ impl WorkspaceSurface {
             {
                 cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
                     key,
-                    severity: notification_center::NoticeSeverity::Warning,
-                    tone: notification_center::NoticeTone::Warning,
+                    severity: notification_center::NoticeSeverity::Error,
+                    tone: notification_center::NoticeTone::Loss,
                     source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
                     title: "Order book unavailable",
                     detail: "The order book request could not be sent. Try again later.".into(),
