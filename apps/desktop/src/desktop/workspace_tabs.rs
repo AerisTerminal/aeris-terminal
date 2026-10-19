@@ -2814,7 +2814,6 @@ impl TerminalApp {
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
             workspace.set_market_message_wake(self.market_frame_wake.callback());
-            let _ = workspace_cx;
         });
         cx.observe(&surface, |app, surface, cx| {
             if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {

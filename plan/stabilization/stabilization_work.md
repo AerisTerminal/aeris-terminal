@@ -1036,6 +1036,30 @@ Status: pending
     successful clearing. M6.2 remains unchecked for deferred
     Trading/OpenFolder/ConnectProvider sources/actions and other
     unwrap/discard cleanup. No M6.3 generation-binding work was attempted.
+  - Part 19: the chart trading projection now handles all three fallible
+    Aeris Charts setters (trading snapshot, host overlay, session-plan levels)
+    at the pane boundary, notifies the chart on success, and posts one
+    sanitized pane-keyed `trading_projection` notice on failure. A successful
+    projection clears it. PaneHarness injects invalid session-plan data,
+    repeats the error, verifies one rendered redacted card and recovery.
+    Removed the redundant workspace context discard. Audited the specifically
+    named `components/terminal_view.rs`, `command_registry.rs` and `desktop.rs`:
+    they have no production `let _ =` discards; the first two retain only the
+    tested constant-root and exhaustive command-registry `expect` invariants,
+    and desktop.rs has no production `expect`/`unwrap` (its remaining ones
+    are test-only). M6.2 stays unchecked. `Trading(RequestId)` cannot be
+    honestly sourced from the current revision-and-string-only desktop
+    `TradingFeedback`; the trading owner must expose a stable request identity
+    in command feedback first. `OpenFolder` needs a safe local-path opener
+    owned by `platform_runtime` (only URL browser opening exists).
+    `ConnectProvider(ProviderId)` needs the M6.9 descriptor-driven connect
+    dispatch; production account authentication remains disabled. Do not add
+    no-op buttons or a parallel trading/account store to satisfy variants.
+    Other update-process kill/wait/spawn result discards remain in `update.rs`
+    and need owner-level cleanup; the chart-setter discards are closed here.
+    VAL-DSK-003..007 identifiers were not found in this checkout's
+    stabilization reports, so their external acceptance evidence was not
+    asserted.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1367,6 +1391,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.2 Part 16 fix(desktop): classified bounded bridge send failures and retired receivers, surfaced startup/shutdown cleanup failures through stderr-safe diagnostics, and preserved chart-failure notice ownership. Focused mailbox and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for account profile refresh, connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
 - 2026-10-19 M6.2 Part 17 fix(desktop): classified account profile-refresh rollback/activation results as signed-out teardown or live bounded-queue failure, with sanitized keyed UI notice or detached-owner diagnostic; diagnosed optional login cancellation failure without enabling authentication. Deterministic account queue tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
 - 2026-10-19 M6.2 Part 18 fix(desktop): routed stopped-connection and series-dispatch failures into the existing sanitized keyed pane notice bridge, preserved typed loading/status projection and removed unused connection/header display strings. PaneHarness repeated-error/redaction/recovery tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for deferred notice sources/actions and remaining unwrap/discard cleanup.
+- 2026-10-19 M6.2 Part 19 fix(desktop): handled chart trading/overlay/plan setter errors through one pane-keyed redacted notice and successful clear, removed a redundant context discard, and documented exact request-ID, safe-folder-opener and descriptor-connect blockers rather than fake actions. Focused PaneHarness and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains unchecked for blocked source/action variants and update-process result cleanup.
 
 ## 7. Known gaps / deferred
 

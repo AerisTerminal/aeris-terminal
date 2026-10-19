@@ -936,6 +936,51 @@ fn pane_harness_repeated_series_dispatch_failure_has_one_notice_and_retry_clears
 }
 
 #[gpui::test]
+fn pane_harness_trading_projection_failure_is_keyed_and_recovery_clears(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            let chart = pane.chart.clone().expect("fixture chart");
+            workspace_layout::refresh_chart_trading_projection(
+                &chart,
+                None,
+                ChartHostOverlaySnapshot::default(),
+                vec![(f64::NAN, "private-credential-sentinel".into())],
+                cx,
+            );
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].key.kind, "trading_projection");
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("private-credential-sentinel")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    harness.pane.update(cx, |pane, cx| {
+        let chart = pane.chart.clone().expect("fixture chart");
+        workspace_layout::refresh_chart_trading_projection(
+            &chart,
+            None,
+            ChartHostOverlaySnapshot::default(),
+            vec![],
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
 fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
     cx: &mut TestAppContext,
 ) {

@@ -899,7 +899,7 @@ fn apply_trading_snapshot(
     state_cx.notify();
 }
 
-fn refresh_chart_trading_projection(
+pub(super) fn refresh_chart_trading_projection(
     chart: &Entity<AerisChartView>,
     trading: Option<ChartTradingSnapshot>,
     host_overlay: ChartHostOverlaySnapshot,
@@ -910,16 +910,50 @@ fn refresh_chart_trading_projection(
     // trading state. Leaving the previous snapshot installed is how cancelled/deleted practice
     // orders can appear to remain stuck on the chart after the runtime has already removed them.
     let trading = authoritative_chart_trading_projection(trading);
+    let mut failed = false;
     if chart.read(cx).trading_snapshot() != trading {
-        let _ = chart.update(cx, |chart, _| chart.set_trading_snapshot(trading));
+        failed |= chart
+            .update(cx, |chart, chart_cx| {
+                let result = chart.set_trading_snapshot(trading);
+                if result.is_ok() {
+                    chart_cx.notify();
+                }
+                result
+            })
+            .is_err();
     }
     if chart.read(cx).host_overlay() != host_overlay {
-        let _ = chart.update(cx, |chart, _| chart.set_host_overlay(host_overlay));
+        failed |= chart
+            .update(cx, |chart, chart_cx| {
+                let result = chart.set_host_overlay(host_overlay);
+                if result.is_ok() {
+                    chart_cx.notify();
+                }
+                result
+            })
+            .is_err();
     }
     if chart.read(cx).session_plan_levels() != session_plan_levels {
-        let _ = chart.update(cx, |chart, _| {
-            chart.replace_session_plan_levels(session_plan_levels)
-        });
+        failed |= chart
+            .update(cx, |chart, chart_cx| {
+                let result = chart.replace_session_plan_levels(session_plan_levels);
+                if result.is_ok() {
+                    chart_cx.notify();
+                }
+                result
+            })
+            .is_err();
+    }
+    if failed {
+        aeris_observability::diagnostic!("Aeris chart trading projection could not be applied");
+        WorkspaceSurface::post_indicator_failure(
+            "trading_projection",
+            "Chart trading unavailable",
+            "Trading overlays could not be shown. Try again.",
+            cx,
+        );
+    } else {
+        WorkspaceSurface::clear_indicator_failure("trading_projection", cx);
     }
 }
 
