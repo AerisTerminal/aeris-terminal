@@ -344,7 +344,7 @@ pub(super) fn report_state(
             state,
             message,
         },
-        None => MarketWorkerMessage::State { state, message },
+        None => MarketWorkerMessage::CatalogFailure { message },
     };
     match messages.send(publication) {
         Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
@@ -652,10 +652,8 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message,
-            }] if message == "catalog unavailable"
+            [MarketWorkerMessage::CatalogFailure { message }]
+                if message == "catalog unavailable"
         ));
     }
 

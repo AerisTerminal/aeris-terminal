@@ -3512,7 +3512,8 @@ impl MarketSummaryEntry {
                 MarketWorkerMessage::State {
                     state: ChartState::Error,
                     message,
-                } => self.message = Some(message),
+                }
+                | MarketWorkerMessage::CatalogFailure { message } => self.message = Some(message),
                 _ => {}
             }
         }

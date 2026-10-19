@@ -312,6 +312,10 @@ pub enum MarketWorkerMessage {
         state: ChartState,
         message: String,
     },
+    /// A catalog or screen endpoint has no chart selection generation.
+    CatalogFailure {
+        message: String,
+    },
     SeriesState {
         generation: u64,
         state: ChartState,

@@ -1965,6 +1965,61 @@ fn pane_harness_trading_projection_failure_is_keyed_and_recovery_clears(cx: &mut
 }
 
 #[gpui::test]
+fn pane_harness_catalog_failure_before_selection_does_not_fail_chart(cx: &mut TestAppContext) {
+    let (harness, cx) =
+        PaneHarness::open_with_startup(WorkspaceSurfaceRestore::default(), false, true, cx);
+    let initial_state = cx.read(|cx| harness.pane.read(cx).chart_state);
+    for _ in 0..2 {
+        harness
+            .publications
+            .send(MarketWorkerMessage::CatalogFailure {
+                message: "private-catalog-detail".into(),
+            })
+            .expect("catalog failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.chart_state, initial_state);
+        assert_eq!(pane.chart_failure, None);
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Symbol search unavailable");
+        assert!(!notices[0].detail.contains("private-catalog-detail"));
+    });
+}
+
+#[gpui::test]
+fn pane_harness_late_catalog_failure_cannot_fail_selected_chart(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let chart = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("ready chart"));
+    harness
+        .publications
+        .send(MarketWorkerMessage::CatalogFailure {
+            message: "retired catalog failure".into(),
+        })
+        .expect("catalog failure enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.chart_state, ChartState::Ready);
+        assert_eq!(pane.chart_failure, None);
+        assert_eq!(
+            pane.chart.as_ref().map(Entity::entity_id),
+            Some(chart.entity_id())
+        );
+        assert_eq!(harness.window.read(cx).toaster.notices().len(), 1);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
     cx: &mut TestAppContext,
 ) {

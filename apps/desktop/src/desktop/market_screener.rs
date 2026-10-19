@@ -709,7 +709,8 @@ impl MarketScreener {
                 MarketWorkerMessage::State {
                     state: ChartState::Error,
                     message,
-                } => {
+                }
+                | MarketWorkerMessage::CatalogFailure { message } => {
                     self.pending_screen = None;
                     self.pending_selection = None;
                     self.message = Some(message);

@@ -3657,6 +3657,12 @@ impl WorkspaceSurface {
             MarketWorkerMessage::State { state, message } => {
                 self.apply_market_state_message(state, message, cx);
             }
+            MarketWorkerMessage::CatalogFailure { message: _ } => {
+                Self::post_symbol_search_notice(
+                    "The market catalog is unavailable. Try again later.",
+                    cx,
+                );
+            }
             MarketWorkerMessage::SeriesState {
                 generation,
                 state,
