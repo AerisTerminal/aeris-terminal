@@ -161,7 +161,13 @@ pub(super) fn apply_pushed_event(
             messages,
         ),
         MarketRuntimeEvent::ProviderState(state) => {
-            apply_provider_state(&state, instrument.provider.as_str(), realtime, messages)?;
+            apply_provider_state(
+                &state,
+                instrument.provider.as_str(),
+                active_generation,
+                realtime,
+                messages,
+            )?;
             Ok(())
         }
         MarketRuntimeEvent::SeriesState(state) => {
@@ -370,6 +376,7 @@ fn stale_generation(received: u64, current: u64, future_error: &str) -> Result<b
 pub(super) fn apply_provider_state(
     state: &ProviderState,
     expected_provider: &str,
+    selection_generation: u64,
     realtime: bool,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
@@ -405,6 +412,7 @@ pub(super) fn apply_provider_state(
     };
     messages
         .send(MarketWorkerMessage::Connection {
+            generation: selection_generation,
             state: connection,
             message: state.detail.clone().unwrap_or(detail),
             transport_rtt_nanos: state.transport_rtt_nanos,

@@ -318,6 +318,7 @@ pub enum MarketWorkerMessage {
         message: String,
     },
     Connection {
+        generation: u64,
         state: FeedConnectionState,
         message: String,
         transport_rtt_nanos: Option<u64>,

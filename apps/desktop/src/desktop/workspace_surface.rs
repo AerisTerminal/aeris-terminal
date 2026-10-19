@@ -3684,10 +3684,11 @@ impl WorkspaceSurface {
                 detail: _,
             } => self.reject_catalog_switch(browser_generation, cx),
             MarketWorkerMessage::Connection {
+                generation,
                 state,
                 message: _,
                 transport_rtt_nanos,
-            } => self.apply_market_connection_message(state, transport_rtt_nanos, cx),
+            } => self.apply_market_connection_message(generation, state, transport_rtt_nanos, cx),
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
             }
@@ -4319,10 +4320,14 @@ impl WorkspaceSurface {
 
     fn apply_market_connection_message(
         &mut self,
+        generation: u64,
         state: FeedConnectionState,
         transport_rtt_nanos: Option<u64>,
         cx: &mut Context<Self>,
     ) {
+        if !self.chart_pane_controller.accept_publication(generation) {
+            return;
+        }
         self.provider_transport_rtt_nanos = if state == FeedConnectionState::Streaming {
             transport_rtt_nanos
         } else {

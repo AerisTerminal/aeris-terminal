@@ -1685,6 +1685,75 @@ fn pane_harness_removed_volume_settings_renders_once_and_readd_clears(cx: &mut T
 }
 
 #[gpui::test]
+fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    let connection = |generation, state, rtt| MarketWorkerMessage::Connection {
+        generation,
+        state,
+        message: "fixture connection".into(),
+        transport_rtt_nanos: rtt,
+    };
+    let previous = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (pane.connection_state, pane.provider_transport_rtt_nanos)
+    });
+    harness
+        .publications
+        .send(connection(sequence, FeedConnectionState::Stopped, None))
+        .expect("pending connection");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            (pane.connection_state, pane.provider_transport_rtt_nanos),
+            previous
+        );
+        assert_ne!(pane.chart_failure, Some(ChartFailure::WorkerStopped));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    harness
+        .publications
+        .send(connection(1, FeedConnectionState::Stopped, None))
+        .expect("retired connection");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(pane.chart_failure, Some(ChartFailure::WorkerStopped));
+    });
+    harness
+        .publications
+        .send(connection(
+            sequence,
+            FeedConnectionState::Streaming,
+            Some(12_500_000),
+        ))
+        .expect("current connection");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.connection_state, Some(FeedConnectionState::Streaming));
+        assert_eq!(pane.provider_transport_rtt_nanos, Some(12_500_000));
+    });
+}
+
+#[gpui::test]
 fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_clears(
     cx: &mut TestAppContext,
 ) {
@@ -1693,6 +1762,7 @@ fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_c
         harness
             .publications
             .send(MarketWorkerMessage::Connection {
+                generation: 1,
                 state: FeedConnectionState::Stopped,
                 message: "private-credential-sentinel".into(),
                 transport_rtt_nanos: None,
@@ -1722,6 +1792,7 @@ fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_c
     harness
         .publications
         .send(MarketWorkerMessage::Connection {
+            generation: 1,
             state: FeedConnectionState::Streaming,
             message: "private-credential-sentinel".into(),
             transport_rtt_nanos: None,

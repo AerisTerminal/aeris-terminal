@@ -2106,6 +2106,7 @@ mod tests {
                 transport_rtt_nanos: None,
             },
             "rithmic",
+            7,
             true,
             &sender,
         )
@@ -2114,6 +2115,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::Connection {
+                generation: 7,
                 state: FeedConnectionState::Recovering,
                 message,
                 transport_rtt_nanos: None,
@@ -2149,6 +2151,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::Connection {
+                generation: 7,
                 state: FeedConnectionState::Streaming,
                 ..
             }]
@@ -2167,6 +2170,7 @@ mod tests {
                 transport_rtt_nanos: Some(12_500_000),
             },
             "hyperliquid",
+            8,
             true,
             &sender,
         )
@@ -2258,6 +2262,7 @@ mod tests {
                 transport_rtt_nanos: None,
             },
             "rithmic",
+            7,
             true,
             &sender,
         )
@@ -2998,6 +3003,7 @@ mod tests {
                     transport_rtt_nanos: Some(12_000_000),
                 },
                 "rithmic",
+                7,
                 true,
                 &sender,
             )
@@ -3014,6 +3020,7 @@ mod tests {
                     transport_rtt_nanos: Some(12_000_000),
                 },
                 "hyperliquid",
+                7,
                 true,
                 &sender,
             )

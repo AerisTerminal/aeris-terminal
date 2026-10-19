@@ -1226,6 +1226,14 @@ Status: pending
     state. The legacy unfenced worker-error/startup state, connection and
     auxiliary messages, switch guards, exhaustive interleavings,
     cover-through-ready and guarded GUI storms remain. M6.3 stays unchecked.
+  - Part 13: provider connection states and startup connection announcements
+    now carry their pane selection generation. The controller rejects pending
+    and retired connection messages before they can change chart failure,
+    connection, ladder or latency presentation; a GPUI PaneHarness regression
+    checks both drops and a committed streaming update. Worker-error/startup
+    chart states, auxiliary messages, legacy switch guards, permutation and
+    seeded interleavings, cover-through-ready and guarded GUI storms remain;
+    M6.3 stays unchecked.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model

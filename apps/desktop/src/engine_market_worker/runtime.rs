@@ -29,6 +29,7 @@ pub(super) fn run_workers(
             .endpoint
             .messages
             .send(MarketWorkerMessage::Connection {
+                generation: record.endpoint.active_generation,
                 state: FeedConnectionState::Discovering,
                 message: "Connecting to market data".to_string(),
                 transport_rtt_nanos: None,
