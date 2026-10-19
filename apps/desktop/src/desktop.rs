@@ -3509,11 +3509,7 @@ impl MarketSummaryEntry {
         for message in messages {
             match message {
                 MarketWorkerMessage::Update(publication) => self.apply_update(publication.update),
-                MarketWorkerMessage::State {
-                    state: ChartState::Error,
-                    message,
-                }
-                | MarketWorkerMessage::CatalogFailure { message } => self.message = Some(message),
+                MarketWorkerMessage::CatalogFailure { message } => self.message = Some(message),
                 _ => {}
             }
         }

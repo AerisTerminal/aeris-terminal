@@ -3654,9 +3654,6 @@ impl WorkspaceSurface {
             MarketWorkerMessage::Recovery { request_id, result } => {
                 self.apply_recovery(request_id, result, cx);
             }
-            MarketWorkerMessage::State { state, message } => {
-                self.apply_market_state_message(state, message, cx);
-            }
             MarketWorkerMessage::CatalogFailure { message: _ } => {
                 Self::post_symbol_search_notice(
                     "The market catalog is unavailable. Try again later.",

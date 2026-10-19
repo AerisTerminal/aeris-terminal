@@ -2531,7 +2531,11 @@ mod tests {
         let states = messages
             .iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::State { state, message } => Some((*state, message.clone())),
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
+                    state,
+                    message,
+                } => Some((*state, message.clone())),
                 _ => None,
             })
             .collect::<Vec<_>>();

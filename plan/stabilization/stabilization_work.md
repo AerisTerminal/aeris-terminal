@@ -1266,6 +1266,13 @@ Status: pending
     fixture `State` route, fence remaining auxiliary pane publications, delete
     switch guards, run permutation and 100+ seeded interleavings, verify
     cover-through-ready and perform guarded GUI switch storms.
+  - Part 17: removed the unfenced `MarketWorkerMessage::State` variant and all
+    pane, screener and market-summary handlers for it. PaneHarness chart
+    readiness and failure fixtures now use exact selection-stamped `SeriesState`;
+    mailbox characterization tests do likewise. The committed interval failure
+    regression rejects a retired error before accepting the replacement error.
+    M6.3 stays unchecked: auxiliary pane publications, switch-guard removal,
+    exhaustive interleavings, cover-through-ready and guarded GUI storms remain.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1614,6 +1621,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 14 fix(desktop): stamped series worker startup/loading and failure states with the active pane selection generation; non-series catalog/screen failures remain app-scoped. The failing-first mailbox regression, app-scoped countercase and GPUI retired-state test passed. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed after fixing a Clippy function-length finding; the 34.5 GiB generated target was cleaned and CARGO_BUILD_JOBS=1 used for the cold rebuild. M6.3 remains unchecked pending pre-selection catalog pane and legacy State cleanup, auxiliary messages, switch guards, exhaustive interleavings and GUI storms.
 - 2026-10-19 M6.3 Part 15 fix(desktop): fenced demand-bound study output, invalidation and removal to the committed pane selection; pure and GPUI retired-study-removal tests passed. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed without CARGO_BUILD_JOBS override. M6.3 stays unchecked pending catalog/legacy State cleanup, other auxiliary messages, switch guards, exhaustive interleavings and guarded GUI storms.
 - 2026-10-19 M6.3 Part 16 fix(desktop): non-series catalog and screen failures no longer enter the chart-state handler; they show a sanitized, keyed catalog notice on panes and remain visible in the screener and market summary. Pre-selection and late-failure GPUI regressions, the runtime mailbox case and all five serial workspace gates passed without a jobs override. M6.3 remains unchecked pending legacy fixture State cleanup, auxiliary fencing, switch-guard removal, interleavings and GUI storms.
+- 2026-10-19 M6.3 Part 17 fix(desktop): removed the legacy unfenced chart-state message and migrated pane and mailbox fixtures to selection-stamped states; the interval failure regression rejects a retired state before restoring on the committed failure. All five serial workspace gates passed with CARGO_BUILD_JOBS=1 after cleaning 29.0 GiB generated artifacts. M6.3 remains unchecked pending auxiliary fences, guard deletion, interleavings and GUI storms.
 
 ## 7. Known gaps / deferred
 

@@ -308,10 +308,6 @@ pub enum MarketWorkerMessage {
         request_id: u64,
         result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
     },
-    State {
-        state: ChartState,
-        message: String,
-    },
     /// A catalog or screen endpoint has no chart selection generation.
     CatalogFailure {
         message: String,
@@ -1976,7 +1972,8 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Loading,
                     message: "loading".to_string(),
                 })
@@ -1984,7 +1981,8 @@ mod tests {
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Ready,
                     message: "ready".to_string(),
                 })
@@ -1996,12 +1994,14 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Loading,
                     message: first,
                 },
-                MarketWorkerMessage::State {
-                state: ChartState::Ready,
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
+                    state: ChartState::Ready,
                     message: second,
                 }
             ] if first == "loading" && second == "ready"
@@ -2109,7 +2109,8 @@ mod tests {
         }));
         assert_eq!(wake_count.load(Ordering::Acquire), 0);
 
-        let message = || MarketWorkerMessage::State {
+        let message = || MarketWorkerMessage::SeriesState {
+            generation: 1,
             state: ChartState::Ready,
             message: "ready".to_string(),
         };
@@ -2420,7 +2421,8 @@ mod tests {
     fn mailbox_wake_fires_for_queued_messages_on_registration() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         sender
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation: 1,
                 state: ChartState::Loading,
                 message: "loading".to_string(),
             })
@@ -2460,7 +2462,8 @@ mod tests {
         drop(receiver);
         assert!(
             sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Ready,
                     message: "ready".to_string(),
                 })
@@ -2545,7 +2548,8 @@ mod tests {
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Error,
                     message: "terminal".to_string(),
                 })
@@ -2560,7 +2564,8 @@ mod tests {
                     update: ReplayStreamUpdate::Snapshot(_),
                     ..
                 }),
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Error,
                     ..
                 }
@@ -2573,7 +2578,8 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Ready,
                     message: "ready".to_string(),
                 })
@@ -2594,7 +2600,8 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::State {
+            [MarketWorkerMessage::SeriesState {
+                generation: 1,
                 state: ChartState::Ready,
                 message: ready,
             }] if ready == "ready"
@@ -2657,7 +2664,8 @@ mod tests {
             Err(super::MarketWorkerSendError::Full)
         );
         sender
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation: 1,
                 state: ChartState::Loading,
                 message: "switching".to_string(),
             })
@@ -2669,7 +2677,8 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::EngineSwitchMarker { sequence: 7 },
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Loading,
                     message,
                 }
@@ -2682,7 +2691,8 @@ mod tests {
         let (error_sender, error_receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             error_sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Error,
                     message: "terminal".to_string(),
                 })
@@ -2690,7 +2700,8 @@ mod tests {
         );
         assert!(
             error_sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Ready,
                     message: "obsolete".to_string(),
                 })
@@ -2700,11 +2711,13 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Error,
                     message: terminal,
                 },
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Ready,
                     message: obsolete,
                 }
@@ -2722,7 +2735,8 @@ mod tests {
         );
         assert!(
             recovery_sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Recovering,
                     message: "obsolete".to_string(),
                 })
@@ -2733,7 +2747,8 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 7, .. },
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Recovering,
                     message,
                 }
@@ -2788,7 +2803,8 @@ mod tests {
         );
         assert!(
             stale_sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Stale,
                     message: "network changed".to_string(),
                 })
@@ -2799,7 +2815,8 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 9, .. },
-                MarketWorkerMessage::State {
+                MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Stale,
                     message,
                 }
@@ -2872,10 +2889,17 @@ mod tests {
                 && *command_generation == latest_generation.get() as u64
                 && *reason == ProviderCatalogRejectionReason::InstrumentUnavailable
         ));
+    }
 
+    #[test]
+    fn series_state_survives_catalog_rejection_in_the_bounded_mailbox() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let generation = NonZeroU64::MIN;
+        let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
         assert!(
             sender
-                .send(MarketWorkerMessage::State {
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
                     state: ChartState::Error,
                     message: "terminal".to_string(),
                 })
@@ -2901,7 +2925,8 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(
             messages[0],
-            MarketWorkerMessage::State {
+            MarketWorkerMessage::SeriesState {
+                generation: 1,
                 state: ChartState::Error,
                 ..
             }

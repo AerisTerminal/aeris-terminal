@@ -180,7 +180,8 @@ impl PaneHarness {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
         self.publications
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation: 1,
                 state: ChartState::Ready,
                 message: "disconnected fixture ready".into(),
             })
@@ -457,9 +458,24 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
     });
+    let state_before_retired_failure = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(MarketWorkerMessage::State {
+        .send(MarketWorkerMessage::SeriesState {
+            generation: 1,
+            state: ChartState::Error,
+            message: "retired provider failure".into(),
+        })
+        .expect("retired failure enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, state_before_retired_failure);
+        assert_eq!(pane.chart_failure, None);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::SeriesState {
+            generation: sequence,
             state: ChartState::Error,
             message: "private provider failure".into(),
         })
@@ -523,7 +539,8 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
         });
         harness
             .publications
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation: sequence,
                 state: ChartState::Error,
                 message: "private provider failure".into(),
             })
@@ -2027,7 +2044,8 @@ fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation: 1,
                 state: ChartState::Error,
                 message: "private-credential-sentinel".into(),
             })

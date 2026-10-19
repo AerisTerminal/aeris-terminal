@@ -706,11 +706,7 @@ impl MarketScreener {
                 MarketWorkerMessage::ProviderCatalog(event) => {
                     outcome.changed |= self.apply_catalog_event(event, &mut outcome.opened);
                 }
-                MarketWorkerMessage::State {
-                    state: ChartState::Error,
-                    message,
-                }
-                | MarketWorkerMessage::CatalogFailure { message } => {
+                MarketWorkerMessage::CatalogFailure { message } => {
                     self.pending_screen = None;
                     self.pending_selection = None;
                     self.message = Some(message);
