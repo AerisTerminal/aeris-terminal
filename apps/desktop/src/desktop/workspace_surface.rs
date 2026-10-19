@@ -3699,11 +3699,15 @@ impl WorkspaceSurface {
             }
             MarketWorkerMessage::OrderBook(frame) => self.apply_order_book_frame(frame, cx),
             MarketWorkerMessage::TradeTape(snapshot) => self.apply_trade_tape(snapshot, cx),
-            MarketWorkerMessage::StudyOutput(snapshot) => self.apply_study_output(&snapshot, cx),
-            MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
-                self.apply_study_invalidated(&invalidated, cx);
+            MarketWorkerMessage::StudyOutput(snapshot) => {
+                self.apply_study_output_message(&snapshot, cx);
             }
-            MarketWorkerMessage::StudyRemoved(removed) => self.apply_study_removed(&removed, cx),
+            MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
+                self.apply_study_invalidation_message(&invalidated, cx);
+            }
+            MarketWorkerMessage::StudyRemoved(removed) => {
+                self.apply_study_removal_message(&removed, cx);
+            }
             MarketWorkerMessage::StudyRegistered {
                 request_sequence,
                 study_id,
@@ -3722,17 +3726,7 @@ impl WorkspaceSurface {
             MarketWorkerMessage::StudyRemovalFailed {
                 study_id,
                 message: _,
-            } => {
-                if !study_removal_failed(&mut self.studies, study_id) {
-                    Self::post_indicator_failure(
-                        "study",
-                        "Study unavailable",
-                        "The study could not be removed. Try again.",
-                        cx,
-                    );
-                }
-                cx.notify();
-            }
+            } => self.apply_study_removal_failure(study_id, cx),
             MarketWorkerMessage::PriceAlertTriggered(trigger) => {
                 self.apply_price_alert_trigger(&trigger, cx);
             }
@@ -4113,6 +4107,57 @@ impl WorkspaceSurface {
             dialog.message = Some("Study settings could not be applied. Try again.".into());
         }
         Self::post_study_failure("Study settings could not be applied. Try again.", cx);
+    }
+
+    fn apply_study_output_message(
+        &self,
+        snapshot: &aeris_market_runtime::MarketStudyOutputSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .chart_pane_controller
+            .accept_study_publication(snapshot.generation.map(|generation| generation.0.get()))
+        {
+            self.apply_study_output(snapshot, cx);
+        }
+    }
+
+    fn apply_study_invalidation_message(
+        &mut self,
+        invalidated: &aeris_market_runtime::MarketStudyOutputsInvalidated,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .chart_pane_controller
+            .accept_study_publication(invalidated.generation.map(|generation| generation.0.get()))
+        {
+            self.apply_study_invalidated(invalidated, cx);
+        }
+    }
+
+    fn apply_study_removal_message(
+        &mut self,
+        removed: &aeris_market_runtime::MarketStudyRemoved,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .chart_pane_controller
+            .accept_study_publication(removed.generation.map(|generation| generation.0.get()))
+        {
+            self.apply_study_removed(removed, cx);
+        }
+    }
+
+    fn apply_study_removal_failure(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
+        if !study_removal_failed(&mut self.studies, study_id) {
+            Self::post_indicator_failure(
+                "study",
+                "Study unavailable",
+                "The study could not be removed. Try again.",
+                cx,
+            );
+        }
+        cx.notify();
     }
 
     fn apply_study_output(

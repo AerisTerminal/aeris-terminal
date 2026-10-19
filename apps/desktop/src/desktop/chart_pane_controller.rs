@@ -47,6 +47,12 @@ impl ChartPaneController {
         generation == self.current_generation
     }
 
+    /// A study publication without a demand belongs to the consumer's
+    /// app-scoped study lifecycle; demand-bound output must match this chart.
+    pub(super) fn accept_study_publication(&self, generation: Option<u64>) -> bool {
+        generation.is_none_or(|generation| self.accept_publication(generation))
+    }
+
     /// An initial instrument descriptor must not overwrite a later pane selection
     /// just because its product happens to have the same provider and symbol.
     pub(super) fn accept_initial_instrument(&self, generation: u64) -> bool {
@@ -110,5 +116,18 @@ mod tests {
         pane.clear();
         assert!(pane.accept_publication(4), "failed request kept its chart");
         assert!(!pane.accept_publication(5));
+    }
+
+    #[test]
+    fn study_publications_reject_retired_and_uncommitted_demand() {
+        let mut pane = ChartPaneController::default();
+        assert!(pane.accept_study_publication(None));
+        pane.request(2);
+        assert!(pane.accept_study_publication(Some(1)));
+        assert!(!pane.accept_study_publication(Some(2)));
+        assert!(pane.accept(2));
+        assert!(!pane.accept_study_publication(Some(1)));
+        assert!(pane.accept_study_publication(Some(2)));
+        assert!(pane.accept_study_publication(None));
     }
 }

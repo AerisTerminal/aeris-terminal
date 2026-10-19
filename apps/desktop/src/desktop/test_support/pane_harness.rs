@@ -749,6 +749,73 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestAppContext) {
+    use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketStudyRemoved};
+    use std::num::NonZeroU64;
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
+    harness.pane.update(cx, |pane, _| {
+        pane.studies.active.push(RuntimeStudyState {
+            study_id,
+            persisted: workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+                .expect("study fixture"),
+            resolved_chart_series: None,
+        });
+    });
+    let removed = |generation| {
+        MarketWorkerMessage::StudyRemoved(MarketStudyRemoved {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: Some(MarketGenerationId(
+                NonZeroU64::new(generation).expect("generation"),
+            )),
+            study_ids: vec![study_id],
+        })
+    };
+    harness
+        .publications
+        .send(removed(1))
+        .expect("retired removal");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            pane.studies.active.len(),
+            1,
+            "retired removal cannot mutate pane"
+        );
+    });
+    harness
+        .publications
+        .send(removed(sequence))
+        .expect("committed removal");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert!(pane.studies.active.is_empty(), "current removal is applied");
+    });
+}
+
+#[gpui::test]
 fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
