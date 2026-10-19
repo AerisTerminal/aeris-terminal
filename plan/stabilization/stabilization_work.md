@@ -1200,6 +1200,15 @@ Status: pending
     within a selection. State, bar snapshots/updates, other pane messages,
     legacy switch guards, interleavings, cover-through-ready and guarded GUI
     storms remain; M6.3 stays unchecked.
+  - Part 10: retained trade-tape ordering now resets at a committed selection
+    boundary instead of comparing unrelated provider-session generations.
+    The strengthened GPUI interval-switch test first failed because the
+    replacement chart received no tape after its predecessor's higher provider
+    generation; it now verifies the replacement's lower-generation tape renders.
+    Within a selection, provider-generation and revision ordering remain
+    unchanged. State, bar snapshots/updates, auxiliary messages, legacy switch
+    guards, complete interleavings, cover-through-ready and guarded GUI storms
+    remain; M6.3 stays unchecked.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1542,6 +1551,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 6 fix(desktop): fenced queued initial instrument descriptor replies against later pane selection requests; pure and GPUI same-instrument retired-descriptor regressions pass. Full gate results are recorded with the commit. M6.3 remains unchecked pending all other pane publications, switch-guard removal, seeded interleavings and guarded GUI storm.
 - 2026-10-19 M6.3 Part 7 fix(desktop): fence market-session statuses at the pane's committed selection; runtime and GPUI regressions cover pending and retired statuses. Full gate results recorded with this commit; M6.3 remains unchecked pending other pane publications and guarded GUI evidence.
 - 2026-10-19 M6.3 Part 9 fix(desktop): the pane now fences order-book frames before ladder mutation; a failing-first GPUI test proved an early replacement frame previously overwrote the displayed book, and covers a higher-revision retired frame after selection commit. Full serial gate results accompany this commit; M6.3 remains unchecked pending state, bars, auxiliary messages, switch-guard removal, interleavings and guarded GUI storms. CARGO_BUILD_JOBS=1 was used for the cold rebuild.
+- 2026-10-19 M6.3 Part 10 fix(desktop): selection changes no longer reject a current tape just because the previous provider session had a higher epoch; a failing-first GPUI interval-switch test covers the lower-generation replacement. Full gate results accompany the commit. M6.3 remains unchecked pending state and bar fencing, auxiliary messages, switch-guard removal, interleavings and GUI storm.
 
 ## 7. Known gaps / deferred
 

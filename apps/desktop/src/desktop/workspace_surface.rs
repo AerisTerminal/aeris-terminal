@@ -3822,10 +3822,10 @@ impl WorkspaceSurface {
         });
         if is_current
             && self.trade_tape.as_ref().is_none_or(|current| {
-                snapshot.provider_generation >= current.provider_generation
-                    && (current.generation != snapshot.generation
-                        || current.provider_generation != snapshot.provider_generation
-                        || snapshot.revision >= current.revision)
+                current.generation != snapshot.generation
+                    || (snapshot.provider_generation >= current.provider_generation
+                        && (current.provider_generation != snapshot.provider_generation
+                            || snapshot.revision >= current.revision))
             })
         {
             self.apply_trade_tape_to_chart(&snapshot, cx);

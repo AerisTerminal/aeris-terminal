@@ -930,6 +930,7 @@ mod timeframe_input {
         // The rewrite belongs to the replacement, which has not been drawn yet.
         let mut rewritten = order_flow_tape(&product, five_minutes, 2, 5);
         rewritten.rewrite_generation = 1;
+        rewritten.provider_generation = 9;
         deliver(MarketWorkerMessage::TradeTape(rewritten), cx);
         assert_eq!(
             applied_ordinal(&one_minute, 1, cx),
@@ -940,10 +941,9 @@ mod timeframe_input {
         // A second selection before the 5m chart is drawn leaves the 1m chart on screen too.
         let fifteen_minutes =
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute15, cx);
-        deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, five_minutes, 3, 6)),
-            cx,
-        );
+        let mut old_tape = order_flow_tape(&product, five_minutes, 3, 6);
+        old_tape.provider_generation = 9;
+        deliver(MarketWorkerMessage::TradeTape(old_tape), cx);
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
         deliver(
@@ -958,6 +958,9 @@ mod timeframe_input {
             MarketWorkerMessage::TradeTape(order_flow_tape(&product, five_minutes, 99, 99)),
             cx,
         );
+        // A new selection may move to another provider session whose generation
+        // starts lower than the previous one's. The selection fence, not the
+        // provider's unrelated epoch, decides whether its tape is current.
         deliver(
             MarketWorkerMessage::TradeTape(order_flow_tape(&product, fifteen_minutes, 1, 6)),
             cx,
