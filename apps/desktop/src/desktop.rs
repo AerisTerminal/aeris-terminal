@@ -12,6 +12,8 @@ mod big_trades_dialog;
 mod bottom_panel;
 #[path = "components/chart_context_menus.rs"]
 mod chart_context_menus;
+#[path = "desktop/chart_pane_controller.rs"]
+mod chart_pane_controller;
 #[path = "components/chart_surface.rs"]
 mod chart_surface;
 #[path = "components/chart_toolbar_menus.rs"]
@@ -868,7 +870,7 @@ struct WorkspaceSurface {
     interval: ChartInterval,
     rithmic_pending_interval: Option<ChartInterval>,
     rithmic_pending_product: Option<InstallProviderInstrument>,
-    rithmic_pending_sequence: Option<u64>,
+    chart_pane_controller: chart_pane_controller::ChartPaneController,
     /// The selection to fall back to if the switch in flight never loads.
     ///
     /// A failed switch must leave the trader on the chart they had, not on an

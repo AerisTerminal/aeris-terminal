@@ -1152,6 +1152,14 @@ Status: pending
     chart entity and notice contents. Exact-generation ChartBinding acceptance,
     late-error fencing, switch-guard removal, permutation/seeded interleavings,
     cover-through-ready and guarded GUI switch storm remain pending.
+  - Part 5: moved the pending selection sequence out of WorkspaceSurface into
+    ChartPaneController. Both commit markers and pre-marker failures now consume
+    only the exact pending generation at its selection-outcome acceptance point;
+    a retired or repeated outcome cannot clear a newer request. Pure outcome
+    interleaving and the existing GPUI retired-failure regression cover this
+    boundary. M6.3 remains unchecked: runtime publications, chart/tape state
+    and switch guards still need the unified binding acceptance,
+    permutation/seeded publication tests and guarded GUI switch storm.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1490,6 +1498,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 2 fix(desktop): delivered exact-sequence pre-marker selection failures to the pane, restoring the previous chart instead of leaving a pending loading cover; tested interval retry deduplication, instrument rollback and retired failure interleaving in GPUI. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after cleaning a 30.5 GiB generated target. M6.3 remains unchecked pending the unified ChartBinding and exact-generation contract.
 - 2026-10-19 M6.3 Part 3 fix(desktop): kept interval-only chart selection uncovered while retaining the instrument-change cover; failing-first GPUI interval regression and instrument countercase passed under --all-features. Documented why the earlier default-feature PaneHarness invocation fails and preserved fixture exclusion from production. Full gate evidence is recorded in the commit verification; M6.3 remains unchecked pending exact-generation binding and GUI storm.
 - 2026-10-19 M6.3 Part 4 fix(desktop): post-marker replacement failure leaves the prior chart Ready with one sanitized selection notice; interval and repeated instrument cases pass in GPUI PaneHarness. M6.3 stays unchecked pending exact-generation acceptance migration, switch-guard deletion, interleavings and GUI storm.
+- 2026-10-19 M6.3 Part 5 refactor(desktop): centralized exact pending-generation acceptance of selection commits and failures in ChartPaneController, removing the pane's raw pending sequence. Pure and GPUI retired-outcome checks pass. M6.3 stays unchecked pending remaining publication binding and GUI storm.
 
 ## 7. Known gaps / deferred
 

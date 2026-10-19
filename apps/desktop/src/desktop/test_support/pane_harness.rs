@@ -510,7 +510,7 @@ fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut Tes
     cx.run_until_parked();
     cx.read(|cx| {
         let pane = harness.pane.read(cx);
-        assert_eq!(pane.rithmic_pending_sequence, Some(second));
+        assert_eq!(pane.chart_pane_controller.pending_selection(), Some(second));
         assert_eq!(pane.rithmic_pending_interval, Some(ChartInterval::Minute15));
         assert_eq!(pane.chart_state, ChartState::Loading);
         assert_eq!(harness.window.read(cx).toaster.notices(), []);
