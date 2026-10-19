@@ -374,10 +374,6 @@ pub enum MarketWorkerMessage {
         browser_generation: u64,
         detail: String,
     },
-    ChartViewport {
-        start_unix_nanos: i64,
-        end_unix_nanos: i64,
-    },
 }
 
 struct MarketWorkerMailbox {

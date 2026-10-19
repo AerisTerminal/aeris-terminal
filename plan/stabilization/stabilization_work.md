@@ -1284,6 +1284,14 @@ Status: pending
     M6.3 stays unchecked: remaining auxiliary publications, switch guards,
     permutations, 100+ seeded interleavings, cover-through-ready and guarded GUI
     storms remain. UI-02 and MD-15 are not yet closed.
+  - Part 19: removed the never-produced `ChartViewport` worker reply and its
+    unfenced pane handler. Restored viewports still apply from pane initialization;
+    the generation-stamped `ChartViewportUpdate` command remains the live path.
+    After cleaning 26.4 GiB of generated artifacts, serial workspace
+    fmt/check/strict Clippy/tests/naming gates passed with CARGO_BUILD_JOBS=1.
+    M6.3 stays unchecked: audit the other auxiliary pane publications, remove
+    switch guards, run permutations and 100+ seeded interleavings, verify
+    cover-through-ready and complete guarded GUI storms.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1634,6 +1642,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 16 fix(desktop): non-series catalog and screen failures no longer enter the chart-state handler; they show a sanitized, keyed catalog notice on panes and remain visible in the screener and market summary. Pre-selection and late-failure GPUI regressions, the runtime mailbox case and all five serial workspace gates passed without a jobs override. M6.3 remains unchecked pending legacy fixture State cleanup, auxiliary fencing, switch-guard removal, interleavings and GUI storms.
 - 2026-10-19 M6.3 Part 17 fix(desktop): removed the legacy unfenced chart-state message and migrated pane and mailbox fixtures to selection-stamped states; the interval failure regression rejects a retired state before restoring on the committed failure. All five serial workspace gates passed with CARGO_BUILD_JOBS=1 after cleaning 29.0 GiB generated artifacts. M6.3 remains unchecked pending auxiliary fences, guard deletion, interleavings and GUI storms.
 - 2026-10-19 M6.3 Part 18 fix(desktop): recovery replies carry the originating pane selection generation and cannot fail or install into a replacement chart; the GPUI retired-recovery test and all five serial workspace gates passed with CARGO_BUILD_JOBS=1 after cleaning 30.3 GiB generated artifacts. M6.3 remains unchecked pending other auxiliary fences, switch guards, interleavings and guarded GUI storms.
+- 2026-10-19 M6.3 Part 19 fix(desktop): remove the never-produced, unfenced viewport reply and pane mutation; keep generation-stamped viewport commands and initialization restore. All five workspace gates passed with CARGO_BUILD_JOBS=1 after cleaning 26.4 GiB. M6.3 remains unchecked pending auxiliary audit, switch guards, interleavings and guarded GUI storms.
 
 ## 7. Known gaps / deferred
 

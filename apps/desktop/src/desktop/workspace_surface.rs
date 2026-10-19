@@ -3749,28 +3749,6 @@ impl WorkspaceSurface {
             }
             MarketWorkerMessage::PriceAlertSyncFailed => Self::apply_price_alert_sync(false, cx),
             MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),
-            MarketWorkerMessage::ChartViewport {
-                start_unix_nanos,
-                end_unix_nanos,
-            } => self.apply_restored_viewport(start_unix_nanos, end_unix_nanos, cx),
-        }
-    }
-
-    fn apply_restored_viewport(
-        &mut self,
-        start_unix_nanos: i64,
-        end_unix_nanos: i64,
-        cx: &mut Context<Self>,
-    ) {
-        let viewport = (start_unix_nanos, end_unix_nanos);
-        self.restored_viewport = Some(viewport);
-        self.last_persisted_viewport = Some(viewport);
-        if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, chart_cx| {
-                if chart.set_visible_time_range_unix_nanos(start_unix_nanos, end_unix_nanos) {
-                    chart_cx.notify();
-                }
-            });
         }
     }
 
