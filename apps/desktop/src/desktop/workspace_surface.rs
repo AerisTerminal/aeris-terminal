@@ -163,7 +163,6 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         pending_ui_diagnostics: None,
         connection_state: init.startup.connection_state,
         market_session_status: None,
-        connection_message: init.startup.connection_message,
         provider_transport_rtt_nanos: None,
         trading_pnl: TradingPnlState::default(),
         order_quantity: init.order_quantity,
@@ -2415,6 +2414,12 @@ impl WorkspaceSurface {
         );
         if !current_plan_limits().extended_timeframes && !starter_interval {
             self.series_message = "This timeframe requires a paid plan".to_string();
+            Self::post_indicator_failure(
+                "series_selection",
+                "Timeframe unavailable",
+                "This timeframe requires a paid plan.",
+                cx,
+            );
             cx.notify();
             return false;
         }
@@ -2428,13 +2433,24 @@ impl WorkspaceSurface {
                 return true;
             }
             let Some(product) = self.product.clone() else {
-                let display = terminal_provider_display(self.provider);
-                self.series_message = format!("{display} market selection is unavailable");
+                self.series_message = "Select a market before changing the timeframe.".into();
+                Self::post_indicator_failure(
+                    "series_selection",
+                    "Timeframe unavailable",
+                    "Select a market before changing the timeframe.",
+                    cx,
+                );
                 cx.notify();
                 return false;
             };
             let Ok(sequence) = self.market_worker.try_select_engine(product, interval) else {
                 self.series_message = format!("{} history could not start", interval.label());
+                Self::post_indicator_failure(
+                    "series_selection",
+                    "Timeframe unavailable",
+                    "Market history could not start. Try again.",
+                    cx,
+                );
                 cx.notify();
                 return false;
             };
@@ -2443,7 +2459,8 @@ impl WorkspaceSurface {
             self.rithmic_switch = RithmicSwitchState::Pending;
             self.chart_state = ChartState::Loading;
             self.clear_chart_failure(cx);
-            self.series_message = format!("Switching to {}", interval.label());
+            Self::clear_indicator_failure("series_selection", cx);
+            self.series_message.clear();
             cx.notify();
             true
         })();
@@ -2480,9 +2497,11 @@ impl WorkspaceSurface {
             .market_worker
             .try_select_engine(instrument.clone(), interval)
         else {
-            self.series_message = format!(
-                "{} market history could not start",
-                instrument.display_symbol
+            Self::post_indicator_failure(
+                "series_selection",
+                "Market history unavailable",
+                "Market history could not start. Try again.",
+                cx,
             );
             cx.notify();
             return false;
@@ -2494,7 +2513,8 @@ impl WorkspaceSurface {
         self.rithmic_switch = RithmicSwitchState::Pending;
         self.chart_state = ChartState::Loading;
         self.clear_chart_failure(cx);
-        self.series_message = format!("Switching to {}", instrument.display_symbol);
+        Self::clear_indicator_failure("series_selection", cx);
+        self.series_message.clear();
         cx.notify();
         true
     }
@@ -3543,6 +3563,7 @@ impl WorkspaceSurface {
             Self::post_chart_failure(ChartFailure::Market, cx);
         } else if matches!(state, ChartState::Ready | ChartState::AwaitingData) {
             self.clear_chart_failure(cx);
+            Self::clear_indicator_failure("series_selection", cx);
         }
         self.chart_state = state;
         cx.notify();
@@ -3629,10 +3650,10 @@ impl WorkspaceSurface {
             } => self.reject_catalog_switch(browser_generation, cx),
             MarketWorkerMessage::Connection {
                 state,
-                message,
+                message: _,
                 transport_rtt_nanos,
             } => {
-                self.apply_market_connection_message(state, message, transport_rtt_nanos, cx);
+                self.apply_market_connection_message(state, transport_rtt_nanos, cx);
             }
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
@@ -4199,7 +4220,6 @@ impl WorkspaceSurface {
     fn apply_market_connection_message(
         &mut self,
         state: FeedConnectionState,
-        message: String,
         transport_rtt_nanos: Option<u64>,
         cx: &mut Context<Self>,
     ) {
@@ -4208,7 +4228,7 @@ impl WorkspaceSurface {
         } else {
             None
         };
-        self.apply_connection_state(state, message, cx);
+        self.apply_connection_state(state, cx);
     }
 
     fn stale_settled_state_during_engine_switch(
@@ -4376,7 +4396,6 @@ impl WorkspaceSurface {
             self.rithmic_pending_interval = Some(interval);
             self.rithmic_switch = RithmicSwitchState::Pending;
         }
-        self.series_message = format!("Market selection failed — showing {}", interval.label());
         cx.notify();
     }
 
@@ -4404,11 +4423,7 @@ impl WorkspaceSurface {
             self.apply_market_worker_message(message, cx);
         }
         if disconnected && !matches!(self.connection_state, Some(FeedConnectionState::Stopped)) {
-            let message = format!(
-                "{} market worker stopped",
-                terminal_provider_display(self.provider)
-            );
-            self.apply_connection_state(FeedConnectionState::Stopped, message, cx);
+            self.apply_connection_state(FeedConnectionState::Stopped, cx);
         }
         self.dispatch_recovery(cx);
         self.dispatch_retained_symbol_search(cx);
@@ -4449,12 +4464,7 @@ impl WorkspaceSurface {
         applied + usize::from(disconnected) + usize::from(context_changed)
     }
 
-    fn apply_connection_state(
-        &mut self,
-        state: FeedConnectionState,
-        message: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_connection_state(&mut self, state: FeedConnectionState, cx: &mut Context<Self>) {
         let state = stabilized_connection_state(self.connection_state, state);
         if state != FeedConnectionState::Streaming {
             self.provider_transport_rtt_nanos = None;
@@ -4466,13 +4476,20 @@ impl WorkspaceSurface {
             .is_some_and(|chart| chart.read(cx).has_market_data());
         if let Some(chart_state) = presentation.chart_state(retained_market_data) {
             self.chart_state = chart_state;
-            if chart_state == ChartState::Error && self.chart_failure.is_none() {
-                Self::post_indicator_failure(
-                    "chart_state",
-                    "Chart unavailable",
-                    "Market worker stopped.",
-                    cx,
-                );
+        }
+        if state == FeedConnectionState::Stopped {
+            if self.chart_failure.is_none()
+                || self.chart_failure == Some(ChartFailure::WorkerStopped)
+            {
+                self.chart_failure = Some(ChartFailure::WorkerStopped);
+                Self::post_chart_failure(ChartFailure::WorkerStopped, cx);
+            }
+        } else if state == FeedConnectionState::Streaming
+            && self.chart_failure == Some(ChartFailure::WorkerStopped)
+        {
+            self.clear_chart_failure(cx);
+            if self.chart_state == ChartState::Error {
+                self.chart_state = ChartState::Loading;
             }
         }
         self.connection_state = Some(state);
@@ -4512,7 +4529,6 @@ impl WorkspaceSurface {
                 });
             }
         }
-        self.connection_message = Some(stable_connection_message(state, message));
         cx.notify();
     }
 

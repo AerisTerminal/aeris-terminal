@@ -641,14 +641,6 @@ const fn stabilized_connection_state(
     }
 }
 
-fn stable_connection_message(state: FeedConnectionState, incoming: String) -> String {
-    match state {
-        FeedConnectionState::Disconnected => "Market data offline".to_string(),
-        FeedConnectionState::Recovering => "Reconnecting market data".to_string(),
-        _ => incoming,
-    }
-}
-
 const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
 
 fn provider_presentation(
@@ -839,7 +831,6 @@ struct WorkspaceSurface {
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     market_session_status: Option<aeris_contracts::MarketSessionStatus>,
-    connection_message: Option<String>,
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPnlState,
     order_quantity: order_quantity::OrderQuantityControls,
@@ -3218,7 +3209,6 @@ struct HeaderState {
     time_zone_clock: String,
     now_unix_nanos: i64,
     account_label: Option<String>,
-    series_message: String,
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
     controls: HeaderControls,
@@ -3606,6 +3596,7 @@ enum ChartFailure {
     Startup,
     UnsupportedProvider,
     Market,
+    WorkerStopped,
 }
 
 impl ChartFailure {
@@ -3616,6 +3607,7 @@ impl ChartFailure {
                 "This restored market provider is unavailable. Choose another market."
             }
             Self::Market => "Market chart could not be loaded. Try again.",
+            Self::WorkerStopped => "Market worker stopped.",
         }
     }
 }
@@ -3733,7 +3725,6 @@ struct TerminalStartupState {
     worker_label: String,
     subscription_id: String,
     connection_state: Option<FeedConnectionState>,
-    connection_message: Option<String>,
     provider: TerminalProvider,
     product: Option<InstallProviderInstrument>,
 }
@@ -3755,14 +3746,12 @@ fn terminal_startup_state(
                     worker_label: "Market worker".to_string(),
                     subscription_id: "Unavailable".to_string(),
                     connection_state: Some(FeedConnectionState::Disconnected),
-                    connection_message: Some(message),
                     provider: TerminalProvider::Rithmic,
                     product: None,
                 };
             };
             let profile = shell.profile_label();
             let connection = shell.connection();
-            let message = shell.message().to_string();
             TerminalStartupState {
                 chart: Some(cx.new(move |_| AerisChartView::empty())),
                 chart_state: ChartState::Loading,
@@ -3771,7 +3760,6 @@ fn terminal_startup_state(
                 worker_label: "Rithmic market worker".to_string(),
                 subscription_id: "Loading chart".to_string(),
                 connection_state: Some(connection),
-                connection_message: Some(message),
                 provider: TerminalProvider::Rithmic,
                 product: None,
             }
@@ -3787,7 +3775,6 @@ fn terminal_startup_state(
                     worker_label: startup.worker_label,
                     subscription_id: startup.subscription_id,
                     connection_state: None,
-                    connection_message: Some(message),
                     provider: FALLBACK_TERMINAL_PROVIDER,
                     product: None,
                 };
@@ -3800,29 +3787,9 @@ fn terminal_startup_state(
                 worker_label: startup.worker_label,
                 subscription_id: startup.subscription_id,
                 connection_state: Some(FeedConnectionState::Discovering),
-                connection_message: Some(provider_connection_message(provider)),
                 provider,
                 product: Some(startup.product),
             }
-        }
-    }
-}
-
-fn provider_connection_message(provider: TerminalProvider) -> String {
-    let descriptor = provider_presentation(provider);
-    let display_name = descriptor.map_or_else(
-        || terminal_provider_id(provider),
-        |value| value.display_name,
-    );
-    match descriptor.map(|value| value.connection_kind) {
-        Some(ProviderConnectionKind::Credentials) => {
-            format!("Connecting to authorized {display_name} markets")
-        }
-        Some(ProviderConnectionKind::HostedBroker) => {
-            format!("Connecting to {display_name} hosted markets")
-        }
-        Some(ProviderConnectionKind::Public) | None => {
-            format!("Connecting to {display_name} public markets")
         }
     }
 }

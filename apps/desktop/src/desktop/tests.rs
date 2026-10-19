@@ -25,11 +25,11 @@ use super::{
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
     ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
     series_selector_label, should_finish_chrome_overlay_close, stabilized_connection_state,
-    stable_connection_message, switch_requires_chart_cover, symbol_input_action,
-    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
-    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
-    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
-    timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
+    timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
+    timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
+    timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
+    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
     workspace_label, workspace_maximize_transition, workspace_split_ratio, workspace_switch,
     wrapped_workspace_index,
@@ -602,10 +602,6 @@ mod timeframe_input {
             let surface = surface.read(cx);
             assert_eq!(surface.provider, TerminalProvider::Ctrader);
             assert_eq!(surface.chart_state, ChartState::Loading);
-            assert_eq!(
-                surface.connection_message.as_deref(),
-                Some("Connecting to cTrader hosted markets")
-            );
             assert!(
                 !super::super::provider_chart_types(surface.provider)
                     .contains(&ChartType::Footprint)
@@ -2800,13 +2796,6 @@ fn reconnect_retry_states_do_not_flicker_back_to_offline() {
         FeedConnectionState::Streaming
     );
     assert_eq!(
-        stable_connection_message(
-            FeedConnectionState::Recovering,
-            "Rithmic realtime disconnected".to_string(),
-        ),
-        "Reconnecting market data"
-    );
-    assert_eq!(
         connectivity_chart_state(ChartState::Ready, FeedConnectionState::Recovering, true,),
         ChartState::Recovering
     );
@@ -4275,20 +4264,8 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         "/ES"
     );
     assert_eq!(
-        super::provider_connection_message(super::TerminalProvider::Tastytrade),
-        "Connecting to tastytrade hosted markets"
-    );
-    assert_eq!(
-        super::provider_connection_message(super::TerminalProvider::Hyperliquid),
-        "Connecting to Hyperliquid public markets"
-    );
-    assert_eq!(
         super::terminal_provider_display(super::TerminalProvider::Ctrader),
         "cTrader"
-    );
-    assert_eq!(
-        super::provider_connection_message(super::TerminalProvider::Ctrader),
-        "Connecting to cTrader hosted markets"
     );
     // Every provider id round-trips; an id the build does not expose maps to none.
     for provider in super::TerminalProvider::ALL {

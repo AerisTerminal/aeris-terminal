@@ -839,6 +839,103 @@ fn pane_harness_removed_volume_settings_renders_once_and_readd_clears(cx: &mut T
 }
 
 #[gpui::test]
+fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_clears(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = PaneHarness::open(cx);
+    for _ in 0..2 {
+        harness
+            .publications
+            .send(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Stopped,
+                message: "private-credential-sentinel".into(),
+                transport_rtt_nanos: None,
+            })
+            .expect("bounded mailbox accepts connection failure");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.chart_failure, Some(ChartFailure::WorkerStopped));
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].key.kind, "chart_state");
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("private-credential-sentinel")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::Connection {
+            state: FeedConnectionState::Streaming,
+            message: "private-credential-sentinel".into(),
+            transport_rtt_nanos: None,
+        })
+        .expect("bounded mailbox accepts connection recovery");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_failure, None);
+        assert_eq!(pane.chart_state, ChartState::Loading);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_repeated_series_dispatch_failure_has_one_notice_and_retry_clears(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = PaneHarness::open(cx);
+    harness.pane.update(cx, |pane, _| {
+        pane.product
+            .as_mut()
+            .expect("fixture product")
+            .display_symbol = "private-credential-sentinel".into();
+        for _ in 0..8 {
+            pane.market_worker
+                .try_set_order_book_visible(true)
+                .expect("fill bounded command queue");
+        }
+    });
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            assert!(!pane.select_interval(ChartInterval::Minute5, cx));
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].key.kind, "series_selection");
+        assert_eq!(toaster.notices()[0].title, "Timeframe unavailable");
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("private-credential-sentinel")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    while harness.commands.as_ref().unwrap().try_recv().is_ok() {}
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
 fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
     cx: &mut TestAppContext,
 ) {

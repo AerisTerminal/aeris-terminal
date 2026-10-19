@@ -526,7 +526,6 @@ pub(super) fn header_controls(
         .child(series_selector(
             app.clone(),
             state.series_label,
-            state.series_message,
             state.pending.series,
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
@@ -1197,7 +1196,6 @@ pub(super) fn chrome_tooltip(
 pub(super) fn series_selector(
     app: Entity<WorkspaceSurface>,
     label: String,
-    _message: String,
     pending: bool,
     theme: &AerisTheme,
     enabled: bool,

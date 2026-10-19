@@ -6,7 +6,6 @@ use std::num::NonZeroUsize;
 pub(crate) struct RithmicShellState {
     pub(crate) identity: FeedIdentity,
     connection: FeedConnectionState,
-    message: String,
 }
 
 impl RithmicShellState {
@@ -16,7 +15,6 @@ impl RithmicShellState {
         Ok(Self {
             identity,
             connection: FeedConnectionState::Discovering,
-            message: "Connecting to Rithmic with the saved login".to_string(),
         })
     }
 
@@ -31,10 +29,6 @@ impl RithmicShellState {
             "rithmic" => "Rithmic".to_string(),
             provider => provider.to_string(),
         }
-    }
-
-    pub(crate) fn message(&self) -> &str {
-        &self.message
     }
 }
 
@@ -343,10 +337,6 @@ mod tests {
             "Discovering Rithmic systems"
         );
         assert_eq!(shell.profile_label(), "Rithmic");
-        assert_eq!(
-            shell.message(),
-            "Connecting to Rithmic with the saved login"
-        );
     }
 
     #[test]

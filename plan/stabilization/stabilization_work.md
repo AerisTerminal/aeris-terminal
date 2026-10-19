@@ -1023,6 +1023,19 @@ Status: pending
     success, and full-queue failure. M6.2 remains unchecked for
     connection/series feedback, deferred Trading/OpenFolder/ConnectProvider
     sources/actions, and remaining unwrap/discard cleanup.
+  - Part 18: stopped market connections use the existing typed chart-failure
+    projection and pane-keyed `chart_state` notice; streaming recovery clears
+    only a worker-stop failure. Timeframe and market-history dispatch failures
+    use one sanitized `series_selection` pane notice, cleared on a successful
+    dispatch or ready/awaiting-data state. Normal connection and series phases
+    remain typed status, not extra notices. Removed the unused stored
+    connection string, provider-specific startup text builder, Rithmic shell
+    message and the unused series-header text pass-through; quick-timeframe
+    failure explanation stays local to its input. PaneHarness exercises
+    repeated connection/series errors, one rendered card, redaction, and
+    successful clearing. M6.2 remains unchecked for deferred
+    Trading/OpenFolder/ConnectProvider sources/actions and other
+    unwrap/discard cleanup. No M6.3 generation-binding work was attempted.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1353,6 +1366,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 15 fix(desktop): handled weak-owner update outcomes for pane/workspace callbacks without duplicate state: released owners cancel quietly, live update failures reach diagnostics. Preserved the tested constant-layout and complete-command-registry startup invariants instead of arbitrary fallbacks. Focused timer-fence tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for profile refresh, market bridge and shutdown discards, connection/series feedback, deferred source/actions and other unwrap cleanup.
 - 2026-10-19 M6.2 Part 16 fix(desktop): classified bounded bridge send failures and retired receivers, surfaced startup/shutdown cleanup failures through stderr-safe diagnostics, and preserved chart-failure notice ownership. Focused mailbox and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for account profile refresh, connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
 - 2026-10-19 M6.2 Part 17 fix(desktop): classified account profile-refresh rollback/activation results as signed-out teardown or live bounded-queue failure, with sanitized keyed UI notice or detached-owner diagnostic; diagnosed optional login cancellation failure without enabling authentication. Deterministic account queue tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
+- 2026-10-19 M6.2 Part 18 fix(desktop): routed stopped-connection and series-dispatch failures into the existing sanitized keyed pane notice bridge, preserved typed loading/status projection and removed unused connection/header display strings. PaneHarness repeated-error/redaction/recovery tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for deferred notice sources/actions and remaining unwrap/discard cleanup.
 
 ## 7. Known gaps / deferred
 
