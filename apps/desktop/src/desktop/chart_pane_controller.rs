@@ -31,6 +31,10 @@ impl ChartPaneController {
         self.pending_selection
     }
 
+    pub(super) fn is_pending(&self, generation: u64) -> bool {
+        self.pending_selection == Some(generation)
+    }
+
     /// Retired selection outcomes cannot change the current pane or its notice.
     pub(super) fn accept(&mut self, generation: u64) -> bool {
         if self.pending_selection != Some(generation) {

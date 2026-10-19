@@ -2688,7 +2688,7 @@ impl WorkspaceSurface {
                     entitlement_id: descriptor.selection_entitlement_id.to_string(),
                     interval: self.interval,
                 };
-                if self.market_worker.try_select_catalog(request).is_err() {
+                let Ok(sequence) = self.market_worker.try_select_catalog(request) else {
                     self.symbol_browser.reject_selection(selection.generation);
                     self.post_symbol_selection_notice(
                         "Market selection could not be scheduled. Try again.",
@@ -2696,7 +2696,8 @@ impl WorkspaceSurface {
                     );
                     cx.notify();
                     return false;
-                }
+                };
+                self.chart_pane_controller.request(sequence);
                 self.pending_symbol_selection_target = Some(target);
                 self.market_state.symbol_selection_pending = true;
                 cx.notify();
@@ -3696,10 +3697,10 @@ impl WorkspaceSurface {
                 interval,
             } => self.apply_catalog_switch(sequence, browser_generation, instrument, interval, cx),
             MarketWorkerMessage::CatalogSwitchFailed {
-                sequence: _,
+                sequence,
                 browser_generation,
                 detail: _,
-            } => self.reject_catalog_switch(browser_generation, cx),
+            } => self.reject_catalog_switch(sequence, browser_generation, cx),
             MarketWorkerMessage::Connection {
                 generation,
                 state,
@@ -4434,7 +4435,9 @@ impl WorkspaceSurface {
         interval: ChartInterval,
         cx: &mut Context<Self>,
     ) {
-        if !self.confirm_catalog_selection(browser_generation) {
+        if !self.chart_pane_controller.is_pending(sequence)
+            || !self.confirm_catalog_selection(browser_generation)
+        {
             return;
         }
         Self::clear_symbol_selection_notice(cx);
@@ -4444,14 +4447,19 @@ impl WorkspaceSurface {
         self.pending_linked_instrument = Some(instrument.clone());
         self.rithmic_pending_product = Some(instrument);
         self.rithmic_pending_interval = Some(interval);
-        self.chart_pane_controller.request(sequence);
         self.rithmic_switch = RithmicSwitchState::Pending;
         self.apply_rithmic_switch_marker(sequence, cx);
     }
 
-    fn reject_catalog_switch(&mut self, browser_generation: u64, cx: &mut Context<Self>) {
-        if usize_generation(browser_generation)
-            .is_some_and(|generation| self.symbol_browser.reject_selection(generation))
+    fn reject_catalog_switch(
+        &mut self,
+        sequence: u64,
+        browser_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_pane_controller.reject(sequence)
+            && usize_generation(browser_generation)
+                .is_some_and(|generation| self.symbol_browser.reject_selection(generation))
         {
             self.market_state.symbol_selection_pending = false;
             self.pending_symbol_selection_target = None;

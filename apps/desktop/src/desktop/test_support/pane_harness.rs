@@ -898,6 +898,78 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
 }
 
 #[gpui::test]
+fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness.pane.update(cx, |pane, _| {
+        let search = pane.symbol_browser.begin_search("ETH").expect("search");
+        assert!(pane.symbol_browser.apply_results(
+            search.request_id,
+            vec![ProviderInstrumentSummary {
+                symbol: "ETH".into(),
+                display_symbol: "ETH".into(),
+                exchange: "TEST".into(),
+                ..ProviderInstrumentSummary::default()
+            }]
+        ));
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_instrument(
+            InstrumentMenuSelection(0),
+            SymbolSelectionTarget::Chart,
+            cx,
+        ));
+    });
+    let request = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::SelectCatalog(request) => Some(request),
+            _ => None,
+        })
+        .expect("catalog request");
+    harness.pane.update(cx, |pane, _| {
+        assert_eq!(
+            pane.chart_pane_controller.pending_selection(),
+            Some(request.sequence),
+            "the request must fence lifecycle before its catalog reply"
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::SeriesState {
+            generation: 1,
+            state: ChartState::Error,
+            message: "retired private error".into(),
+        })
+        .expect("old series error");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Ready);
+        assert_eq!(
+            pane.chart_pane_controller.pending_selection(),
+            Some(request.sequence)
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::CatalogSwitchFailed {
+            sequence: request.sequence,
+            browser_generation: request.browser_generation,
+            detail: "catalog failed".into(),
+        })
+        .expect("catalog failure");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_pane_controller.pending_selection(), None);
+        assert!(pane.chart_pane_controller.accept_series_state(1));
+        assert_eq!(pane.chart_state, ChartState::Ready);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestAppContext) {
     use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketStudyRemoved};
     use std::num::NonZeroU64;
