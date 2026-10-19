@@ -1180,6 +1180,17 @@ Status: pending
     session after the marker and verifies only the new status is shown.
     M6.3 stays unchecked: state, snapshots, updates, tape, other pane messages,
     switch-guard removal, full interleavings and guarded GUI storms remain.
+  - Part 8: trade-tape snapshots now pass the pane controller's exact committed
+    selection-generation fence before replacing retained tape or projecting
+    trades into the chart. The interval-switch GPUI regression uses real
+    selection generations, sends a higher-revision retired tape after a second
+    marker, and verifies the replacement renders only the current selection's
+    tape while the prior chart's cursor stays intact. The tape revision check
+    still orders publications within one generation; it no longer treats a
+    larger numeric generation as sufficient to cross the pane boundary.
+    Other pane state, snapshot/update and auxiliary message acceptance,
+    legacy switch guards, complete interleavings, cover-through-ready and
+    guarded GUI switch storms remain; M6.3 stays unchecked.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model

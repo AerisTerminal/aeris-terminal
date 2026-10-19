@@ -3813,6 +3813,12 @@ impl WorkspaceSurface {
         snapshot: aeris_market_runtime::MarketTradeTapeSnapshot,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .chart_pane_controller
+            .accept_publication(snapshot.generation.0.get())
+        {
+            return;
+        }
         let is_current = self.product.as_ref().is_none_or(|product| {
             snapshot.provider_id == product.provider
                 && snapshot.instrument_id == product.instrument_id
@@ -3820,8 +3826,7 @@ impl WorkspaceSurface {
         });
         if is_current
             && self.trade_tape.as_ref().is_none_or(|current| {
-                snapshot.generation.0.get() >= current.generation.0.get()
-                    && snapshot.provider_generation >= current.provider_generation
+                snapshot.provider_generation >= current.provider_generation
                     && (current.generation != snapshot.generation
                         || current.provider_generation != snapshot.provider_generation
                         || snapshot.revision >= current.revision)

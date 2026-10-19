@@ -776,6 +776,7 @@ mod timeframe_input {
 
     fn order_flow_tape(
         product: &InstallProviderInstrument,
+        generation: u64,
         revision: u64,
         last_ordinal: u64,
     ) -> aeris_market_runtime::MarketTradeTapeSnapshot {
@@ -809,7 +810,9 @@ mod timeframe_input {
             .collect::<Vec<_>>();
         aeris_market_runtime::MarketTradeTapeSnapshot {
             consumer_id: aeris_market_runtime::MarketConsumerId(std::num::NonZeroU64::MIN),
-            generation: aeris_market_runtime::MarketGenerationId(std::num::NonZeroU64::MIN),
+            generation: aeris_market_runtime::MarketGenerationId(
+                std::num::NonZeroU64::new(generation).expect("selection generation is nonzero"),
+            ),
             provider_id: product.provider.clone(),
             instrument_id: product.instrument_id.clone(),
             entitlement_id: product.entitlement_id.clone(),
@@ -907,7 +910,7 @@ mod timeframe_input {
             });
         });
         deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 1, 3)),
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 1, 1, 3)),
             cx,
         );
         let one_minute = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
@@ -925,7 +928,7 @@ mod timeframe_input {
         );
         // A rewritten prefix must not invalidate the old chart's resume cursor.
         // The rewrite belongs to the replacement, which has not been drawn yet.
-        let mut rewritten = order_flow_tape(&product, 2, 5);
+        let mut rewritten = order_flow_tape(&product, five_minutes, 2, 5);
         rewritten.rewrite_generation = 1;
         deliver(MarketWorkerMessage::TradeTape(rewritten), cx);
         assert_eq!(
@@ -938,7 +941,7 @@ mod timeframe_input {
         let fifteen_minutes =
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute15, cx);
         deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 3, 6)),
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, five_minutes, 3, 6)),
             cx,
         );
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
@@ -947,6 +950,16 @@ mod timeframe_input {
             MarketWorkerMessage::EngineSwitchMarker {
                 sequence: fifteen_minutes,
             },
+            cx,
+        );
+        // Even a higher revision from the retired selection cannot replace the
+        // new binding's tape while the old chart is still on screen.
+        deliver(
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, five_minutes, 99, 99)),
+            cx,
+        );
+        deliver(
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, fifteen_minutes, 1, 6)),
             cx,
         );
         publish_snapshot(&surface, cx);
@@ -958,7 +971,7 @@ mod timeframe_input {
             "the replacement chart rebuilds its order flow from the retained tape"
         );
         deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 4, 7)),
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, fifteen_minutes, 2, 7)),
             cx,
         );
         assert_eq!(applied_ordinal(&replacement, 15, cx), Some(7));
