@@ -708,6 +708,10 @@ fn spawn_group(
                 for record in &endpoints {
                     runtime::report_state(
                         &record.endpoint.messages,
+                        record
+                            .role
+                            .demands_series()
+                            .then_some(record.endpoint.active_generation),
                         ChartState::Error,
                         error.clone(),
                     );
@@ -1120,9 +1124,10 @@ mod tests {
                         );
                         return;
                     }
-                    MarketWorkerMessage::State {
+                    MarketWorkerMessage::SeriesState {
                         state: ChartState::Error,
                         message,
+                        ..
                     } => panic!("Hyperliquid market runtime startup failed: {message}"),
                     _ => {}
                 }

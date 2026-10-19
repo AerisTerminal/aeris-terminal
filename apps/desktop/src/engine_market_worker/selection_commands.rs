@@ -89,6 +89,7 @@ fn begin_endpoint_demand(
     let provider_name = provider_display_name(record.product.provider.as_str());
     super::runtime::report_state(
         &record.endpoint.messages,
+        Some(record.endpoint.active_generation),
         ChartState::Loading,
         format!("Loading {provider_name} history"),
     );
@@ -108,7 +109,12 @@ fn begin_endpoint_demand(
             viewport: None,
         },
     ) {
-        super::runtime::report_state(&record.endpoint.messages, ChartState::Error, error);
+        super::runtime::report_state(
+            &record.endpoint.messages,
+            Some(record.endpoint.active_generation),
+            ChartState::Error,
+            error,
+        );
         return Ok(());
     }
 
@@ -290,6 +296,7 @@ fn process_engine_select(
     cancel_pending_recovery(endpoint)?;
     super::runtime::report_state(
         &endpoint.messages,
+        Some(endpoint.active_generation),
         ChartState::Loading,
         format!(
             "Loading {} history",

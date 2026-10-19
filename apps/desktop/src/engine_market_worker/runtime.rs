@@ -84,7 +84,15 @@ fn run_attached_workers(
                             ticket_interest_dirty = true;
                         }
                         Err(error) => {
-                            report_state(&record.endpoint.messages, ChartState::Error, error);
+                            report_state(
+                                &record.endpoint.messages,
+                                record
+                                    .role
+                                    .demands_series()
+                                    .then_some(record.endpoint.active_generation),
+                                ChartState::Error,
+                                error,
+                            );
                             retire_endpoint(market, client_id, &mut record.endpoint);
                         }
                     },
@@ -100,7 +108,15 @@ fn run_attached_workers(
             let (commands, disconnected) = drain_command_batch(&record.endpoint.commands);
             for command in commands {
                 if let Err(error) = process_command(market, client_id, record, command) {
-                    report_state(&record.endpoint.messages, ChartState::Error, error);
+                    report_state(
+                        &record.endpoint.messages,
+                        record
+                            .role
+                            .demands_series()
+                            .then_some(record.endpoint.active_generation),
+                        ChartState::Error,
+                        error,
+                    );
                 }
             }
             if disconnected {
@@ -306,14 +322,31 @@ fn report_runtime_failure(endpoints: &[EndpointRecord], error: &str) {
     for record in endpoints.iter().filter(|record| record.endpoint.active) {
         report_state(
             &record.endpoint.messages,
+            record
+                .role
+                .demands_series()
+                .then_some(record.endpoint.active_generation),
             ChartState::Error,
             error.to_string(),
         );
     }
 }
 
-pub(super) fn report_state(messages: &MarketWorkerSender, state: ChartState, message: String) {
-    match messages.send(MarketWorkerMessage::State { state, message }) {
+pub(super) fn report_state(
+    messages: &MarketWorkerSender,
+    generation: Option<u64>,
+    state: ChartState,
+    message: String,
+) {
+    let publication = match generation {
+        Some(generation) => MarketWorkerMessage::SeriesState {
+            generation,
+            state,
+            message,
+        },
+        None => MarketWorkerMessage::State { state, message },
+    };
+    match messages.send(publication) {
         Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
             // The receiver has gone away during pane retirement.
         }
@@ -359,17 +392,7 @@ fn apply_received_event(
         let MarketRuntimeEvent::Fault(fault) = event else {
             return Err("engine pushed an unrouted market message".to_string());
         };
-        for endpoint in endpoints
-            .iter()
-            .filter(|record| record.endpoint.active)
-            .map(|record| &record.endpoint)
-        {
-            report_state(
-                &endpoint.messages,
-                ChartState::Error,
-                fault.redacted_detail.clone(),
-            );
-        }
+        report_runtime_failure(endpoints, &fault.redacted_detail);
         return Ok(false);
     }
     let Some(record) = endpoints
@@ -382,6 +405,10 @@ fn apply_received_event(
         apply_selection_outcome(record, outcome)?;
         return Ok(true);
     }
+    let generation = record
+        .role
+        .demands_series()
+        .then_some(record.endpoint.active_generation);
     let endpoint = &mut record.endpoint;
     let (catalog, event) = classify_provider_catalog_event(event);
     let event = match catalog {
@@ -454,7 +481,7 @@ fn apply_received_event(
         &endpoint.messages,
     );
     if let Err(error) = result {
-        report_state(&endpoint.messages, ChartState::Error, error);
+        report_state(&endpoint.messages, generation, ChartState::Error, error);
     }
     Ok(false)
 }
@@ -577,7 +604,50 @@ mod tests {
     #[test]
     fn runtime_failure_uses_bounded_pane_mailbox_and_tolerates_retirement() {
         let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
-        report_state(&messages, ChartState::Error, "market unavailable".into());
+        report_state(
+            &messages,
+            Some(7),
+            ChartState::Error,
+            "market unavailable".into(),
+        );
+        let (queued, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            queued.as_slice(),
+            [MarketWorkerMessage::SeriesState {
+                generation: 7,
+                state: ChartState::Error,
+                message,
+            }] if message == "market unavailable"
+        ));
+        for _ in 0..9 {
+            report_state(
+                &messages,
+                Some(7),
+                ChartState::Error,
+                "market unavailable".into(),
+            );
+        }
+        report_state(
+            &messages,
+            Some(7),
+            ChartState::Error,
+            "saturated pane".into(),
+        );
+        assert_eq!(messages.occupancy().0, 9, "control reserve remains bounded");
+        drop(receiver);
+        report_state(&messages, Some(7), ChartState::Error, "retired pane".into());
+    }
+
+    #[test]
+    fn non_series_endpoint_failure_remains_app_scoped() {
+        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        report_state(
+            &messages,
+            None,
+            ChartState::Error,
+            "catalog unavailable".into(),
+        );
         let (queued, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
@@ -585,15 +655,8 @@ mod tests {
             [MarketWorkerMessage::State {
                 state: ChartState::Error,
                 message,
-            }] if message == "market unavailable"
+            }] if message == "catalog unavailable"
         ));
-        for _ in 0..9 {
-            report_state(&messages, ChartState::Error, "market unavailable".into());
-        }
-        report_state(&messages, ChartState::Error, "saturated pane".into());
-        assert_eq!(messages.occupancy().0, 9, "control reserve remains bounded");
-        drop(receiver);
-        report_state(&messages, ChartState::Error, "retired pane".into());
     }
 
     #[test]
