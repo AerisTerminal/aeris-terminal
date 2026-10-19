@@ -247,6 +247,131 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
 }
 
 #[gpui::test]
+fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notice(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let (old_chart, old_product) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (
+            pane.chart.clone().expect("original chart"),
+            pane.product.clone(),
+        )
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("command receiver")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection request");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: "private provider failure".into(),
+        })
+        .expect("failure enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.product, old_product);
+        assert_eq!(pane.interval, ChartInterval::Minute1);
+        assert_eq!(
+            pane.chart.as_ref().map(Entity::entity_id),
+            Some(old_chart.entity_id())
+        );
+        assert_eq!(pane.chart_state, ChartState::Ready);
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Timeframe unavailable");
+        assert!(!notices[0].detail.contains("private provider failure"));
+    });
+}
+
+#[gpui::test]
+fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicates_notice(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let (old_chart, old_product) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (
+            pane.chart.clone().expect("original chart"),
+            pane.product.clone().expect("original product"),
+        )
+    });
+    let mut replacement = old_product.clone();
+    replacement.instrument_id = "different-instrument".into();
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            assert!(pane.select_installed_instrument(&replacement, cx));
+        });
+        let sequence = harness
+            .commands
+            .as_ref()
+            .expect("command receiver")
+            .try_iter()
+            .filter_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+                _ => None,
+            })
+            .last()
+            .expect("selection request");
+        harness
+            .publications
+            .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+            .expect("marker enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        harness
+            .publications
+            .send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: "private provider failure".into(),
+            })
+            .expect("failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let pane = harness.pane.read(cx);
+            assert_eq!(pane.product.as_ref(), Some(&old_product));
+            assert_eq!(pane.interval, ChartInterval::Minute1);
+            assert_eq!(
+                pane.chart.as_ref().map(Entity::entity_id),
+                Some(old_chart.entity_id())
+            );
+            assert_eq!(pane.chart_state, ChartState::Ready);
+            let notices = harness.window.read(cx).toaster.notices();
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].title, "Market selection unavailable");
+            assert!(!notices[0].detail.contains("private provider failure"));
+        });
+    }
+}
+
+#[gpui::test]
 fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

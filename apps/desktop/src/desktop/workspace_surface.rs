@@ -4212,17 +4212,39 @@ impl WorkspaceSurface {
             return;
         }
         if state == ChartState::Error && engine_provider {
-            let swapping = self.rithmic_switch.is_swapping();
+            let restoring_chart = self.rithmic_switch.is_swapping()
+                && self.chart.is_some()
+                && self.rithmic_previous_selection.is_some();
+            let instrument_changed = self
+                .rithmic_previous_selection
+                .as_ref()
+                .is_some_and(|(product, _)| product != &self.product);
             self.rithmic_switch = RithmicSwitchState::Idle;
             self.rithmic_pending_interval = None;
             self.rithmic_pending_product = None;
             self.rithmic_pending_sequence = None;
             self.market_state.symbol_selection_pending = false;
-            if swapping {
+            if restoring_chart {
                 self.restore_rithmic_selection_after_failure(cx);
-            } else {
-                self.rithmic_previous_selection = None;
+                // The displayed chart still belongs to the previous selection.
+                // A rejected replacement is a selection failure, not a failure
+                // of that chart; keep it usable while its demand is restored.
+                self.clear_chart_failure(cx);
+                self.chart_state = ChartState::Ready;
+                if instrument_changed {
+                    self.post_symbol_selection_notice("Market selection failed. Try again.", cx);
+                } else {
+                    Self::post_indicator_failure(
+                        "series_selection",
+                        "Timeframe unavailable",
+                        "Market history could not start. Try again.",
+                        cx,
+                    );
+                }
+                cx.notify();
+                return;
             }
+            self.rithmic_previous_selection = None;
         } else if engine_provider && state == ChartState::Ready {
             self.rithmic_switch = RithmicSwitchState::Idle;
             self.rithmic_previous_selection = None;
