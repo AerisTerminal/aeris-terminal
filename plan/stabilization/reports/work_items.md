@@ -959,6 +959,14 @@ Scope: `NotificationCenter` holds a bounded queue of `UserNotice` (key, severity
 - Handle the `let _ =` discards in the restore setters, `try_set_order_book_visible`, `process_pending_price_alerts` and the search paths.
 - Remove the dead parameters and production `expect`/`unwrap` listed in UI-11.
 - Notices are also logged, without secrets.
+Delivery staging: M6.2 owns the bounded keyed center, toaster projection, sanitized
+diagnostics, pane/workspace/persistence sources, and the existing chart-preference
+`Retry` action. Do not add inert action variants: M6.9 owns descriptor-backed
+`ConnectProvider(ProviderId)`; M6.10 owns stable request IDs and
+`Trading(RequestId)` command feedback; M7.8 owns guarded `OpenFolder` from the
+trusted persistence location. M6.12 enforces the final desktop-wide discard policy.
+The live `selection_pending` guard protects controls during an in-flight selection;
+VAL-DSK-007 targets dummy dead-parameter discards, not that state.
 Design refs: 11 §5.1-5.2, §9 D1
 Closes findings: UI-11 (most)
 Key tests:

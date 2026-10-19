@@ -926,11 +926,19 @@ and zero frames per idle second; before/after idle CPU for 1, 4, 16 panes record
   Provider(ProviderId), title, detail, action: OpenFolder | Retry | ConnectProvider(ProviderId), lifetime: Timed |
   UntilCleared | UntilDismissed }`; `NotificationCenter` (bounded; timed notices evicted first; `UntilCleared` bounded by
   key) renders through the existing toaster. Every notice is also logged; tokens never appear in notice text.
+- The notice contract is staged at real ownership boundaries: M6.2 supplies the bounded center,
+  sanitized pane/workspace/persistence projection and the existing chart-preference `Retry`;
+  M6.9 adds descriptor-backed `ConnectProvider(ProviderId)`; M6.10 adds stable request IDs
+  and `Trading(RequestId)` feedback; M7.8 adds guarded `OpenFolder` for the trusted
+  persistence location. Do not render an action before its owning dispatch exists.
 - Per-pane strings `indicator_message`, `symbol_message`, `price_alert_message`, `chart_state_message` are deleted.
-- All 101 production `let _ =` in the desktop are resolved: user-visible failure -> notice; expected-harmless (closed
+- M6.2 resolves discarded failures at its notice and bridge paths; M6.12 enforces the
+  remaining desktop-wide discard policy: user-visible failure -> notice; expected-harmless (closed
   channel at shutdown) -> explicit `if let Err` with a reason; internal -> `diagnostic!`. Dead parameters silenced with
-  `let _ = x;` are removed. Production `expect`/`unwrap` on the UI thread return errors. `apps/desktop/Cargo.toml`
-  adds `let_underscore_must_use = "deny"` when the count reaches zero.
+  `let _ = x;` are removed. Active `selection_pending` state is retained to guard in-flight
+  selection controls; it is not a dead parameter. Only documented, tested startup invariants
+  retain production `expect`; other fallible UI-thread operations return errors.
+  `apps/desktop/Cargo.toml` adds `let_underscore_must_use = "deny"` when the count reaches zero.
 - No control flow on display text: `should_autoload_rithmic_catalog` -> `ProviderEvent::CatalogReady` +
   `ProviderDescriptor::autoload_catalog`; `starts_with("RISK WARNING")` -> `TradingEvent::RiskWarning`.
 
