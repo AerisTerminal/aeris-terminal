@@ -1330,6 +1330,51 @@ Status: pending
     remain open; M6.3 stays unchecked pending the rest of the auxiliary audit,
     switch-guard removal, fixed permutations, 100+ seeded interleavings,
     cover-through-ready and guarded GUI storms.
+  - Part 24 mailbox audit (`market_worker.rs::MarketWorkerMessage` ->
+    `workspace_surface.rs::apply_market_worker_message`, including delegated
+    handlers; all current variants enumerated):
+    - `Update` (snapshot and delta), `MarketSessionStatus`, `OrderBook`,
+      `TradeTape`, and `Connection`: exact displayed selection generation via
+      `ChartPaneController::accept_publication`, before chart, ladder, tape,
+      session or connection mutation.
+    - `SeriesState` and `Recovery`: exact displayed generation via
+      `accept_series_state`, which also rejects lifecycle outcomes while a
+      replacement request is pending. `Recovery` additionally matches its
+      chart request ID. These are not ordinary old-series data publications.
+    - `StudyOutput`, `StudyOutputsInvalidated`, `StudyRemoved`: demand-bound
+      output uses `accept_study_publication(Some(generation))`; generation-free
+      pre-selection consumer study lifecycle uses its `None` arm. The separate
+      `StudyRegistered` and `StudyRegistrationFailed` replies consume the
+      outstanding registration request sequence; `StudyReinitialized`,
+      `StudyReinitializationFailed`, `StudyRemovalFailed` use the registered
+      study ID and the consumer's pending reinitialization/removal state.
+      These are consumer-scoped operations, not series publications.
+    - `EngineSwitchMarker` and `EngineSelectionFailed`: exact pending selection
+      sequence via `accept` and `reject` respectively (legacy pending-switch
+      guards still also apply). `SelectedInstrument`: initial descriptor
+      adoption only when there is no pending request and its generation is not
+      older than the latest requested selection. `CatalogSwitchCommitted`:
+      exact pending sequence plus symbol-browser selection generation before
+      committing; `CatalogSwitchFailed`: exact pending sequence plus browser
+      rejection generation before pane failure presentation. These are
+      selection outcomes, not committed-series publications.
+    - `ProviderCatalog`: runtime consumer/provider/command callbacks are
+      fenced before delivery; desktop matches provider and browser
+      search/selection generations for results, previews and rejection.
+      `CatalogReady` is provider-scoped startup; screen replies are ignored
+      by a chart pane. `CatalogFailure` is an app-scoped sanitized notice and
+      never changes chart state. `Diagnostics` only logs when enabled.
+    - `PriceAlertTriggered`: alert-ID match against the pane's owned alert
+      list before changing alert status/line or adding a bounded announcement;
+      alerts survive symbol switches and are not chart-selection publications.
+      `PriceAlertSyncFailed` and `PriceAlertSyncSucceeded` only post/clear a
+      keyed pane notice for the consumer's alert subscription.
+    - No remaining mailbox variant feeds selection-bound chart data without
+      its exact displayed-generation or pending-selection acceptance. The
+      consumer-scoped study/alert and catalog routes deliberately do not use
+      a chart selection generation. This audit does not claim that the legacy
+      switch guards are gone or that all interleavings have passed; those are
+      Parts 25 and 26 respectively.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1685,6 +1730,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 21 fix(desktop): protect pending selections from old-series errors; failing-first GPUI and pure controller tests plus all five serial workspace gates passed after cleaning 28.1 GiB with CARGO_BUILD_JOBS=1. M6.3 remains unchecked pending auxiliary audit, switch guards, interleavings, cover-through-ready and guarded GUI storms.
 - 2026-10-19 M6.3 Part 22 fix(desktop): record catalog chart selection at dispatch and reject stale lifecycle during catalog resolution; GPUI regression and serial full gates recorded with this commit. M6.3 remains unchecked pending auxiliary audit, switch guards, fixed permutations, 100+ interleavings, cover-through-ready and guarded GUI storms.
 - 2026-10-19 M6.3 Part 23 fix(desktop): old-series recovery results now use the lifecycle acceptance fence while a replacement is pending; the failing-first GPUI regression and all five serial workspace gates passed after cleaning 29.0 GiB with CARGO_BUILD_JOBS=1. M6.3 remains unchecked pending the rest of the auxiliary audit, switch guards, exhaustive interleavings, cover-through-ready and guarded GUI storms.
+- 2026-10-19 M6.3 Part 24 docs(desktop): audited every market-worker mailbox variant delivered to the chart pane and recorded its exact generation, lifecycle, pending-selection, consumer-scoped or app-scoped acceptance above. No new unfenced selection-bound route was found. M6.3 remains unchecked; Part 25 removes legacy switch guards, then Part 26 exercises fixed permutations and seeded interleavings, Part 27 verifies cover-through-ready and Part 28 runs isolated GUI storms.
 
 ## 7. Known gaps / deferred
 
