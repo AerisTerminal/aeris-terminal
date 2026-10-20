@@ -731,7 +731,7 @@ mod timeframe_input {
         assert_eq!(selections, [ChartInterval::Day1]);
         cx.read(|cx| {
             assert_eq!(
-                surface.read(cx).rithmic_pending_interval,
+                surface.read(cx).chart_pane_controller.pending_interval(),
                 Some(ChartInterval::Day1)
             );
         });

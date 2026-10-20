@@ -868,8 +868,6 @@ struct WorkspaceSurface {
     product: Option<InstallProviderInstrument>,
     rithmic_switch: RithmicSwitchState,
     interval: ChartInterval,
-    rithmic_pending_interval: Option<ChartInterval>,
-    rithmic_pending_product: Option<InstallProviderInstrument>,
     chart_pane_controller: chart_pane_controller::ChartPaneController,
     /// The selection to fall back to if the switch in flight never loads.
     ///

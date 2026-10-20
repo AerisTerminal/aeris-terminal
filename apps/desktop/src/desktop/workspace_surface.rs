@@ -198,8 +198,6 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         product: init.startup.product,
         rithmic_switch: RithmicSwitchState::Idle,
         interval: init.interval,
-        rithmic_pending_interval: None,
-        rithmic_pending_product: None,
         chart_pane_controller: chart_pane_controller::ChartPaneController::default(),
         rithmic_previous_selection: None,
         restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
@@ -2435,10 +2433,11 @@ impl WorkspaceSurface {
         #[cfg(feature = "diagnostics")]
         let started = Instant::now();
         let selected = (|| {
-            if self.interval == interval && self.rithmic_pending_interval.is_none() {
+            if self.interval == interval && self.chart_pane_controller.pending_interval().is_none()
+            {
                 return true;
             }
-            if self.rithmic_pending_interval == Some(interval) {
+            if self.chart_pane_controller.pending_interval() == Some(interval) {
                 return true;
             }
             let Some(product) = self.product.clone() else {
@@ -2463,8 +2462,9 @@ impl WorkspaceSurface {
                 cx.notify();
                 return false;
             };
-            self.rithmic_pending_interval = Some(interval);
             self.chart_pane_controller.request(sequence);
+            self.chart_pane_controller
+                .set_pending_target(sequence, interval, None);
             self.rithmic_switch = RithmicSwitchState::Pending;
             self.chart_state = ChartState::Loading;
             self.clear_chart_failure(cx);
@@ -2487,13 +2487,13 @@ impl WorkspaceSurface {
         if self.product.as_ref().is_some_and(|current| {
             current.provider == instrument.provider
                 && current.instrument_id == instrument.instrument_id
-        }) && self.rithmic_pending_product.is_none()
+        }) && self.chart_pane_controller.pending_product().is_none()
         {
             return true;
         }
         if self
-            .rithmic_pending_product
-            .as_ref()
+            .chart_pane_controller
+            .pending_product()
             .is_some_and(|pending| {
                 pending.provider == instrument.provider
                     && pending.instrument_id == instrument.instrument_id
@@ -2515,10 +2515,10 @@ impl WorkspaceSurface {
             cx.notify();
             return false;
         };
-        self.rithmic_pending_product = Some(instrument.clone());
         self.pending_linked_instrument = Some(instrument.clone());
-        self.rithmic_pending_interval = Some(interval);
         self.chart_pane_controller.request(sequence);
+        self.chart_pane_controller
+            .set_pending_target(sequence, interval, Some(instrument.clone()));
         self.rithmic_switch = RithmicSwitchState::Pending;
         self.chart_state = ChartState::Loading;
         self.clear_chart_failure(cx);
@@ -3579,8 +3579,8 @@ impl WorkspaceSurface {
     /// instrument needs the neutral cover until its handoff is current.
     pub(super) fn showing_superseded_series(&self) -> bool {
         let instrument_changed = if self.rithmic_switch.is_pending() {
-            self.rithmic_pending_product
-                .as_ref()
+            self.chart_pane_controller
+                .pending_product()
                 .is_some_and(|product| Some(product) != self.product.as_ref())
         } else {
             self.rithmic_previous_selection
@@ -4314,8 +4314,6 @@ impl WorkspaceSurface {
                 .as_ref()
                 .is_some_and(|(product, _)| product != &self.product);
             self.rithmic_switch = RithmicSwitchState::Idle;
-            self.rithmic_pending_interval = None;
-            self.rithmic_pending_product = None;
             self.chart_pane_controller.clear();
             self.market_state.symbol_selection_pending = false;
             if restoring_chart {
@@ -4425,8 +4423,8 @@ impl WorkspaceSurface {
         self.consume_catalog_search_authorization();
         self.market_state.symbol_selection_pending = false;
         self.pending_linked_instrument = Some(instrument.clone());
-        self.rithmic_pending_product = Some(instrument);
-        self.rithmic_pending_interval = Some(interval);
+        self.chart_pane_controller
+            .set_pending_target(sequence, interval, Some(instrument));
         self.rithmic_switch = RithmicSwitchState::Pending;
         self.commit_pending_selection(sequence, cx);
     }
@@ -4449,11 +4447,11 @@ impl WorkspaceSurface {
     }
 
     fn reject_pending_engine_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
+        let failed_interval = self.chart_pane_controller.pending_interval();
+        let instrument_switch = self.chart_pane_controller.pending_product().is_some();
         if !self.chart_pane_controller.reject(sequence) {
             return;
         }
-        let failed_interval = self.rithmic_pending_interval.take();
-        let instrument_switch = self.rithmic_pending_product.take().is_some();
         self.pending_linked_instrument = None;
         self.market_state.symbol_selection_pending = false;
         self.rithmic_switch = RithmicSwitchState::Idle;
@@ -4494,27 +4492,27 @@ impl WorkspaceSurface {
         // drawings; a symbol replacement must not carry price-anchored drawings
         // onto another instrument.
         self.retain_chart_presentation(cx);
-        if let Some(interval) = self.rithmic_pending_interval.take() {
-            self.interval = interval;
-        }
-        if let Some(product) = self.rithmic_pending_product.take() {
-            // Selections only come from providers the menu lists.
-            if let Some(provider) = known_terminal_provider(&product.provider)
-                && provider != self.provider
-            {
-                self.provider = provider;
+        if let Some(target) = self.chart_pane_controller.take_pending_target() {
+            self.interval = target.interval;
+            if let Some(product) = target.product {
+                // Selections only come from providers the menu lists.
+                if let Some(provider) = known_terminal_provider(&product.provider)
+                    && provider != self.provider
+                {
+                    self.provider = provider;
+                }
+                self.product = Some(product);
+                self.market_session_status = None;
+                // Price levels belong to one instrument: a product switch drops
+                // the old book back to loading instead of showing BTC levels
+                // under an ETH selection. Interval-only switches keep the book.
+                self.order_book.update(cx, |order_book, order_book_cx| {
+                    order_book.clear(order_book_cx);
+                });
+                self.trade_tape = None;
+                self.trade_sweeps = Arc::from([]);
+                self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
             }
-            self.product = Some(product);
-            self.market_session_status = None;
-            // Price levels belong to one instrument: a product switch drops
-            // the old book back to loading instead of showing BTC levels
-            // under an ETH selection. Interval-only switches keep the book.
-            self.order_book.update(cx, |order_book, order_book_cx| {
-                order_book.clear(order_book_cx);
-            });
-            self.trade_tape = None;
-            self.trade_sweeps = Arc::from([]);
-            self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
         }
         self.rithmic_switch = if self.chart.is_some() {
             RithmicSwitchState::Swapping
@@ -4538,8 +4536,6 @@ impl WorkspaceSurface {
         };
         self.product.clone_from(&product);
         self.interval = interval;
-        self.rithmic_pending_interval = None;
-        self.rithmic_pending_product = None;
         self.chart_pane_controller.clear();
         self.rithmic_switch = RithmicSwitchState::Idle;
         self.order_book.update(cx, |order_book, order_book_cx| {
@@ -4552,7 +4548,8 @@ impl WorkspaceSurface {
             .and_then(|product| self.market_worker.try_select_engine(product, interval).ok());
         if let Some(sequence) = restored {
             self.chart_pane_controller.request(sequence);
-            self.rithmic_pending_interval = Some(interval);
+            self.chart_pane_controller
+                .set_pending_target(sequence, interval, None);
             self.rithmic_switch = RithmicSwitchState::Pending;
         }
         cx.notify();

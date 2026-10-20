@@ -363,8 +363,8 @@ impl TerminalApp {
         let surface = self.active_surface();
         let surface = surface.read(cx);
         let active = surface
-            .rithmic_pending_product
-            .as_ref()
+            .chart_pane_controller
+            .pending_product()
             .or(surface.product.as_ref());
         let trading_activity = surface.trading_pnl.instruments_with_activity();
         self.watchlist
@@ -688,8 +688,8 @@ impl TerminalApp {
         let current = {
             let surface = self.active_surface().read(cx);
             let active = surface
-                .rithmic_pending_product
-                .as_ref()
+                .chart_pane_controller
+                .pending_product()
                 .or(surface.product.as_ref());
             active.and_then(|active| {
                 self.watchlist.iter().position(|instrument| {

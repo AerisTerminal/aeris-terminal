@@ -67,7 +67,7 @@ pub(super) fn pane_chart_notice(
             chart_state,
             connection_state,
             surface.chart_failure,
-            surface.rithmic_pending_interval,
+            surface.chart_pane_controller.pending_interval(),
         )
         .as_str(),
     )

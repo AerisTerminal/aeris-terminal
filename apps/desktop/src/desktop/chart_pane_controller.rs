@@ -1,7 +1,16 @@
 //! Selection outcome fence for one chart pane.
 
+use super::{ChartInterval, InstallProviderInstrument};
+
+/// The requested target belongs to the same exact selection as its outcome.
+pub(super) struct PendingChartTarget {
+    pub(super) interval: ChartInterval,
+    pub(super) product: Option<InstallProviderInstrument>,
+}
+
 pub(super) struct ChartPaneController {
     pending_selection: Option<u64>,
+    pending_target: Option<PendingChartTarget>,
     latest_selection: u64,
     current_generation: u64,
 }
@@ -10,6 +19,7 @@ impl Default for ChartPaneController {
     fn default() -> Self {
         Self {
             pending_selection: None,
+            pending_target: None,
             latest_selection: 0,
             current_generation: 1,
         }
@@ -20,10 +30,35 @@ impl ChartPaneController {
     pub(super) fn request(&mut self, generation: u64) {
         self.latest_selection = self.latest_selection.max(generation);
         self.pending_selection = Some(generation);
+        self.pending_target = None;
+    }
+
+    pub(super) fn set_pending_target(
+        &mut self,
+        generation: u64,
+        interval: ChartInterval,
+        product: Option<InstallProviderInstrument>,
+    ) {
+        if self.is_pending(generation) {
+            self.pending_target = Some(PendingChartTarget { interval, product });
+        }
+    }
+
+    pub(super) fn pending_interval(&self) -> Option<ChartInterval> {
+        self.pending_target.as_ref().map(|target| target.interval)
+    }
+
+    pub(super) fn pending_product(&self) -> Option<&InstallProviderInstrument> {
+        self.pending_target.as_ref()?.product.as_ref()
+    }
+
+    pub(super) fn take_pending_target(&mut self) -> Option<PendingChartTarget> {
+        self.pending_target.take()
     }
 
     pub(super) fn clear(&mut self) {
         self.pending_selection = None;
+        self.pending_target = None;
     }
 
     #[cfg(test)]
@@ -52,6 +87,7 @@ impl ChartPaneController {
             return false;
         }
         self.pending_selection = None;
+        self.pending_target = None;
         true
     }
 
@@ -105,6 +141,30 @@ mod tests {
         pane.request(10);
         assert!(pane.accept(10));
         assert_eq!(pane.pending_selection(), None);
+    }
+
+    #[test]
+    fn pending_target_follows_only_the_current_request_and_is_consumed() {
+        let mut pane = ChartPaneController::default();
+        pane.request(7);
+        pane.set_pending_target(7, ChartInterval::Minute5, None);
+        pane.request(8);
+        pane.set_pending_target(7, ChartInterval::Day1, None);
+        assert_eq!(pane.pending_interval(), None);
+        pane.set_pending_target(8, ChartInterval::Minute15, None);
+        assert_eq!(pane.pending_interval(), Some(ChartInterval::Minute15));
+        assert!(!pane.reject(7));
+        assert_eq!(pane.pending_interval(), Some(ChartInterval::Minute15));
+        assert!(pane.accept(8));
+        assert_eq!(
+            pane.take_pending_target().map(|target| target.interval),
+            Some(ChartInterval::Minute15)
+        );
+        assert_eq!(pane.pending_interval(), None);
+        pane.request(9);
+        pane.set_pending_target(9, ChartInterval::Hour1, None);
+        assert!(pane.reject(9));
+        assert_eq!(pane.pending_interval(), None);
     }
 
     #[test]
