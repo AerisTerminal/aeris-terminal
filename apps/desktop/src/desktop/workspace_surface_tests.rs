@@ -1530,6 +1530,80 @@ mod instrument_drawings {
     }
 
     #[gpui::test]
+    fn pane_presentation_round_trips_all_chart_preferences(cx: &mut TestAppContext) {
+        use prost::Message as _;
+
+        let (source, _requests, cx) = open_surface(cx, instrument("A"), None);
+        show(&source, "A", cx);
+        let mut original = saved(&source, cx);
+        original.chart_type = ChartType::HollowCandles.identifier().into();
+        original.indicators = vec![WorkspaceChartIndicatorState {
+            kind: ChartIndicator::Volume.identifier().into(),
+            visible: false,
+            volume: Some(persisted_volume_settings(&VolumeSettings::default())),
+        }];
+        original.price_axis = Some(WorkspacePriceAxisState {
+            mode: 1,
+            ..WorkspacePriceAxisState::default()
+        });
+        original.crosshair_mode = 2;
+        let appearance = original.appearance.as_mut().expect("saved appearance");
+        appearance.grid_visible = !appearance.grid_visible;
+        std::mem::swap(&mut appearance.up_color, &mut appearance.down_color);
+        original.order_flow = Some(persisted_order_flow_settings(OrderFlowSettings {
+            show_cumulative_delta: true,
+            ..OrderFlowSettings::default()
+        }));
+        original.studies =
+            vec![legacy_runtime_study(1, ChartIndicator::Sma, false).expect("hidden saved study")];
+        original.legend = Some(persisted_chart_legend(ChartLegendOptions {
+            symbol_values: false,
+            indicators: false,
+            ..ChartLegendOptions::default()
+        }));
+        original.time_zone = "America/New_York".into();
+        original.show_order_management_lines = Some(false);
+        original.show_execution_marks = Some(false);
+        original.extend_order_lines_left = Some(false);
+        original.context_panel_visible = true;
+        original.context_panel_tab = ContextPanelTab::Energy.persisted();
+        original.context_panel_height = 320;
+        original.chart_link_group = 2;
+        original.chart_link_flags = 1;
+
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(original.clone()));
+        let pending = cx
+            .read(|cx| surface.read(cx).workspace_chart_state(cx))
+            .expect("presentation before bars");
+        assert_eq!(
+            pending, original,
+            "the pending save retains every preference"
+        );
+        let decoded = WorkspaceChartState::decode(pending.encode_to_vec().as_slice())
+            .expect("pane presentation decodes");
+        assert_eq!(decoded, original);
+        show(&surface, "A", cx);
+        let loaded = saved(&surface, cx);
+        assert_eq!(loaded.chart_type, original.chart_type);
+        assert_eq!(loaded.indicators, original.indicators);
+        assert_eq!(loaded.price_axis.as_ref().map(|axis| axis.mode), Some(1));
+        assert_eq!(loaded.crosshair_mode, original.crosshair_mode);
+        assert_eq!(loaded.appearance, original.appearance);
+        assert_eq!(loaded.order_flow, original.order_flow);
+        assert_eq!(loaded.studies, original.studies);
+        assert_eq!(loaded.legend, original.legend);
+        assert_eq!(loaded.time_zone, original.time_zone);
+        assert_eq!(loaded.show_order_management_lines, Some(false));
+        assert_eq!(loaded.show_execution_marks, Some(false));
+        assert_eq!(loaded.extend_order_lines_left, Some(false));
+        assert!(loaded.context_panel_visible);
+        assert_eq!(loaded.context_panel_tab, original.context_panel_tab);
+        assert_eq!(loaded.context_panel_height, original.context_panel_height);
+        assert_eq!(loaded.chart_link_group, original.chart_link_group);
+        assert_eq!(loaded.chart_link_flags, original.chart_link_flags);
+    }
+
+    #[gpui::test]
     fn drawings_return_when_switching_back_and_after_a_restart(cx: &mut TestAppContext) {
         let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
         show(&surface, "A", cx);

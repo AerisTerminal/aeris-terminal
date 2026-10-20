@@ -1770,6 +1770,101 @@ impl PanePersistence<'_> {
         state.chart_link_group = u32::from(surface.chart_link_group);
         state.chart_link_flags = u32::from(surface.chart_link_flags);
     }
+
+    fn presentation(&self, saved: Option<&WorkspaceChartState>) -> PanePresentation {
+        let mut state = saved.cloned().unwrap_or_default();
+        self.apply_surface_fields(&mut state);
+        PanePresentation {
+            state,
+            has_saved_chart: saved.is_some(),
+        }
+    }
+}
+
+/// One snapshot of the pane's chart preferences. Pane-owned choices override a
+/// retained chart document before either the startup or replacement chart sees it.
+struct PanePresentation {
+    state: WorkspaceChartState,
+    has_saved_chart: bool,
+}
+
+impl PanePresentation {
+    fn apply(
+        &self,
+        chart: &Entity<AerisChartView>,
+        drawings: Option<&WorkspaceInstrumentDrawingsState>,
+        cx: &mut Context<WorkspaceSurface>,
+    ) -> bool {
+        let state = &self.state;
+        let indicators = state
+            .indicators
+            .iter()
+            .filter_map(|item| {
+                ChartIndicator::from_identifier(&item.kind).map(|indicator| ChartIndicatorState {
+                    indicator,
+                    visible: item.visible,
+                    volume: item
+                        .volume
+                        .as_ref()
+                        .filter(|_| indicator == ChartIndicator::Volume)
+                        .and_then(restored_volume_settings),
+                })
+            })
+            .filter(|state| !runtime_managed_indicator(state.indicator))
+            .take(ChartIndicator::ALL.len())
+            .collect::<Vec<_>>();
+        let chart_type = ChartType::from_identifier(&state.chart_type);
+        let price_axis = state.price_axis.as_ref().and_then(|axis| {
+            Some(PriceAxisMenuState {
+                flags: u16::try_from(axis.flags).ok()?,
+                mode: u8::try_from(axis.mode).ok()?.min(3),
+                left: axis.left,
+                precision: axis.precision.and_then(|value| u8::try_from(value).ok()),
+            })
+        });
+        let crosshair_mode = u8::try_from(state.crosshair_mode)
+            .ok()
+            .filter(|mode| *mode <= 3);
+        let appearance = state
+            .appearance
+            .as_ref()
+            .and_then(restored_chart_appearance);
+        let order_flow = state
+            .order_flow
+            .as_ref()
+            .and_then(restored_order_flow_settings);
+        let legend = restored_chart_legend(state.legend);
+        chart.update(cx, |chart, _| {
+            let mut failed = chart.set_time_zone(&state.time_zone).is_err();
+            failed |= chart
+                .set_order_lines_extend_left(state.extend_order_lines_left.unwrap_or(true))
+                .is_err();
+            if !self.has_saved_chart {
+                return failed;
+            }
+            chart.set_legend_options(legend);
+            if let Some(order_flow) = order_flow {
+                failed |= chart.set_order_flow_settings(order_flow).is_err();
+            }
+            if let Some(chart_type) = chart_type {
+                chart.set_chart_type(chart_type);
+            }
+            if let Some(appearance) = &appearance {
+                chart.set_appearance_settings(appearance);
+            }
+            failed |= chart.restore_indicator_states(&indicators).is_err();
+            if let Some(drawings) = drawings {
+                import_drawings(chart, drawings);
+            }
+            if let Some(price_axis) = price_axis {
+                chart.restore_price_axis_menu_state(price_axis);
+            }
+            if let Some(mode) = crosshair_mode {
+                chart.set_crosshair_mode(mode);
+            }
+            failed
+        })
+    }
 }
 
 impl WorkspaceSurface {
@@ -1837,82 +1932,6 @@ impl WorkspaceSurface {
         };
         PanePersistence(self).apply_surface_fields(&mut state);
         Some(state)
-    }
-
-    fn apply_restored_chart_state(
-        chart: &Entity<AerisChartView>,
-        state: &WorkspaceChartState,
-        drawings: Option<&WorkspaceInstrumentDrawingsState>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let indicators = state
-            .indicators
-            .iter()
-            .filter_map(|item| {
-                ChartIndicator::from_identifier(&item.kind).map(|indicator| ChartIndicatorState {
-                    indicator,
-                    visible: item.visible,
-                    volume: item
-                        .volume
-                        .as_ref()
-                        .filter(|_| indicator == ChartIndicator::Volume)
-                        .and_then(restored_volume_settings),
-                })
-            })
-            .filter(|state| !runtime_managed_indicator(state.indicator))
-            .take(ChartIndicator::ALL.len())
-            .collect::<Vec<_>>();
-        let chart_type = ChartType::from_identifier(&state.chart_type);
-        let price_axis = state.price_axis.as_ref().and_then(|axis| {
-            Some(PriceAxisMenuState {
-                flags: u16::try_from(axis.flags).ok()?,
-                mode: u8::try_from(axis.mode).ok()?.min(3),
-                left: axis.left,
-                precision: axis.precision.and_then(|value| u8::try_from(value).ok()),
-            })
-        });
-        let crosshair_mode = u8::try_from(state.crosshair_mode)
-            .ok()
-            .filter(|mode| *mode <= 3);
-        let appearance = state
-            .appearance
-            .as_ref()
-            .and_then(restored_chart_appearance);
-        let order_flow = state
-            .order_flow
-            .as_ref()
-            .and_then(restored_order_flow_settings);
-        let time_zone = if state.time_zone.is_empty() {
-            aeris_chart_integration::DEFAULT_TIME_ZONE
-        } else {
-            state.time_zone.as_str()
-        };
-        let legend = restored_chart_legend(state.legend);
-        chart.update(cx, |chart, _| {
-            chart.set_legend_options(legend);
-            let mut failed = false;
-            failed |= chart.set_time_zone(time_zone).is_err();
-            if let Some(order_flow) = order_flow {
-                failed |= chart.set_order_flow_settings(order_flow).is_err();
-            }
-            if let Some(chart_type) = chart_type {
-                chart.set_chart_type(chart_type);
-            }
-            if let Some(appearance) = &appearance {
-                chart.set_appearance_settings(appearance);
-            }
-            failed |= chart.restore_indicator_states(&indicators).is_err();
-            if let Some(drawings) = drawings {
-                import_drawings(chart, drawings);
-            }
-            if let Some(price_axis) = price_axis {
-                chart.restore_price_axis_menu_state(price_axis);
-            }
-            if let Some(mode) = crosshair_mode {
-                chart.set_crosshair_mode(mode);
-            }
-            failed
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2006,7 +2025,9 @@ impl WorkspaceSurface {
         let Some(chart) = self.chart.as_ref() else {
             return;
         };
-        let failed = self.apply_surface_chart_settings(chart, cx);
+        let failed = PanePersistence(self)
+            .presentation(None)
+            .apply(chart, None, cx);
         if failed {
             Self::post_chart_restore_failure(cx);
         } else {
@@ -2246,24 +2267,6 @@ impl WorkspaceSurface {
                     || badge.contains(&query)
             })
             .collect()
-    }
-
-    /// Restored and retained snapshots can predate the trader's latest choices. Apply
-    /// surface-owned settings last to every chart, attempting both even if one fails.
-    fn apply_surface_chart_settings(
-        &self,
-        chart: &Entity<AerisChartView>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let time_zone = self.chart_time_zone.clone();
-        let extend_order_lines_left = self.chart_trading_visibility.extend_order_lines_left;
-        chart.update(cx, |chart, _| {
-            let mut failed = chart.set_time_zone(&time_zone).is_err();
-            failed |= chart
-                .set_order_lines_extend_left(extend_order_lines_left)
-                .is_err();
-            failed
-        })
     }
 
     /// The selected chart time zone, owned by the surface so it reads correctly before the
@@ -3311,8 +3314,7 @@ impl WorkspaceSurface {
             .retained_chart_presentation
             .drawings
             .begin_chart(self.product.as_ref());
-        let mut restore_failed = false;
-        if let Some(restored) = self.restored_chart_state.take() {
+        let mut restore_failed = if let Some(restored) = self.restored_chart_state.take() {
             self.retained_chart_presentation.rejected_saved =
                 RejectedSavedPresentation::of(&restored);
             let drawings = drawings.or_else(|| {
@@ -3322,17 +3324,22 @@ impl WorkspaceSurface {
                     self.product.as_ref(),
                 )
             });
-            restore_failed =
-                Self::apply_restored_chart_state(&chart, &restored, drawings.as_ref(), cx);
+            PanePersistence(self)
+                .presentation(Some(&restored))
+                .apply(&chart, drawings.as_ref(), cx)
         } else if let Some(state) = &self.retained_chart_presentation.chart_state {
-            restore_failed = Self::apply_restored_chart_state(&chart, state, drawings.as_ref(), cx);
+            PanePersistence(self)
+                .presentation(Some(state))
+                .apply(&chart, drawings.as_ref(), cx)
         } else {
             self.apply_retained_indicators_to_chart(&chart, cx);
             if let Some(drawings) = drawings {
                 chart.update(cx, |chart, _| import_drawings(chart, &drawings));
             }
-        }
-        restore_failed |= self.apply_surface_chart_settings(&chart, cx);
+            PanePersistence(self)
+                .presentation(None)
+                .apply(&chart, None, cx)
+        };
         restore_failed |= self.retained_chart_presentation.rejected_saved.any();
         if restore_failed {
             Self::post_chart_restore_failure(cx);
