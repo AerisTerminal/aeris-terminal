@@ -1993,13 +1993,7 @@ impl WorkspaceSurface {
         let Some(chart) = self.chart.as_ref() else {
             return;
         };
-        let failed = chart.update(cx, |chart, _| {
-            let time_zone_failed = chart.set_time_zone(&self.chart_time_zone).is_err();
-            let order_lines_failed = chart
-                .set_order_lines_extend_left(self.chart_trading_visibility.extend_order_lines_left)
-                .is_err();
-            time_zone_failed || order_lines_failed
-        });
+        let failed = self.apply_surface_chart_settings(chart, cx);
         if failed {
             Self::post_chart_restore_failure(cx);
         } else {
@@ -2241,15 +2235,22 @@ impl WorkspaceSurface {
             .collect()
     }
 
-    /// Restored and retained snapshots can predate the trader's latest choice, so the
-    /// surface-owned zone is applied last to every chart this pane creates.
-    fn apply_surface_time_zone(
+    /// Restored and retained snapshots can predate the trader's latest choices. Apply
+    /// surface-owned settings last to every chart, attempting both even if one fails.
+    fn apply_surface_chart_settings(
         &self,
         chart: &Entity<AerisChartView>,
         cx: &mut Context<Self>,
     ) -> bool {
         let time_zone = self.chart_time_zone.clone();
-        chart.update(cx, |chart, _| chart.set_time_zone(&time_zone).is_err())
+        let extend_order_lines_left = self.chart_trading_visibility.extend_order_lines_left;
+        chart.update(cx, |chart, _| {
+            let mut failed = chart.set_time_zone(&time_zone).is_err();
+            failed |= chart
+                .set_order_lines_extend_left(extend_order_lines_left)
+                .is_err();
+            failed
+        })
     }
 
     /// The selected chart time zone, owned by the surface so it reads correctly before the
@@ -3318,13 +3319,7 @@ impl WorkspaceSurface {
                 chart.update(cx, |chart, _| import_drawings(chart, &drawings));
             }
         }
-        let extend_order_lines_left = self.chart_trading_visibility.extend_order_lines_left;
-        restore_failed |= chart.update(cx, |chart, _| {
-            chart
-                .set_order_lines_extend_left(extend_order_lines_left)
-                .is_err()
-        });
-        restore_failed |= self.apply_surface_time_zone(&chart, cx);
+        restore_failed |= self.apply_surface_chart_settings(&chart, cx);
         restore_failed |= self.retained_chart_presentation.rejected_saved.any();
         if restore_failed {
             Self::post_chart_restore_failure(cx);

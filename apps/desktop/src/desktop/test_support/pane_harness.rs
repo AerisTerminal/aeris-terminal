@@ -1794,6 +1794,7 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
     let restore = WorkspaceSurfaceRestore {
         chart: Some(WorkspaceChartState {
             time_zone: private_zone.into(),
+            extend_order_lines_left: Some(false),
             ..WorkspaceChartState::default()
         }),
         ..WorkspaceSurfaceRestore::default()
@@ -1803,6 +1804,17 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
         assert!(
             harness.pane.read(cx).chart.is_some(),
             "startup chart exists"
+        );
+        assert!(
+            !harness
+                .pane
+                .read(cx)
+                .chart
+                .as_ref()
+                .expect("startup chart")
+                .read(cx)
+                .order_lines_extend_left(),
+            "a failed time zone must not skip the order-line setting"
         );
     });
     cx.run_until_parked();
@@ -1815,6 +1827,17 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
     harness.reinstall_snapshot(12, cx);
     cx.run_until_parked();
     cx.read(|cx| {
+        assert!(
+            !harness
+                .pane
+                .read(cx)
+                .chart
+                .as_ref()
+                .expect("replacement chart")
+                .read(cx)
+                .order_lines_extend_left(),
+            "replacement retains the order-line setting after the failed time zone"
+        );
         let toaster = &harness.window.read(cx).toaster;
         assert_eq!(toaster.notices().len(), 1);
         assert_eq!(
