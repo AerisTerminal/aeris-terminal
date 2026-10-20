@@ -94,7 +94,7 @@ fn begin_endpoint_demand(
         ChartState::Loading,
         format!("Loading {provider_name} history"),
     );
-    let instrument = InstrumentRequest::startup(&record.product);
+    let instrument = record.initial_instrument.clone();
     if let Err(error) = market.select_and_demand(
         client_id,
         SelectionRequest {

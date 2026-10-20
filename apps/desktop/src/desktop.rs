@@ -5589,13 +5589,18 @@ enum DesktopLayout {
 
 struct ConfiguredLifecycle {
     workspace: WorkspaceState,
+    restored_workspace: bool,
 }
 
 fn configure_desktop_state(
     services: &aeris_desktop::services::DesktopServices,
 ) -> ConfiguredLifecycle {
-    let workspace = local_state::load_workspace(&services.persistence.workspace_path());
-    ConfiguredLifecycle { workspace }
+    let (workspace, restored_workspace) =
+        local_state::load_workspace_with_origin(&services.persistence.workspace_path());
+    ConfiguredLifecycle {
+        workspace,
+        restored_workspace,
+    }
 }
 
 fn configured_market_workers(
@@ -5660,6 +5665,7 @@ fn configured_market_workers(
                 let group = engine_market_worker::start_workspace_tabs(
                     &services.market,
                     &lifecycle.workspace,
+                    lifecycle.restored_workspace,
                     services.trading.clone(),
                     Arc::clone(&services.clock),
                 )?;
@@ -5680,6 +5686,7 @@ fn configured_market_workers(
             let group = engine_market_worker::start_workspace_tabs(
                 &services.market,
                 &lifecycle.workspace,
+                lifecycle.restored_workspace,
                 services.trading.clone(),
                 Arc::clone(&services.clock),
             )?;

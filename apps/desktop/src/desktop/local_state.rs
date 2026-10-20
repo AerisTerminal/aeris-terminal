@@ -44,9 +44,15 @@ mod legacy_workspace_envelope {
 }
 
 pub(super) fn load_workspace(path: &Path) -> WorkspaceState {
+    load_workspace_with_origin(path).0
+}
+
+/// A recovered file is authoritative even when it holds the same symbol as
+/// the fresh default. Only a workspace with no readable saved file is fresh.
+pub(super) fn load_workspace_with_origin(path: &Path) -> (WorkspaceState, bool) {
     load_workspace_result(path).unwrap_or_else(|error| {
         diagnostic!("Aeris workspace restore skipped: {error}");
-        default_workspace()
+        (default_workspace(), false)
     })
 }
 
@@ -67,13 +73,13 @@ pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState
     }
 }
 
-fn load_workspace_result(path: &Path) -> Result<WorkspaceState, String> {
+fn load_workspace_result(path: &Path) -> Result<(WorkspaceState, bool), String> {
     if let Some(workspace) = load_recoverable_workspace_from_path(path)? {
-        return Ok(workspace);
+        return Ok((workspace, true));
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if !legacy.is_file() {
-        return Ok(default_workspace());
+        return Ok((default_workspace(), false));
     }
     let workspace = load_legacy_workspace_from_path(&legacy)?;
     match save_workspace_to_path(&workspace, path) {
@@ -88,7 +94,7 @@ fn load_workspace_result(path: &Path) -> Result<WorkspaceState, String> {
             diagnostic!("Aeris workspace migration could not persist the current format: {error}");
         }
     }
-    Ok(workspace)
+    Ok((workspace, true))
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
@@ -687,6 +693,23 @@ mod tests {
         assert_eq!(load_workspace(&first_path).workspace_revision, 41);
         assert_ne!(load_workspace(&second_path).workspace_revision, 41);
         std::fs::remove_dir_all(first.parent().expect("first root")).expect("fixture root removed");
+    }
+
+    #[test]
+    fn saved_default_symbol_is_restored_instead_of_treated_as_fresh() {
+        let path = temporary_workspace_path();
+        let (fresh, restored) = load_workspace_with_origin(&path);
+        assert!(!restored);
+        assert_eq!(fresh.workspace_tabs.len(), 1);
+        save_workspace(&fresh, &path).expect("save provisional default");
+        let (saved, restored) = load_workspace_with_origin(&path);
+        assert!(restored, "an existing BTC workspace is not a fresh default");
+        assert_eq!(
+            saved.workspace_tabs[0].panes[0].instrument,
+            fresh.workspace_tabs[0].panes[0].instrument
+        );
+        std::fs::remove_dir_all(path.parent().expect("fixture root"))
+            .expect("fixture root removed");
     }
 
     fn workspace_with_revision(revision: u64) -> WorkspaceState {

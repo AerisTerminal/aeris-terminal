@@ -111,24 +111,31 @@ impl InstrumentRequest {
         {
             Self::Default
         } else {
-            Self::Ref(InstrumentRef {
-                provider_id: instrument.provider.clone(),
-                instrument_id: instrument.instrument_id.clone(),
-                entitlement_id: instrument.entitlement_id.clone(),
-                query: Some(
-                    match super::built_in_provider_presentations()
-                        .iter()
-                        .find(|provider| provider.id == instrument.provider)
-                        .map(|provider| provider.catalog_symbol)
-                    {
-                        Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
-                            instrument.display_symbol.clone()
-                        }
-                        _ => instrument.provider_symbol.clone(),
-                    },
-                ),
-            })
+            Self::restored(instrument)
         }
+    }
+
+    /// A persisted pane's identity is authoritative even when it happens to
+    /// have the same fields as the runtime's provisional public default.
+    #[must_use]
+    pub fn restored(instrument: &InstallProviderInstrument) -> Self {
+        Self::Ref(InstrumentRef {
+            provider_id: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            entitlement_id: instrument.entitlement_id.clone(),
+            query: Some(
+                match super::built_in_provider_presentations()
+                    .iter()
+                    .find(|provider| provider.id == instrument.provider)
+                    .map(|provider| provider.catalog_symbol)
+                {
+                    Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
+                        instrument.display_symbol.clone()
+                    }
+                    _ => instrument.provider_symbol.clone(),
+                },
+            ),
+        })
     }
 }
 

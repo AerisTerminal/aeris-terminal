@@ -97,6 +97,7 @@ impl EndpointRole {
 struct EndpointRecord {
     workspace_id: u64,
     product: InstallProviderInstrument,
+    initial_instrument: aeris_market_runtime::InstrumentRequest,
     interval: ChartInterval,
     role: EndpointRole,
     pending_selection: Option<(u64, InstallProviderInstrument, ChartInterval)>,
@@ -225,6 +226,10 @@ impl WorkspaceMarketFactory {
         );
         endpoint.endpoint.resource_class = resource_class;
         endpoint.role = role;
+        if role == EndpointRole::Market {
+            endpoint.initial_instrument =
+                aeris_market_runtime::InstrumentRequest::restored(&endpoint.product);
+        }
         self.additions
             .try_send(endpoint)
             .map_err(|error| match error {
@@ -329,6 +334,7 @@ pub(super) fn start_rithmic_catalog(
 pub(super) fn start_workspace_tabs(
     market: &MarketService,
     workspace: &WorkspaceState,
+    restored: bool,
     trading: aeris_trading_runtime::TradingService,
     clock: Arc<dyn Clock>,
 ) -> Result<WorkspaceMarketGroup, String> {
@@ -341,7 +347,7 @@ pub(super) fn start_workspace_tabs(
     }
     let restore_notices = plan.notices.clone();
     for pane in plan.panes {
-        let (worker, endpoint) = worker_endpoint_for_market(
+        let (worker, mut endpoint) = worker_endpoint_for_market(
             market,
             pane.workspace_id,
             pane.pane_id,
@@ -350,6 +356,7 @@ pub(super) fn start_workspace_tabs(
             pane.interval,
             (pane.restored_viewport, pane.generation),
         );
+        endpoint.initial_instrument = workspace_initial_instrument(&endpoint.product, restored);
         initial.push(worker);
         endpoints.push(endpoint);
     }
@@ -375,6 +382,17 @@ pub(super) fn start_workspace_tabs(
         },
         restore_notices,
     })
+}
+
+fn workspace_initial_instrument(
+    product: &InstallProviderInstrument,
+    restored: bool,
+) -> aeris_market_runtime::InstrumentRequest {
+    if restored {
+        aeris_market_runtime::InstrumentRequest::restored(product)
+    } else {
+        aeris_market_runtime::InstrumentRequest::startup(product)
+    }
 }
 
 pub(super) struct RestoredWorkspacePaneSpec {
@@ -643,6 +661,7 @@ fn worker_endpoint_with_wake(
     };
     let endpoint = EndpointRecord {
         workspace_id,
+        initial_instrument: aeris_market_runtime::InstrumentRequest::startup(&product),
         product,
         interval,
         role: EndpointRole::Market,
@@ -1282,6 +1301,72 @@ mod tests {
             assert_eq!(plan.panes[0].interval, ChartInterval::Day3);
             assert_eq!(plan.notices, Vec::<String>::new());
         }
+    }
+
+    #[test]
+    fn restored_panes_preserve_each_persisted_instrument_ref() {
+        use aeris_market_runtime::{InstrumentRef, InstrumentRequest};
+
+        let instruments = ["BTC", "ETH", "SOL", "HYPE"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, symbol)| {
+                let mut product = default_hyperliquid_product();
+                product.instrument_id = format!("hyperliquid:perp:{symbol}");
+                product.provider_symbol = symbol.into();
+                product.display_symbol = format!("{symbol}-USDC");
+                product.entitlement_id = format!("saved-entitlement-{index}");
+                product
+            })
+            .collect::<Vec<_>>();
+        let workspace = WorkspaceState {
+            workspace_tabs: vec![WorkspaceTabState {
+                workspace_id: 1,
+                panes: instruments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, product)| WorkspacePaneState {
+                        pane_id: index as u64 + 1,
+                        consumer_id: index as u64 + 1,
+                        kind: WorkspacePaneKind::Chart as i32,
+                        instrument: Some(product.clone()),
+                        interval: ChartInterval::Minute1.label().into(),
+                        generation: 1,
+                        ..WorkspacePaneState::default()
+                    })
+                    .collect(),
+                ..WorkspaceTabState::default()
+            }],
+            ..WorkspaceState::default()
+        };
+        let plan = restored_workspace_boot_plan(&workspace).expect("four panes");
+        assert_eq!(plan.panes.len(), 4);
+        for (pane, expected) in plan.panes.iter().zip(&instruments) {
+            let (_worker, mut record) = worker_endpoint(
+                pane.workspace_id,
+                pane.pane_id,
+                pane.instrument.clone(),
+                pane.consumer_id,
+                pane.interval,
+                pane.restored_viewport,
+                pane.generation,
+            );
+            record.initial_instrument = workspace_initial_instrument(&record.product, true);
+            assert_eq!(
+                record.initial_instrument,
+                InstrumentRequest::Ref(InstrumentRef {
+                    provider_id: expected.provider.clone(),
+                    instrument_id: expected.instrument_id.clone(),
+                    entitlement_id: expected.entitlement_id.clone(),
+                    query: Some(expected.provider_symbol.clone()),
+                })
+            );
+            assert!(record.initial_selection_pending);
+        }
+        assert!(matches!(
+            workspace_initial_instrument(&instruments[0], false),
+            InstrumentRequest::Default
+        ));
     }
 
     #[test]

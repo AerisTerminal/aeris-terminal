@@ -1483,6 +1483,15 @@ Status: pending
     user interval selection, one applied reply and no follow-up selection.
     The restored-pane InstrumentRef command count, legacy selection API
     removal and literal four-pane GUI restart remain; M6.5 stays unchecked.
+  - Part 2: startup now distinguishes a readable persisted workspace from
+    a fresh default, even if both display BTC-USDC. Each saved pane carries
+    its exact provider, instrument and entitlement as an `InstrumentRef`
+    through the existing single initial selection call. Newly created
+    explicit panes also use refs; only a genuinely fresh workspace asks for
+    the runtime's ungated default. Protobuf reopen and four-pane identity
+    regressions pass. An instrumented one-command/one-applied-reply test
+    for all restored panes, legacy `try_select_engine` removal and the
+    guarded four-pane GUI restart remain; M6.5 stays unchecked.
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
@@ -1856,6 +1865,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.4 Part 4a fix(desktop): corrected the pending-chart save dropping pane-owned visibility, context and link edits; shared its capture with loaded-chart persistence and extended the combined restore-failure notice test. The pending-chart regression failed first with the old visibility and now covers protobuf reopen. M6.4 remains unchecked until full presentation ownership and every-field round trip, followed by the guarded GUI pass.
 - 2026-10-20 M6.4 Part 4b refactor(desktop): moved chart-setting application into a transient PanePresentation snapshot of the saved document plus pane-owned settings; the new GPUI regression checks nondefault chart preferences and study visibility through loading, protobuf decoding and a loaded chart. M6.4 remains unchecked pending guarded VAL-DSK-017 GUI evidence; a maintainer-owned release desktop is running. Cleaned only Cargo's dev profile after target reached 31.63 GiB, never the release profile.
 - 2026-10-20 M6.4 code closeout / M6.5 Part 1 fix(desktop): marked M6.4 code-complete with literal VAL-DSK-017 GUI evidence explicitly unvalidated pending the guarded final pass; fenced initial and replacement selection replies at the bridge and covered duplicate/retired outcomes plus one-command/no-follow-up pane dispatch. M6.5 remains unchecked for restored-pane identity and legacy API removal. Cleaned only Cargo's dev profile after target reached 28.14 GiB.
+- 2026-10-20 M6.5 Part 2 fix(desktop): separated saved workspace provenance from the provisional fresh default so a restored BTC pane no longer becomes `Default`; four saved panes carry exact `InstrumentRef` identity into the existing initial runtime selection. Fresh and explicit newly added pane paths remain distinct. The literal four-pane GUI assertion and instrumented restored-pane command/reply count are not yet validated. Removed only Cargo's dev profile after target reached 31.64 GiB; never touched release.
 - 2026-10-20 UI fix(desktop): no stabilization item. The panel sidebar's watchlist, order book, time and sales and context toggles now use the header's text-toggle style (`text-interactive` while off, `text-active` while on, no selected fill), so their icons no longer look active while the panel is closed. Verified in an isolated worktree at 821f8f76: fmt, desktop Clippy, desktop tests and naming_check passed; the workspace-wide gates were not rerun because the mission's uncommitted work shares the checkout.
 
 ## 7. Known gaps / deferred
