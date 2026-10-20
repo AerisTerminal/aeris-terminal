@@ -788,6 +788,7 @@ fn sidebar_toggle(
                 .show_delay(TOOLTIP_OPEN_DELAY)
                 .placement(TooltipPlacement::Left),
         )
+        .text_toggle()
         .selected(state.selected)
         .disabled(!state.enabled)
         .on_click(move |_, _, cx| {

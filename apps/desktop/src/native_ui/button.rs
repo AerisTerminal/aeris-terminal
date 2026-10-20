@@ -518,7 +518,8 @@ impl Button {
 
     /// A toggle that shows its state through the interactive text tokens alone:
     /// `text-interactive` off and `text-active` on, with no selected fill. Hover adds `hover-bg`
-    /// in both states and keeps the text. The chart header's panel toggles use it.
+    /// in both states and keeps the text. The header's chart-link toggle and the panel sidebar's
+    /// toggles use it.
     pub(crate) fn text_toggle(mut self) -> Self {
         self.flags.set(ButtonFlags::TEXT_TOGGLE, true);
         self
