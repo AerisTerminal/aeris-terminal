@@ -386,7 +386,7 @@ fn initialize_record(
 /// Applies one event drained directly from the runtime-owned consumer outbox.
 fn apply_received_event(
     market: &MarketService,
-    _client_id: u64,
+    client_id: u64,
     (consumer_id, event): (u64, aeris_market_runtime::MarketConsumerEvent),
     endpoints: &mut [EndpointRecord],
     clock: &dyn Clock,
@@ -406,7 +406,7 @@ fn apply_received_event(
         return Ok(false);
     };
     if let MarketRuntimeEvent::SelectionOutcome(outcome) = event {
-        apply_selection_outcome(record, outcome)?;
+        adopt_selection_outcome(market, client_id, record, outcome)?;
         return Ok(true);
     }
     let generation = record
@@ -488,6 +488,34 @@ fn apply_received_event(
         report_state(&endpoint.messages, generation, ChartState::Error, error);
     }
     Ok(false)
+}
+
+/// Applies a selection reply, then gives an adopted selection the depth visibility the
+/// pane requested while it was still resolving.
+fn adopt_selection_outcome(
+    market: &MarketService,
+    client_id: u64,
+    record: &mut EndpointRecord,
+    outcome: aeris_market_runtime::SelectionOutcome,
+) -> Result<(), String> {
+    let adopted = matches!(
+        &outcome,
+        aeris_market_runtime::SelectionOutcome::Selected { generation, .. }
+            if selection_matches_request(record, generation.0.get())
+    );
+    apply_selection_outcome(record, outcome)?;
+    if adopted
+        && let Err(error) =
+            super::selection_commands::apply_depth_visibility(market, client_id, record)
+    {
+        report_state(
+            &record.endpoint.messages,
+            Some(record.endpoint.active_generation),
+            ChartState::Error,
+            error,
+        );
+    }
+    Ok(())
 }
 
 fn selection_matches_request(record: &EndpointRecord, generation: u64) -> bool {

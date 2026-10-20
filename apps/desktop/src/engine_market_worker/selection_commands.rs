@@ -142,7 +142,8 @@ fn instrument_ref(product: &InstallProviderInstrument) -> InstrumentRequest {
 ///
 /// Visibility is endpoint intent, so it is retained even when no series demand
 /// exists yet: while the startup instrument is still resolving against the live
-/// catalog, `begin_endpoint_demand` installs demand with the retained streams.
+/// catalog, the adopted selection receives the retained streams through
+/// `apply_depth_visibility`.
 pub(super) fn set_depth_visible(
     market: &MarketService,
     client_id: u64,
@@ -159,6 +160,23 @@ pub(super) fn set_depth_visible(
         endpoint.consumer_id,
         endpoint.active_generation,
         market.available_streams(provider, streams)?,
+    )
+}
+
+/// Applies the retained depth visibility to an adopted selection's demand. A selection
+/// dispatched before the order book opened or closed carried the older streams; when they
+/// already match, the runtime leaves the demand unchanged.
+pub(super) fn apply_depth_visibility(
+    market: &MarketService,
+    client_id: u64,
+    record: &EndpointRecord,
+) -> Result<(), String> {
+    let endpoint = &record.endpoint;
+    market.set_streams(
+        client_id,
+        endpoint.consumer_id,
+        endpoint.active_generation,
+        chart_demand_streams(market, &record.product.provider, endpoint.depth_visible)?,
     )
 }
 
@@ -186,6 +204,7 @@ pub(super) fn process_command(
         interval,
         endpoint,
         pending_selection,
+        initial_selection_pending,
         ..
     } = record;
     match command {
@@ -238,7 +257,7 @@ pub(super) fn process_command(
             client_id,
             endpoint,
             &product.provider,
-            endpoint.active_generation == 0,
+            endpoint.active_generation == 0 || *initial_selection_pending,
             visible,
         ),
         MarketWorkerCommand::ResourceClass(resource_class) => {

@@ -967,6 +967,33 @@ mod tests {
         assert!(!record.endpoint.depth_visible);
     }
 
+    #[test]
+    fn depth_opened_before_a_restored_selection_resolves_waits_for_the_selection() {
+        let market = MarketService::start().expect("market runtime");
+        let (_pane, mut record) = worker_endpoint(
+            1,
+            2,
+            default_hyperliquid_product(),
+            41,
+            ChartInterval::Minute1,
+            None,
+            7,
+        );
+        assert!(record.initial_selection_pending);
+
+        // The restored generation has no demand until `select_and_demand` replies, so
+        // the intent must be retained for `apply_depth_visibility` instead of being
+        // applied to the unresolved generation and lost.
+        process_command(
+            &market,
+            1,
+            &mut record,
+            MarketWorkerCommand::DepthVisible(true),
+        )
+        .expect("visibility is retained without touching unresolved demand");
+        assert!(record.endpoint.depth_visible);
+    }
+
     fn handle_rithmic_catalog_event(
         endpoint: &mut WorkerEndpoint,
         event: MarketRuntimeEvent,
