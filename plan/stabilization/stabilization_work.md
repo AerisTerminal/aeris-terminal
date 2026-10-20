@@ -1451,6 +1451,11 @@ Status: pending
     even if the first fails. The invalid-zone pane regression checks that the saved
     order-line choice survives both charts while one keyed notice is retained and
     clears on correction. M6.4 remains unchecked for the full presentation round trip.
+  - Part 3: a GPUI pane regression changes chart style, swaps the existing
+    bullish/bearish colors and selects logarithmic price scale, then switches
+    instruments, serializes the resulting pane state, decodes it and reopens
+    a chart. All three properties survive both boundaries. The complete
+    `PanePresentation` ownership/field round trip and GUI clause remain open.
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
@@ -1821,6 +1826,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 UI chore(deps): no stabilization item. Pinned Aeris Charts to 584edc22 (footprint style options and per-cluster summary, larger trading markers with positions above coincident orders, general-chart legend and histograms). That revision moved to Rust 1.99.1 and Zed GPUI 56934ec0, so the workspace toolchain, the GPUI pins and `third_party/gpui_base` follow to keep one GPUI in the lockfile, and naming_check approves the new revision. The Terminal ignores the general-chart `GeneralLegendChanged` event like `GeneralBrushChanged`. The new footprint style options are not yet exposed in Terminal settings. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-20 UI revert(market): no stabilization item. Reverted the tastytrade Screener (641605f6): every screen request returned HTTP 403 on an unfunded account, and tastytrade documents `/market-data/by-type` as available only to funded account holders. The REST screen, its adapter client, the `ProviderMarketKind`/day-volume contract fields and the desktop provider tabs are removed. Only the table rounding stays: the header and last row round themselves because GPUI clips children to a rectangle, so square cells no longer overflow the table's rounded corners. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-20 M6.4 Part 2 fix(desktop): after the maintainer reverted the unavailable tastytrade screen at 6a067c7c, reapplied the previously interrupted unified chart-surface setters on a clean main tree. Kept M6.3 GUI Part 28b deferred until the guarded milestone-end pass, and kept M6.4 unchecked until its presentation/persistence contract is complete.
+- 2026-10-20 M6.4 Part 3 test(desktop): verified actual chart style, two nondefault series colors and logarithmic scale across a committed instrument selection and proto round-trip/reopen; no behavior change was needed for those properties. Full presentation ownership remains M6.4 work, so do not check the item or claim VAL-DSK-016 complete.
 
 ## 7. Known gaps / deferred
 

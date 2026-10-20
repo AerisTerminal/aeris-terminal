@@ -1489,6 +1489,109 @@ fn pane_harness_instrument_cover_waits_for_ready_after_snapshot(cx: &mut TestApp
     check_instrument_cover_through_ready(true, cx);
 }
 
+fn assert_chart_presentation(
+    pane: &WorkspaceSurface,
+    expected: &ChartAppearanceSettings,
+    cx: &App,
+) {
+    let chart = pane.chart.as_ref().expect("chart").read(cx);
+    assert_eq!(chart.chart_type(), ChartType::HollowCandles);
+    assert_eq!(&chart.appearance_settings(), expected);
+    assert_eq!(
+        chart
+            .price_axis_menu_state(0, false)
+            .expect("price axis")
+            .mode,
+        1
+    );
+}
+
+#[gpui::test]
+fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestAppContext) {
+    use prost::Message as _;
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut replacement = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("original instrument")
+    });
+    replacement.instrument_id = "different-instrument".into();
+    let appearance = harness.pane.update(cx, |pane, cx| {
+        pane.set_chart_type(ChartType::HollowCandles, cx);
+        let chart = pane.chart.as_ref().expect("original chart").clone();
+        let mut appearance = chart.read(cx).appearance_settings();
+        appearance.grid_visible = !appearance.grid_visible;
+        std::mem::swap(&mut appearance.up_color, &mut appearance.down_color);
+        pane.set_chart_appearance(&appearance, cx);
+        chart.update(cx, |chart, _| {
+            assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::SetMode(1),));
+        });
+        assert!(pane.select_installed_instrument(&replacement, cx));
+        appearance
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("instrument selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .expect("selection commit");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let snapshot = harness.market.publish_snapshot(13).expect("new bars");
+    harness
+        .publications
+        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+            update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
+            generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+                .with_selection_generation(sequence),
+            subscription_id: snapshot.subscription_id,
+            worker_label: snapshot.worker_label,
+            ui_diagnostics: None,
+        }))
+        .expect("covering snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.read(|cx| {
+        assert_chart_presentation(harness.pane.read(cx), &appearance, cx);
+    });
+    let saved = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .workspace_chart_state(cx)
+            .expect("saved presentation")
+    });
+    let decoded = WorkspaceChartState::decode(saved.encode_to_vec().as_slice())
+        .expect("pane persistence decodes");
+    assert_eq!(decoded, saved, "pane persistence preserves all fields");
+    let (mut reopened, cx) = PaneHarness::open_with_restore(
+        WorkspaceSurfaceRestore {
+            chart: Some(decoded),
+            ..WorkspaceSurfaceRestore::default()
+        },
+        cx,
+    );
+    reopened.publish_snapshot(12, cx);
+    cx.read(|cx| {
+        assert_chart_presentation(reopened.pane.read(cx), &appearance, cx);
+    });
+}
+
 #[gpui::test]
 fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
     cx: &mut TestAppContext,
