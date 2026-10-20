@@ -3444,6 +3444,9 @@ impl WorkspaceSurface {
             self.clear_chart_failure(cx);
             if super::provider_presentation(self.provider).is_some() {
                 self.market_state.symbol_selection_pending = false;
+                if !self.chart_pane_controller.chart_needs_replacement() {
+                    self.rithmic_previous_selection = None;
+                }
             }
         } else {
             self.set_chart_state(
@@ -3579,7 +3582,9 @@ impl WorkspaceSurface {
     /// on screen while its replacement history loads; only a different
     /// instrument needs the neutral cover until its handoff is current.
     pub(super) fn showing_superseded_series(&self) -> bool {
-        let displayed_product = if self.chart_pane_controller.chart_needs_replacement() {
+        let displayed_product = if self.chart_pane_controller.chart_needs_replacement()
+            || (self.rithmic_previous_selection.is_some() && self.chart_state != ChartState::Ready)
+        {
             self.rithmic_previous_selection
                 .as_ref()
                 .map_or(self.product.as_ref(), |(product, _)| product.as_ref())
@@ -4340,13 +4345,13 @@ impl WorkspaceSurface {
             }
             self.rithmic_previous_selection = None;
         } else if engine_provider && state == ChartState::Ready {
-            self.rithmic_previous_selection = None;
-            self.market_state.symbol_selection_pending = false;
-        } else if engine_provider && state == ChartState::AwaitingData {
-            // A chart awaiting the replacement's covering snapshot remains covered.
             if !self.chart_pane_controller.chart_needs_replacement() {
                 self.rithmic_previous_selection = None;
             }
+            self.market_state.symbol_selection_pending = false;
+        } else if engine_provider && state == ChartState::AwaitingData {
+            // Coverage may arrive before readiness; keep the instrument handoff
+            // covered until both have arrived.
             self.market_state.symbol_selection_pending = false;
         }
         self.set_chart_state(state, message, cx);

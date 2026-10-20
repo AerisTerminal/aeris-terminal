@@ -1424,6 +1424,14 @@ Status: pending
     seed and step printed on failure. No edge-case fix was required.
     M6.3 stays unchecked for Part 27 cover-through-ready and Part 28 guarded
     GUI symbol/interval/order-book storms on an isolated root.
+  - Part 27: a failing-first GPUI instrument-switch regression covered both
+    Ready-before-snapshot and snapshot-before-Ready ordering. The pane now
+    retains the prior selection for the neutral instrument cover until the
+    exact committed selection has both a covering snapshot and readiness.
+    Ready alone cannot expose the superseded chart, and a snapshot alone
+    cannot uncover history that the runtime has not declared ready. The prior
+    selection is released when the second prerequisite arrives. M6.3 stays
+    unchecked for Part 28's guarded isolated GUI switch storm.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1785,6 +1793,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.3 Part 25b2b refactor(desktop): removed legacy switch phase and marker variant; chart presentation gates now follow the controller's installed-versus-committed selection generation. Focused GPUI pane regressions passed (39 tests); full workspace gate and hunk-isolated commit evidence recorded with this part. M6.3 remains unchecked pending Parts 26-28.
 - 2026-10-20 M6.3 Part 25c fix(desktop): restored the self-contained committed terminal-view drawing-toolbar expression in 260b9415 while retaining the maintainer's expression uncommitted; five workspace gates and an isolated HEAD desktop check passed with CARGO_BUILD_JOBS=1. The 17-file maintainer baseline remained intact after the verified push.
 - 2026-10-20 M6.3 Part 26 test(desktop): all 120 controller event permutations, all six GPUI snapshot/marker orders and 128 seeded 256-step interleavings passed. M6.3 stays unchecked for Parts 27-28.
+- 2026-10-20 M6.3 Part 27 fix(desktop): failing-first GPUI tests proved either readiness or covering history could uncover a changed instrument prematurely; the pane retains the neutral cover until both arrive. M6.3 stays unchecked for Part 28 guarded GUI storms.
 
 ## 7. Known gaps / deferred
 

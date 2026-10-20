@@ -1276,6 +1276,88 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
     });
 }
 
+fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut replacement = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("original instrument")
+    });
+    replacement.instrument_id = "different-instrument".into();
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_installed_instrument(&replacement, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("instrument selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .expect("selection commit");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert!(pane.showing_superseded_series());
+    });
+
+    let snapshot = harness
+        .market
+        .publish_snapshot(13)
+        .expect("replacement bars");
+    let covering = MarketWorkerMessage::Update(MarketWorkerPublication {
+        update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
+        generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+            .with_selection_generation(sequence),
+        subscription_id: snapshot.subscription_id,
+        worker_label: snapshot.worker_label,
+        ui_diagnostics: None,
+    });
+    let ready = MarketWorkerMessage::SeriesState {
+        generation: sequence,
+        state: ChartState::Ready,
+        message: "replacement series ready".into(),
+    };
+    let events = if snapshot_first {
+        [covering, ready]
+    } else {
+        [ready, covering]
+    };
+    for (step, event) in events.into_iter().enumerate() {
+        harness.publications.send(event).expect("replacement event");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+            assert_eq!(
+                pane.showing_superseded_series(),
+                step == 0,
+                "cover requires both readiness and covering bars; snapshot_first={snapshot_first}, step={step}"
+            );
+            if step == 1 {
+                assert_eq!(pane.chart_state, ChartState::Ready);
+            }
+        });
+    }
+}
+
+#[gpui::test]
+fn pane_harness_instrument_cover_waits_for_snapshot_after_ready(cx: &mut TestAppContext) {
+    check_instrument_cover_through_ready(false, cx);
+}
+
+#[gpui::test]
+fn pane_harness_instrument_cover_waits_for_ready_after_snapshot(cx: &mut TestAppContext) {
+    check_instrument_cover_through_ready(true, cx);
+}
+
 #[gpui::test]
 fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
     cx: &mut TestAppContext,
