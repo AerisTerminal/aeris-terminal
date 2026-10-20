@@ -955,17 +955,6 @@ pub struct ScreenProviderMarkets {
     pub maximum_results: u32,
 }
 
-/// Provider-neutral listing class of a screened market, for grouping and labels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ProviderMarketKind {
-    Perpetual,
-    Spot,
-    /// Listed shares, including exchange-traded funds.
-    Equity,
-    Index,
-    Future,
-}
-
 /// Provider-reported statistics for one listed instrument. Each value carries an explicit
 /// fixed-point scale; an absent value was not reported by the provider and is never
 /// fabricated.
@@ -973,11 +962,9 @@ pub enum ProviderMarketKind {
 pub struct ProviderMarketStatistics {
     /// Selection identity and presentation metadata, identical to a search result.
     pub instrument: ProviderInstrumentSummary,
-    /// Listing class; absent when the provider does not classify the market.
-    pub kind: Option<ProviderMarketKind>,
     /// Decimal scale for `mark_price` and `previous_day_price`.
     pub price_scale: u32,
-    /// Provider mark price, or the last trade price for a market the provider does not mark.
+    /// Provider mark price.
     pub mark_price: Option<i64>,
     /// Provider reference price from one day earlier, the base for day change.
     pub previous_day_price: Option<i64>,
@@ -985,11 +972,6 @@ pub struct ProviderMarketStatistics {
     pub notional_scale: u32,
     /// Quote-currency volume traded over the provider's trailing day.
     pub day_notional_volume: Option<i64>,
-    /// Decimal scale for `day_volume`.
-    pub volume_scale: u32,
-    /// Quantity traded over the provider's day in instrument units (shares or contracts),
-    /// for a provider that reports no quote-currency volume.
-    pub day_volume: Option<i64>,
     /// Open interest valued at the mark price, in quote currency.
     pub open_interest_notional: Option<i64>,
     /// Decimal scale for `funding_rate`.

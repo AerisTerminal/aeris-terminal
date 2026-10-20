@@ -1628,8 +1628,6 @@ impl From<tastytrade::CatalogEvent> for ProviderCatalogEvent {
                 selection,
             },
             tastytrade::CatalogEvent::RefreshFailed(detail) => Self::RefreshFailed(detail),
-            tastytrade::CatalogEvent::ScreenCompleted(screen) => Self::ScreenCompleted(screen),
-            tastytrade::CatalogEvent::ScreenRejected(rejection) => Self::ScreenRejected(rejection),
             tastytrade::CatalogEvent::Calendar {
                 generation,
                 instrument_id,

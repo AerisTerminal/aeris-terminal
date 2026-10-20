@@ -3,7 +3,7 @@
 
 use super::market_screener::{
     AppView, MarketScreener, SCREENER_REFRESH_TICK, ScreenerCategory, ScreenerColumn, ScreenerRow,
-    ScreenerSort, ScreenerStatus, capture_time_label, market_kind_label,
+    ScreenerSort, ScreenerStatus, capture_time_label,
 };
 use super::*;
 use gpui::uniform_list;
@@ -21,7 +21,6 @@ const RANK_WIDTH: f32 = 56.0;
 const MARKET_MIN_WIDTH: f32 = 200.0;
 const EXCHANGE_LOGO_SIZE: f32 = 16.0;
 const SORT_ICON_SIZE: f32 = 12.0;
-const PROVIDER_LOGO_SIZE: f32 = 14.0;
 const FOOTER_HEIGHT: f32 = 36.0;
 
 #[derive(Clone, Copy)]
@@ -40,17 +39,17 @@ const COLUMNS: [ColumnSpec; 6] = [
     },
     ColumnSpec {
         column: ScreenerColumn::Price,
-        label: "Price",
+        label: "Mark price",
         width: Some(140.0),
     },
     ColumnSpec {
         column: ScreenerColumn::Change,
-        label: "Day change",
+        label: "24h change",
         width: Some(112.0),
     },
     ColumnSpec {
         column: ScreenerColumn::Volume,
-        label: "Day volume",
+        label: "24h volume",
         width: Some(128.0),
     },
     ColumnSpec {
@@ -79,24 +78,9 @@ fn table_cell(theme: &AerisTheme, divided: bool) -> Div {
         })
 }
 
-/// The columns the current screen reports, each paired with whether it carries a divider:
-/// every visible column but the last.
-fn visible_columns(screener: &MarketScreener) -> Vec<(ColumnSpec, bool)> {
-    let reported = screener.reported_columns();
-    let visible = COLUMNS
-        .into_iter()
-        .filter(|spec| reported.shows(spec.column))
-        .collect::<Vec<_>>();
-    let count = visible.len();
-    visible
-        .into_iter()
-        .enumerate()
-        .map(|(index, spec)| (spec, index + 1 < count))
-        .collect()
-}
-
-fn column_cell(spec: ColumnSpec, divided: bool, theme: &AerisTheme) -> Div {
-    let cell = table_cell(theme, divided);
+fn column_cell(spec: ColumnSpec, theme: &AerisTheme) -> Div {
+    let last = spec.column == COLUMNS[COLUMNS.len() - 1].column;
+    let cell = table_cell(theme, !last);
     match spec.width {
         Some(width) => cell.w(px(width)).flex_none().justify_end(),
         None => cell.min_w(px(MARKET_MIN_WIDTH)).flex_1(),
@@ -104,8 +88,8 @@ fn column_cell(spec: ColumnSpec, divided: bool, theme: &AerisTheme) -> Div {
 }
 
 /// A row's numeric value cell, set in the platform mono face.
-fn numeric_column_cell(spec: ColumnSpec, divided: bool, theme: &AerisTheme) -> Div {
-    column_cell(spec, divided, theme).font_family(aeris_design_system::platform_mono_font_family())
+fn numeric_column_cell(spec: ColumnSpec, theme: &AerisTheme) -> Div {
+    column_cell(spec, theme).font_family(aeris_design_system::platform_mono_font_family())
 }
 
 /// The table container's corner radius less its border, so square-cornered table chrome
@@ -156,7 +140,6 @@ pub(super) fn market_screener_page(
         .px(px(PAGE_PADDING_X))
         .bg(gpui_color(colors.surface))
         .child(page_header(terminal, screener, theme))
-        .children(provider_bar(terminal, screener, theme))
         .child(category_bar(terminal, screener, theme))
         .child(
             div()
@@ -169,7 +152,7 @@ pub(super) fn market_screener_page(
                 .border(px(theme.dimensions.border_width))
                 .border_color(gpui_color(colors.border_secondary))
                 .overflow_hidden()
-                .child(table_header(terminal, screener, theme))
+                .child(table_header(terminal, screener.sort(), theme))
                 .child(table_body(terminal, screener, theme)),
         )
         .child(page_footer(screener, theme))
@@ -252,46 +235,6 @@ fn page_header(
         )
 }
 
-/// One tab per screening provider; omitted when only one provider screens markets.
-fn provider_bar(
-    terminal: &Entity<TerminalApp>,
-    screener: &MarketScreener,
-    theme: &AerisTheme,
-) -> Option<Div> {
-    let providers = screener.providers();
-    if providers.len() < 2 {
-        return None;
-    }
-    let colors = theme.colors;
-    let selected = screener.provider_id();
-    let tabs = providers.iter().enumerate().map(|(index, provider)| {
-        let select_terminal = terminal.clone();
-        let id = provider.id;
-        Tab::new(("screener_provider", index), theme)
-            .selected(selected == Some(id))
-            .gap_2()
-            .aria_label(format!("Screen {} markets", provider.display_name))
-            .on_click(move |_, window, cx| {
-                select_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.select_market_screener_provider(id, window, terminal_cx);
-                });
-            })
-            .children(
-                assets::ExchangeLogo::for_logo_key(provider.logo_key)
-                    .map(|logo| exchange_mark(logo, px(PROVIDER_LOGO_SIZE), false, &colors)),
-            )
-            .child(provider.display_name)
-    });
-    Some(
-        div()
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .child(TabList::new("screener_providers", "Market provider", theme).children(tabs)),
-    )
-}
-
 fn category_bar(
     terminal: &Entity<TerminalApp>,
     screener: &MarketScreener,
@@ -300,8 +243,7 @@ fn category_bar(
     let colors = theme.colors;
     let counts = screener.counts();
     let selected = screener.category();
-    let tabs = counts
-        .categories()
+    let tabs = ScreenerCategory::ALL
         .into_iter()
         .enumerate()
         .map(|(index, category)| {
@@ -335,13 +277,8 @@ fn category_bar(
         .child(TabList::new("screener_categories", "Market category", theme).children(tabs))
 }
 
-fn table_header(
-    terminal: &Entity<TerminalApp>,
-    screener: &MarketScreener,
-    theme: &AerisTheme,
-) -> Div {
+fn table_header(terminal: &Entity<TerminalApp>, sort: ScreenerSort, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
-    let sort = screener.sort();
     table_row_frame(TABLE_HEADER_HEIGHT)
         // GPUI clips children to a rectangle, so the filled header carries the container's
         // rounding itself rather than painting over the rounded border.
@@ -353,16 +290,15 @@ fn table_header(
         .text_color(gpui_color(colors.text_secondary))
         .child(rank_cell(theme).child("#"))
         .children(
-            visible_columns(screener)
+            COLUMNS
                 .into_iter()
-                .map(|(spec, divided)| header_cell(terminal, spec, divided, sort, theme)),
+                .map(|spec| header_cell(terminal, spec, sort, theme)),
         )
 }
 
 fn header_cell(
     terminal: &Entity<TerminalApp>,
     spec: ColumnSpec,
-    divided: bool,
     sort: ScreenerSort,
     theme: &AerisTheme,
 ) -> impl IntoElement {
@@ -382,7 +318,7 @@ fn header_cell(
     };
     let label = div().child(spec.label);
     let numeric = spec.width.is_some();
-    column_cell(spec, divided, theme).child(
+    column_cell(spec, theme).child(
         div()
             .id(SharedString::from(format!("screener_sort_{}", spec.label)))
             .h_full()
@@ -429,7 +365,6 @@ fn table_body(
     let list_terminal = terminal.clone();
     let list_theme = *theme;
     let list_rows = Rc::clone(&rows);
-    let columns = visible_columns(screener);
     let logo = screener.exchange_logo();
     let scroll = screener.scroll.clone();
     let scrollbar = scroll.0.borrow().base_handle.clone();
@@ -448,7 +383,6 @@ fn table_body(
                             index,
                             index == last,
                             list_rows.get(index)?,
-                            &columns,
                             logo,
                             &list_theme,
                         ))
@@ -470,13 +404,22 @@ fn table_row(
     index: usize,
     last: bool,
     row: &ScreenerRow,
-    columns: &[(ColumnSpec, bool)],
     logo: Option<assets::ExchangeLogo>,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let open_terminal = terminal.clone();
     let open_row = row.clone();
+    let kind = row.kind.map(|kind| {
+        div()
+            .flex_none()
+            .px(px(6.0))
+            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+            .bg(gpui_color(colors.surface_raised))
+            .text_xs()
+            .text_color(gpui_color(colors.text_secondary))
+            .child(kind.label())
+    });
     table_row_frame(ROW_HEIGHT)
         .id(("market_screener_row", index))
         // The final row meets the container's rounded border, which also separates it.
@@ -507,54 +450,35 @@ fn table_row(
                 .text_color(gpui_color(colors.text_muted))
                 .child((index + 1).to_string()),
         )
-        .children(
-            columns
-                .iter()
-                .map(|(spec, divided)| row_cell(*spec, *divided, row, logo, theme)),
+        .child(
+            column_cell(COLUMNS[0], theme)
+                .gap_2()
+                .children(
+                    logo.map(|logo| exchange_mark(logo, px(EXCHANGE_LOGO_SIZE), false, &colors)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                        .text_color(gpui_color(colors.text_default))
+                        .child(row.display_symbol.clone()),
+                )
+                .children(kind),
         )
-}
-
-fn row_cell(
-    spec: ColumnSpec,
-    divided: bool,
-    row: &ScreenerRow,
-    logo: Option<assets::ExchangeLogo>,
-    theme: &AerisTheme,
-) -> Div {
-    let colors = theme.colors;
-    let numeric = || numeric_column_cell(spec, divided, theme);
-    match spec.column {
-        ScreenerColumn::Market => column_cell(spec, divided, theme)
-            .gap_2()
-            .children(logo.map(|logo| exchange_mark(logo, px(EXCHANGE_LOGO_SIZE), false, &colors)))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                    .text_color(gpui_color(colors.text_default))
-                    .child(row.display_symbol.clone()),
-            )
-            .children(row.kind.map(|kind| {
-                div()
-                    .flex_none()
-                    .px(px(6.0))
-                    .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                    .bg(gpui_color(colors.surface_raised))
-                    .text_xs()
-                    .text_color(gpui_color(colors.text_secondary))
-                    .child(market_kind_label(kind))
-            })),
-        ScreenerColumn::Price => numeric().child(row.price.clone()),
-        ScreenerColumn::Change => numeric()
-            .text_color(direction_color(row.change_direction, theme))
-            .child(row.change.clone()),
-        ScreenerColumn::Volume => numeric().child(row.volume.clone()),
-        ScreenerColumn::OpenInterest => numeric().child(row.open_interest.clone()),
-        ScreenerColumn::Funding => numeric()
-            .text_color(direction_color(row.funding_direction, theme))
-            .child(row.funding.clone()),
-    }
+        .child(numeric_column_cell(COLUMNS[1], theme).child(row.price.clone()))
+        .child(
+            numeric_column_cell(COLUMNS[2], theme)
+                .text_color(direction_color(row.change_direction, theme))
+                .child(row.change.clone()),
+        )
+        .child(numeric_column_cell(COLUMNS[3], theme).child(row.volume.clone()))
+        .child(numeric_column_cell(COLUMNS[4], theme).child(row.open_interest.clone()))
+        .child(
+            numeric_column_cell(COLUMNS[5], theme)
+                .text_color(direction_color(row.funding_direction, theme))
+                .child(row.funding.clone()),
+        )
 }
 
 /// Loading, failure and no-match states in place of the rows.
@@ -573,7 +497,10 @@ fn table_placeholder(screener: &MarketScreener, theme: &AerisTheme) -> AnyElemen
         (ScreenerStatus::Loading, Some(message)) => div().child(message.to_string()),
         (ScreenerStatus::Ready, _) => {
             div().child(if screener.counts().get(screener.category()) == 0 {
-                "No markets are listed in this category".to_string()
+                format!(
+                    "No {} are listed",
+                    screener.category().label().to_lowercase()
+                )
             } else {
                 "No markets match the search".to_string()
             })
@@ -631,13 +558,11 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
                 .text_color(gpui_color(color))
                 .child(text)
         }))
-        .child(div().flex_none().child(
-            if screener.reported_columns().shows(ScreenerColumn::Funding) {
-                "Funding per hour · refreshes every 5 seconds"
-            } else {
-                "Refreshes every 5 seconds"
-            },
-        ))
+        .child(
+            div()
+                .flex_none()
+                .child("Mark prices · funding per hour · refreshes every 5 seconds"),
+        )
 }
 
 impl TerminalApp {
@@ -690,24 +615,6 @@ impl TerminalApp {
             }
         });
         self.pages.screener.keep_refreshing(refresh);
-    }
-
-    /// Screens another provider's markets, retiring the previous provider's consumer.
-    pub(super) fn select_market_screener_provider(
-        &mut self,
-        provider: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pages.screener.provider_id() == Some(provider) {
-            return;
-        }
-        if let Some(retirement) = self.pages.screener.select_provider(provider) {
-            self.lifecycle.retire_market_worker(retirement, cx);
-        }
-        self.pages.screener.scroll_to_top();
-        self.activate_market_screener(window, cx);
-        cx.notify();
     }
 
     pub(super) fn refresh_market_screener(&mut self, cx: &mut Context<Self>) {

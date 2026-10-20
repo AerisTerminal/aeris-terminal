@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_contracts::{ProviderInstrumentSummary, ProviderMarketKind, ProviderMarketStatistics};
+use aeris_contracts::{ProviderInstrumentSummary, ProviderMarketStatistics};
 use aeris_hyperliquid_market_adapter::{
     FUNDING_INTERVAL_SECONDS, FUNDING_RATE_SCALE, HyperliquidCatalog, HyperliquidHttpConfig,
     HyperliquidInstrument, HyperliquidMarketKind, HyperliquidMarketStatistics,
@@ -99,12 +99,6 @@ pub(crate) fn screen_rows(
         .take(maximum_results)
         .map(|(instrument, statistics)| ProviderMarketStatistics {
             instrument: instrument_summary(instrument),
-            kind: Some(match instrument.kind {
-                HyperliquidMarketKind::CorePerp | HyperliquidMarketKind::BuilderPerp { .. } => {
-                    ProviderMarketKind::Perpetual
-                }
-                HyperliquidMarketKind::Spot { .. } => ProviderMarketKind::Spot,
-            }),
             price_scale: NORMALIZED_PRICE_SCALE,
             mark_price: statistics.mark_price,
             previous_day_price: statistics.previous_day_price,
@@ -114,8 +108,6 @@ pub(crate) fn screen_rows(
             funding_rate_scale: FUNDING_RATE_SCALE,
             funding_rate: statistics.funding_rate,
             funding_interval_seconds: statistics.funding_rate.map(|_| FUNDING_INTERVAL_SECONDS),
-            volume_scale: 0,
-            day_volume: None,
         })
         .collect()
 }
@@ -206,7 +198,6 @@ mod tests {
             first.instrument.instrument_type.as_deref(),
             Some("perpetual")
         );
-        assert_eq!(first.kind, Some(ProviderMarketKind::Perpetual));
     }
 
     #[test]

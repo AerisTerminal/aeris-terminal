@@ -4,8 +4,7 @@
 
 use super::*;
 use aeris_contracts::{
-    ProviderConnectionKind, ProviderMarketKind, ProviderMarketStatistics,
-    ProviderPresentationDescriptor, ScreenProviderMarkets,
+    ProviderMarketStatistics, ProviderPresentationDescriptor, ScreenProviderMarkets,
 };
 use gpui::{ScrollStrategy, UniformListScrollHandle};
 use std::cmp::Ordering as CmpOrdering;
@@ -47,32 +46,29 @@ impl AppView {
     }
 }
 
-const MARKET_KINDS: [ProviderMarketKind; 5] = [
-    ProviderMarketKind::Perpetual,
-    ProviderMarketKind::Spot,
-    ProviderMarketKind::Equity,
-    ProviderMarketKind::Index,
-    ProviderMarketKind::Future,
-];
-
-/// The short badge shown beside a market's symbol.
-pub(super) const fn market_kind_label(kind: ProviderMarketKind) -> &'static str {
-    match kind {
-        ProviderMarketKind::Perpetual => "Perp",
-        ProviderMarketKind::Spot => "Spot",
-        ProviderMarketKind::Equity => "Equity",
-        ProviderMarketKind::Index => "Index",
-        ProviderMarketKind::Future => "Future",
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScreenerMarketKind {
+    Perpetual,
+    Spot,
 }
 
-const fn market_kind_position(kind: ProviderMarketKind) -> usize {
-    match kind {
-        ProviderMarketKind::Perpetual => 0,
-        ProviderMarketKind::Spot => 1,
-        ProviderMarketKind::Equity => 2,
-        ProviderMarketKind::Index => 3,
-        ProviderMarketKind::Future => 4,
+impl ScreenerMarketKind {
+    fn of(statistics: &ProviderMarketStatistics) -> Option<Self> {
+        let kind = statistics.instrument.instrument_type.as_deref()?;
+        if kind == "spot" {
+            Some(Self::Spot)
+        } else if kind.contains("perpetual") {
+            Some(Self::Perpetual)
+        } else {
+            None
+        }
+    }
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Perpetual => "Perp",
+            Self::Spot => "Spot",
+        }
     }
 }
 
@@ -80,25 +76,26 @@ const fn market_kind_position(kind: ProviderMarketKind) -> usize {
 pub(super) enum ScreenerCategory {
     #[default]
     All,
-    Kind(ProviderMarketKind),
+    Perpetuals,
+    Spot,
 }
 
 impl ScreenerCategory {
+    pub(super) const ALL: [Self; 3] = [Self::All, Self::Perpetuals, Self::Spot];
+
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::All => "All markets",
-            Self::Kind(ProviderMarketKind::Perpetual) => "Perpetuals",
-            Self::Kind(ProviderMarketKind::Spot) => "Spot",
-            Self::Kind(ProviderMarketKind::Equity) => "Stocks & ETFs",
-            Self::Kind(ProviderMarketKind::Index) => "Indices",
-            Self::Kind(ProviderMarketKind::Future) => "Futures",
+            Self::Perpetuals => "Perpetuals",
+            Self::Spot => "Spot",
         }
     }
 
-    fn includes(self, kind: Option<ProviderMarketKind>) -> bool {
+    fn includes(self, kind: Option<ScreenerMarketKind>) -> bool {
         match self {
             Self::All => true,
-            Self::Kind(category) => kind == Some(category),
+            Self::Perpetuals => kind == Some(ScreenerMarketKind::Perpetual),
+            Self::Spot => kind == Some(ScreenerMarketKind::Spot),
         }
     }
 }
@@ -157,7 +154,7 @@ pub(super) struct ScreenerRow {
     pub(super) symbol: String,
     pub(super) exchange: String,
     pub(super) display_symbol: String,
-    pub(super) kind: Option<ProviderMarketKind>,
+    pub(super) kind: Option<ScreenerMarketKind>,
     pub(super) price: String,
     pub(super) change: String,
     pub(super) change_direction: Option<CmpOrdering>,
@@ -170,55 +167,16 @@ pub(super) struct ScreenerRow {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ScreenerCategoryCounts {
     pub(super) all: usize,
-    by_kind: [usize; MARKET_KINDS.len()],
+    pub(super) perpetuals: usize,
+    pub(super) spot: usize,
 }
 
 impl ScreenerCategoryCounts {
     pub(super) const fn get(self, category: ScreenerCategory) -> usize {
         match category {
             ScreenerCategory::All => self.all,
-            ScreenerCategory::Kind(kind) => self.by_kind[market_kind_position(kind)],
-        }
-    }
-
-    /// "All markets" followed by every category the current screen lists.
-    pub(super) fn categories(self) -> Vec<ScreenerCategory> {
-        std::iter::once(ScreenerCategory::All)
-            .chain(
-                MARKET_KINDS
-                    .into_iter()
-                    .map(ScreenerCategory::Kind)
-                    .filter(|category| self.get(*category) > 0),
-            )
-            .collect()
-    }
-}
-
-/// Optional columns, shown only when some market in the screen reports them.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct ScreenerReportedColumns {
-    open_interest: bool,
-    funding: bool,
-}
-
-impl ScreenerReportedColumns {
-    fn of(markets: &[ProviderMarketStatistics]) -> Self {
-        Self {
-            open_interest: markets
-                .iter()
-                .any(|market| market.open_interest_notional.is_some()),
-            funding: markets.iter().any(|market| market.funding_rate.is_some()),
-        }
-    }
-
-    pub(super) const fn shows(self, column: ScreenerColumn) -> bool {
-        match column {
-            ScreenerColumn::OpenInterest => self.open_interest,
-            ScreenerColumn::Funding => self.funding,
-            ScreenerColumn::Market
-            | ScreenerColumn::Price
-            | ScreenerColumn::Change
-            | ScreenerColumn::Volume => true,
+            ScreenerCategory::Perpetuals => self.perpetuals,
+            ScreenerCategory::Spot => self.spot,
         }
     }
 }
@@ -226,7 +184,7 @@ impl ScreenerReportedColumns {
 /// Sort keys derived once per statistics row, in display units.
 struct ScreenerEntry<'a> {
     statistics: &'a ProviderMarketStatistics,
-    kind: Option<ProviderMarketKind>,
+    kind: Option<ScreenerMarketKind>,
     price: Option<f64>,
     change_ratio: Option<f64>,
     volume: Option<f64>,
@@ -238,19 +196,14 @@ impl<'a> ScreenerEntry<'a> {
     fn new(statistics: &'a ProviderMarketStatistics) -> Self {
         Self {
             statistics,
-            kind: statistics.kind,
+            kind: ScreenerMarketKind::of(statistics),
             price: statistics
                 .mark_price
                 .map(|value| fixed_to_f64(value, statistics.price_scale)),
             change_ratio: change_ratio(statistics),
             volume: statistics
                 .day_notional_volume
-                .map(|value| fixed_to_f64(value, statistics.notional_scale))
-                .or_else(|| {
-                    statistics
-                        .day_volume
-                        .map(|value| fixed_to_f64(value, statistics.volume_scale))
-                }),
+                .map(|value| fixed_to_f64(value, statistics.notional_scale)),
             open_interest: statistics
                 .open_interest_notional
                 .map(|value| fixed_to_f64(value, statistics.notional_scale)),
@@ -372,8 +325,10 @@ pub(super) fn screener_category_counts(
         ScreenerCategoryCounts::default(),
         |mut counts, statistics| {
             counts.all += 1;
-            if let Some(kind) = statistics.kind {
-                counts.by_kind[market_kind_position(kind)] += 1;
+            match ScreenerMarketKind::of(statistics) {
+                Some(ScreenerMarketKind::Perpetual) => counts.perpetuals += 1,
+                Some(ScreenerMarketKind::Spot) => counts.spot += 1,
+                None => {}
             }
             counts
         },
@@ -400,11 +355,7 @@ fn screener_row(entry: &ScreenerEntry<'_>) -> ScreenerRow {
             .mark_price
             .zip(statistics.previous_day_price)
             .map(|(mark, previous)| mark.cmp(&previous)),
-        volume: if statistics.day_notional_volume.is_some() {
-            compact_notional(statistics.day_notional_volume, statistics.notional_scale)
-        } else {
-            compact_quantity(statistics.day_volume, statistics.volume_scale)
-        },
+        volume: compact_notional(statistics.day_notional_volume, statistics.notional_scale),
         open_interest: compact_notional(
             statistics.open_interest_notional,
             statistics.notional_scale,
@@ -441,15 +392,6 @@ pub(super) fn grouped_decimal(text: &str) -> String {
 }
 
 pub(super) fn compact_notional(value: Option<i64>, scale: u32) -> String {
-    compact_amount(value, scale, "$")
-}
-
-/// Shares or contracts, compacted like a notional but without a currency mark.
-pub(super) fn compact_quantity(value: Option<i64>, scale: u32) -> String {
-    compact_amount(value, scale, "")
-}
-
-fn compact_amount(value: Option<i64>, scale: u32, currency: &str) -> String {
     let Some(value) = value else {
         return UNAVAILABLE_VALUE.to_string();
     };
@@ -463,10 +405,10 @@ fn compact_amount(value: Option<i64>, scale: u32, currency: &str) -> String {
         (1_000.0, "K"),
     ] {
         if magnitude >= threshold {
-            return format!("{sign}{currency}{:.2}{suffix}", magnitude / threshold);
+            return format!("{sign}${:.2}{suffix}", magnitude / threshold);
         }
     }
-    format!("{sign}{currency}{magnitude:.2}")
+    format!("{sign}${magnitude:.2}")
 }
 
 /// Wall-clock capture time as `HH:MM:SS UTC`.
@@ -502,8 +444,6 @@ pub(super) struct ScreenerPoll {
 }
 
 pub(super) struct MarketScreener {
-    /// Every provider that answers a market screen, in registration order.
-    providers: Vec<&'static ProviderPresentationDescriptor>,
     provider: Option<&'static ProviderPresentationDescriptor>,
     worker: Option<MarketDataWorker>,
     markets: Vec<ProviderMarketStatistics>,
@@ -519,7 +459,6 @@ pub(super) struct MarketScreener {
     query: String,
     rows: Rc<Vec<ScreenerRow>>,
     counts: ScreenerCategoryCounts,
-    reported_columns: ScreenerReportedColumns,
     search_input: Option<Entity<InputState>>,
     pub(super) scroll: UniformListScrollHandle,
     /// Refresh cadence task; held only while the page is shown, and dropping it cancels it.
@@ -528,13 +467,10 @@ pub(super) struct MarketScreener {
 
 impl Default for MarketScreener {
     fn default() -> Self {
-        let providers = aeris_market_runtime::built_in_provider_presentations()
-            .iter()
-            .filter(|descriptor| descriptor.market_screen_available)
-            .collect::<Vec<_>>();
         Self {
-            provider: providers.first().copied(),
-            providers,
+            provider: aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .find(|descriptor| descriptor.market_screen_available),
             worker: None,
             markets: Vec::new(),
             captured_at_unix_millis: None,
@@ -549,7 +485,6 @@ impl Default for MarketScreener {
             query: String::new(),
             rows: Rc::new(Vec::new()),
             counts: ScreenerCategoryCounts::default(),
-            reported_columns: ScreenerReportedColumns::default(),
             search_input: None,
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
@@ -558,45 +493,8 @@ impl Default for MarketScreener {
 }
 
 impl MarketScreener {
-    pub(super) fn providers(&self) -> &[&'static ProviderPresentationDescriptor] {
-        &self.providers
-    }
-
-    pub(super) fn provider_id(&self) -> Option<&'static str> {
-        self.provider.map(|descriptor| descriptor.id)
-    }
-
     pub(super) fn provider_name(&self) -> Option<&'static str> {
         self.provider.map(|descriptor| descriptor.display_name)
-    }
-
-    /// Switches the screen to another provider. Rows, filters that may not apply to its
-    /// markets, and pending requests are dropped; the returned retirement belongs to the
-    /// previous provider's consumer, and the page starts a new one when it is activated.
-    pub(super) fn select_provider(&mut self, id: &str) -> Option<MarketWorkerRetirement> {
-        let provider = self
-            .providers
-            .iter()
-            .copied()
-            .find(|descriptor| descriptor.id == id)?;
-        if self.provider.is_some_and(|current| current.id == id) {
-            return None;
-        }
-        self.provider = Some(provider);
-        self.markets.clear();
-        self.captured_at_unix_millis = None;
-        self.next_refresh_at = None;
-        self.message = None;
-        self.sort = ScreenerSort::default();
-        self.category = ScreenerCategory::All;
-        self.counts = ScreenerCategoryCounts::default();
-        self.reported_columns = ScreenerReportedColumns::default();
-        self.rebuild_rows();
-        self.begin_retirement()
-    }
-
-    pub(super) const fn reported_columns(&self) -> ScreenerReportedColumns {
-        self.reported_columns
     }
 
     /// Every screened market is listed by the screening provider, so its logo marks each row.
@@ -827,25 +725,6 @@ impl MarketScreener {
         outcome
     }
 
-    /// A provider behind a user connection most often fails to screen because it is not
-    /// connected, so its message points to Accounts.
-    fn unavailable_message(&self) -> String {
-        match self.provider {
-            Some(provider)
-                if matches!(
-                    provider.connection_kind,
-                    ProviderConnectionKind::HostedBroker | ProviderConnectionKind::Credentials
-                ) =>
-            {
-                format!(
-                    "{} market statistics are unavailable. Check its connection in Accounts; retrying",
-                    provider.display_name
-                )
-            }
-            _ => "Market statistics are unavailable; retrying".to_string(),
-        }
-    }
-
     fn apply_catalog_event(
         &mut self,
         event: ProviderCatalogEvent,
@@ -861,13 +740,6 @@ impl MarketScreener {
                 self.displayed_generation = screen.screen_generation;
                 self.captured_at_unix_millis = Some(screen.captured_at_unix_millis);
                 self.counts = screener_category_counts(&screen.markets);
-                self.reported_columns = ScreenerReportedColumns::of(&screen.markets);
-                if !self.reported_columns.shows(self.sort.column) {
-                    self.sort = ScreenerSort::default();
-                }
-                if self.counts.get(self.category) == 0 {
-                    self.category = ScreenerCategory::All;
-                }
                 self.markets = screen.markets;
                 if self.pending_selection.is_none() {
                     self.message = None;
@@ -881,7 +753,7 @@ impl MarketScreener {
                     .is_some_and(|(generation, _)| generation == rejection.command_generation) =>
             {
                 self.pending_screen = None;
-                self.message = Some(self.unavailable_message());
+                self.message = Some("Market statistics are unavailable; retrying".to_string());
                 true
             }
             ProviderCatalogEvent::SelectionInstalled {
@@ -919,7 +791,7 @@ mod tests {
 
     fn market(
         symbol: &str,
-        kind: ProviderMarketKind,
+        kind: &str,
         mark: Option<i64>,
         previous: Option<i64>,
         volume: Option<i64>,
@@ -930,9 +802,9 @@ mod tests {
                 symbol: symbol.to_string(),
                 display_symbol: format!("{symbol}-USDC"),
                 exchange: "Hyperliquid".to_string(),
+                instrument_type: Some(kind.to_string()),
                 ..Default::default()
             },
-            kind: Some(kind),
             price_scale: 2,
             mark_price: mark,
             previous_day_price: previous,
@@ -942,8 +814,6 @@ mod tests {
             funding_rate_scale: 8,
             funding_rate: funding,
             funding_interval_seconds: funding.map(|_| 3_600),
-            volume_scale: 0,
-            day_volume: None,
         }
     }
 
@@ -951,7 +821,7 @@ mod tests {
         vec![
             market(
                 "BTC",
-                ProviderMarketKind::Perpetual,
+                "perpetual",
                 Some(10_000_000),
                 Some(9_500_000),
                 Some(500),
@@ -959,42 +829,13 @@ mod tests {
             ),
             market(
                 "ETH",
-                ProviderMarketKind::Perpetual,
+                "perpetual",
                 Some(300_000),
                 Some(310_000),
                 Some(900),
                 Some(-500),
             ),
-            market(
-                "PURR",
-                ProviderMarketKind::Spot,
-                Some(20),
-                Some(20),
-                None,
-                None,
-            ),
-        ]
-    }
-
-    /// Listed equities and futures report traded units, not quote-currency volume.
-    fn unit_volume_markets() -> Vec<ProviderMarketStatistics> {
-        let listed = |symbol: &str, kind, volume| ProviderMarketStatistics {
-            day_volume: volume,
-            volume_scale: 8,
-            ..market(symbol, kind, Some(10_000), Some(9_000), None, None)
-        };
-        vec![
-            listed(
-                "SPY",
-                ProviderMarketKind::Equity,
-                Some(4_741_779_200_000_000),
-            ),
-            listed("SPX", ProviderMarketKind::Index, None),
-            listed(
-                "/ESU6",
-                ProviderMarketKind::Future,
-                Some(120_000_000_000_000),
-            ),
+            market("PURR", "spot", Some(20), Some(20), None, None),
         ]
     }
 
@@ -1053,18 +894,13 @@ mod tests {
         let markets = markets();
         let sort = ScreenerSort::default();
         assert_eq!(
-            symbols(&screener_rows(
-                &markets,
-                ScreenerCategory::Kind(ProviderMarketKind::Spot),
-                "",
-                sort
-            )),
+            symbols(&screener_rows(&markets, ScreenerCategory::Spot, "", sort)),
             ["PURR"]
         );
         assert_eq!(
             symbols(&screener_rows(
                 &markets,
-                ScreenerCategory::Kind(ProviderMarketKind::Perpetual),
+                ScreenerCategory::Perpetuals,
                 "",
                 sort
             )),
@@ -1079,77 +915,14 @@ mod tests {
             )),
             ["BTC"]
         );
-        let counts = screener_category_counts(&markets);
-        assert_eq!(counts.all, 3);
         assert_eq!(
-            counts.get(ScreenerCategory::Kind(ProviderMarketKind::Perpetual)),
-            2
+            screener_category_counts(&markets),
+            ScreenerCategoryCounts {
+                all: 3,
+                perpetuals: 2,
+                spot: 1,
+            }
         );
-        assert_eq!(
-            counts.categories(),
-            [
-                ScreenerCategory::All,
-                ScreenerCategory::Kind(ProviderMarketKind::Perpetual),
-                ScreenerCategory::Kind(ProviderMarketKind::Spot),
-            ],
-            "only listed categories are offered"
-        );
-    }
-
-    #[test]
-    fn unit_volume_ranks_and_formats_without_a_currency_and_hides_unreported_columns() {
-        let markets = unit_volume_markets();
-        let rows = screener_rows(&markets, ScreenerCategory::All, "", ScreenerSort::default());
-        assert_eq!(symbols(&rows), ["SPY", "/ESU6", "SPX"]);
-        assert_eq!(rows[0].volume, "47.42M");
-        assert_eq!(rows[1].volume, "1.20M");
-        assert_eq!(rows[2].volume, UNAVAILABLE_VALUE);
-        assert_eq!(rows[0].kind, Some(ProviderMarketKind::Equity));
-        assert_eq!(
-            screener_category_counts(&markets).categories(),
-            [
-                ScreenerCategory::All,
-                ScreenerCategory::Kind(ProviderMarketKind::Equity),
-                ScreenerCategory::Kind(ProviderMarketKind::Index),
-                ScreenerCategory::Kind(ProviderMarketKind::Future),
-            ]
-        );
-        let columns = ScreenerReportedColumns::of(&markets);
-        assert!(!columns.shows(ScreenerColumn::Funding));
-        assert!(!columns.shows(ScreenerColumn::OpenInterest));
-        assert!(columns.shows(ScreenerColumn::Volume));
-        assert!(ScreenerReportedColumns::of(&self::markets()).shows(ScreenerColumn::Funding));
-    }
-
-    #[test]
-    fn switching_provider_drops_the_previous_screen_and_its_filters() {
-        let mut screener = MarketScreener::default();
-        let ids = screener
-            .providers()
-            .iter()
-            .map(|provider| provider.id)
-            .collect::<Vec<_>>();
-        assert!(ids.len() >= 2, "more than one provider screens markets");
-        assert_eq!(screener.provider_id(), Some(ids[0]));
-        screener.markets = markets();
-        screener.counts = screener_category_counts(&screener.markets);
-        screener.captured_at_unix_millis = Some(1);
-        screener.set_category(ScreenerCategory::Kind(ProviderMarketKind::Spot));
-        screener.set_sort_column(ScreenerColumn::Funding);
-        assert!(screener.select_provider(ids[0]).is_none());
-        assert_eq!(screener.rows().len(), 1, "reselecting keeps the screen");
-
-        assert!(
-            screener.select_provider(ids[1]).is_none(),
-            "no consumer started"
-        );
-        assert_eq!(screener.provider_id(), Some(ids[1]));
-        assert!(screener.rows().is_empty());
-        assert_eq!(screener.status(), ScreenerStatus::Loading);
-        assert_eq!(screener.category(), ScreenerCategory::All);
-        assert_eq!(screener.sort(), ScreenerSort::default());
-        assert!(screener.select_provider("unknown").is_none());
-        assert_eq!(screener.provider_id(), Some(ids[1]));
     }
 
     #[test]
