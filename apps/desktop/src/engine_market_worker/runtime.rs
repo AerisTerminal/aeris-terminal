@@ -252,18 +252,22 @@ fn publish_session_statuses(
         }
         let now = *now.get_or_insert_with(|| clock.wall_unix_nanos());
         let status = market.market_session_status(&record.product, now);
-        if let Err(error) =
-            record
-                .endpoint
-                .messages
-                .send(MarketWorkerMessage::MarketSessionStatus {
-                    generation: record.endpoint.active_generation,
-                    status,
-                })
-        {
-            diagnostic!("Aeris market session status was not delivered: {error}");
+        match record
+            .endpoint
+            .messages
+            .send(MarketWorkerMessage::MarketSessionStatus {
+                generation: record.endpoint.active_generation,
+                status,
+            }) {
+            Ok(()) => {
+                record.session_status_sent = Some((record.product.instrument_id.clone(), revision));
+            }
+            Err(error) => {
+                // Keep the last acknowledged revision so a full mailbox retries
+                // on the next worker iteration without waiting for the minute tick.
+                diagnostic!("Aeris market session status was not delivered: {error}");
+            }
         }
-        record.session_status_sent = Some((record.product.instrument_id.clone(), revision));
     }
 }
 
@@ -800,6 +804,50 @@ mod tests {
         assert_ne!(
             first, second,
             "different sessions must follow the injected clock"
+        );
+    }
+
+    #[test]
+    fn market_session_status_retries_after_mailbox_backpressure() {
+        let market = MarketService::start().expect("market runtime");
+        let clock = ManualClock::new(1_781_568_000_000_000_000);
+        let (_pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            super::super::default_product("ES"),
+            3,
+            super::super::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        record.endpoint.messages = messages;
+        let mut records = vec![record];
+        for _ in 0..9 {
+            records[0]
+                .endpoint
+                .messages
+                .send(MarketWorkerMessage::SeriesState {
+                    generation: 1,
+                    state: ChartState::Loading,
+                    message: String::new(),
+                })
+                .expect("fill bounded control reserve");
+        }
+        publish_session_statuses(&market, &mut records, false, &clock);
+        assert_eq!(records[0].session_status_sent, None);
+        assert_eq!(receiver.drain().0.len(), 9);
+
+        publish_session_statuses(&market, &mut records, false, &clock);
+        assert!(matches!(
+            receiver.drain().0.as_slice(),
+            [MarketWorkerMessage::MarketSessionStatus { generation: 1, .. }]
+        ));
+        assert!(records[0].session_status_sent.is_some());
+        publish_session_statuses(&market, &mut records, false, &clock);
+        assert!(
+            receiver.drain().0.is_empty(),
+            "do not repeat an acknowledged status"
         );
     }
 

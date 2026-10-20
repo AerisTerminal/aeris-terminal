@@ -1551,6 +1551,12 @@ Status: pending
     runtime-failure replies under explicit backpressure and successful retry.
     Parallel market messages, ChartState/MarketGeneration, and the remaining
     bridge discards still require collapse; VAL-DSK-021/022 remain open.
+  - Part 4: market session status revisions are recorded only after the
+    bounded pane mailbox accepts the status. On backpressure the next worker
+    iteration retries without waiting for the minute tick; a saturation
+    regression verifies the retry and prevents a duplicate after delivery.
+    Parallel market messages, ChartState/MarketGeneration and other bridge
+    discards remain; VAL-DSK-021/022 remain open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
 - [ ] M6.9 descriptor-login-and-symbol-browser - Descriptor-driven provider connect, login form and symbol browser
@@ -1932,6 +1938,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 1 refactor(desktop): stopped in-place study, order-book and tape publication coalescing in the bounded GPUI mailbox; 10,000 ordered fixture publications survive frame-budgeted drains with explicit backpressure. All five workspace gates passed. M6.6 remains unchecked for full message collapse and VAL-DSK-021/022 completion.
 - 2026-10-21 M6.6 Part 2 refactor(desktop): removed the diagnostic replacement/eviction scans from market mailbox enqueue; diagnostic snapshots preserve FIFO order with publication events, use the bounded control reserve, and report full backpressure instead of silent loss. The message/ChartState collapse, recovery expect and bridge discards remain for later M6.6 parts.
 - 2026-10-21 M6.6 Part 3 fix(desktop): removed the recovery-demand `expect` and made recovery acknowledgement consumption follow successful bounded-mailbox delivery; a saturation regression verifies the pending request survives failed cancellation and failure-reply sends, then completes once capacity returns. The parallel message/ChartState/MarketGeneration collapse and bridge discards remain.
+- 2026-10-21 M6.6 Part 4 fix(desktop): market session status no longer advances its delivered revision on mailbox backpressure, and retries on the next worker iteration after capacity returns. A bounded-mailbox regression covers failure, retry and nonduplicate delivery. M6.6 remains unchecked pending message collapse and VAL-DSK-021/022.
 
 ## 7. Known gaps / deferred
 
