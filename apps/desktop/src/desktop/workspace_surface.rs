@@ -2490,7 +2490,7 @@ impl WorkspaceSurface {
                 cx.notify();
                 return false;
             };
-            let Ok(sequence) = self.market_worker.try_select_engine(product, interval) else {
+            let Ok(sequence) = self.market_worker.try_select_instrument(product, interval) else {
                 self.series_message = format!("{} history could not start", interval.label());
                 Self::post_indicator_failure(
                     "series_selection",
@@ -2542,7 +2542,7 @@ impl WorkspaceSurface {
         let interval = super::instrument_interval(instrument, self.interval);
         let Ok(sequence) = self
             .market_worker
-            .try_select_engine(instrument.clone(), interval)
+            .try_select_instrument(instrument.clone(), interval)
         else {
             Self::post_indicator_failure(
                 "series_selection",
@@ -4576,8 +4576,11 @@ impl WorkspaceSurface {
         self.trade_tape = None;
         self.trade_sweeps = Arc::from([]);
         self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
-        let restored = product
-            .and_then(|product| self.market_worker.try_select_engine(product, interval).ok());
+        let restored = product.and_then(|product| {
+            self.market_worker
+                .try_select_instrument(product, interval)
+                .ok()
+        });
         if let Some(sequence) = restored {
             self.chart_pane_controller.request(sequence);
             self.chart_pane_controller

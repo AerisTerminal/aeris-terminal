@@ -1492,6 +1492,13 @@ Status: pending
     regressions pass. An instrumented one-command/one-applied-reply test
     for all restored panes, legacy `try_select_engine` removal and the
     guarded four-pane GUI restart remain; M6.5 stays unchecked.
+  - Part 3: renamed the remaining `try_select_engine` desktop API and
+    callers to `try_select_instrument`, reflecting the runtime-owned
+    select-and-demand boundary without changing dispatch or introducing
+    a second selection command. The VAL-DSK-019 source search and runtime
+    naming rule now pass. Instrumented restored-pane command/reply counts
+    and literal VAL-DSK-020 four-pane GUI restart remain unverified;
+    M6.5 stays unchecked.
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
@@ -1867,6 +1874,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.4 code closeout / M6.5 Part 1 fix(desktop): marked M6.4 code-complete with literal VAL-DSK-017 GUI evidence explicitly unvalidated pending the guarded final pass; fenced initial and replacement selection replies at the bridge and covered duplicate/retired outcomes plus one-command/no-follow-up pane dispatch. M6.5 remains unchecked for restored-pane identity and legacy API removal. Cleaned only Cargo's dev profile after target reached 28.14 GiB.
 - 2026-10-20 M6.5 Part 2 fix(desktop): separated saved workspace provenance from the provisional fresh default so a restored BTC pane no longer becomes `Default`; four saved panes carry exact `InstrumentRef` identity into the existing initial runtime selection. Fresh and explicit newly added pane paths remain distinct. The literal four-pane GUI assertion and instrumented restored-pane command/reply count are not yet validated. Removed only Cargo's dev profile after target reached 31.64 GiB; never touched release.
 - 2026-10-20 UI fix(desktop): no stabilization item. The panel sidebar's watchlist, order book, time and sales and context toggles now use the header's text-toggle style (`text-interactive` while off, `text-active` while on, no selected fill), so their icons no longer look active while the panel is closed. Verified in an isolated worktree at 821f8f76: fmt, desktop Clippy, desktop tests and naming_check passed; the workspace-wide gates were not rerun because the mission's uncommitted work shares the checkout.
+- 2026-10-20 M6.5 Part 3 refactor(desktop): removed legacy `try_select_engine` references from desktop production and tests, keeping the single runtime-owned instrument select-and-demand operation and its existing exact-reply fence. The first full suite had one isolated-pass persistence test failure; after a dev-only clean the second full suite and all other gates passed. Restored-pane command/reply instrumentation and guarded GUI restart remain before M6.5 closure.
 
 ## 7. Known gaps / deferred
 

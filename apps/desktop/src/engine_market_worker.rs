@@ -1072,7 +1072,7 @@ mod tests {
 
         assert_eq!(
             pane.worker
-                .try_select_engine(product, ChartInterval::Minute5)
+                .try_select_instrument(product, ChartInterval::Minute5)
                 .expect("engine selection queued"),
             8
         );
@@ -1110,7 +1110,7 @@ mod tests {
         let selected = default_product("ES");
         assert_eq!(
             pane.worker
-                .try_select_engine(selected.clone(), ChartInterval::Minute5)
+                .try_select_instrument(selected.clone(), ChartInterval::Minute5)
                 .expect("first catalog selection is dispatchable"),
             1
         );
@@ -1837,7 +1837,7 @@ mod tests {
             .expect("recovery queues under generation seven");
         assert_eq!(
             pane.worker
-                .try_select_engine(product, ChartInterval::Minute5)
+                .try_select_instrument(product, ChartInterval::Minute5)
                 .expect("new selection queues after recovery"),
             8
         );

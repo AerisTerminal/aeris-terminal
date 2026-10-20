@@ -1199,11 +1199,11 @@ impl MarketDataWorker {
             })
     }
 
-    /// Requests a Rithmic selection without blocking.
+    /// Requests one runtime-owned instrument selection and series demand without blocking.
     ///
     /// # Errors
     /// Returns the request when the command mailbox is full or disconnected.
-    pub fn try_select_engine(
+    pub fn try_select_instrument(
         &self,
         product: InstallProviderInstrument,
         interval: ChartInterval,
@@ -1235,7 +1235,7 @@ impl MarketDataWorker {
                     TrySendError::Disconnected(command) => (false, command),
                 };
                 let MarketWorkerCommand::EngineSelect(request) = command else {
-                    unreachable!("Rithmic selection send errors retain the selection command");
+                    unreachable!("instrument selection send errors retain the selection command");
                 };
                 if full {
                     TrySendError::Full(request)
@@ -3289,7 +3289,7 @@ mod tests {
             ..InstallProviderInstrument::default()
         };
         assert!(matches!(
-            worker.try_select_engine(selected.clone(), ChartInterval::Minute1),
+            worker.try_select_instrument(selected.clone(), ChartInterval::Minute1),
             Err(TrySendError::Full(_))
         ));
         assert_eq!(sequence.load(Ordering::Acquire), 7);
@@ -3305,7 +3305,7 @@ mod tests {
             Ok(MarketWorkerCommand::ProviderSelect(queued)) if queued == selection
         ));
         let next = worker
-            .try_select_engine(selected, ChartInterval::Minute1)
+            .try_select_instrument(selected, ChartInterval::Minute1)
             .expect("engine selection follows the click");
 
         assert_eq!(next, 8);
