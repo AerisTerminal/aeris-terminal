@@ -15,6 +15,7 @@ pub(in crate::market_service) struct TradeModel {
     pub(in crate::market_service) series: BarSeriesKey,
     pub(in crate::market_service) generation: ProviderGeneration,
     cadence: TradeLiveCadence,
+    calendar_stamp: calendar::CalendarBarStamp,
     pub(in crate::market_service) gap_policy: CandleGapPolicy,
     pub(in crate::market_service) candle_symbol: Option<String>,
     pub(in crate::market_service) price_scale: u8,
@@ -89,7 +90,14 @@ impl TradeModel {
             },
             None,
         );
-        Self::with_calendar(series, generation, candle, clock, calendar)
+        Self::with_calendar(
+            series,
+            generation,
+            candle,
+            clock,
+            calendar,
+            calendar::CalendarBarStamp::SessionOpen,
+        )
     }
 
     pub(in crate::market_service) fn with_calendar(
@@ -98,6 +106,7 @@ impl TradeModel {
         candle: Option<(CandleGapPolicy, String)>,
         clock: std::sync::Arc<dyn super::super::clock::Clock>,
         calendar: super::super::calendar::MarketCalendarService,
+        calendar_stamp: calendar::CalendarBarStamp,
     ) -> Option<Self> {
         use super::super::calendar::CalendarBarPeriod;
         let cadence = match series.period {
@@ -136,6 +145,7 @@ impl TradeModel {
             series: series.clone(),
             generation,
             cadence,
+            calendar_stamp,
             gap_policy,
             candle_symbol,
             price_scale: 0,
@@ -568,11 +578,8 @@ impl TradeModel {
                     }
                 }
                 TradeLiveCadence::Calendar { period } => {
-                    let last_bucket = self.calendar.bar_bucket(
-                        &self.series.instrument_id,
-                        last.exchange_timestamp_unix_nanos.div_euclid(1_000_000),
-                        period,
-                    );
+                    let last_bucket =
+                        self.stamped_bar_bucket(last.exchange_timestamp_unix_nanos, period);
                     let trade_bucket = self.calendar.bar_bucket(
                         &self.series.instrument_id,
                         exchange_nanos.div_euclid(1_000_000),
@@ -584,7 +591,11 @@ impl TradeModel {
                     if last_bucket == Some(trade_bucket) {
                         updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
                     } else {
-                        started_rithmic_bar(last, trade, self.calendar_bar_open(exchange_nanos))?
+                        started_rithmic_bar(
+                            last,
+                            trade,
+                            self.calendar_bar_open(exchange_nanos, period),
+                        )?
                     }
                 }
                 TradeLiveCadence::Tick { .. } => unreachable!(),
@@ -772,25 +783,38 @@ impl TradeModel {
                     && trade_seconds < open_seconds.saturating_add(seconds)
             }
             TradeLiveCadence::Calendar { period } => {
-                self.calendar.bar_bucket(
-                    &self.series.instrument_id,
-                    open_nanos.div_euclid(1_000_000),
-                    period,
-                ) == self.calendar.bar_bucket(
-                    &self.series.instrument_id,
-                    exchange_nanos.div_euclid(1_000_000),
-                    period,
-                )
+                self.stamped_bar_bucket(open_nanos, period)
+                    == self.calendar.bar_bucket(
+                        &self.series.instrument_id,
+                        exchange_nanos.div_euclid(1_000_000),
+                        period,
+                    )
             }
             TradeLiveCadence::Tick { .. } => false,
         }
     }
 
-    fn calendar_bar_open(&self, exchange_nanos: i64) -> i64 {
-        let millis = exchange_nanos.div_euclid(1_000_000);
+    fn stamped_bar_bucket(
+        &self,
+        open_nanos: i64,
+        period: calendar::CalendarBarPeriod,
+    ) -> Option<i64> {
+        self.calendar.stamped_bar_bucket(
+            &self.series.instrument_id,
+            open_nanos.div_euclid(1_000_000),
+            period,
+            self.calendar_stamp,
+        )
+    }
+
+    fn calendar_bar_open(&self, exchange_nanos: i64, period: calendar::CalendarBarPeriod) -> i64 {
         self.calendar
-            .session_open(&self.series.instrument_id, millis)
-            .unwrap_or(millis)
+            .bar_open_stamp(
+                &self.series.instrument_id,
+                exchange_nanos.div_euclid(1_000_000),
+                period,
+                self.calendar_stamp,
+            )
             .saturating_mul(1_000_000)
     }
 
@@ -872,11 +896,8 @@ impl TradeModel {
                 }
             }
             TradeLiveCadence::Calendar { period } => {
-                let last_bucket = self.calendar.bar_bucket(
-                    &self.series.instrument_id,
-                    last.exchange_timestamp_unix_nanos.div_euclid(1_000_000),
-                    period,
-                );
+                let last_bucket =
+                    self.stamped_bar_bucket(last.exchange_timestamp_unix_nanos, period);
                 let trade_bucket = self.calendar.bar_bucket(
                     &self.series.instrument_id,
                     exchange_nanos.div_euclid(1_000_000),
@@ -888,7 +909,11 @@ impl TradeModel {
                 if last_bucket == Some(trade_bucket) {
                     updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
                 } else {
-                    started_rithmic_bar(last, trade, self.calendar_bar_open(exchange_nanos))?
+                    started_rithmic_bar(
+                        last,
+                        trade,
+                        self.calendar_bar_open(exchange_nanos, period),
+                    )?
                 }
             }
         };

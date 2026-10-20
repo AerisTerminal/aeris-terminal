@@ -1128,6 +1128,7 @@ impl Coordinator<'_> {
                         candle,
                         std::sync::Arc::clone(&self.clock),
                         self.calendar.for_instrument(&instrument.instrument_id),
+                        descriptor.capabilities.calendar_bar_stamp,
                     ) {
                         handoff.connected = connected;
                         self.series.insert_trade(series.clone(), handoff);
@@ -3093,6 +3094,69 @@ mod tests {
     }
 
     #[test]
+    fn midnight_utc_equity_bars_take_their_trading_date_trades() {
+        use super::super::calendar::{
+            CalendarBarStamp, CalendarSource, ExchangeRule, MarketCalendarService,
+        };
+        use chrono::{DateTime, Utc};
+        let at = |text: &str| {
+            text.parse::<DateTime<Utc>>()
+                .expect("instant")
+                .timestamp_nanos_opt()
+                .expect("range")
+        };
+        for (period, stamp, during, next, next_stamp) in [
+            (
+                BarPeriod::session(1).expect("daily"),
+                "2026-05-14T00:00:00Z",
+                "2026-05-14T15:00:00Z",
+                "2026-05-15T14:00:00Z",
+                "2026-05-15T00:00:00Z",
+            ),
+            (
+                BarPeriod::week(1).expect("week"),
+                "2026-05-11T00:00:00Z",
+                "2026-05-14T15:00:00Z",
+                "2026-05-18T14:00:00Z",
+                "2026-05-18T00:00:00Z",
+            ),
+        ] {
+            let mut series = rithmic_tick_series();
+            series.period = period;
+            let mut calendar = MarketCalendarService::default();
+            calendar.insert(
+                series.instrument_id.clone(),
+                CalendarSource::ExchangeRule(ExchangeRule::UsEquity),
+            );
+            let mut live = TradeModel::with_calendar(
+                &series,
+                generation(),
+                None,
+                std::sync::Arc::new(super::super::clock::SystemClock),
+                calendar,
+                CalendarBarStamp::TradingDateMidnightUtc,
+            )
+            .expect("calendar handoff");
+            live.seed(2, 0, &[bar(10, at(stamp), 10_000)], None, Some(0))
+                .expect("seed");
+            live.connected = true;
+            live.accept_trade(&tick_trade(1, at(during), 10_100))
+                .expect("same period");
+            assert_eq!(
+                live.bars.len(),
+                1,
+                "{period:?}: a trade updates its trading date's bar"
+            );
+            assert_eq!(live.bars[0].close, 10_100);
+            assert_eq!(live.bars[0].exchange_timestamp_unix_nanos, at(stamp));
+            live.accept_trade(&tick_trade(2, at(next), 10_200))
+                .expect("next period");
+            assert_eq!(live.bars.len(), 2, "{period:?}: next period");
+            assert_eq!(live.bars[1].exchange_timestamp_unix_nanos, at(next_stamp));
+        }
+    }
+
+    #[test]
     fn six_non_cme_week_and_month_live_series_follow_calendar() {
         use super::super::calendar::{CalendarSource, ExchangeRule};
         use aeris_contracts::ProviderSessionHours;
@@ -3191,6 +3255,7 @@ mod tests {
             None,
             std::sync::Arc::new(super::super::clock::SystemClock),
             calendar,
+            super::super::calendar::CalendarBarStamp::SessionOpen,
         )
         .expect("calendar handoff");
         live.seed(

@@ -892,6 +892,9 @@ struct ProviderCapabilities {
     /// Coordinator-facing detail published when broker authorization is revoked.
     authorization_revoked_detail: &'static str,
     live_model: LiveModel,
+    /// Timestamp convention of the provider's session, week and month bars,
+    /// which trade-built bars must reproduce to stay one bar per period.
+    calendar_bar_stamp: calendar::CalendarBarStamp,
     overflow_recovery_detail: &'static str,
     trade_continuity: TradeContinuity,
     candle_requires_connected: bool,
@@ -1071,6 +1074,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         alert_demand_update: AlertDemandUpdate::Immediate,
         authorization_revoked_detail: "Rithmic disconnected",
         live_model: LiveModel::TradeBuilt,
+        calendar_bar_stamp: calendar::CalendarBarStamp::SessionOpen,
         overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
         trade_continuity: TradeContinuity::Sequence,
         candle_requires_connected: false,
@@ -1138,6 +1142,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     alert_demand_update: AlertDemandUpdate::MarkDirty,
     authorization_revoked_detail: "Hyperliquid disconnected",
     live_model: LiveModel::ProviderCandles,
+    calendar_bar_stamp: calendar::CalendarBarStamp::TradingDateMidnightUtc,
     overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
     trade_continuity: TradeContinuity::Sequence,
     candle_requires_connected: true,

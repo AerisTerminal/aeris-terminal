@@ -86,6 +86,9 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
         alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
         authorization_revoked_detail: "Tastytrade disconnected",
         live_model: super::LiveModel::TradeBuilt,
+        // dxFeed stamps `{=d}`, `{=w}` and `{=mo}` candles at 00:00 UTC of
+        // their trading date, outside an equity's session.
+        calendar_bar_stamp: super::calendar::CalendarBarStamp::TradingDateMidnightUtc,
         overflow_recovery_detail: "Tastytrade queue overflow requires recovery",
         trade_continuity: super::TradeContinuity::Indexed,
         candle_requires_connected: false,

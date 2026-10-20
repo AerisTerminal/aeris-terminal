@@ -63,6 +63,18 @@ pub enum CalendarBarPeriod {
     Month,
 }
 
+/// Instant a provider uses as the timestamp of a session, week or month bar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarBarStamp {
+    /// The opening instant of the bar's first session.
+    SessionOpen,
+    /// 00:00 UTC of the bar's first trading date. For an equity this instant
+    /// lies outside every session, so it names the bar only through its date.
+    TradingDateMidnightUtc,
+}
+
+const DAY_MS: i64 = 86_400_000;
+
 impl CalendarSource {
     #[must_use]
     pub fn kind(&self) -> CalendarSourceKind {
@@ -327,15 +339,45 @@ impl MarketCalendarService {
         {
             return None;
         }
-        let day = self.trading_day(instrument_id, at_utc_ms)?;
-        match period {
-            CalendarBarPeriod::Session(days) if days > 0 => Some(day.div_euclid(i64::from(days))),
-            CalendarBarPeriod::Session(_) => None,
-            CalendarBarPeriod::Week => Some((day + 3).div_euclid(7)),
-            CalendarBarPeriod::Month => {
-                let date = DateTime::<Utc>::from_timestamp(day.checked_mul(86_400)?, 0)?;
-                Some(i64::from(date.year()) * 12 + i64::from(date.month()))
+        day_bucket(self.trading_day(instrument_id, at_utc_ms)?, period)
+    }
+
+    /// Identity of a bar from the timestamp its provider stamped on it.
+    #[must_use]
+    pub fn stamped_bar_bucket(
+        &self,
+        instrument_id: &str,
+        stamp_utc_ms: i64,
+        period: CalendarBarPeriod,
+        stamp: CalendarBarStamp,
+    ) -> Option<i64> {
+        match stamp {
+            CalendarBarStamp::SessionOpen => self.bar_bucket(instrument_id, stamp_utc_ms, period),
+            CalendarBarStamp::TradingDateMidnightUtc => {
+                day_bucket(stamp_utc_ms.div_euclid(DAY_MS), period)
             }
+        }
+    }
+
+    /// Timestamp the provider gives the bar that a trade at `at_utc_ms` opens.
+    #[must_use]
+    pub fn bar_open_stamp(
+        &self,
+        instrument_id: &str,
+        at_utc_ms: i64,
+        period: CalendarBarPeriod,
+        stamp: CalendarBarStamp,
+    ) -> i64 {
+        match stamp {
+            CalendarBarStamp::SessionOpen => self
+                .session_open(instrument_id, at_utc_ms)
+                .unwrap_or(at_utc_ms),
+            CalendarBarStamp::TradingDateMidnightUtc => self
+                .trading_day(instrument_id, at_utc_ms)
+                .and_then(|day| day_bucket(day, period))
+                .and_then(|bucket| bucket_first_day(bucket, period))
+                .and_then(|day| day.checked_mul(DAY_MS))
+                .unwrap_or(at_utc_ms),
         }
     }
 
@@ -410,6 +452,41 @@ impl MarketCalendarService {
                 ..unknown()
             },
             _ => unknown(),
+        }
+    }
+}
+
+/// Bar identity of a trading date (Unix days). Weeks start on Monday.
+fn day_bucket(day: i64, period: CalendarBarPeriod) -> Option<i64> {
+    match period {
+        CalendarBarPeriod::Session(days) if days > 0 => Some(day.div_euclid(i64::from(days))),
+        CalendarBarPeriod::Session(_) => None,
+        CalendarBarPeriod::Week => Some((day + 3).div_euclid(7)),
+        CalendarBarPeriod::Month => {
+            let date = DateTime::<Utc>::from_timestamp(day.checked_mul(86_400)?, 0)?;
+            Some(i64::from(date.year()) * 12 + i64::from(date.month()))
+        }
+    }
+}
+
+/// First trading date (Unix days) of a bar identity from `day_bucket`.
+fn bucket_first_day(bucket: i64, period: CalendarBarPeriod) -> Option<i64> {
+    match period {
+        CalendarBarPeriod::Session(days) if days > 0 => bucket.checked_mul(i64::from(days)),
+        CalendarBarPeriod::Session(_) => None,
+        CalendarBarPeriod::Week => bucket.checked_mul(7)?.checked_sub(3),
+        CalendarBarPeriod::Month => {
+            let months = bucket.checked_sub(1)?;
+            let year = i32::try_from(months.div_euclid(12)).ok()?;
+            let month = u32::try_from(months.rem_euclid(12) + 1).ok()?;
+            let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+            Some(
+                first
+                    .and_hms_opt(0, 0, 0)?
+                    .and_utc()
+                    .timestamp()
+                    .div_euclid(86_400),
+            )
         }
     }
 }
