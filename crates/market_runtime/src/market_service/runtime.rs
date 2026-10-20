@@ -72,15 +72,13 @@ fn dispatch_hyperliquid_catalog(
 
 pub(super) fn dispatch_tastytrade_catalog(
     controls: &SyncSender<super::tastytrade::CatalogControl>,
-    provider: &str,
+    _provider: &str,
     command: ProviderCatalogCommand,
 ) -> Result<(), String> {
     let control = match command {
         ProviderCatalogCommand::Search(value) => super::tastytrade::CatalogControl::Search(value),
         ProviderCatalogCommand::Select(value) => super::tastytrade::CatalogControl::Select(value),
-        ProviderCatalogCommand::Screen(_) => {
-            return Err(format!("{provider} does not provide a market screen"));
-        }
+        ProviderCatalogCommand::Screen(value) => super::tastytrade::CatalogControl::Screen(value),
     };
     controls
         .try_send(control)
@@ -1965,6 +1963,25 @@ mod tests {
         assert!(matches!(
             hyperliquid_rx.try_recv(),
             Ok(HyperliquidCatalogControl::Screen(_))
+        ));
+
+        let (tastytrade_tx, tastytrade_rx) = mpsc::sync_channel(1);
+        let (_, tastytrade_events) =
+            mpsc::sync_channel::<super::super::tastytrade::CatalogEvent>(1);
+        let tastytrade = ProviderCatalogChannelImpl::new(
+            tastytrade_tx,
+            tastytrade_events,
+            dispatch_tastytrade_catalog,
+        );
+        tastytrade
+            .send(
+                "tastytrade",
+                ProviderCatalogCommand::Screen(ScreenProviderMarkets::default()),
+            )
+            .expect("tastytrade screens its curated universe");
+        assert!(matches!(
+            tastytrade_rx.try_recv(),
+            Ok(super::super::tastytrade::CatalogControl::Screen(_))
         ));
     }
 

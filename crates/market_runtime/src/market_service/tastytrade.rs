@@ -50,7 +50,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         ready_label_suffix: "",
         depth_available: false,
         search_categories_available: true,
-        market_screen_available: false,
+        market_screen_available: true,
         trades_available: true,
         connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
     };
@@ -132,6 +132,7 @@ const CANDLE_SNAPSHOT_STALL: Duration = Duration::from_secs(5);
 pub(super) enum CatalogControl {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
+    Screen(super::ScreenProviderMarkets),
 }
 pub(super) enum CatalogEvent {
     Search(ProviderInstrumentSearchResult),
@@ -146,6 +147,8 @@ pub(super) enum CatalogEvent {
         selection: bool,
     },
     RefreshFailed(String),
+    ScreenCompleted(aeris_contracts::ProviderMarketScreen),
+    ScreenRejected(ProviderCatalogRejected),
     Calendar {
         generation: u64,
         instrument_id: String,
@@ -795,6 +798,7 @@ pub(super) fn run_catalog(
     let mut selection_generation = 0u64;
     let mut calendar_instruments = BTreeMap::<String, InstallProviderInstrument>::new();
     let mut calendar_revision = api.calendar_revision();
+    let mut screen = screen::RetainedScreen::default();
     while !stop.load(Ordering::Acquire) {
         let current_epoch = api.authorization_epoch.load(Ordering::Acquire);
         if current_epoch != authorization_epoch {
@@ -802,6 +806,7 @@ pub(super) fn run_catalog(
             futures.clear();
             searches.clear();
             calendar_instruments.clear();
+            screen.clear();
             refresh_at = Instant::now() + Duration::from_mins(30);
         }
         if let Some(detail) = refresh_catalog(&mut futures, &mut refresh_at, api, stop)
@@ -829,11 +834,13 @@ pub(super) fn run_catalog(
         let (consumer, command, selection) = match &control {
             CatalogControl::Search(s) => (s.consumer_id, s.search_generation, false),
             CatalogControl::Select(s) => (s.consumer_id, s.selection_generation, true),
+            CatalogControl::Screen(s) => (s.consumer_id, s.screen_generation, false),
         };
         let result = process_catalog_control(
             control,
             &mut futures,
             &mut searches,
+            &mut screen,
             &mut selection_generation,
             &CatalogWorkerContext {
                 remote_tx: &remote_tx,
@@ -876,6 +883,7 @@ fn process_catalog_control(
     control: CatalogControl,
     futures: &mut Vec<FutureInstrument>,
     searches: &mut CatalogSearches,
+    screen: &mut screen::RetainedScreen,
     selection_generation: &mut u64,
     context: &CatalogWorkerContext<'_>,
 ) -> Result<CatalogEvent, String> {
@@ -917,6 +925,13 @@ fn process_catalog_control(
             context.generation,
             selection_generation,
         ),
+        CatalogControl::Screen(request) => Ok(screen.answer(
+            &request,
+            futures,
+            context.api,
+            context.stop,
+            context.generation,
+        )),
     }
 }
 
@@ -1147,6 +1162,7 @@ fn resolve_selection(
     if selection.entitlement_id != ENTITLEMENT {
         return Err("Tastytrade entitlement changed".into());
     }
+    // The screened universe is fixed, so a screen row stays selectable without a search.
     let item = searches
         .get(&search_slot(
             selection.consumer_id,
@@ -1158,7 +1174,10 @@ fn resolve_selection(
                 item.symbol == selection.symbol && catalog_venue(item) == selection.exchange
             })
         })
+        .cloned()
+        .or_else(|| screen::listed_instrument(&selection.symbol, &selection.exchange, futures))
         .ok_or("Tastytrade selection is no longer in the current search")?;
+    let item = &item;
     let resolved = if item.instrument_type == "Future" {
         futures
             .iter()
@@ -2964,6 +2983,9 @@ pub(super) fn start_record(
         workers: vec![catalog_worker, token_worker, provider_worker],
     })
 }
+
+#[path = "tastytrade_screen.rs"]
+mod screen;
 
 #[cfg(test)]
 #[path = "tastytrade_tests.rs"]

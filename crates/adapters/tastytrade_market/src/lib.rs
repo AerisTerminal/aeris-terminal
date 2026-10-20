@@ -18,8 +18,10 @@ use serde::{Deserialize, de::DeserializeOwned};
 use zeroize::{Zeroize as _, Zeroizing};
 
 mod catalog;
+mod market_data;
 mod session;
 pub use catalog::{FutureInstrument, PriceIncrementBand, ResolvedInstrument, SearchInstrument};
+pub use market_data::{MARKET_DATA_BATCH_LIMIT, MarketDataSnapshot, MarketDataType};
 pub use session::{
     DATA_SCALE, DxlinkSession, FeedEvent, Subscription, SubscriptionChangeBudget,
     SubscriptionChangeError, TradePrint,
@@ -460,6 +462,31 @@ impl TastytradeBrokerClient {
             )
             .map_err(|error| error.to_string())?;
         page.validated()
+    }
+
+    /// Fetches quote snapshots, one provider request per batch of at most
+    /// `MARKET_DATA_BATCH_LIMIT` symbols.
+    /// # Errors
+    /// Rejects invalid symbols, unrequested or malformed items, and provider errors.
+    pub fn market_data(
+        &mut self,
+        capability: &HostedBrokerConnection,
+        instruments: &[(MarketDataType, String)],
+        stop: &Arc<AtomicBool>,
+    ) -> Result<Vec<MarketDataSnapshot>, String> {
+        let mut snapshots = Vec::with_capacity(instruments.len());
+        for batch in instruments.chunks(MARKET_DATA_BATCH_LIMIT) {
+            let query = market_data::batch_query(batch)?;
+            let query = query
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect::<Vec<_>>();
+            let page: market_data::MarketDataPage = self
+                .get(capability, "/market-data/by-type", &query, stop)
+                .map_err(|error| error.to_string())?;
+            snapshots.extend(page.validated(batch)?);
+        }
+        Ok(snapshots)
     }
 
     /// Resolves an exact tradable identity to its own streamer symbol and tick schedule.
