@@ -493,7 +493,7 @@ fn selection_matches_request(record: &EndpointRecord, generation: u64) -> bool {
     }
 }
 
-fn apply_selection_outcome(
+pub(super) fn apply_selection_outcome(
     record: &mut EndpointRecord,
     outcome: aeris_market_runtime::SelectionOutcome,
 ) -> Result<(), String> {

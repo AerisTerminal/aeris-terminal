@@ -1341,8 +1341,9 @@ mod tests {
         };
         let plan = restored_workspace_boot_plan(&workspace).expect("four panes");
         assert_eq!(plan.panes.len(), 4);
+        let mut requests = Vec::new();
         for (pane, expected) in plan.panes.iter().zip(&instruments) {
-            let (_worker, mut record) = worker_endpoint(
+            let (worker, mut record) = worker_endpoint(
                 pane.workspace_id,
                 pane.pane_id,
                 pane.instrument.clone(),
@@ -1362,11 +1363,65 @@ mod tests {
                 })
             );
             assert!(record.initial_selection_pending);
+            requests.push(assert_restored_pane_dispatch_and_reply(
+                pane, expected, worker, record,
+            ));
         }
+        assert_eq!(requests.len(), 4, "one initial command for each saved pane");
         assert!(matches!(
             workspace_initial_instrument(&instruments[0], false),
             InstrumentRequest::Default
         ));
+    }
+
+    fn assert_restored_pane_dispatch_and_reply(
+        pane: &RestoredWorkspacePaneSpec,
+        expected: &InstallProviderInstrument,
+        mut worker: WorkspaceMarketPane,
+        mut record: EndpointRecord,
+    ) -> aeris_market_runtime::SelectionRequest {
+        use aeris_market_runtime::{
+            InstrumentDescriptor, MarketGenerationId, ResolvedSeries, SelectionOutcome,
+        };
+
+        let mut requests = Vec::new();
+        selection_commands::dispatch_initial_selection(
+            &record,
+            StreamRequirements::BARS,
+            |request| {
+                requests.push(request);
+                Ok(())
+            },
+        )
+        .expect("one initial dispatch");
+        let [request] = requests.as_slice() else {
+            panic!("one request per restored pane");
+        };
+        assert_eq!(request.consumer_id, pane.consumer_id);
+        assert_eq!(request.generation, pane.generation);
+        assert_eq!(request.interval, pane.interval);
+        assert_eq!(request.instrument, record.initial_instrument);
+        let presentation = provider_presentation(&expected.provider).expect("restored provider");
+        let outcome = || SelectionOutcome::Selected {
+            generation: MarketGenerationId(
+                NonZeroU64::new(pane.generation).expect("restored generation"),
+            ),
+            descriptor: Box::new(
+                InstrumentDescriptor::from_install(expected, presentation, true)
+                    .expect("restored descriptor"),
+            ),
+            series: ResolvedSeries::resolve(expected, pane.interval, presentation)
+                .expect("restored series"),
+        };
+        runtime::apply_selection_outcome(&mut record, outcome()).expect("first reply");
+        runtime::apply_selection_outcome(&mut record, outcome()).expect("duplicate reply");
+        assert!(matches!(
+            worker.worker.drain_messages().0.as_slice(),
+            [MarketWorkerMessage::SelectedInstrument { generation, instrument }]
+                if *generation == pane.generation && instrument == expected
+        ));
+        assert!(!record.initial_selection_pending);
+        requests.pop().expect("one dispatched request")
     }
 
     #[test]

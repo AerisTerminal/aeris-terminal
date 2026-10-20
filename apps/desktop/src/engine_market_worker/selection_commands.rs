@@ -94,22 +94,14 @@ fn begin_endpoint_demand(
         ChartState::Loading,
         format!("Loading {provider_name} history"),
     );
-    let instrument = record.initial_instrument.clone();
-    if let Err(error) = market.select_and_demand(
-        client_id,
-        SelectionRequest {
-            consumer_id: record.endpoint.consumer_id,
-            generation: record.endpoint.active_generation,
-            instrument,
-            interval: record.interval,
-            streams: chart_demand_streams(
-                market,
-                &record.product.provider,
-                record.endpoint.depth_visible,
-            )?,
-            viewport: None,
-        },
-    ) {
+    let streams = chart_demand_streams(
+        market,
+        &record.product.provider,
+        record.endpoint.depth_visible,
+    )?;
+    if let Err(error) = dispatch_initial_selection(record, streams, |request| {
+        market.select_and_demand(client_id, request)
+    }) {
         super::runtime::report_state(
             &record.endpoint.messages,
             Some(record.endpoint.active_generation),
@@ -121,6 +113,22 @@ fn begin_endpoint_demand(
 
     Ok(())
 }
+
+pub(super) fn dispatch_initial_selection(
+    record: &EndpointRecord,
+    streams: StreamRequirements,
+    dispatch: impl FnOnce(SelectionRequest) -> Result<(), String>,
+) -> Result<(), String> {
+    dispatch(SelectionRequest {
+        consumer_id: record.endpoint.consumer_id,
+        generation: record.endpoint.active_generation,
+        instrument: record.initial_instrument.clone(),
+        interval: record.interval,
+        streams,
+        viewport: None,
+    })
+}
+
 fn instrument_ref(product: &InstallProviderInstrument) -> InstrumentRequest {
     InstrumentRequest::Ref(InstrumentRef {
         provider_id: product.provider.clone(),
