@@ -793,6 +793,25 @@ fn restored_order_flow_settings(
     })
 }
 
+impl RejectedSavedPresentation {
+    fn of(state: &WorkspaceChartState) -> Self {
+        Self {
+            appearance: state
+                .appearance
+                .as_ref()
+                .is_some_and(|appearance| restored_chart_appearance(appearance).is_none()),
+            order_flow: state
+                .order_flow
+                .as_ref()
+                .is_some_and(|settings| restored_order_flow_settings(settings).is_none()),
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.appearance || self.order_flow
+    }
+}
+
 const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
     match plot {
         StudyPlotKind::Line => ChartStudyPlotKind::Line,
@@ -3280,6 +3299,8 @@ impl WorkspaceSurface {
             .begin_chart(self.product.as_ref());
         let mut restore_failed = false;
         if let Some(restored) = self.restored_chart_state.take() {
+            self.retained_chart_presentation.rejected_saved =
+                RejectedSavedPresentation::of(&restored);
             let drawings = drawings.or_else(|| {
                 chart_drawings::legacy_pane_drawings(
                     &restored.chart_state_json,
@@ -3304,6 +3325,7 @@ impl WorkspaceSurface {
                 .is_err()
         });
         restore_failed |= self.apply_surface_time_zone(&chart, cx);
+        restore_failed |= self.retained_chart_presentation.rejected_saved.any();
         if restore_failed {
             Self::post_chart_restore_failure(cx);
         } else {
@@ -4997,6 +5019,7 @@ impl WorkspaceSurface {
         }) {
             Ok(true) => {
                 Self::clear_indicator_failure("order_flow", cx);
+                self.retained_chart_presentation.rejected_saved.order_flow = false;
                 self.chart_persistence_dirty = true;
                 if let Some(snapshot) = self.trade_tape.clone() {
                     self.apply_trade_tape_to_chart(&snapshot, cx);
@@ -5070,6 +5093,7 @@ impl WorkspaceSurface {
             }
             changed
         }) {
+            self.retained_chart_presentation.rejected_saved.appearance = false;
             self.chart_persistence_dirty = true;
             cx.notify();
         }
@@ -5090,6 +5114,7 @@ impl WorkspaceSurface {
             }
             changed
         }) {
+            self.retained_chart_presentation.rejected_saved.appearance = false;
             self.chart_persistence_dirty = true;
             cx.notify();
         }
@@ -5110,6 +5135,7 @@ impl WorkspaceSurface {
             }
             changed
         }) {
+            self.retained_chart_presentation.rejected_saved.appearance = false;
             self.chart_persistence_dirty = true;
             cx.notify();
         }
@@ -5123,6 +5149,7 @@ impl WorkspaceSurface {
             chart.reset_appearance_settings();
             chart_cx.notify();
         });
+        self.retained_chart_presentation.rejected_saved.appearance = false;
         self.chart_persistence_dirty = true;
         cx.notify();
     }

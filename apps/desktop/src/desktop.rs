@@ -1609,6 +1609,16 @@ struct RetainedChartPresentation {
     price_precision: Option<u8>,
     chart_state: Option<WorkspaceChartState>,
     drawings: PaneDrawings,
+    rejected_saved: RejectedSavedPresentation,
+}
+
+/// Saved presentation fields the restore could not parse. Each chart rebuild re-applies the
+/// sanitized retained state, so the rejection is kept here and keeps the restore notice posted
+/// until the trader edits that setting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RejectedSavedPresentation {
+    appearance: bool,
+    order_flow: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

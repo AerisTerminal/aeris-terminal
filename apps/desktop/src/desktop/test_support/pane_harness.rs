@@ -1719,6 +1719,74 @@ fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mu
 }
 
 #[gpui::test]
+fn pane_harness_invalid_saved_presentation_reports_one_notice_for_multiple_fields(
+    cx: &mut TestAppContext,
+) {
+    let restore = WorkspaceSurfaceRestore {
+        chart: Some(WorkspaceChartState {
+            appearance: Some(WorkspaceChartAppearanceState {
+                grid_style: u32::MAX,
+                ..WorkspaceChartAppearanceState::default()
+            }),
+            order_flow: Some(WorkspaceOrderFlowSettingsState {
+                display_mode: u32::MAX,
+                ..WorkspaceOrderFlowSettingsState::default()
+            }),
+            ..WorkspaceChartState::default()
+        }),
+        ..WorkspaceSurfaceRestore::default()
+    };
+    let (mut harness, cx) = PaneHarness::open_with_restore(restore, cx);
+    harness.publish_snapshot(12, cx);
+    harness.reinstall_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(
+            notices.len(),
+            1,
+            "both invalid saved fields share one notice"
+        );
+        assert_eq!(notices[0].title, "Chart settings could not be restored");
+        assert_eq!(
+            notices[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
+    });
+    harness.pane.update(cx, |pane, cx| {
+        let mut appearance = pane
+            .chart
+            .as_ref()
+            .expect("snapshot chart")
+            .read(cx)
+            .appearance_settings();
+        appearance.grid_visible = !appearance.grid_visible;
+        pane.set_chart_appearance(&appearance, cx);
+    });
+    harness.reinstall_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(
+            harness.window.read(cx).toaster.notices().len(),
+            1,
+            "the untouched order-flow rejection keeps the notice"
+        );
+    });
+    harness.pane.update(cx, |pane, cx| {
+        pane.set_chart_order_flow_settings(
+            OrderFlowSettings {
+                show_cumulative_delta: true,
+                ..OrderFlowSettings::default()
+            },
+            cx,
+        );
+    });
+    harness.reinstall_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
 fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clears(
     cx: &mut TestAppContext,
 ) {

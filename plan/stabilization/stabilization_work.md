@@ -1441,6 +1441,11 @@ Status: pending
     requires literal guarded VAL-DSK-013/014/015 GUI evidence; M6.3 remains
     unchecked.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
+  - Part 1: saved appearance and order-flow settings that fail to parse are no longer
+    dropped silently. The pane records the rejected fields in its retained presentation and
+    posts the one keyed "Chart settings could not be restored" notice. That notice survives
+    chart rebuilds until the trader edits each rejected setting. M6.4 stays unchecked:
+    `PanePresentation` itself and the remaining restore setters (UI-11) follow.
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
@@ -1806,6 +1811,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 UI feat(desktop): typography and chrome polish with no stabilization item. Inter 4.1 Regular/Medium/Bold replace the single synthesized Inter face; Geist Mono (`platform_mono_font_family()`) renders numbers in the order book, time and sales, bottom-panel and screener cells; market panels move from the header to a right icon sidebar; the bottom panel's tabs move into its open body; tooltips become trigger-anchored secondary-surface pills with top/bottom/left/right placement and a spring fade, replacing GPUI's cursor-positioned tooltip. Backfilled the 35 "closed in this commit" placeholders in sections 3 and 5 with the commits that introduced them. On an isolated worktree holding only this change, fmt, Clippy and naming_check passed and every test passed except three naming_check self-tests that read CRLF-checked-out files there; they pass on the LF main tree (120/120). M6.3 and M6.4 stay unchecked.
 - 2026-10-20 M2.7 follow-up fix(market): trade-built session, week and month bars now reproduce their provider's bar timestamp. Each provider declares a `CalendarBarStamp` with its registration (tastytrade/dxFeed and Hyperliquid stamp 00:00 UTC of the trading date; Rithmic and cTrader stamp the session open), and the trade model buckets the seeded bar by that stamp, so a US equity's midnight-stamped daily or weekly bar takes its own trading date's trades instead of opening a duplicate bar. Generic calendar code stays provider-neutral. The `midnight_utc_equity_bars_take_their_trading_date_trades` regression and the full workspace gates passed.
 - 2026-10-20 UI feat(desktop): chrome visibility and watchlist precision with no stabilization item. The drawing tools sidebar is a saved "Drawing toolbar" switch in the platform menu (the collapse and expander controls are removed), and the "Quick trade buttons" chart setting shows or hides the Buy / quantity / Sell bar on every chart; both persist in the chart chrome preferences and default to shown. Watchlist prices use the instrument tick precision, color only the changed digits, and ignore sub-grid prints for tick direction. Preference round-trip and watchlist precision tests passed with the full workspace gates.
+- 2026-10-20 M6.4 Part 1 fix(desktop): rejected saved appearance and order-flow fields post one restore notice that persists across chart rebuilds until the trader edits them. The failing-first `pane_harness_invalid_saved_presentation_reports_one_notice_for_multiple_fields` GPUI regression now passes and covers partial and full recovery; fmt, Clippy, workspace tests and naming_check passed. M6.4 stays unchecked.
 
 ## 7. Known gaps / deferred
 
