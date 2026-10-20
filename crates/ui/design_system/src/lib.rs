@@ -938,7 +938,7 @@ mod tests {
         for required in [
             "--font-sans: \"Inter\", sans-serif;",
             "--font-mono: \"Geist Mono\", monospace;",
-            "--font-weight-normal: 500;",
+            "--font-weight-normal: 400;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 700;",
             "--font-feature-tabular-numerals: \"tnum\";",
@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(platform_mono_font_family(), "Geist Mono");
 
         let typography = platform_typography();
-        assert_eq!(typography.weight(TypographyRole::Normal), 500);
+        assert_eq!(typography.weight(TypographyRole::Normal), 400);
         assert_eq!(typography.weight(TypographyRole::Emphasis), 700);
         assert_eq!(typography.weight(TypographyRole::Strong), 700);
         assert_eq!(typography.tabular_numerals_feature(), "tnum");

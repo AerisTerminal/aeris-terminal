@@ -50,7 +50,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Focus is one style everywhere: the control's `--border-width` border turns `ring-primary` (no
   thicker ring, glow or background change).
 - Typography uses the bundled Inter faces (Regular 400, Medium 500, Bold 700) for platform text and
-  the bundled Faculty Glyphic Regular face only for brand/display text. Changing numbers use Inter's
+  the bundled Faculty Glyphic Regular face only for brand/display text. The normal platform weight
+  (`--font-weight-normal`) is Regular 400; emphasis and strong text use Bold 700. Changing numbers use Inter's
   tabular figures (`tnum`). Geist Mono (Regular, Medium, Bold) is bundled as `--font-mono`
   (`platform_mono_font_family()`) for numbers in data panels only: order book rows, time and sales
   rows, position/order/trade values and screener numeric columns. Headers and labels stay Inter.

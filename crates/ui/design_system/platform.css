@@ -49,7 +49,7 @@
 :root {
   --font-sans: "Inter", sans-serif;
   --font-mono: "Geist Mono", monospace;
-  --font-weight-normal: 500;
+  --font-weight-normal: 400;
   --font-weight-emphasis: 700;
   --font-weight-strong: 700;
   --font-feature-tabular-numerals: "tnum";
