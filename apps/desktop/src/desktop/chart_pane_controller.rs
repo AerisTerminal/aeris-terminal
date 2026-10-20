@@ -288,4 +288,170 @@ mod tests {
         assert!(pane.reject(4));
         assert!(!pane.chart_needs_replacement());
     }
+
+    #[test]
+    fn fixed_switch_publication_permutations_obey_the_selection_fence() {
+        // A replacement commit, old/new data and old/new lifecycle can arrive
+        // in any order after dispatch. Only committed data can install a chart.
+        for commit_at in 0..5 {
+            for old_data_at in 0..5 {
+                for new_data_at in 0..5 {
+                    if commit_at == old_data_at
+                        || commit_at == new_data_at
+                        || old_data_at == new_data_at
+                    {
+                        continue;
+                    }
+                    for old_state_at in 0..5 {
+                        if [commit_at, old_data_at, new_data_at].contains(&old_state_at) {
+                            continue;
+                        }
+                        let new_state_at = (0..5)
+                            .find(|at| {
+                                ![commit_at, old_data_at, new_data_at, old_state_at].contains(at)
+                            })
+                            .expect("fifth event");
+                        let order = [
+                            commit_at,
+                            old_data_at,
+                            new_data_at,
+                            old_state_at,
+                            new_state_at,
+                        ];
+                        let mut pane = ChartPaneController::default();
+                        pane.chart_installed();
+                        pane.request(2);
+                        let mut replacement_installed = false;
+                        for step in 0..5 {
+                            if step == commit_at {
+                                assert!(pane.accept(2), "order {order:?}");
+                            } else if step == old_data_at {
+                                assert_eq!(
+                                    pane.accept_publication(1),
+                                    step < commit_at,
+                                    "order {order:?}"
+                                );
+                            } else if step == new_data_at {
+                                if pane.accept_publication(2) {
+                                    pane.chart_installed();
+                                    replacement_installed = true;
+                                }
+                            } else if step == old_state_at {
+                                assert!(!pane.accept_series_state(1), "order {order:?}");
+                            } else {
+                                assert_eq!(
+                                    pane.accept_series_state(2),
+                                    step > commit_at,
+                                    "order {order:?}"
+                                );
+                            }
+                            assert_eq!(
+                                pane.chart_needs_replacement(),
+                                step >= commit_at && !replacement_installed,
+                                "order {order:?}, step {step}"
+                            );
+                        }
+                        assert!(!pane.accept_publication(1), "order {order:?}");
+                        assert!(pane.accept_publication(2), "order {order:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_switch_and_publication_interleavings_keep_exact_binding() {
+        for seed in 0..128_u64 {
+            let mut random = seed.wrapping_add(1);
+            let mut pane = ChartPaneController::default();
+            pane.chart_installed();
+            let (mut committed, mut displayed, mut pending, mut next) = (1, 1, None, 2);
+            for step in 0..256 {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                match random % 8 {
+                    0 => {
+                        pane.request(next);
+                        pending = Some(next);
+                        next += 1;
+                    }
+                    1 => {
+                        let generation = if random & 8 == 0 {
+                            pending.unwrap_or(next)
+                        } else {
+                            next
+                        };
+                        assert_eq!(
+                            pane.accept(generation),
+                            pending == Some(generation),
+                            "seed {seed}, step {step}"
+                        );
+                        if pending == Some(generation) {
+                            committed = generation;
+                            pending = None;
+                        }
+                    }
+                    2 => {
+                        let generation = if random & 8 == 0 {
+                            pending.unwrap_or(next)
+                        } else {
+                            next
+                        };
+                        assert_eq!(
+                            pane.reject(generation),
+                            pending == Some(generation),
+                            "seed {seed}, step {step}"
+                        );
+                        if pending == Some(generation) {
+                            pending = None;
+                        }
+                    }
+                    3..=5 => {
+                        let generation = match random % 3 {
+                            0 => committed,
+                            1 => next,
+                            _ => committed.saturating_sub(1),
+                        };
+                        let accepted = pane.accept_publication(generation);
+                        assert_eq!(
+                            accepted,
+                            generation == committed,
+                            "seed {seed}, step {step}"
+                        );
+                        if accepted && random & 16 != 0 {
+                            pane.chart_installed();
+                            displayed = committed;
+                        }
+                    }
+                    6 => {
+                        let generation = if random & 8 == 0 { committed } else { next };
+                        assert_eq!(
+                            pane.accept_series_state(generation),
+                            pending.is_none() && generation == committed,
+                            "seed {seed}, step {step}"
+                        );
+                    }
+                    _ => {
+                        let generation = if random & 8 == 0 { committed } else { next };
+                        assert_eq!(
+                            pane.accept_study_publication(Some(generation)),
+                            generation == committed,
+                            "seed {seed}, step {step}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    pane.pending_selection(),
+                    pending,
+                    "seed {seed}, step {step}"
+                );
+                assert_eq!(
+                    pane.chart_needs_replacement(),
+                    displayed != committed,
+                    "seed {seed}, step {step}"
+                );
+            }
+        }
+    }
 }

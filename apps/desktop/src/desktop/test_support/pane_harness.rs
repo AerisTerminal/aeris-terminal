@@ -803,6 +803,99 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     });
 }
 
+fn check_snapshot_switch_order(order: [u8; 3], cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let original = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .chart
+            .as_ref()
+            .expect("original chart")
+            .entity_id()
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("interval selection");
+    let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
+    let mut committed = false;
+    let mut replacement_installed = false;
+    for event in order {
+        let message = match event {
+            0 => MarketWorkerMessage::EngineSelectionCommitted { sequence },
+            1 | 2 => MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
+                generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+                    .with_selection_generation(if event == 1 { 1 } else { sequence }),
+                subscription_id: snapshot.subscription_id.clone(),
+                worker_label: snapshot.worker_label.clone(),
+                ui_diagnostics: None,
+            }),
+            _ => panic!("unknown switch event"),
+        };
+        harness.publications.send(message).expect("fixture message");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1, "order {order:?}");
+            if event == 0 {
+                committed = true;
+            } else if event == 2 && committed {
+                replacement_installed = true;
+            }
+            assert_eq!(
+                pane.chart.as_ref().map(Entity::entity_id) != Some(original),
+                replacement_installed,
+                "order {order:?}, event {event}"
+            );
+            assert_eq!(
+                pane.chart_pane_controller.chart_needs_replacement(),
+                committed && !replacement_installed,
+                "order {order:?}, event {event}"
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn pane_harness_snapshot_order_commit_old_new(cx: &mut TestAppContext) {
+    check_snapshot_switch_order([0, 1, 2], cx);
+}
+
+#[gpui::test]
+fn pane_harness_snapshot_order_commit_new_old(cx: &mut TestAppContext) {
+    check_snapshot_switch_order([0, 2, 1], cx);
+}
+
+#[gpui::test]
+fn pane_harness_snapshot_order_old_commit_new(cx: &mut TestAppContext) {
+    check_snapshot_switch_order([1, 0, 2], cx);
+}
+
+#[gpui::test]
+fn pane_harness_snapshot_order_old_new_commit(cx: &mut TestAppContext) {
+    check_snapshot_switch_order([1, 2, 0], cx);
+}
+
+#[gpui::test]
+fn pane_harness_snapshot_order_new_commit_old(cx: &mut TestAppContext) {
+    check_snapshot_switch_order([2, 0, 1], cx);
+}
+
+#[gpui::test]
+fn pane_harness_snapshot_order_new_old_commit(cx: &mut TestAppContext) {
+    check_snapshot_switch_order([2, 1, 0], cx);
+}
+
 #[gpui::test]
 fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
