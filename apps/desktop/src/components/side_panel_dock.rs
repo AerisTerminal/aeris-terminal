@@ -5,6 +5,8 @@
 //! panels themselves live in their own component modules.
 
 use super::order_book_panel::{OrderBookPanelState, order_book_side_panel};
+use super::order_entry_panel::{ORDER_ENTRY_PANEL_WIDTH, order_entry_side_panel};
+use super::order_ticket::TradingOrderControlsState;
 use super::time_sales_panel::{TIME_SALES_PANEL_WIDTH, TimeSalesPanelState, time_sales_panel};
 use super::watchlist_panel::{WatchlistPanelState, watchlist_side_panel};
 use super::*;
@@ -27,6 +29,7 @@ impl SidePanel {
     pub(super) const fn sizing(self) -> SidePanelSizing {
         match self {
             Self::OrderBook | Self::Watchlist => SidePanelSizing::Flexible,
+            Self::OrderEntry => SidePanelSizing::Fixed(ORDER_ENTRY_PANEL_WIDTH),
             Self::TimeSales => SidePanelSizing::Fixed(TIME_SALES_PANEL_WIDTH),
         }
     }
@@ -40,6 +43,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) width: f32,
     pub(super) split_basis_points: u32,
     pub(super) order_book: OrderBookPanelState<'a>,
+    pub(super) order_entry: TradingOrderControlsState<'a>,
     pub(super) time_sales: TimeSalesPanelState<'a>,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) theme: &'a AerisTheme,
@@ -184,6 +188,7 @@ struct DockContents<'a> {
     app: Entity<WorkspaceSurface>,
     terminal: Entity<TerminalApp>,
     order_book: OrderBookPanelState<'a>,
+    order_entry: TradingOrderControlsState<'a>,
     time_sales: Option<TimeSalesPanelState<'a>>,
     watchlist: Option<WatchlistPanelState>,
     theme: &'a AerisTheme,
@@ -194,6 +199,9 @@ impl DockContents<'_> {
         let content = match panel {
             SidePanel::OrderBook => {
                 Some(order_book_side_panel(&self.order_book).into_any_element())
+            }
+            SidePanel::OrderEntry => {
+                Some(order_entry_side_panel(&self.order_entry).into_any_element())
             }
             SidePanel::TimeSales => self
                 .time_sales
@@ -230,6 +238,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         width,
         split_basis_points,
         order_book,
+        order_entry,
         time_sales,
         watchlist,
         theme,
@@ -245,6 +254,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         app,
         terminal,
         order_book,
+        order_entry,
         time_sales: Some(time_sales),
         watchlist: Some(watchlist),
         theme,
@@ -301,6 +311,7 @@ pub(super) fn side_panel_header(
     let colors = theme.colors;
     let close_id = match panel {
         SidePanel::OrderBook => "close_order_book_panel",
+        SidePanel::OrderEntry => "close_order_entry_panel",
         SidePanel::TimeSales => "close_time_sales_panel",
         SidePanel::Watchlist => "close_watchlist_panel",
     };
@@ -439,13 +450,13 @@ mod tests {
         assert!((tape_only.total_width - TIME_SALES_PANEL_WIDTH).abs() < f32::EPSILON);
         assert_eq!(tape_only.width_from_drag(1_000.0, 500.0), None);
 
+        let fixed = ORDER_ENTRY_PANEL_WIDTH + TIME_SALES_PANEL_WIDTH;
         let all = DockGeometry::new(visible(&SidePanel::ALL), 400.0);
         assert!(
-            (all.total_width - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH + TIME_SALES_PANEL_WIDTH))
-                .abs()
+            (all.total_width - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH + fixed)).abs()
                 < f32::EPSILON
         );
-        assert!((all.fixed_before_split - TIME_SALES_PANEL_WIDTH).abs() < f32::EPSILON);
+        assert!((all.fixed_before_split - fixed).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -458,8 +469,13 @@ mod tests {
             .expect("flexible panels resize");
         assert!((width - 400.0).abs() < 0.01);
 
-        // The split handle sits after the book (400 px) and the fixed Time & Sales column.
-        let handle_x = left + 400.0 + TIME_SALES_PANEL_WIDTH + SIDE_PANEL_SPLIT_DIVIDER_WIDTH / 2.0;
+        // The split handle sits after the book (400 px) and the fixed order entry and
+        // Time & Sales columns.
+        let handle_x = left
+            + 400.0
+            + ORDER_ENTRY_PANEL_WIDTH
+            + TIME_SALES_PANEL_WIDTH
+            + SIDE_PANEL_SPLIT_DIVIDER_WIDTH / 2.0;
         let ratio = all
             .split_ratio_from_drag(left, handle_x)
             .expect("two flexible panels split");
@@ -481,11 +497,16 @@ mod tests {
         assert!(!slots[0].leading_border && !slots[0].split_before);
         assert_eq!(
             slots[1].sizing,
-            DockSlotSizing::Fixed(TIME_SALES_PANEL_WIDTH)
+            DockSlotSizing::Fixed(ORDER_ENTRY_PANEL_WIDTH)
         );
         assert!(slots[1].leading_border);
-        assert_eq!(slots[2].sizing, DockSlotSizing::Grow(0.6));
-        assert!(slots[2].split_before && !slots[2].leading_border);
+        assert_eq!(
+            slots[2].sizing,
+            DockSlotSizing::Fixed(TIME_SALES_PANEL_WIDTH)
+        );
+        assert!(slots[2].leading_border);
+        assert_eq!(slots[3].sizing, DockSlotSizing::Grow(0.6));
+        assert!(slots[3].split_before && !slots[3].leading_border);
 
         let tape_and_watchlist =
             dock_slots(visible(&[SidePanel::TimeSales, SidePanel::Watchlist]), None);

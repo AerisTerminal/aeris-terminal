@@ -435,17 +435,19 @@ pub(super) fn workspace_market_area(
             width: surface.side_panel_width,
             split_basis_points: surface.side_panel_split_basis_points,
             order_book: OrderBookPanelState {
+                app: active_surface,
                 order_book: &surface.order_book,
                 column_menu_open: surface.menu_state.order_book_column_open,
                 columns: surface.order_book.read(cx).columns(),
-                ticket: ticket_controls_state(
-                    active_surface,
-                    surface,
-                    order_book_frame.as_ref(),
-                    has_open_position,
-                    theme,
-                ),
+                theme,
             },
+            order_entry: ticket_controls_state(
+                active_surface,
+                surface,
+                order_book_frame.as_ref(),
+                has_open_position,
+                theme,
+            ),
             time_sales: TimeSalesPanelState {
                 app: active_surface.clone(),
                 tape: surface.trade_tape.as_ref(),

@@ -24,7 +24,10 @@ use aeris_charts_engine::{
     HostLegendSeries, IndicatorChromeOptions, IndicatorKind, IndicatorPane, InteractionOptions,
     PriceScaleMode, PriceScaleTarget, SeriesChromeFlag, TradingIntent, TradingSnapshot,
 };
-pub use aeris_charts_engine::{BigTradesFilter, BigTradesIntensity, BigTradesSize};
+pub use aeris_charts_engine::{
+    BigTradesFilter, BigTradesIntensity, BigTradesSize, CumulativeDeltaStyle,
+    DepthLevel as ChartDepthLevel,
+};
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError,
     ExternalStudyInputRequirements as ChartStudyInputRequirements,
@@ -457,9 +460,13 @@ pub enum FootprintDisplayMode {
 pub struct OrderFlowSettings {
     pub display_mode: FootprintDisplayMode,
     pub show_cumulative_delta: bool,
+    pub cumulative_delta_style: CumulativeDeltaStyle,
     pub show_delta_histogram: bool,
     /// Big-trades bubbles over the price series; `None` while the indicator is not added.
     pub big_trades: Option<BigTradesSettings>,
+    /// Current-book bars at the price pane's right edge; `None` while the indicator is not
+    /// added, otherwise whether it is shown.
+    pub order_book_depth: Option<bool>,
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
@@ -470,8 +477,10 @@ impl Default for OrderFlowSettings {
         Self {
             display_mode: FootprintDisplayMode::BidAsk,
             show_cumulative_delta: false,
+            cumulative_delta_style: CumulativeDeltaStyle::Line,
             show_delta_histogram: false,
             big_trades: None,
+            order_book_depth: None,
             ticks_per_row: 0,
         }
     }
@@ -936,6 +945,7 @@ enum LegendItem {
     Study { study_id: u64, series_id: u32 },
     OrderFlow(OrderFlowStudy),
     BigTrades,
+    OrderBookDepth,
 }
 
 /// The volume indicator on a chart: the outputs of the Aeris Charts binding drawing it and the
@@ -984,6 +994,7 @@ impl LegendItem {
             Self::OrderFlow(study) => (1_u64 << 62) | study as u64,
             Self::VolumeProfile => 1_u64 << 61,
             Self::BigTrades => 1_u64 << 60,
+            Self::OrderBookDepth => 1_u64 << 59,
         }
     }
 }
@@ -1105,6 +1116,7 @@ pub struct AerisChartView {
     hollow_base: Option<ChartAppearanceSettings>,
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
+    order_book_depth_state: Option<OrderBookDepthState>,
     product_bars: ProductPriceBars,
     legend_options: ChartLegendOptions,
     /// Host content placed under the symbol legend row, such as the trading host's order
@@ -1209,6 +1221,7 @@ impl AerisChartView {
             hollow_base: None,
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
+            order_book_depth_state: None,
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
@@ -1315,6 +1328,7 @@ impl AerisChartView {
             hollow_base: None,
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
+            order_book_depth_state: None,
             product_bars,
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
@@ -3258,6 +3272,8 @@ pub use drawings::{
 mod export;
 mod indicators;
 mod input;
+mod order_book_depth;
+use order_book_depth::OrderBookDepthState;
 mod order_flow;
 pub use order_flow::classify_order_flow_sweeps;
 mod studies;

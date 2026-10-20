@@ -72,6 +72,9 @@ impl AerisChartView {
             return Ok(false);
         }
         self.order_flow_settings = settings;
+        if settings.order_book_depth != Some(true) {
+            self.clear_order_book_depth();
+        }
         self.reconfigure_order_flow();
         self.mark_user_state_changed();
         Ok(true)
@@ -316,6 +319,7 @@ impl AerisChartView {
             visual: footprint_visual_options(cell_mode(self.order_flow_settings.display_mode)),
             show_footprint: self.chart_type == super::ChartType::Footprint,
             show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
+            cumulative_delta_style: self.order_flow_settings.cumulative_delta_style,
             show_delta_histogram: self.order_flow_settings.show_delta_histogram,
             big_trades: self
                 .order_flow_settings

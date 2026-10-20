@@ -1,4 +1,4 @@
-//! Compact practice-trading controls owned by the order-book panel.
+//! Compact practice-trading controls shown in the order entry panel.
 
 use super::Input;
 use super::InputState;
@@ -46,8 +46,6 @@ pub(super) fn trading_order_controls(
         .flex_col()
         .gap(px(GAP))
         .p_2()
-        .border_t(px(state.theme.dimensions.border_width))
-        .border_color(gpui_color(state.theme.colors.border))
         .bg(gpui_color(state.theme.colors.surface))
         .child(account_selector(state))
         .children(account_summary(state.trading_pnl, state.theme))

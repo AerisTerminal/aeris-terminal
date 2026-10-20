@@ -1020,6 +1020,7 @@ impl TerminalApp {
             series_colors: surface.chart_series_colors(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
+            trades_available: super::provider_trades_available(surface.provider),
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
             chart_trade_buttons_visible: self.chart_chrome.chart_trade_buttons.shown(),
@@ -1271,7 +1272,9 @@ impl TerminalApp {
             action,
             ChartSettingsAction::FootprintMode(_)
                 | ChartSettingsAction::ToggleCumulativeDelta
+                | ChartSettingsAction::CumulativeDeltaStyle(_)
                 | ChartSettingsAction::ToggleDeltaHistogram
+                | ChartSettingsAction::ToggleOrderBookDepth
                 | ChartSettingsAction::FootprintTicksPerRow(_)
         ) {
             return false;
@@ -1284,8 +1287,17 @@ impl TerminalApp {
             ChartSettingsAction::ToggleCumulativeDelta => {
                 settings.show_cumulative_delta = !settings.show_cumulative_delta;
             }
+            ChartSettingsAction::CumulativeDeltaStyle(style) => {
+                settings.cumulative_delta_style = style;
+            }
             ChartSettingsAction::ToggleDeltaHistogram => {
                 settings.show_delta_histogram = !settings.show_delta_histogram;
+            }
+            ChartSettingsAction::ToggleOrderBookDepth => {
+                settings.order_book_depth = match settings.order_book_depth {
+                    Some(_) => None,
+                    None => Some(true),
+                };
             }
             ChartSettingsAction::FootprintTicksPerRow(ticks) => settings.ticks_per_row = ticks,
             _ => unreachable!(),
@@ -1333,7 +1345,9 @@ impl TerminalApp {
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::ToggleCumulativeDelta
+            | ChartSettingsAction::CumulativeDeltaStyle(_)
             | ChartSettingsAction::ToggleDeltaHistogram
+            | ChartSettingsAction::ToggleOrderBookDepth
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks
@@ -1376,7 +1390,9 @@ impl TerminalApp {
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::ToggleCumulativeDelta
+            | ChartSettingsAction::CumulativeDeltaStyle(_)
             | ChartSettingsAction::ToggleDeltaHistogram
+            | ChartSettingsAction::ToggleOrderBookDepth
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks

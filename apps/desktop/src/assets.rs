@@ -60,12 +60,13 @@ pub enum UiIcon {
     More,
     Template,
     OrderBook,
+    OrderEntry,
     TimeSales,
     Watchlist,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -114,6 +115,7 @@ impl UiIcon {
         Self::More,
         Self::Template,
         Self::OrderBook,
+        Self::OrderEntry,
         Self::TimeSales,
         Self::Watchlist,
     ];
@@ -169,6 +171,7 @@ impl UiIcon {
             Self::More => "more.svg",
             Self::Template => "template.svg",
             Self::OrderBook => "order-book.svg",
+            Self::OrderEntry => "order-entry.svg",
             Self::TimeSales => "time-sales.svg",
             Self::Watchlist => "watchlist.svg",
         };
@@ -582,6 +585,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "copy-success.svg" => include_bytes!("../assets/icons/ui/copy-success.svg"),
         "data-panel.svg" => include_bytes!("../assets/icons/ui/data-panel.svg"),
         "order-book.svg" => include_bytes!("../assets/icons/ui/order-book.svg"),
+        "order-entry.svg" => include_bytes!("../assets/icons/ui/order-entry.svg"),
         "time-sales.svg" => include_bytes!("../assets/icons/ui/time-sales.svg"),
         "watchlist.svg" => include_bytes!("../assets/icons/ui/watchlist.svg"),
         "trash.svg" => include_bytes!("../assets/icons/ui/trash.svg"),

@@ -671,7 +671,7 @@ const PANEL_SIDEBAR_WIDTH: f32 = 36.0;
 pub(super) struct PanelSidebarState {
     pub(super) side_panels: SidePanelVisibility,
     pub(super) context_visible: bool,
-    /// Order book and Time & Sales need a selected market.
+    /// Order book, order entry and Time & Sales need a selected market.
     pub(super) market_selected: bool,
 }
 
@@ -722,6 +722,7 @@ pub(super) fn panel_sidebar(
         .bg(gpui_color(colors.surface))
         .child(side_panel(SidePanel::Watchlist))
         .child(side_panel(SidePanel::OrderBook))
+        .child(side_panel(SidePanel::OrderEntry))
         .child(side_panel(SidePanel::TimeSales))
         .child(context)
 }
@@ -740,6 +741,13 @@ fn side_panel_toggle(
             WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleOrderBook,
+        ),
+        SidePanel::OrderEntry => (
+            "order_entry_toggle",
+            HugeIcon::OrderEntry,
+            WorkspaceSurface::toggle_order_entry
+                as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+            aeris_desktop::command_registry::CommandId::ToggleOrderEntry,
         ),
         SidePanel::TimeSales => (
             "time_sales_toggle",

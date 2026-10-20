@@ -280,7 +280,8 @@ pub struct WorkspacePaneState {
     /// Durable user-authored chart presentation and drawing state.
     #[prost(message, optional, tag = "10")]
     pub chart: Option<WorkspaceChartState>,
-    /// Visible native side-panel components: bit 0 order book, bit 1 watchlist.
+    /// Visible native side-panel components: bit 0 order book, bit 1 watchlist,
+    /// bit 2 Time & Sales, bit 3 order entry.
     #[prost(uint32, tag = "11")]
     pub side_panel_visibility: u32,
     /// Side-panel width in logical pixels.
@@ -422,6 +423,13 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// before it replaced the footprint trade bubbles.
     #[prost(message, optional, tag = "8")]
     pub big_trades: Option<WorkspaceBigTradesState>,
+    /// The current-book bars at the price pane's right edge; absent when the indicator is not
+    /// added, otherwise whether it is shown.
+    #[prost(bool, optional, tag = "9")]
+    pub order_book_depth: Option<bool>,
+    /// 0 draws CVD as a line and 1 as candles; absent in older workspaces, which drew lines.
+    #[prost(uint32, tag = "10")]
+    pub cumulative_delta_style: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]

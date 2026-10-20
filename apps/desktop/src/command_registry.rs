@@ -15,6 +15,7 @@ pub enum CommandId {
     CloseWindow,
     ToggleContext,
     ToggleOrderBook,
+    ToggleOrderEntry,
     ToggleTimeSales,
     ToggleWatchlist,
     ChartCandles,
@@ -46,7 +47,7 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::OpenPalette,
         Self::ToggleFullscreen,
         Self::MinimizeWindow,
@@ -54,6 +55,7 @@ impl CommandId {
         Self::CloseWindow,
         Self::ToggleContext,
         Self::ToggleOrderBook,
+        Self::ToggleOrderEntry,
         Self::ToggleTimeSales,
         Self::ToggleWatchlist,
         Self::ChartCandles,
@@ -94,6 +96,7 @@ impl CommandId {
             | Self::CloseWindow => CommandGroup::General,
             Self::ToggleContext
             | Self::ToggleOrderBook
+            | Self::ToggleOrderEntry
             | Self::ToggleTimeSales
             | Self::ToggleWatchlist => CommandGroup::Panels,
             Self::ChartCandles
@@ -403,6 +406,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         CommandId::ToggleOrderBook,
         "Order book",
         "toggle show hide dom depth",
+        &[],
+    ),
+    spec(
+        CommandId::ToggleOrderEntry,
+        "Order entry",
+        "toggle show hide ticket trade buy sell",
         &[],
     ),
     spec(

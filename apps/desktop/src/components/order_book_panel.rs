@@ -1,6 +1,5 @@
-//! Docked order book panel: depth ladder above the order ticket, plus its column menu.
+//! Docked order book panel: the depth ladder and its column menu.
 
-use super::order_ticket::{TradingOrderControlsState, trading_order_controls};
 use super::side_panel_dock::{side_panel_header, side_panel_header_button};
 use super::{
     AerisTheme, Div, Entity, HugeIcon, InteractiveElement, IntoElement, MenuPanel, MenuPlacement,
@@ -11,22 +10,22 @@ use gpui::StatefulInteractiveElement;
 
 #[derive(Clone, Copy)]
 pub(super) struct OrderBookPanelState<'a> {
+    pub(super) app: &'a Entity<WorkspaceSurface>,
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
     pub(super) column_menu_open: bool,
     pub(super) columns: OrderBookColumnVisibility,
-    /// Order ticket docked under the ladder; it carries the panel's app, book frame and theme.
-    pub(super) ticket: TradingOrderControlsState<'a>,
+    pub(super) theme: &'a AerisTheme,
 }
 
 pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
     let OrderBookPanelState {
+        app,
         order_book,
         column_menu_open,
         columns,
-        ticket,
+        theme,
     } = *state;
-    let app = ticket.app.clone();
-    let theme = ticket.theme;
+    let app = app.clone();
     let settings_app = app.clone();
     let recenter_order_book = order_book.clone();
     div()
@@ -71,7 +70,6 @@ pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
                 .overflow_hidden()
                 .child(order_book.clone()),
         )
-        .child(trading_order_controls(&ticket))
         .children(
             column_menu_open.then(|| order_book_column_menu_layer(app, order_book, columns, theme)),
         )

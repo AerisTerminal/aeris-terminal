@@ -26,6 +26,8 @@ pub(super) const MAXIMUM_WATCHLIST_ENTRIES: usize = 64;
 /// Fewer than Aeris Charts accepts, so the largest templates cannot crowd the workspace file.
 pub(super) const MAXIMUM_DRAWING_TEMPLATES: usize = 64;
 pub(super) const MAXIMUM_DRAWING_TEMPLATE_NAME_BYTES: usize = 64;
+/// Revision 2 moved the order ticket out of the order book into its own order entry panel.
+const WORKSPACE_SCHEMA_REVISION: u32 = 2;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct LegacyWorkspaceEnvelope {
@@ -234,7 +236,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         interval_seconds: 60,
         watchlist: vec!["BTC-USDC".to_string()],
         workspace_revision: 1,
-        schema_revision: 1,
+        schema_revision: WORKSPACE_SCHEMA_REVISION,
         layout_generation: 1,
         active_workspace_id: 1,
         workspace_tabs: vec![WorkspaceTabState {
@@ -258,6 +260,21 @@ pub(super) fn default_workspace() -> WorkspaceState {
             instrument: Some(instrument),
         }],
         drawing_templates: Vec::new(),
+    }
+}
+
+fn sanitize_side_panels(pane: &mut WorkspacePaneState, ticket_in_order_book: bool) {
+    let order_book = u32::from(super::SidePanel::OrderBook.persisted_bit());
+    let order_entry = u32::from(super::SidePanel::OrderEntry.persisted_bit());
+    pane.side_panel_visibility &= u32::from(super::SidePanelVisibility::PERSISTED);
+    if ticket_in_order_book && pane.side_panel_visibility & order_book != 0 {
+        pane.side_panel_visibility |= order_entry;
+    }
+    if pane.side_panel_width != 0 {
+        pane.side_panel_width = pane.side_panel_width.clamp(360, 480);
+    }
+    if pane.side_panel_split_basis_points != 0 {
+        pane.side_panel_split_basis_points = pane.side_panel_split_basis_points.clamp(500, 9_500);
     }
 }
 
@@ -304,20 +321,15 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     // default template so reset cannot be overwritten after the engine API runs.
     workspace.default_chart_settings = None;
     sanitize_watchlist(&mut workspace);
+    // Earlier revisions docked the ticket inside the order book, so an open book keeps it.
+    let ticket_in_order_book = workspace.schema_revision < WORKSPACE_SCHEMA_REVISION;
+    workspace.schema_revision = workspace.schema_revision.max(WORKSPACE_SCHEMA_REVISION);
     for pane in workspace
         .workspace_tabs
         .iter_mut()
         .flat_map(|tab| tab.panes.iter_mut())
     {
-        // Order book, watchlist and Time & Sales panels.
-        pane.side_panel_visibility &= 0b111;
-        if pane.side_panel_width != 0 {
-            pane.side_panel_width = pane.side_panel_width.clamp(360, 480);
-        }
-        if pane.side_panel_split_basis_points != 0 {
-            pane.side_panel_split_basis_points =
-                pane.side_panel_split_basis_points.clamp(500, 9_500);
-        }
+        sanitize_side_panels(pane, ticket_in_order_book);
         let Some(chart) = &mut pane.chart else {
             continue;
         };
@@ -826,6 +838,25 @@ mod tests {
         }
     }
 
+    fn round_trip_order_flow() -> WorkspaceOrderFlowSettingsState {
+        WorkspaceOrderFlowSettingsState {
+            display_mode: 2,
+            show_cumulative_delta: true,
+            show_delta_histogram: true,
+            ticks_per_row: 5,
+            study_visibility_revision: 1,
+            big_trades: Some(WorkspaceBigTradesState {
+                filter: 3,
+                minimum_volume_bits: 25.0_f64.to_bits(),
+                size: 2,
+                show_volume: false,
+                hidden: true,
+            }),
+            order_book_depth: Some(false),
+            cumulative_delta_style: 1,
+        }
+    }
+
     fn round_trip_chart_state() -> WorkspaceChartState {
         WorkspaceChartState {
             chart_type: "bars".to_string(),
@@ -891,20 +922,7 @@ mod tests {
                 area_bottom_color: "#2563eb00".to_string(),
                 crosshair_style_custom: Some(true),
             }),
-            order_flow: Some(WorkspaceOrderFlowSettingsState {
-                display_mode: 2,
-                show_cumulative_delta: true,
-                show_delta_histogram: true,
-                ticks_per_row: 5,
-                study_visibility_revision: 1,
-                big_trades: Some(WorkspaceBigTradesState {
-                    filter: 3,
-                    minimum_volume_bits: 25.0_f64.to_bits(),
-                    size: 2,
-                    show_volume: false,
-                    hidden: true,
-                }),
-            }),
+            order_flow: Some(round_trip_order_flow()),
             context_panel_visible: true,
             context_panel_tab: 2,
             chart_link_group: 2,
@@ -1113,9 +1131,36 @@ mod tests {
         assert_eq!(sanitized.watchlist_entries.len(), 1);
         assert_eq!(sanitized.watchlist, vec!["BTC-USDC"]);
         let pane = &sanitized.workspace_tabs[0].panes[0];
-        assert_eq!(pane.side_panel_visibility, 7);
+        assert_eq!(pane.side_panel_visibility, 15);
         assert_eq!(pane.side_panel_width, 480);
         assert_eq!(pane.side_panel_split_basis_points, 9_500);
+    }
+
+    #[test]
+    fn workspaces_saved_with_the_ticket_in_the_order_book_open_the_order_entry_panel() {
+        let mut legacy = default_workspace();
+        legacy.schema_revision = 1;
+        // Order book and watchlist open; a closed book keeps the ticket closed too.
+        legacy.workspace_tabs[0].panes[0].side_panel_visibility = 0b011;
+        let mut closed_book = legacy.workspace_tabs[0].panes[0].clone();
+        closed_book.pane_id = 2;
+        closed_book.side_panel_visibility = 0b010;
+        legacy.workspace_tabs[0].panes.push(closed_book);
+
+        let migrated = sanitize_workspace(legacy);
+
+        assert_eq!(migrated.schema_revision, WORKSPACE_SCHEMA_REVISION);
+        let panes = &migrated.workspace_tabs[0].panes;
+        assert_eq!(panes[0].side_panel_visibility, 0b1011);
+        assert_eq!(panes[1].side_panel_visibility, 0b010);
+
+        let mut current = migrated;
+        current.workspace_tabs[0].panes[0].side_panel_visibility = 0b001;
+        let resanitized = sanitize_workspace(current);
+        assert_eq!(
+            resanitized.workspace_tabs[0].panes[0].side_panel_visibility, 0b001,
+            "a current workspace may keep the order book open without the ticket"
+        );
     }
 
     #[test]

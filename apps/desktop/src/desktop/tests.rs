@@ -1416,6 +1416,68 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn order_book_on_chart_holds_the_book_demand_until_removed(cx: &mut TestAppContext) {
+        let (surface, requests, _publications, cx) = harness(cx);
+        install_chart(&surface, None, cx);
+        let depth_demands = || {
+            requests
+                .try_iter()
+                .filter_map(|command| match command {
+                    MarketWorkerCommand::DepthVisible(visible) => Some(visible),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        depth_demands();
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                assert!(surface.add_order_flow_study(
+                    workspace_surface::OrderFlowMenuStudy::OrderBookDepth,
+                    cx
+                ));
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            depth_demands(),
+            vec![true],
+            "the chart's book opens the demand"
+        );
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.set_side_panel_visible(SidePanel::OrderBook, true, cx);
+                surface.set_side_panel_visible(SidePanel::OrderBook, false, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            depth_demands(),
+            Vec::<bool>::new(),
+            "the order book panel shares the open demand"
+        );
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                let settings = surface.chart_order_flow_settings(cx).expect("chart");
+                surface.set_chart_order_flow_settings(
+                    OrderFlowSettings {
+                        order_book_depth: None,
+                        ..settings
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            depth_demands(),
+            vec![false],
+            "removing it releases the demand"
+        );
+    }
+
+    #[gpui::test]
     fn big_trades_dialog_applies_only_a_valid_draft_and_keeps_visibility(cx: &mut TestAppContext) {
         let (surface, _requests, _publications, cx) = harness(cx);
         let hidden = BigTradesSettings {
@@ -3210,8 +3272,33 @@ fn time_sales_is_an_independent_market_panel_with_a_stable_persisted_bit() {
     assert_eq!(SidePanelVisibility::from_persisted(4), panels);
     assert_eq!(
         SidePanelVisibility::from_persisted(u32::MAX),
-        SidePanelVisibility(0b111)
+        SidePanelVisibility(0b1111)
     );
+}
+
+#[test]
+fn order_entry_is_its_own_market_panel_that_keeps_the_book_demanded() {
+    assert_eq!(SidePanel::OrderEntry.title(), "Order Entry");
+    assert_eq!(
+        aeris_desktop::command_registry::command(
+            aeris_desktop::command_registry::CommandId::ToggleOrderEntry
+        )
+        .title,
+        "Order entry"
+    );
+    assert!(SidePanel::OrderEntry.requires_market());
+
+    let mut panels = SidePanelVisibility::default();
+    panels.set(SidePanel::OrderEntry, true);
+    assert!(!panels.contains(SidePanel::OrderBook));
+    assert_eq!(SidePanelVisibility::from_persisted(8), panels);
+    // The ticket trades on the live book frame, so it holds depth demand without the ladder.
+    assert!(panels.needs_order_book());
+
+    let mut tape_and_watchlist = SidePanelVisibility::default();
+    tape_and_watchlist.set(SidePanel::TimeSales, true);
+    tape_and_watchlist.set(SidePanel::Watchlist, true);
+    assert!(!tape_and_watchlist.needs_order_book());
 }
 
 #[test]

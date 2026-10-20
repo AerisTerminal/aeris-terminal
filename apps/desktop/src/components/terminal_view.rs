@@ -264,6 +264,7 @@ impl TerminalApp {
             CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
             CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
             CommandId::ToggleOrderBook => surface.update(cx, WorkspaceSurface::toggle_order_book),
+            CommandId::ToggleOrderEntry => surface.update(cx, WorkspaceSurface::toggle_order_entry),
             CommandId::ToggleTimeSales => surface.update(cx, WorkspaceSurface::toggle_time_sales),
             CommandId::ToggleWatchlist => surface.update(cx, WorkspaceSurface::toggle_watchlist),
             CommandId::ChartCandles

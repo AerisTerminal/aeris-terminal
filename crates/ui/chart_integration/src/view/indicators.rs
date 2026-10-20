@@ -131,6 +131,7 @@ impl AerisChartView {
                 .into_iter()
                 .any(|study| self.has_order_flow_study(study))
             || self.order_flow_settings.big_trades.is_some()
+            || self.order_flow_settings.order_book_depth.is_some()
     }
     /// Removes every indicator. The product-owned price and volume series stay in place.
     pub fn clear_indicators(&mut self) -> bool {
@@ -144,6 +145,7 @@ impl AerisChartView {
             }
         }
         cleared |= self.remove_big_trades();
+        cleared |= self.remove_order_book_depth();
         if !cleared {
             return false;
         }
@@ -214,6 +216,10 @@ impl AerisChartView {
             let item = LegendItem::BigTrades;
             insert_price_pane_legend_row(&mut rows, item, "Big Trades", big_trades.visible, true);
         }
+        if let Some(visible) = self.order_flow_settings.order_book_depth {
+            let item = LegendItem::OrderBookDepth;
+            insert_price_pane_legend_row(&mut rows, item, "Order Book", visible, false);
+        }
         apply_legend_options(&mut rows, self.legend_options);
         rows
     }
@@ -241,6 +247,9 @@ impl AerisChartView {
         }
         if item == LegendItem::BigTrades {
             return self.set_big_trades_visible(visible);
+        }
+        if item == LegendItem::OrderBookDepth {
+            return self.set_order_book_depth_visible(visible);
         }
         let ids: Vec<u32> = match item {
             // The footprint presents the same product price series, so they toggle together.
@@ -285,7 +294,10 @@ impl AerisChartView {
                 }
                 return changed;
             }
-            LegendItem::Study { .. } | LegendItem::OrderFlow(_) | LegendItem::BigTrades => {
+            LegendItem::Study { .. }
+            | LegendItem::OrderFlow(_)
+            | LegendItem::BigTrades
+            | LegendItem::OrderBookDepth => {
                 unreachable!("study and order-flow visibility handled above")
             }
         };
@@ -311,6 +323,7 @@ impl AerisChartView {
             LegendItem::Volume => self.remove_volume(),
             LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
             LegendItem::BigTrades => return self.remove_big_trades(),
+            LegendItem::OrderBookDepth => return self.remove_order_book_depth(),
             LegendItem::VolumeProfile => self.remove_volume_profile(),
             LegendItem::Asset | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),

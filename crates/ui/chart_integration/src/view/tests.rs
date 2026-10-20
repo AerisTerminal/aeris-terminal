@@ -354,6 +354,113 @@ fn order_flow_settings_and_chart_type_changes_keep_footprint_history() {
 }
 
 #[test]
+fn cumulative_delta_style_converts_the_drawn_cvd_in_place() {
+    let mut chart = AerisChartView::empty();
+    let mut settings = chart.order_flow_settings();
+    settings.show_cumulative_delta = true;
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &[order_flow_trade(1, 60_000_000, 2.0)],
+        )
+        .unwrap();
+    let cvd = |chart: &AerisChartView| {
+        chart
+            .order_flow_state
+            .as_ref()
+            .and_then(|state| state.study_series(OrderFlowStudy::CumulativeDelta))
+            .and_then(|series| chart.engine.series_kind(series))
+    };
+    assert_eq!(cvd(&chart), Some(aeris_charts_engine::SeriesKind::Line));
+
+    settings.cumulative_delta_style = CumulativeDeltaStyle::Candles;
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    assert_eq!(
+        cvd(&chart),
+        Some(aeris_charts_engine::SeriesKind::Candlestick)
+    );
+}
+
+#[test]
+fn order_book_depth_follows_the_indicator_and_its_legend_row() {
+    let level = |price, size| ChartDepthLevel {
+        price,
+        size,
+        order_count: None,
+    };
+    let book = || {
+        (
+            vec![level(100.0, 3.0), level(99.75, 5.0)],
+            vec![level(100.25, 2.0)],
+        )
+    };
+    let drawn = |chart: &AerisChartView| {
+        chart
+            .order_book_depth_state
+            .as_ref()
+            .and_then(|state| chart.engine.depth_book(state.stream))
+            .map(|book| book.ladder(10, 0.0, None).len())
+    };
+    let mut chart = AerisChartView::empty();
+    let (bids, asks) = book();
+    chart
+        .apply_order_book_depth("instrument:test", 0.25, bids, asks)
+        .unwrap();
+    assert_eq!(
+        drawn(&chart),
+        None,
+        "the book is ignored until the indicator is added"
+    );
+
+    let mut settings = chart.order_flow_settings();
+    settings.order_book_depth = Some(true);
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    let (bids, asks) = book();
+    chart
+        .apply_order_book_depth("instrument:test", 0.25, bids, asks)
+        .unwrap();
+    assert_eq!(drawn(&chart), Some(3));
+    assert!(
+        chart
+            .legend_rows()
+            .iter()
+            .any(|row| row.item == LegendItem::OrderBookDepth && row.visible)
+    );
+
+    // A crossed book is rejected and leaves no stale bars behind.
+    let crossed = chart.apply_order_book_depth(
+        "instrument:test",
+        0.25,
+        vec![level(100.5, 1.0)],
+        vec![level(100.25, 1.0)],
+    );
+    assert!(crossed.is_err());
+    assert_eq!(drawn(&chart), None);
+
+    assert!(chart.set_legend_item_visible(LegendItem::OrderBookDepth, false));
+    assert_eq!(chart.order_flow_settings().order_book_depth, Some(false));
+    let (bids, asks) = book();
+    chart
+        .apply_order_book_depth("instrument:test", 0.25, bids, asks)
+        .unwrap();
+    assert_eq!(drawn(&chart), None, "a hidden indicator draws nothing");
+
+    assert!(chart.remove_legend_indicator(LegendItem::OrderBookDepth));
+    assert_eq!(chart.order_flow_settings().order_book_depth, None);
+    assert!(
+        !chart
+            .legend_rows()
+            .iter()
+            .any(|row| row.item == LegendItem::OrderBookDepth)
+    );
+}
+
+#[test]
 fn order_flow_resume_ordinal_scopes_suffix_projection_and_appends_skip_forced_layout() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);

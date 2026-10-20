@@ -164,6 +164,8 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         ticks_per_row: 0,
         study_visibility_revision: 0,
         big_trades: None,
+        order_book_depth: None,
+        cumulative_delta_style: 0,
     };
     let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
     assert!(!restored.show_cumulative_delta);
@@ -190,6 +192,8 @@ fn retired_footprint_trade_bubbles_restore_without_big_trades() {
         ticks_per_row: 0,
         study_visibility_revision: 1,
         big_trades: None,
+        order_book_depth: None,
+        cumulative_delta_style: 0,
     }
     .encode_to_vec();
     // Tag 4 (varint) enabled the footprint trade bubbles; tag 5 (fixed64) held their threshold.
@@ -285,6 +289,107 @@ fn big_trades_settings_round_trip_and_invalid_state_is_rejected() {
         };
         assert_eq!(restored_order_flow_settings(&state), None, "{invalid:?}");
     }
+}
+
+#[test]
+fn order_book_depth_and_cvd_style_round_trip_and_unknown_style_is_rejected() {
+    for order_book_depth in [None, Some(true), Some(false)] {
+        for cumulative_delta_style in [CumulativeDeltaStyle::Line, CumulativeDeltaStyle::Candles] {
+            let settings = OrderFlowSettings {
+                show_cumulative_delta: true,
+                cumulative_delta_style,
+                order_book_depth,
+                ..OrderFlowSettings::default()
+            };
+            let persisted = persisted_order_flow_settings(settings);
+            assert_eq!(restored_order_flow_settings(&persisted), Some(settings));
+        }
+    }
+    let older = WorkspaceOrderFlowSettingsState {
+        study_visibility_revision: 1,
+        ..WorkspaceOrderFlowSettingsState::default()
+    };
+    let restored = restored_order_flow_settings(&older).expect("older settings restore");
+    assert_eq!(restored.cumulative_delta_style, CumulativeDeltaStyle::Line);
+    assert_eq!(restored.order_book_depth, None);
+    let unknown = WorkspaceOrderFlowSettingsState {
+        cumulative_delta_style: 2,
+        ..older
+    };
+    assert_eq!(restored_order_flow_settings(&unknown), None);
+}
+
+#[test]
+fn order_book_frame_projects_resting_levels_onto_the_price_grid() {
+    use aeris_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow, OrderBookState};
+    let level = |price, quantity: Option<i64>, order_count| OrderBookColumnLevel {
+        price,
+        quantity,
+        order_count,
+        price_text: String::new(),
+        quantity_text: String::new(),
+        traded_volume: 0,
+        traded_volume_text: String::new(),
+        relative_size_bps: 0,
+    };
+    let mut frame = OrderBookFrame {
+        provider_id: "rithmic".to_string(),
+        instrument_id: "ESZ6".to_string(),
+        entitlement_id: "test".to_string(),
+        session_generation: 1,
+        selection_generation: 1,
+        revision: 1,
+        source_watermark: 1,
+        bbo_source_watermark: 1,
+        state: OrderBookState::Ready,
+        price_scale: 2,
+        quantity_scale: 0,
+        price_increment: Some(25),
+        best_bid: Some(level(500_000, Some(4), None)),
+        best_ask: Some(level(500_025, None, None)),
+        traded_volumes: std::collections::BTreeMap::new(),
+        trade_source_watermark: 0,
+        top_of_book_only: false,
+        rows: vec![
+            OrderBookRow {
+                bid: Some(level(500_000, Some(12), Some(3))),
+                ask: Some(level(500_025, Some(7), Some(0))),
+            },
+            OrderBookRow {
+                bid: Some(level(499_975, Some(0), None)),
+                ask: None,
+            },
+        ],
+    };
+    let (tick_size, bids, asks) = chart_order_book_depth(&frame).expect("ready book");
+    assert!((tick_size - 0.25).abs() < f64::EPSILON);
+    assert_eq!(
+        bids,
+        vec![ChartDepthLevel {
+            price: 5_000.0,
+            size: 12.0,
+            order_count: Some(3),
+        }],
+        "an empty level is not drawn"
+    );
+    assert_eq!(
+        asks,
+        vec![ChartDepthLevel {
+            price: 5_000.25,
+            size: 7.0,
+            order_count: None,
+        }],
+        "a zero order count means the provider published none"
+    );
+
+    frame.top_of_book_only = true;
+    let (_, bids, asks) = chart_order_book_depth(&frame).expect("top of book");
+    assert_eq!(bids.len(), 1);
+    assert!(asks.is_empty(), "a best offer without a size has no bar");
+
+    frame.state =
+        OrderBookState::Recovering(aeris_market_data::OrderBookRecoveryReason::AwaitingSnapshot);
+    assert_eq!(chart_order_book_depth(&frame), None);
 }
 
 #[test]

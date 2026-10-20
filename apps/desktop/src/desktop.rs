@@ -54,6 +54,8 @@ mod native_ui;
 mod notification_center;
 #[path = "components/order_book_panel.rs"]
 mod order_book_panel;
+#[path = "components/order_entry_panel.rs"]
+mod order_entry_panel;
 #[path = "components/order_quantity.rs"]
 mod order_quantity;
 #[path = "components/order_ticket.rs"]
@@ -103,21 +105,21 @@ use aeris_chart_integration::{
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingId, ChartDrawingKind, ChartDrawingStamp, ChartExecutionId, ChartExecutionKind,
-    ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow,
-    ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata, ChartLegendOptions, ChartOrderId,
-    ChartOrderKind, ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPositionId,
-    ChartPositionSide, ChartSeriesColors, ChartSettingsRequest, ChartSplitDirection,
-    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
-    ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
-    ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
+    ChartDepthLevel, ChartDrawingId, ChartDrawingKind, ChartDrawingStamp, ChartExecutionId,
+    ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot,
+    ChartHostTimeWindow, ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata,
+    ChartLegendOptions, ChartOrderId, ChartOrderKind, ChartOrderRole, ChartOrderSide,
+    ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSeriesColors, ChartSettingsRequest,
+    ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
     ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
     ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
     ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
-    ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH,
-    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction,
-    PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
-    classify_order_flow_sweeps,
+    ChartWorkspaceLayout, CumulativeDeltaStyle, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode,
+    MAXIMUM_STUDY_LINE_WIDTH, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
+    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind,
+    VolumeAverageSettings, VolumePlacement, VolumeSettings, classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -795,6 +797,13 @@ struct ObservedChart {
     selected_drawing: Option<ChartDrawingId>,
 }
 
+/// Whether the market worker holds a pane's order-book subscription open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderBookDemand {
+    Released,
+    Open,
+}
+
 struct WorkspaceSurface {
     chart: Option<Entity<AerisChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
@@ -886,6 +895,8 @@ struct WorkspaceSurface {
     restored_chart_state: Option<WorkspaceChartState>,
     chart_persistence_dirty: bool,
     last_chart_user_state_revision: u64,
+    /// The order-book demand the market worker last accepted for this pane.
+    order_book_demand: OrderBookDemand,
     price_alerts: Vec<WorkspacePriceAlertState>,
     price_alert_dialog: Option<PriceAlertDialogState>,
     price_alert_restore_status: PriceAlertRestoreStatus,
@@ -2990,6 +3001,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             if user_state_revision != app.last_chart_user_state_revision {
                 app.last_chart_user_state_revision = user_state_revision;
                 app.chart_persistence_dirty = true;
+                app.sync_order_book_demand(cx);
                 cx.notify();
             }
             let clock_revision = chart.read(cx).clock_revision();
@@ -3168,6 +3180,7 @@ struct HeaderPendingState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SidePanel {
     OrderBook,
+    OrderEntry,
     TimeSales,
     Watchlist,
 }
@@ -3176,7 +3189,7 @@ enum SidePanel {
 struct SidePanelVisibility(u8);
 
 impl SidePanelVisibility {
-    const PERSISTED: u8 = 0b111;
+    const PERSISTED: u8 = 0b1111;
 
     fn from_persisted(bits: u32) -> Self {
         Self(u8::try_from(bits & u32::from(Self::PERSISTED)).unwrap_or_default())
@@ -3196,6 +3209,12 @@ impl SidePanelVisibility {
 
     const fn any(self) -> bool {
         self.0 != 0
+    }
+
+    fn needs_order_book(self) -> bool {
+        SidePanel::ALL
+            .into_iter()
+            .any(|panel| panel.needs_order_book() && self.contains(panel))
     }
 }
 
@@ -3239,11 +3258,17 @@ fn claim_once(claimed: &mut bool) -> bool {
 }
 
 impl SidePanel {
-    const ALL: [Self; 3] = [Self::OrderBook, Self::TimeSales, Self::Watchlist];
+    const ALL: [Self; 4] = [
+        Self::OrderBook,
+        Self::OrderEntry,
+        Self::TimeSales,
+        Self::Watchlist,
+    ];
 
     const fn title(self) -> &'static str {
         match self {
             Self::OrderBook => "Order Book",
+            Self::OrderEntry => "Order Entry",
             Self::TimeSales => "Time & Sales",
             Self::Watchlist => "Watchlist",
         }
@@ -3256,12 +3281,18 @@ impl SidePanel {
             Self::OrderBook => 1,
             Self::Watchlist => 2,
             Self::TimeSales => 4,
+            Self::OrderEntry => 8,
         }
     }
 
     /// Market panels need a selected instrument before they can open.
     const fn requires_market(self) -> bool {
-        matches!(self, Self::OrderBook | Self::TimeSales)
+        matches!(self, Self::OrderBook | Self::OrderEntry | Self::TimeSales)
+    }
+
+    /// Panels that read the live order-book frame and so keep its depth demand open.
+    const fn needs_order_book(self) -> bool {
+        matches!(self, Self::OrderBook | Self::OrderEntry)
     }
 }
 
@@ -5140,7 +5171,9 @@ enum ChartSettingsAction {
     LineStyle(u8),
     FootprintMode(FootprintDisplayMode),
     ToggleCumulativeDelta,
+    CumulativeDeltaStyle(CumulativeDeltaStyle),
     ToggleDeltaHistogram,
+    ToggleOrderBookDepth,
     /// Instrument ticks per footprint row; zero is automatic.
     FootprintTicksPerRow(u32),
     ToggleOrderManagementLines,
@@ -5178,6 +5211,8 @@ struct ChartSettingsSnapshot {
     series_colors: ChartSeriesColors,
     crosshair_mode: u8,
     order_flow: OrderFlowSettings,
+    /// Whether the provider publishes trade prints, which the tape-derived studies need.
+    trades_available: bool,
     time_zone: String,
     trading_visibility: ChartTradingVisibilitySettings,
     chart_trade_buttons_visible: bool,
@@ -6112,6 +6147,7 @@ fn command_key_action(
         CommandId::KillSwitch => Box::new(TradingKillSwitch),
         CommandId::ToggleContext
         | CommandId::ToggleOrderBook
+        | CommandId::ToggleOrderEntry
         | CommandId::ToggleTimeSales
         | CommandId::ToggleWatchlist
         | CommandId::ChartCandles

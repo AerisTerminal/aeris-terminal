@@ -216,6 +216,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         restored_chart_state: init.restored_chart_state,
         chart_persistence_dirty: false,
         last_chart_user_state_revision: 0,
+        order_book_demand: OrderBookDemand::Released,
         price_alerts: init.price_alerts,
         price_alert_dialog: None,
         price_alert_restore_status: init.price_alert_restore_status,
@@ -591,16 +592,23 @@ pub(super) enum OrderFlowMenuStudy {
     CumulativeDelta,
     Delta,
     BigTrades,
+    OrderBookDepth,
 }
 
 impl OrderFlowMenuStudy {
-    pub(super) const ALL: [Self; 3] = [Self::CumulativeDelta, Self::Delta, Self::BigTrades];
+    pub(super) const ALL: [Self; 4] = [
+        Self::CumulativeDelta,
+        Self::Delta,
+        Self::BigTrades,
+        Self::OrderBookDepth,
+    ];
 
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::CumulativeDelta => "Cumulative delta (CVD)",
             Self::Delta => "Delta histogram",
             Self::BigTrades => "Big trades",
+            Self::OrderBookDepth => "Order book on chart (DOM)",
         }
     }
 
@@ -609,7 +617,13 @@ impl OrderFlowMenuStudy {
             Self::CumulativeDelta => settings.show_cumulative_delta,
             Self::Delta => settings.show_delta_histogram,
             Self::BigTrades => settings.big_trades.is_some(),
+            Self::OrderBookDepth => settings.order_book_depth.is_some(),
         }
+    }
+
+    /// Whether the study is built from trade prints rather than the resting book.
+    pub(super) const fn needs_trades(self) -> bool {
+        !matches!(self, Self::OrderBookDepth)
     }
 }
 
@@ -746,6 +760,54 @@ fn big_trades_volume_text(volume: f64) -> String {
     }
 }
 
+/// Chart depth levels drawn from an order-book frame, with the tick size their prices lie on,
+/// or `None` while the book is recovering and has no trustworthy levels.
+fn chart_order_book_depth(
+    frame: &aeris_market_data::OrderBookFrame,
+) -> Option<(f64, Vec<ChartDepthLevel>, Vec<ChartDepthLevel>)> {
+    use num_traits::ToPrimitive;
+    if matches!(
+        frame.state,
+        aeris_market_data::OrderBookState::Recovering(_)
+    ) {
+        return None;
+    }
+    let price_divisor = 10_f64.powi(i32::from(frame.price_scale));
+    let quantity_divisor = 10_f64.powi(i32::from(frame.quantity_scale));
+    // Without a published increment every fixed-point price still lies on its scale's grid.
+    let tick_size = frame.price_increment.unwrap_or(1).to_f64()? / price_divisor;
+    let level = |level: &aeris_market_data::OrderBookColumnLevel| {
+        let quantity = level.quantity.filter(|quantity| *quantity > 0)?;
+        Some(ChartDepthLevel {
+            price: level.price.to_f64()? / price_divisor,
+            size: quantity.to_f64()? / quantity_divisor,
+            order_count: level.order_count.filter(|count| *count > 0),
+        })
+    };
+    let (bids, asks) = if frame.top_of_book_only {
+        (
+            frame.best_bid.iter().filter_map(level).collect(),
+            frame.best_ask.iter().filter_map(level).collect(),
+        )
+    } else {
+        (
+            frame
+                .rows
+                .iter()
+                .filter_map(|row| row.bid.as_ref())
+                .filter_map(level)
+                .collect(),
+            frame
+                .rows
+                .iter()
+                .filter_map(|row| row.ask.as_ref())
+                .filter_map(level)
+                .collect(),
+        )
+    };
+    Some((tick_size, bids, asks))
+}
+
 fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderFlowSettingsState {
     WorkspaceOrderFlowSettingsState {
         display_mode: match settings.display_mode {
@@ -762,6 +824,11 @@ fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderF
         ticks_per_row: settings.ticks_per_row,
         study_visibility_revision: 1,
         big_trades: settings.big_trades.map(persisted_big_trades),
+        order_book_depth: settings.order_book_depth,
+        cumulative_delta_style: match settings.cumulative_delta_style {
+            CumulativeDeltaStyle::Line => 0,
+            CumulativeDeltaStyle::Candles => 1,
+        },
     }
 }
 
@@ -782,13 +849,20 @@ fn restored_order_flow_settings(
         Some(state) => Some(restored_big_trades(state)?),
         None => None,
     };
+    let cumulative_delta_style = match settings.cumulative_delta_style {
+        0 => CumulativeDeltaStyle::Line,
+        1 => CumulativeDeltaStyle::Candles,
+        _ => return None,
+    };
     Some(OrderFlowSettings {
         display_mode,
         show_cumulative_delta: settings.study_visibility_revision >= 1
             && settings.show_cumulative_delta,
+        cumulative_delta_style,
         show_delta_histogram: settings.study_visibility_revision >= 1
             && settings.show_delta_histogram,
         big_trades,
+        order_book_depth: settings.order_book_depth,
         ticks_per_row: settings.ticks_per_row,
     })
 }
@@ -3370,11 +3444,13 @@ impl WorkspaceSurface {
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
         self.chart_pane_controller.chart_installed();
+        self.sync_order_book_demand(cx);
         // Interval switches keep the instrument's tape; project it into the new chart now
         // instead of leaving the footprint empty until the next tape revision.
         if let Some(tape) = self.trade_tape.clone() {
             self.apply_trade_tape_to_chart(&tape, cx);
         }
+        self.apply_order_book_to_chart(cx);
         self.synchronize_runtime_studies(cx);
     }
 
@@ -3890,8 +3966,53 @@ impl WorkspaceSurface {
             .chart_pane_controller
             .accept_publication(frame.selection_generation)
         {
-            self.order_book.update(cx, |order_book, order_book_cx| {
+            let installed = self.order_book.update(cx, |order_book, order_book_cx| {
                 order_book.replace_frame(frame, order_book_cx)
+            });
+            if installed {
+                self.apply_order_book_to_chart(cx);
+            }
+        }
+    }
+
+    /// Projects the pane's current book, owned by its order-book view, into the chart's
+    /// right-edge depth bars while that indicator is shown.
+    fn apply_order_book_to_chart(&self, cx: &mut Context<Self>) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.read(cx).order_flow_settings().order_book_depth != Some(true) {
+            return;
+        }
+        let Some((identity, depth)) = self
+            .order_book
+            .read(cx)
+            .frame()
+            .map(|frame| (frame.instrument_id.clone(), chart_order_book_depth(frame)))
+        else {
+            return;
+        };
+        let drawn = chart.update(cx, |chart, chart_cx| {
+            let drawn = if let Some((tick_size, bids, asks)) = depth {
+                chart.apply_order_book_depth(&identity, tick_size, bids, asks)
+            } else {
+                chart.clear_order_book_depth();
+                Ok(())
+            };
+            chart_cx.notify();
+            drawn
+        });
+        if let Err(error) = drawn {
+            diagnostic!("Aeris order book could not be drawn on the chart: {error}");
+        }
+    }
+
+    /// Removes the chart's drawn book when the pane's book stops or changes instrument.
+    fn clear_chart_order_book_depth(&self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.clear_order_book_depth();
+                chart_cx.notify();
             });
         }
     }
@@ -4547,6 +4668,7 @@ impl WorkspaceSurface {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.clear(order_book_cx);
                 });
+                self.clear_chart_order_book_depth(cx);
                 self.trade_tape = None;
                 self.trade_sweeps = Arc::from([]);
                 self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
@@ -4573,6 +4695,7 @@ impl WorkspaceSurface {
         self.order_book.update(cx, |order_book, order_book_cx| {
             order_book.clear(order_book_cx);
         });
+        self.clear_chart_order_book_depth(cx);
         self.trade_tape = None;
         self.trade_sweeps = Arc::from([]);
         self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
@@ -4694,6 +4817,7 @@ impl WorkspaceSurface {
                         order_book_cx,
                     );
                 });
+                self.clear_chart_order_book_depth(cx);
             }
             FeedConnectionState::Discovering
             | FeedConnectionState::Authenticating
@@ -4717,6 +4841,7 @@ impl WorkspaceSurface {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.mark_unavailable(order_book_cx);
                 });
+                self.clear_chart_order_book_depth(cx);
             }
         }
         cx.notify();
@@ -4962,14 +5087,14 @@ impl WorkspaceSurface {
     pub(super) fn indicator_menu_entries(&self, cx: &App) -> Vec<IndicatorMenuEntry> {
         let query = self.indicator_input.read(cx).value().to_string();
         let normalized_query = query.trim().to_ascii_lowercase();
-        let order_flow = super::provider_trades_available(self.provider)
-            .then(|| self.chart_order_flow_settings(cx))
-            .flatten()
+        let trades = super::provider_trades_available(self.provider);
+        let order_flow = self
+            .chart_order_flow_settings(cx)
             .into_iter()
             .flat_map(|settings| {
-                OrderFlowMenuStudy::ALL
-                    .into_iter()
-                    .filter(move |study| !study.is_shown(settings))
+                OrderFlowMenuStudy::ALL.into_iter().filter(move |study| {
+                    (trades || !study.needs_trades()) && !study.is_shown(settings)
+                })
             })
             .filter(|study| {
                 study
@@ -5003,7 +5128,7 @@ impl WorkspaceSurface {
         study: OrderFlowMenuStudy,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !super::provider_trades_available(self.provider) {
+        if study.needs_trades() && !super::provider_trades_available(self.provider) {
             return false;
         }
         let Some(mut settings) = self.chart_order_flow_settings(cx) else {
@@ -5015,6 +5140,7 @@ impl WorkspaceSurface {
             OrderFlowMenuStudy::BigTrades => {
                 settings.big_trades = Some(settings.big_trades.unwrap_or_default());
             }
+            OrderFlowMenuStudy::OrderBookDepth => settings.order_book_depth = Some(true),
         }
         self.set_chart_order_flow_settings(settings, cx);
         true
@@ -5042,6 +5168,8 @@ impl WorkspaceSurface {
                 if let Some(snapshot) = self.trade_tape.clone() {
                     self.apply_trade_tape_to_chart(&snapshot, cx);
                 }
+                self.sync_order_book_demand(cx);
+                self.apply_order_book_to_chart(cx);
                 cx.notify();
             }
             Ok(false) => {}
@@ -5718,6 +5846,10 @@ impl WorkspaceSurface {
         self.toggle_side_panel(SidePanel::OrderBook, cx);
     }
 
+    pub(super) fn toggle_order_entry(&mut self, cx: &mut Context<Self>) {
+        self.toggle_side_panel(SidePanel::OrderEntry, cx);
+    }
+
     pub(super) fn toggle_time_sales(&mut self, cx: &mut Context<Self>) {
         self.toggle_side_panel(SidePanel::TimeSales, cx);
     }
@@ -5736,38 +5868,62 @@ impl WorkspaceSurface {
             return;
         }
         self.side_panels.set(panel, visible);
-        if panel == SidePanel::OrderBook {
-            if visible {
-                self.order_book
-                    .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
-            } else {
-                self.menu_state.order_book_column_open = false;
-            }
-            let key = notification_center::NoticeKey {
-                scope: cx.entity_id().as_u64(),
-                kind: "order_book_demand",
-            };
-            if self
-                .market_worker
-                .try_set_order_book_visible(visible)
-                .is_err()
-            {
-                cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
-                    key,
-                    severity: notification_center::NoticeSeverity::Error,
-                    tone: notification_center::NoticeTone::Loss,
-                    source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-                    title: "Order book unavailable",
-                    detail: "The order book request could not be sent. Try again later.".into(),
-                    action: None,
-                    lifetime: notification_center::NoticeLifetime::UntilCleared,
-                }));
-            } else {
-                cx.emit(PaneNoticeEvent::Clear(key));
-            }
+        if panel == SidePanel::OrderBook && !visible {
+            self.menu_state.order_book_column_open = false;
         }
+        self.sync_order_book_demand(cx);
         self.chart_persistence_dirty = true;
         cx.notify();
+    }
+
+    /// Whether any consumer of this pane's live order-book frame is shown: a docked panel or
+    /// the chart's right-edge book.
+    fn order_book_demanded(&self, cx: &App) -> bool {
+        self.side_panels.needs_order_book()
+            || self.chart.as_ref().is_some_and(|chart| {
+                chart.read(cx).order_flow_settings().order_book_depth == Some(true)
+            })
+    }
+
+    /// Opens or releases the pane's order-book demand when its consumers changed it. A request
+    /// the worker could not take is sent again on the next change.
+    pub(super) fn sync_order_book_demand(&mut self, cx: &mut Context<Self>) {
+        let demanded = self.order_book_demanded(cx);
+        let demand = if demanded {
+            OrderBookDemand::Open
+        } else {
+            OrderBookDemand::Released
+        };
+        if demand == self.order_book_demand {
+            return;
+        }
+        if demanded {
+            self.order_book
+                .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
+        }
+        let key = notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "order_book_demand",
+        };
+        if self
+            .market_worker
+            .try_set_order_book_visible(demanded)
+            .is_err()
+        {
+            cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+                key,
+                severity: notification_center::NoticeSeverity::Error,
+                tone: notification_center::NoticeTone::Loss,
+                source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
+                title: "Order book unavailable",
+                detail: "The order book request could not be sent. Try again later.".into(),
+                action: None,
+                lifetime: notification_center::NoticeLifetime::UntilCleared,
+            }));
+        } else {
+            self.order_book_demand = demand;
+            cx.emit(PaneNoticeEvent::Clear(key));
+        }
     }
 
     /// Applies a whole docked-panel layout, as when the active pane hands its panels over.
