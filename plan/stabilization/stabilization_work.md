@@ -1544,6 +1544,13 @@ Status: pending
     explicit saturation result, and interleaving with chart publications.
     The parallel message/ChartState model, recovery panic and bridge discards
     remain; VAL-DSK-021/022 are not yet complete.
+  - Part 3: recovery completion, cancellation and replacement retain the
+    pending request until their acknowledgement enters the bounded mailbox;
+    demand failures reply using the exact request without a production
+    `expect`. A saturation regression checks both cancellation and
+    runtime-failure replies under explicit backpressure and successful retry.
+    Parallel market messages, ChartState/MarketGeneration, and the remaining
+    bridge discards still require collapse; VAL-DSK-021/022 remain open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
 - [ ] M6.9 descriptor-login-and-symbol-browser - Descriptor-driven provider connect, login form and symbol browser
@@ -1924,6 +1931,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.5 Part 5 fix(desktop): four restored GPUI panes capture four exact endpoint select-and-demand dispatches, reject altered duplicate initial replies and retain distinct saved identities and intervals; the user-selection GPUI regression counts one command/no follow-up. VAL-DSK-020 GUI restart remains unvalidated while the maintainer's release desktop runs; only M6.5 code is checked.
 - 2026-10-21 M6.6 Part 1 refactor(desktop): stopped in-place study, order-book and tape publication coalescing in the bounded GPUI mailbox; 10,000 ordered fixture publications survive frame-budgeted drains with explicit backpressure. All five workspace gates passed. M6.6 remains unchecked for full message collapse and VAL-DSK-021/022 completion.
 - 2026-10-21 M6.6 Part 2 refactor(desktop): removed the diagnostic replacement/eviction scans from market mailbox enqueue; diagnostic snapshots preserve FIFO order with publication events, use the bounded control reserve, and report full backpressure instead of silent loss. The message/ChartState collapse, recovery expect and bridge discards remain for later M6.6 parts.
+- 2026-10-21 M6.6 Part 3 fix(desktop): removed the recovery-demand `expect` and made recovery acknowledgement consumption follow successful bounded-mailbox delivery; a saturation regression verifies the pending request survives failed cancellation and failure-reply sends, then completes once capacity returns. The parallel message/ChartState/MarketGeneration collapse and bridge discards remain.
 
 ## 7. Known gaps / deferred
 

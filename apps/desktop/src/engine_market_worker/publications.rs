@@ -428,7 +428,8 @@ pub(super) fn send_recovery(
     endpoint: &mut WorkerEndpoint,
     command: ReplayRecoveryCommand,
 ) -> Result<(), String> {
-    if let Some(previous) = endpoint.pending_recovery.replace(command) {
+    let series = series_key(product, interval)?;
+    if let Some(previous) = endpoint.pending_recovery {
         endpoint
             .messages
             .send(MarketWorkerMessage::Recovery {
@@ -438,7 +439,7 @@ pub(super) fn send_recovery(
             })
             .map_err(|error| error.to_string())?;
     }
-    let series = series_key(product, interval)?;
+    endpoint.pending_recovery = Some(command);
     let demand = chart_demand_streams(market, &product.provider, endpoint.depth_visible).and_then(
         |streams| {
             market.set_demand(
@@ -451,25 +452,22 @@ pub(super) fn send_recovery(
         },
     );
     if let Err(error) = demand {
-        let pending = endpoint
-            .pending_recovery
-            .take()
-            .expect("recovery was installed before demand was issued");
         endpoint
             .messages
             .send(MarketWorkerMessage::Recovery {
                 generation: endpoint.active_generation,
-                request_id: pending.request_id,
+                request_id: command.request_id,
                 result: Err(MarketRecoveryFailure::Failed(error)),
             })
             .map_err(|error| error.to_string())?;
+        endpoint.pending_recovery = None;
     }
     Ok(())
 }
 
 /// Retires the pending recovery because a new market selection replaces the chart it served.
 pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(), String> {
-    let Some(pending) = endpoint.pending_recovery.take() else {
+    let Some(pending) = endpoint.pending_recovery else {
         return Ok(());
     };
     endpoint
@@ -479,7 +477,9 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
             request_id: pending.request_id,
             result: Err(MarketRecoveryFailure::Superseded),
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    endpoint.pending_recovery = None;
+    Ok(())
 }
 
 pub(super) fn complete_pending_recovery(
@@ -499,7 +499,6 @@ pub(super) fn complete_pending_recovery(
         {
             let replay = replay_runtime_snapshot(snapshot, Some(product), received_unix_nanos)?;
             let generation = runtime_generation_from_snapshot(snapshot, &replay)?;
-            endpoint.pending_recovery = None;
             let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
             endpoint
                 .messages
@@ -514,6 +513,7 @@ pub(super) fn complete_pending_recovery(
                     }),
                 })
                 .map_err(|error| error.to_string())?;
+            endpoint.pending_recovery = None;
             Ok(true)
         }
         MarketRuntimeEvent::DemandError(error)
@@ -521,7 +521,6 @@ pub(super) fn complete_pending_recovery(
                 && error.consumer_id.0.get() == endpoint.consumer_id
                 && error.generation.0.get() == endpoint.active_generation =>
         {
-            endpoint.pending_recovery = None;
             endpoint
                 .messages
                 .send(MarketWorkerMessage::Recovery {
@@ -530,6 +529,7 @@ pub(super) fn complete_pending_recovery(
                     result: Err(MarketRecoveryFailure::Failed(demand_error(error))),
                 })
                 .map_err(|error| error.to_string())?;
+            endpoint.pending_recovery = None;
             Ok(true)
         }
         _ => Ok(false),

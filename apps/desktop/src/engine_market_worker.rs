@@ -1853,6 +1853,83 @@ mod tests {
     }
 
     #[test]
+    fn recovery_acknowledgements_keep_pending_request_under_mailbox_backpressure() {
+        let product = default_hyperliquid_product();
+        let (mut pane, mut record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
+        let pending = ReplayRecoveryCommand {
+            request_id: 9,
+            reason: aeris_application::ResnapshotReason::QueueOverflow,
+        };
+        record.endpoint.pending_recovery = Some(pending);
+        let sender = record.endpoint.messages.clone();
+        let mut count = 0;
+        loop {
+            match sender.send(MarketWorkerMessage::CatalogFailure {
+                message: "fixture".to_string(),
+            }) {
+                Ok(()) => count += 1,
+                Err(aeris_desktop::market_worker::MarketWorkerSendError::Full) => break,
+                Err(error) => panic!("unexpected mailbox failure: {error}"),
+            }
+            assert!(count < 4096, "control mailbox must be bounded");
+        }
+        assert!(count > 0);
+        assert!(cancel_pending_recovery(&mut record.endpoint).is_err());
+        assert_eq!(record.endpoint.pending_recovery, Some(pending));
+        assert_eq!(pane.worker.drain_messages().0.len(), count);
+        cancel_pending_recovery(&mut record.endpoint).expect("retry delivers cancellation");
+        assert!(record.endpoint.pending_recovery.is_none());
+        assert!(matches!(
+            pane.worker.drain_messages().0.as_slice(),
+            [MarketWorkerMessage::Recovery {
+                generation: 3,
+                request_id: 9,
+                result: Err(MarketRecoveryFailure::Superseded),
+            }]
+        ));
+
+        record.endpoint.pending_recovery = Some(pending);
+        for _ in 0..count {
+            sender
+                .send(MarketWorkerMessage::CatalogFailure {
+                    message: "fixture".to_string(),
+                })
+                .expect("control reserve fills");
+        }
+        let event = MarketRuntimeEvent::DemandError(MarketDemandError {
+            consumer_id: MarketConsumerId(NonZeroU64::new(41).expect("consumer")),
+            generation: MarketGenerationId(NonZeroU64::new(3).expect("generation")),
+            scope: MarketDemandErrorScope::Series,
+            code: EngineFaultCode::Retryable,
+            stage: FailureStage::ProviderHistory,
+            detail: "Fixture recovery failed".to_string(),
+            series: Some(series_key(&product, ChartInterval::Minute1).expect("series")),
+            cause: "fixture failure".to_string(),
+            elapsed_millis: None,
+        });
+        assert!(
+            complete_pending_recovery(&event, &product, &mut record.endpoint, 1_000_000_000)
+                .is_err()
+        );
+        assert_eq!(record.endpoint.pending_recovery, Some(pending));
+        assert_eq!(pane.worker.drain_messages().0.len(), count);
+        assert!(
+            complete_pending_recovery(&event, &product, &mut record.endpoint, 1_000_000_000)
+                .expect("retry delivers failure")
+        );
+        assert!(record.endpoint.pending_recovery.is_none());
+        assert!(matches!(
+            pane.worker.drain_messages().0.as_slice(),
+            [MarketWorkerMessage::Recovery {
+                generation: 3,
+                request_id: 9,
+                result: Err(MarketRecoveryFailure::Failed(_)),
+            }]
+        ));
+    }
+
+    #[test]
     fn engine_selection_cancels_old_recovery_before_new_snapshot_can_complete_it() {
         let product = default_hyperliquid_product();
         let (mut pane, mut record) =
