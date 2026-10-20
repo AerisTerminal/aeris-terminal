@@ -3573,7 +3573,7 @@ impl WorkspaceSurface {
                 self.replay_label = generation_status(
                     &self.worker_label,
                     &bootstrap.subscription_id,
-                    MarketPublicationGeneration::from_generation(&bootstrap.generation),
+                    bootstrap.generation,
                 );
                 self.apply_market_state_message(
                     ChartState::Ready,

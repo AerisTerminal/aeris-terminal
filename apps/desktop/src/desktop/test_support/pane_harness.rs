@@ -188,7 +188,7 @@ impl PaneHarness {
         self.publications
             .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
-                generation: MarketPublicationGeneration::from_generation(&snapshot.generation),
+                generation: snapshot.generation,
                 subscription_id: snapshot.subscription_id,
                 worker_label: snapshot.worker_label,
                 ui_diagnostics: None,
@@ -906,7 +906,8 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
     let publication = |selection_generation| MarketWorkerPublication {
         update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
-        generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+        generation: snapshot
+            .generation
             .with_selection_generation(selection_generation),
         subscription_id: snapshot.subscription_id.clone(),
         worker_label: snapshot.worker_label.clone(),
@@ -999,7 +1000,8 @@ fn check_snapshot_switch_order(order: [u8; 3], cx: &mut TestAppContext) {
             0 => MarketWorkerMessage::EngineSelectionCommitted { sequence },
             1 | 2 => MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
-                generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+                generation: snapshot
+                    .generation
                     .with_selection_generation(if event == 1 { 1 } else { sequence }),
                 subscription_id: snapshot.subscription_id.clone(),
                 worker_label: snapshot.worker_label.clone(),
@@ -1125,8 +1127,7 @@ fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppCo
     let publication = |generation| {
         MarketWorkerMessage::Update(MarketWorkerPublication {
             update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
-            generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
-                .with_selection_generation(generation),
+            generation: snapshot.generation.with_selection_generation(generation),
             subscription_id: snapshot.subscription_id.clone(),
             worker_label: snapshot.worker_label.clone(),
             ui_diagnostics: None,
@@ -1610,8 +1611,7 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
         .expect("replacement bars");
     let covering = MarketWorkerMessage::Update(MarketWorkerPublication {
         update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
-        generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
-            .with_selection_generation(sequence),
+        generation: snapshot.generation.with_selection_generation(sequence),
         subscription_id: snapshot.subscription_id,
         worker_label: snapshot.worker_label,
         ui_diagnostics: None,
@@ -1719,8 +1719,7 @@ fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestA
         .publications
         .send(MarketWorkerMessage::Update(MarketWorkerPublication {
             update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
-            generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
-                .with_selection_generation(sequence),
+            generation: snapshot.generation.with_selection_generation(sequence),
             subscription_id: snapshot.subscription_id,
             worker_label: snapshot.worker_label,
             ui_diagnostics: None,

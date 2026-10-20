@@ -39,10 +39,10 @@ use aeris_observability::FeedConnectionState;
 #[cfg(test)]
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_desktop::market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
-    MarketRecoveryFailure, MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage,
-    MarketWorkerPublication, MarketWorkerSender, MarketWorkerStartup,
-    classify_provider_catalog_event, market_worker_channel,
+    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure,
+    MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
+    MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
+    market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -818,9 +818,7 @@ fn worker_identity(provider: &str) -> (&'static str, &'static str) {
 mod replay_conversion;
 #[cfg(test)]
 use replay_conversion::{replay_bar_definition, snapshot_instrument};
-use replay_conversion::{
-    replay_runtime_snapshot, replay_runtime_tail_update, runtime_generation_from_snapshot,
-};
+use replay_conversion::{replay_runtime_snapshot, replay_runtime_tail_update};
 pub(crate) use replay_conversion::{runtime_order_book_frame, series_key};
 
 fn default_product(product_id: &str) -> InstallProviderInstrument {

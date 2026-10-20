@@ -1529,6 +1529,55 @@ Status: pending
     checks. M6.5 code is complete; VAL-DSK-020 remains explicitly unvalidated
     because the maintainer owns the running release desktop (PID 40076).
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
+  - Part 5 route map (Part 24 fence audit; runtime events are delivered in a
+    `Fenced<ConsumerTag, MarketRuntimeEvent>` envelope before the desktop
+    translates them; names below describe the eventual pane projection, not
+    permission to accept an unfenced worker message):
+    - `Update` snapshot/tail <- `SeriesSnapshot`/`SeriesUpdate`: bar
+      conversion is a GPUI projection, not a second canonical bar generation;
+      accept the exact displayed selection generation.
+    - `SeriesState` <- `SeriesState` (`Live`, `Ready`, `Resolving`,
+      `Partial`, `Empty`, `Failed`), `DemandError` and endpoint failure:
+      pane readiness projection; accept the displayed generation and reject
+      old lifecycle outcomes during a pending replacement.
+    - `OrderBook` <- `OrderBookSnapshot`; `TradeTape` <-
+      `TradeTapeSnapshot`: convert depth for display or retain tape; accept
+      the exact displayed generation and maintain per-selection revisions.
+    - `StudyOutput` <- `StudyOutputSnapshot`; `StudyOutputsInvalidated` <-
+      `StudyOutputsInvalidated`; `StudyRemoved` <- `StudyRemoved`: accept
+      demand-bound generation, or consumer-scoped pre-selection study
+      lifecycle when no generation exists.
+    - `MarketSessionStatus` <- consumer instrument/session status;
+      `Connection` <- `ProviderState`: accept exact displayed generation.
+      `Recovery` <- covering `SeriesSnapshot`/`DemandError` for the pending
+      recovery request: accept lifecycle generation plus exact request ID.
+    - `ProviderCatalog` <- `CatalogReady`, instrument search result/preview,
+      selection/rejection and market screen result/rejection: runtime fences
+      consumer/provider/callback; browser checks its search/selection
+      generation. `CatalogFailure` is an app-scoped sanitized failure notice.
+    - `Diagnostics` is diagnostic-only (bounded FIFO, no chart mutation).
+      `PriceAlertTriggered` <- `PriceAlertTriggered`, matched by owned
+      alert ID; `PriceAlertSyncFailed`/`PriceAlertSyncSucceeded` are
+      consumer-scoped keyed-notice outcomes, not series publications.
+    - `StudyRegistered`/`StudyRegistrationFailed` are consumer-scoped
+      registration replies matched by outstanding request sequence;
+      `StudyReinitialized`/`StudyReinitializationFailed`/
+      `StudyRemovalFailed` are consumer-scoped replies matched by study ID
+      and pending operation.
+    - `EngineSelectionCommitted`/`EngineSelectionFailed` <- the accepted
+      select-and-demand result, matched to the exact pending sequence;
+      `SelectedInstrument` is the one-shot initial descriptor gated by its
+      selection generation. `CatalogSwitchCommitted`/
+      `CatalogSwitchFailed` <- catalog selection result/rejection, matched
+      by exact pending pane sequence and browser generation.
+  - Part 5a: recovery now carries only a bounded presentation evidence
+    record derived directly from the runtime-converted snapshot; the duplicate
+    `MarketGeneration<ProvenancedMarketBar>` copy and its constructor are
+    removed from desktop production code. The fixture uses its own
+    test-only model to generate evidence. Empty covering snapshots still
+    reject recovery. Chart data, readiness, and the remaining routes have
+    not yet been moved to direct fenced pane projection; `ChartState` and
+    `MarketWorkerMessage` remain, so VAL-DSK-021/022 are not claimed complete.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;

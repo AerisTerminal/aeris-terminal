@@ -58,15 +58,10 @@ impl FixtureMarketWorker {
         let ReplayStreamUpdate::Snapshot(decoded_snapshot) = publication.update else {
             return Err("fixture snapshot published a delta".to_string());
         };
-        let generation = self
-            .model
-            .current_generation()
-            .cloned()
-            .ok_or_else(|| "fixture snapshot did not retain a generation".to_string())?;
         Ok(MarketWorkerBootstrap {
             snapshot: decoded_snapshot,
             subscription_id: SUBSCRIPTION_ID.to_string(),
-            generation,
+            generation: publication.generation,
             worker_label: "deterministic fixture · disconnected".to_string(),
         })
     }
@@ -101,9 +96,15 @@ impl FixtureMarketWorker {
         let MarketBarModelOutcome::Published(generation) = outcome else {
             return Err("fixture update did not publish a client generation".to_string());
         };
+        let (first, last) = generation.sequence_range();
         Ok(MarketWorkerPublication {
             update,
-            generation: MarketPublicationGeneration::from_generation(&generation),
+            generation: MarketPublicationGeneration::from_tail(
+                generation.publication_generation(),
+                generation.items().len(),
+                first,
+                last,
+            ),
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: "deterministic fixture · disconnected".to_string(),
             ui_diagnostics: None,
@@ -114,21 +115,18 @@ impl FixtureMarketWorker {
 #[cfg(test)]
 mod tests {
     use super::FixtureMarketWorker;
-    use crate::market_worker::MarketPublicationGeneration;
 
     #[test]
     fn fixture_market_publishes_disconnected_bounded_snapshots() {
         let mut market = FixtureMarketWorker::try_new().expect("fixture constructs");
         let first = market.publish_snapshot(2).expect("first snapshot");
-        assert_eq!(first.generation.items().len(), 2);
+        assert_eq!(first.generation.retained_items(), 2);
         assert_eq!(first.subscription_id, "desktop_fixture_market_bars");
         assert!(first.worker_label.contains("disconnected"));
         let next = market.publish_snapshot(3).expect("next snapshot");
-        assert_eq!(next.generation.items().len(), 3);
+        assert_eq!(next.generation.retained_items(), 3);
         assert!(
-            MarketPublicationGeneration::from_generation(&next.generation).publication_generation()
-                > MarketPublicationGeneration::from_generation(&first.generation)
-                    .publication_generation()
+            next.generation.publication_generation() > first.generation.publication_generation()
         );
     }
 }

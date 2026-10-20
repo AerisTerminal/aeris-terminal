@@ -3,9 +3,7 @@
 //! This module does not implement a socket, live provider or production transport.
 
 use aeris_application::ReplayRecoveryCommand;
-use aeris_application::{
-    MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
-};
+use aeris_application::{ReplaySnapshot, ReplayStreamUpdate};
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderMarketScreen, ScreenProviderMarkets,
@@ -80,8 +78,6 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartState {
     Loading,
@@ -118,7 +114,7 @@ impl ChartState {
 pub struct MarketWorkerBootstrap {
     pub snapshot: ReplaySnapshot,
     pub subscription_id: String,
-    pub generation: DesktopMarketGeneration,
+    pub generation: MarketPublicationGeneration,
     pub worker_label: String,
 }
 
@@ -235,15 +231,14 @@ pub struct MarketPublicationGeneration {
 
 impl MarketPublicationGeneration {
     #[must_use]
-    pub fn from_generation(generation: &DesktopMarketGeneration) -> Self {
-        let (first_sequence, last_sequence) = generation.sequence_range();
-        Self {
-            selection_generation: 1,
-            publication_generation: generation.publication_generation(),
-            retained_items: generation.items().len(),
+    pub fn from_snapshot(snapshot: &ReplaySnapshot) -> Self {
+        let (first_sequence, last_sequence) = snapshot.sequence_range();
+        Self::from_tail(
+            snapshot.evidence().publication_generation,
+            snapshot.bars().len(),
             first_sequence,
             last_sequence,
-        }
+        )
     }
 
     #[must_use]
@@ -1596,6 +1591,19 @@ mod tests {
     }
 
     #[test]
+    fn recovery_projection_uses_snapshot_evidence_without_retaining_a_second_bar_set() {
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let bootstrap = fixture.publish_snapshot(3).expect("fixture snapshot");
+        let evidence = MarketPublicationGeneration::from_snapshot(&bootstrap.snapshot);
+        assert_eq!(bootstrap.generation, evidence);
+        assert_eq!(evidence.retained_items(), bootstrap.snapshot.bars().len());
+        assert_eq!(
+            evidence.sequence_range(),
+            bootstrap.snapshot.sequence_range()
+        );
+    }
+
+    #[test]
     fn dropping_worker_requests_shutdown_without_waiting_for_acknowledgement() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
@@ -1788,7 +1796,7 @@ mod tests {
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let make_publication = |bootstrap: super::MarketWorkerBootstrap| MarketWorkerPublication {
-            generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+            generation: bootstrap.generation,
             update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
             subscription_id: bootstrap.subscription_id,
             worker_label: bootstrap.worker_label,
@@ -1845,7 +1853,7 @@ mod tests {
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         sender
             .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+                generation: bootstrap.generation,
                 update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
                 subscription_id: bootstrap.subscription_id,
                 worker_label: bootstrap.worker_label,
@@ -2345,7 +2353,7 @@ mod tests {
         sender
             .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot.clone()),
-                generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+                generation: bootstrap.generation,
                 subscription_id: "burst".to_string(),
                 worker_label: "burst".to_string(),
                 ui_diagnostics: None,
@@ -2476,9 +2484,7 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: MarketPublicationGeneration::from_generation(
-                        &bootstrap.generation,
-                    ),
+                    generation: bootstrap.generation,
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: Some(PendingUiDiagnostics::new(generation)),
@@ -2542,9 +2548,7 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: MarketPublicationGeneration::from_generation(
-                        &bootstrap.generation,
-                    ),
+                    generation: bootstrap.generation,
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: None,
@@ -2623,9 +2627,7 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: MarketPublicationGeneration::from_generation(
-                        &bootstrap.generation,
-                    ),
+                    generation: bootstrap.generation,
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: None,
@@ -2661,7 +2663,7 @@ mod tests {
         assert_eq!(
             sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+                generation: bootstrap.generation,
                 subscription_id: bootstrap.subscription_id,
                 worker_label: bootstrap.worker_label,
                 ui_diagnostics: None,

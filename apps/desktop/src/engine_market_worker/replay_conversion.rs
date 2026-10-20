@@ -1,11 +1,11 @@
 //! Replay conversion.
 
 use super::{
-    AssetClass, BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, DesktopMarketGeneration,
-    InstallProviderInstrument, InstrumentId, InstrumentLifecycle, InstrumentPrecision,
-    InstrumentRevision, MarketBar, MarketEventProvenance, MarketOrderBookSnapshot,
-    MarketSeriesSnapshot, MarketSeriesUpdate, Provenanced, ReplayProvenance, ReplaySnapshot,
-    ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, provider_display_name,
+    AssetClass, BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, InstallProviderInstrument,
+    InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision, MarketBar,
+    MarketEventProvenance, MarketOrderBookSnapshot, MarketSeriesSnapshot, MarketSeriesUpdate,
+    Provenanced, ReplayProvenance, ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate,
+    SeriesTailOperation, provider_display_name,
 };
 use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
@@ -58,30 +58,6 @@ pub(crate) fn replay_runtime_snapshot(
         definition,
         publication.publication_generation,
         bars,
-    )
-    .map_err(|error| error.to_string())
-}
-
-pub(crate) fn runtime_generation_from_snapshot(
-    publication: &MarketSeriesSnapshot,
-    replay: &ReplaySnapshot,
-) -> Result<DesktopMarketGeneration, String> {
-    let first_sequence = replay
-        .bars()
-        .first()
-        .map(|bar| bar.value().source_sequence)
-        .ok_or_else(|| "runtime snapshot is empty".to_string())?;
-    let last_sequence = replay
-        .bars()
-        .last()
-        .map(|bar| bar.value().source_sequence)
-        .ok_or_else(|| "runtime snapshot is empty".to_string())?;
-    DesktopMarketGeneration::try_new(
-        publication.snapshot.provider_generation.0.get(),
-        publication.publication_generation,
-        first_sequence,
-        last_sequence,
-        replay.bars().to_vec(),
     )
     .map_err(|error| error.to_string())
 }

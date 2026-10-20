@@ -8,8 +8,8 @@ use super::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender, ProviderConnectionState,
     ProviderState, PushedEventContext, ReplayRecoveryCommand, ReplayStreamUpdate, SeriesLoadState,
     WorkerEndpoint, chart_demand_streams, demand_error, provider_display_name,
-    replay_runtime_snapshot, replay_runtime_tail_update, runtime_generation_from_snapshot,
-    runtime_order_book_frame, series_key, worker_identity,
+    replay_runtime_snapshot, replay_runtime_tail_update, runtime_order_book_frame, series_key,
+    worker_identity,
 };
 use aeris_observability::diagnostic;
 
@@ -498,7 +498,13 @@ pub(super) fn complete_pending_recovery(
                 && snapshot.snapshot.provider_generation.0.get() >= product.session_generation =>
         {
             let replay = replay_runtime_snapshot(snapshot, Some(product), received_unix_nanos)?;
-            let generation = runtime_generation_from_snapshot(snapshot, &replay)?;
+            // Recovery needs a covering bar. Previously the duplicate
+            // MarketGeneration constructor rejected this empty case.
+            if replay.bars().is_empty() {
+                return Err("runtime snapshot is empty".to_string());
+            }
+            let generation = MarketPublicationGeneration::from_snapshot(&replay)
+                .with_selection_generation(endpoint.active_generation);
             let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
             endpoint
                 .messages
