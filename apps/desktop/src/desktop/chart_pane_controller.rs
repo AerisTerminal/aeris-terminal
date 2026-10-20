@@ -14,6 +14,7 @@ pub(super) struct ChartPaneController {
     latest_selection: u64,
     current_generation: u64,
     displayed_generation: Option<u64>,
+    initial_instrument_applied: bool,
 }
 
 impl Default for ChartPaneController {
@@ -24,6 +25,7 @@ impl Default for ChartPaneController {
             latest_selection: 0,
             current_generation: 1,
             displayed_generation: None,
+            initial_instrument_applied: false,
         }
     }
 }
@@ -130,10 +132,12 @@ impl ChartPaneController {
         generation.is_none_or(|generation| self.accept_publication(generation))
     }
 
-    /// An initial instrument descriptor must not overwrite a later pane selection
-    /// just because its product happens to have the same provider and symbol.
+    /// The initial runtime descriptor is a one-shot reply, not a continuing
+    /// source of terms. A repeated reply cannot replace the accepted terms.
     pub(super) fn accept_initial_instrument(&self, generation: u64) -> bool {
-        self.pending_selection.is_none() && generation >= self.latest_selection
+        !self.initial_instrument_applied
+            && self.pending_selection.is_none()
+            && generation >= self.latest_selection
     }
 
     pub(super) fn adopt_initial_instrument(&mut self, generation: u64) -> bool {
@@ -141,6 +145,7 @@ impl ChartPaneController {
             return false;
         }
         self.current_generation = generation;
+        self.initial_instrument_applied = true;
         true
     }
 }
@@ -148,6 +153,15 @@ impl ChartPaneController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_descriptor_is_consumed_once_even_for_the_same_generation() {
+        let mut pane = ChartPaneController::default();
+        assert!(pane.adopt_initial_instrument(7));
+        assert!(pane.accept_publication(7));
+        assert!(!pane.adopt_initial_instrument(7));
+        assert!(!pane.adopt_initial_instrument(8));
+    }
 
     #[test]
     fn selection_outcomes_accept_only_the_exact_pending_generation() {

@@ -706,6 +706,28 @@ fn worker_endpoint(
     )
 }
 
+/// Captures the same initial worker dispatch used by a restored pane, without
+/// starting a provider session in the GPUI pane fixture.
+#[cfg(test)]
+pub(super) fn restored_selection_for_pane_harness(
+    product: InstallProviderInstrument,
+    interval: ChartInterval,
+    consumer_id: u64,
+) -> aeris_market_runtime::SelectionRequest {
+    let (_, mut record) = worker_endpoint(1, consumer_id, product, consumer_id, interval, None, 1);
+    record.initial_instrument = workspace_initial_instrument(&record.product, true);
+    let mut requests = Vec::new();
+    selection_commands::dispatch_initial_selection(&record, StreamRequirements::BARS, |request| {
+        requests.push(request);
+        Ok(())
+    })
+    .expect("restored initial selection dispatch");
+    let [request] = requests.as_slice() else {
+        panic!("restored endpoint must dispatch exactly one selection");
+    };
+    request.clone()
+}
+
 fn spawn_group(
     market: MarketService,
     client_id: u64,

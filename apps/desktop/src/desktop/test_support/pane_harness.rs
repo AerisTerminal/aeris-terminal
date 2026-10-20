@@ -83,6 +83,24 @@ impl PaneHarness {
             .instrument
             .clone()
             .expect("fixture product");
+        Self::open_with_product(
+            restore,
+            fill_command_queue,
+            rithmic_startup,
+            product,
+            ChartInterval::Minute1,
+            cx,
+        )
+    }
+
+    fn open_with_product(
+        restore: WorkspaceSurfaceRestore,
+        fill_command_queue: bool,
+        rithmic_startup: bool,
+        product: InstallProviderInstrument,
+        interval: ChartInterval,
+        cx: &mut TestAppContext,
+    ) -> (Self, &mut VisualTestContext) {
         let (commands, requests) = mpsc::sync_channel(8);
         let (publications, messages) = market_worker_channel(NonZeroUsize::new(8).unwrap());
         let (_shutdown_sender, shutdown) = mpsc::sync_channel(1);
@@ -107,7 +125,7 @@ impl PaneHarness {
             } else {
                 MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
                     product,
-                    interval: ChartInterval::Minute1,
+                    interval,
                     restored_viewport: None,
                     subscription_id: "desktop_fixture_market_bars".into(),
                     worker_label: "disconnected fixture".into(),
@@ -199,6 +217,105 @@ impl PaneHarness {
         self.pane.update(cx, |pane, cx| {
             pane.install_snapshot_chart(&snapshot.snapshot, cx);
         });
+    }
+}
+
+#[gpui::test]
+fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAppContext) {
+    let default_product = local_state::default_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("fixture product");
+    let mut panes = Vec::new();
+    let mut dispatches = Vec::new();
+    for (index, (symbol, interval)) in [
+        ("BTC", ChartInterval::Minute1),
+        ("ETH", ChartInterval::Minute5),
+        ("SOL", ChartInterval::Hour1),
+        ("HYPE", ChartInterval::Day3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut product = default_product.clone();
+        product.instrument_id = format!("hyperliquid:perp:{symbol}");
+        product.provider_symbol = symbol.into();
+        product.display_symbol = format!("{symbol}-USDC");
+        product.entitlement_id = format!("saved-entitlement-{index}");
+        let consumer_id = index as u64 + 1;
+        let request = engine_market_worker::restored_selection_for_pane_harness(
+            product.clone(),
+            interval,
+            consumer_id,
+        );
+        assert_eq!(request.consumer_id, consumer_id);
+        assert_eq!(request.generation, 1);
+        assert_eq!(request.interval, interval);
+        assert_eq!(
+            request.instrument,
+            aeris_market_runtime::InstrumentRequest::restored(&product)
+        );
+        dispatches.push(request);
+        let (harness, cx) = PaneHarness::open_with_product(
+            WorkspaceSurfaceRestore::default(),
+            false,
+            false,
+            product.clone(),
+            interval,
+            cx,
+        );
+        cx.read(|cx| {
+            let pane = harness.pane.read(cx);
+            assert_eq!(pane.product.as_ref(), Some(&product));
+            assert_eq!(pane.interval, interval);
+            assert!(pane.chart_pane_controller.accept_publication(1));
+        });
+        panes.push((harness, product, interval));
+    }
+    assert_eq!(
+        dispatches.len(),
+        4,
+        "four exact restored selection commands"
+    );
+    assert_eq!(panes.len(), 4);
+    for (harness, product, interval) in &mut panes {
+        harness
+            .publications
+            .send(MarketWorkerMessage::SelectedInstrument {
+                generation: 1,
+                instrument: product.clone(),
+            })
+            .expect("restored selection reply enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        let mut duplicate = product.clone();
+        duplicate.price_increment = Some(999);
+        harness
+            .publications
+            .send(MarketWorkerMessage::SelectedInstrument {
+                generation: 1,
+                instrument: duplicate,
+            })
+            .expect("duplicate reply enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        cx.read(|cx| {
+            let pane = harness.pane.read(cx);
+            assert_eq!(pane.product.as_ref(), Some(&*product));
+            assert_eq!(pane.interval, *interval);
+            assert!(pane.chart_pane_controller.accept_publication(1));
+        });
+        assert!(
+            harness
+                .commands
+                .as_ref()
+                .expect("command receiver")
+                .try_iter()
+                .all(|command| !matches!(command, MarketWorkerCommand::EngineSelect(_))),
+            "a restored Selected reply cannot dispatch a follow-up selection"
+        );
     }
 }
 

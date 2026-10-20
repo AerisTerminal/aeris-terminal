@@ -1475,7 +1475,7 @@ Status: pending
     be automated or interrupted. The current chart integration constructs
     a new `AerisChartView` on a covering snapshot; a drawing-preserving
     in-place cross-instrument reset remains an Aeris Charts operation for M7.9.
-- [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
+- [x] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop (code complete; VAL-DSK-020 guarded GUI restart not yet validated)
   - Parallel test isolation: the workspace persistence fixture used a PID
     and wall-clock timestamp as its temporary root, allowing concurrent
     tests in the same process to alias when the clock repeats. An atomic
@@ -1515,6 +1515,19 @@ Status: pending
     helper leaves the runtime as demand owner. This is endpoint evidence,
     not the literal four-pane GPUI PaneHarness or guarded GUI restart
     evidence required by VAL-DSK-018/020; M6.5 remains unchecked.
+  - Part 5: a four-pane GPUI `PaneHarness` regression captures exactly four
+    production endpoint startup dispatches with each saved `InstrumentRef`,
+    consumer, generation and interval, opens distinct BTC/ETH/SOL/HYPE panes,
+    accepts each initial
+    `SelectedInstrument` reply exactly once and rejects altered duplicates
+    without dispatching follow-up selections. The complementary endpoint
+    regression in Part 4 counts four exact `InstrumentRef` requests and one
+    applied worker reply per pane; the user-selection GPUI test counts one
+    command with no follow-up. The new GPUI test exposed a pane-side
+    duplicate-reply overwrite, now fenced as a one-shot initial descriptor.
+    VAL-DSK-018/019 are covered by those tests and the source/naming rule
+    checks. M6.5 code is complete; VAL-DSK-020 remains explicitly unvalidated
+    because the maintainer owns the running release desktop (PID 40076).
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
@@ -1893,6 +1906,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.5 Part 3 refactor(desktop): removed legacy `try_select_engine` references from desktop production and tests, keeping the single runtime-owned instrument select-and-demand operation and its existing exact-reply fence. The first full suite had one isolated-pass persistence test failure; after a dev-only clean the second full suite and all other gates passed. Restored-pane command/reply instrumentation and guarded GUI restart remain before M6.5 closure.
 - 2026-10-20 M6.5 parallel-test isolation test(desktop): added a per-process atomic sequence to the timestamped temporary workspace root and covered concurrent path generation. Twenty simultaneous default-parallel desktop persistence test runs passed. The earlier one-off empty-template failure is consistent with a shared fixture root; M6.5 remains unchecked pending four-pane restored selection counts and GUI restart.
 - 2026-10-20 M6.5 Part 4 test(desktop): instrumented the production initial select-and-demand request builder in the restored four-pane endpoint test; four exact saved refs yield four requests and four applied replies despite duplicate outcomes. Focused regression and full workspace gates pass. PaneHarness and guarded four-pane GUI restart remain outstanding while a maintainer-owned release desktop runs; M6.5 remains unchecked.
+- 2026-10-20 M6.5 Part 5 fix(desktop): four restored GPUI panes capture four exact endpoint select-and-demand dispatches, reject altered duplicate initial replies and retain distinct saved identities and intervals; the user-selection GPUI regression counts one command/no follow-up. VAL-DSK-020 GUI restart remains unvalidated while the maintainer's release desktop runs; only M6.5 code is checked.
 
 ## 7. Known gaps / deferred
 
