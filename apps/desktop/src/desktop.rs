@@ -3154,8 +3154,6 @@ struct HeaderState {
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
     controls: HeaderControls,
-    side_panels: SidePanelVisibility,
-    context_visible: bool,
     chart_link_group: u8,
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
@@ -3628,8 +3626,6 @@ struct HeaderControls(u8);
 impl HeaderControls {
     const INSTRUMENT: u8 = 1;
     const SERIES: u8 = 2;
-    /// Order book and Time & Sales, which need a selected market.
-    const MARKET_PANELS: u8 = 4;
     const INDICATOR: u8 = 8;
     const CHART_TYPE: u8 = 16;
 
@@ -3643,7 +3639,7 @@ impl HeaderControls {
             controls |= Self::INSTRUMENT;
         }
         if selection {
-            controls |= Self::SERIES | Self::MARKET_PANELS;
+            controls |= Self::SERIES;
         }
         Self(controls)
     }

@@ -462,6 +462,15 @@ pub(super) fn workspace_market_area(
             theme,
         })
     });
+    let panel_sidebar = super::terminal_chrome::panel_sidebar(
+        active_surface,
+        super::terminal_chrome::PanelSidebarState {
+            side_panels: surface.side_panels,
+            context_visible: surface.context_panel_visible,
+            market_selected: surface.has_market_selection(),
+        },
+        theme,
+    );
     let context = workspace_context_panel(surface, active_surface, theme);
     let center = workspace_center_column(grid, context, drawing_toolbar_collapsed, active_surface);
     div()
@@ -472,6 +481,7 @@ pub(super) fn workspace_market_area(
         .track_focus(&chrome_focus)
         .child(center)
         .children(side_panel)
+        .child(panel_sidebar)
         .when(drawing_toolbar_collapsed, |market| {
             market.child(drawing_toolbar_expander(
                 terminal.clone(),

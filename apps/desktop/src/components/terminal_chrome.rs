@@ -1,6 +1,7 @@
 use super::app_navigation::app_navigation_button;
 use super::platform_menu::account_avatar_button;
 use super::*;
+use crate::desktop::native_ui::tooltip::TooltipPlacement;
 use aeris_contracts::{MarketSessionPhase, MarketSessionStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,7 +486,7 @@ pub(super) fn header_controls(
     // Give the global controls an explicit, non-shrinking track. GPUI cannot
     // infer a stable intrinsic width for this mixed Button/avatar group, which
     // previously let the flex item collapse to zero even on wide windows.
-    let (side_panel_toggles, context_toggle, link_toggle) = header_panel_toggles(app, &state);
+    let link_toggle = chart_link_toggle(app, &state);
     let connection = header_connection_presentation(&state);
     let market_controls = div()
         .h_full()
@@ -554,8 +555,6 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .children(side_panel_toggles)
-        .child(context_toggle)
         .child(link_toggle);
     let accounts = accounts_selector(app.clone(), state.account_label, &state.theme);
     let time_zone = time_zone_selector(
@@ -640,39 +639,7 @@ pub(super) fn rithmic_attribution(theme: &AerisTheme) -> impl IntoElement + use<
         .child(mark(assets::AttributionMark::PoweredByOmne))
 }
 
-fn header_panel_toggles(
-    app: &Entity<WorkspaceSurface>,
-    state: &HeaderState,
-) -> (Vec<AnyElement>, AnyElement, AnyElement) {
-    let side_panels = SidePanel::ALL
-        .into_iter()
-        .map(|panel| {
-            side_panel_toggle(
-                app.clone(),
-                &state.theme,
-                panel,
-                !panel.requires_market() || state.controls.enabled(HeaderControls::MARKET_PANELS),
-                state.side_panels.contains(panel),
-            )
-        })
-        .collect();
-    let context_command = aeris_desktop::command_registry::command(
-        aeris_desktop::command_registry::CommandId::ToggleContext,
-    );
-    let context = panel_toggle(
-        PanelToggleState {
-            id: "context_panel_toggle",
-            label: context_command.title,
-            icon: HugeIcon::Info,
-            enabled: true,
-            selected: state.context_visible,
-            tooltip: context_command.title,
-            toggle: WorkspaceSurface::toggle_context_panel,
-        },
-        &state.theme,
-        app.clone(),
-    )
-    .into_any_element();
+fn chart_link_toggle(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> AnyElement {
     let link_label = match state.chart_link_group {
         1 => "Link A",
         2 => "Link B",
@@ -680,7 +647,7 @@ fn header_panel_toggles(
         4 => "Link D",
         _ => "Link",
     };
-    let link = panel_toggle(
+    panel_toggle(
         PanelToggleState {
             id: "chart_link_group_toggle",
             label: link_label,
@@ -693,11 +660,73 @@ fn header_panel_toggles(
         &state.theme,
         app.clone(),
     )
-    .into_any_element();
-    (side_panels, context, link)
+    .into_any_element()
 }
 
-pub(super) fn side_panel_toggle(
+/// A `ButtonSize::Default` toggle (28 px) with 4 px of rail on each side.
+const PANEL_SIDEBAR_WIDTH: f32 = 36.0;
+
+/// What the panel sidebar shows for the active workspace surface.
+#[derive(Clone, Copy)]
+pub(super) struct PanelSidebarState {
+    pub(super) side_panels: SidePanelVisibility,
+    pub(super) context_visible: bool,
+    /// Order book and Time & Sales need a selected market.
+    pub(super) market_selected: bool,
+}
+
+/// Icon-only toggles for the market panels on the workspace's right edge, mirroring the
+/// drawing sidebar on the left so the header keeps only chart controls.
+pub(super) fn panel_sidebar(
+    app: &Entity<WorkspaceSurface>,
+    state: PanelSidebarState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let side_panel = |panel: SidePanel| {
+        side_panel_toggle(
+            app.clone(),
+            theme,
+            panel,
+            !panel.requires_market() || state.market_selected,
+            state.side_panels.contains(panel),
+        )
+    };
+    let context_command = aeris_desktop::command_registry::command(
+        aeris_desktop::command_registry::CommandId::ToggleContext,
+    );
+    let context = sidebar_toggle(
+        PanelToggleState {
+            id: "context_panel_toggle",
+            label: context_command.title,
+            icon: HugeIcon::Info,
+            enabled: true,
+            selected: state.context_visible,
+            tooltip: context_command.title,
+            toggle: WorkspaceSurface::toggle_context_panel,
+        },
+        theme,
+        app.clone(),
+    );
+    div()
+        .flex_none()
+        .h_full()
+        .w(px(PANEL_SIDEBAR_WIDTH))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .py_2()
+        .border_l(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
+        .child(side_panel(SidePanel::Watchlist))
+        .child(side_panel(SidePanel::OrderBook))
+        .child(side_panel(SidePanel::TimeSales))
+        .child(context)
+}
+
+fn side_panel_toggle(
     app: Entity<WorkspaceSurface>,
     theme: &AerisTheme,
     panel: SidePanel,
@@ -707,28 +736,28 @@ pub(super) fn side_panel_toggle(
     let (id, icon, toggle, command_id) = match panel {
         SidePanel::OrderBook => (
             "order_book_toggle",
-            HugeIcon::DataPanel,
+            HugeIcon::OrderBook,
             WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleOrderBook,
         ),
         SidePanel::TimeSales => (
             "time_sales_toggle",
-            HugeIcon::DataPanel,
+            HugeIcon::TimeSales,
             WorkspaceSurface::toggle_time_sales
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleTimeSales,
         ),
         SidePanel::Watchlist => (
             "watchlist_toggle",
-            HugeIcon::DataPanel,
+            HugeIcon::Watchlist,
             WorkspaceSurface::toggle_watchlist
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleWatchlist,
         ),
     };
     let command = aeris_desktop::command_registry::command(command_id);
-    panel_toggle(
+    sidebar_toggle(
         PanelToggleState {
             id,
             label: command.title,
@@ -741,7 +770,30 @@ pub(super) fn side_panel_toggle(
         theme,
         app,
     )
-    .into_any_element()
+}
+
+/// An icon-only panel toggle; the command title is its tooltip and accessible name.
+fn sidebar_toggle(
+    state: PanelToggleState,
+    theme: &AerisTheme,
+    app: Entity<WorkspaceSurface>,
+) -> AnyElement {
+    Button::new(state.id, theme)
+        .variant(ButtonVariant::Ghost)
+        .button_size(ButtonSize::Default)
+        .icon(header_icon(state.icon))
+        .aria_label(state.tooltip)
+        .tooltip(
+            TooltipSpec::new(state.tooltip, theme)
+                .show_delay(TOOLTIP_OPEN_DELAY)
+                .placement(TooltipPlacement::Left),
+        )
+        .selected(state.selected)
+        .disabled(!state.enabled)
+        .on_click(move |_, _, cx| {
+            app.update(cx, state.toggle);
+        })
+        .into_any_element()
 }
 
 pub(super) fn connection_status_indicator(
@@ -757,79 +809,49 @@ pub(super) fn connection_status_indicator(
         .into_iter()
         .map(|(label, value)| (label, SharedString::from(value)))
         .collect();
-    let tooltip_theme = *theme;
-    div()
-        .id(("connection_status", usize::MAX))
-        .flex()
-        .child(
-            div()
-                .id("connection_status_dot")
-                .size(px(7.0))
-                .flex_none()
-                .rounded_full()
-                .bg(gpui_color(color)),
-        )
-        .tooltip(move |_, cx| {
-            cx.new(|_| ConnectionStatusTooltip {
-                provider: provider.clone(),
-                status: status.clone(),
-                latency: latency.clone(),
-                market_rows: market_rows.clone(),
-                theme: tooltip_theme,
-            })
-            .into()
-        })
-        .tooltip_show_delay(TOOLTIP_OPEN_DELAY)
-}
-
-struct ConnectionStatusTooltip {
-    provider: SharedString,
-    status: SharedString,
-    latency: SharedString,
-    market_rows: Vec<(&'static str, SharedString)>,
-    theme: AerisTheme,
-}
-
-impl Render for ConnectionStatusTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
-        div().pl_2().pt_2().child(
+    let tooltip = TooltipSpec::rich(
+        move |theme| {
             div()
                 .min_w(px(190.0))
-                .px_3()
-                .py_2()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border))
-                .bg(gpui_color(colors.surface))
-                .font_family(aeris_design_system::platform_font_family())
-                .font_weight(platform_font_weight(TypographyRole::Normal))
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(connection_tooltip_row(
                     "Provider",
-                    self.provider.clone(),
+                    provider.clone(),
                     false,
-                    &self.theme,
+                    theme,
                 ))
                 .child(connection_tooltip_row(
                     "Status",
-                    self.status.clone(),
+                    status.clone(),
                     false,
-                    &self.theme,
+                    theme,
                 ))
                 .child(connection_tooltip_row(
                     "Latency",
-                    self.latency.clone(),
+                    latency.clone(),
                     true,
-                    &self.theme,
+                    theme,
                 ))
-                .children(self.market_rows.iter().map(|(label, value)| {
-                    connection_tooltip_row(label, value.clone(), false, &self.theme)
-                })),
-        )
-    }
+                .children(market_rows.iter().map(|(label, value)| {
+                    connection_tooltip_row(label, value.clone(), false, theme)
+                }))
+                .into_any_element()
+        },
+        theme,
+    )
+    .show_delay(TOOLTIP_OPEN_DELAY);
+    with_tooltip(
+        ("connection_status", usize::MAX),
+        div()
+            .id("connection_status_dot")
+            .size(px(7.0))
+            .flex_none()
+            .rounded_full()
+            .bg(gpui_color(color)),
+        &tooltip,
+    )
 }
 
 fn connection_tooltip_row(

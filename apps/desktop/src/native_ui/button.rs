@@ -44,7 +44,7 @@ use super::{
     platform_font_weight, platform_tabular_numerals,
     rem_scale::design_rems,
     theme::{gpui_color, platform_border_width},
-    tooltip::TooltipSpec,
+    tooltip::{TooltipSpec, attach_tooltip},
 };
 
 type ClickActivation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -818,7 +818,7 @@ fn attach_activation(button: BaseButton, activation: Option<Activation>) -> Base
 }
 
 impl RenderOnce for Button {
-    fn render(mut self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let policy = self.policy();
         let appearance = self.appearance();
         let resolved = ResolvedStyle::new(&appearance, self.flags);
@@ -863,11 +863,7 @@ impl RenderOnce for Button {
 
         match self.tooltip {
             Some(tooltip) => {
-                let delay = tooltip.delay();
-                button
-                    .tooltip(tooltip.builder())
-                    .tooltip_show_delay(delay)
-                    .into_any_element()
+                attach_tooltip(button, self.id, &tooltip, window, cx).into_any_element()
             }
             None => button.into_any_element(),
         }

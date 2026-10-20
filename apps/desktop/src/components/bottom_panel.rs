@@ -1,6 +1,7 @@
 //! Bottom panel with open-position and trade-history tabs. Its header stays docked at the window
 //! bottom while collapsed and rides the top edge of the panel while open; the open panel resizes
-//! from that edge.
+//! from that edge. The tabs live in the open panel's body, above the table they switch, so the
+//! collapsed header carries only the panel title and its expand control.
 //!
 //! The trading owner stays authoritative for fills, the round trips grouped from them and every
 //! position. This module keeps one shared presentation copy of the open positions of every
@@ -21,6 +22,7 @@ const TRADE_HISTORY_MAXIMUM_HEIGHT: f32 = 640.0;
 /// Space a resize always leaves for the title bar, chart header and workspace above.
 const TRADE_HISTORY_MINIMUM_WORKSPACE_HEIGHT: f32 = 240.0;
 const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
+const BOTTOM_PANEL_TITLE: &str = "Portfolio";
 const ACCOUNT_STATS_GAP: f32 = 24.0;
 const ACCOUNT_STATS_DIVIDER_HEIGHT: f32 = 28.0;
 const TABLE_HEADER_HEIGHT: f32 = 30.0;
@@ -253,9 +255,8 @@ impl BottomPanelState {
         true
     }
 
-    /// Opens the panel on `tab`; selecting the tab already shown collapses the panel.
+    /// Shows `tab` in the open panel.
     fn select_tab(&mut self, tab: BottomPanelTab) {
-        self.open = !(self.open && self.tab == tab);
         self.tab = tab;
         self.account_menu_open = false;
     }
@@ -546,7 +547,9 @@ pub(super) fn bottom_panel(
             theme,
         ))
         .when(open, |panel| {
-            let panel = panel.children(account_stats(state, theme));
+            let panel = panel
+                .children(account_stats(state, theme))
+                .child(bottom_panel_tab_bar(terminal, state, theme));
             match state.tab {
                 BottomPanelTab::TradeHistory => panel
                     .child(trade_history_column_header(
@@ -597,19 +600,6 @@ fn trade_history_header(
 ) -> Div {
     let colors = theme.colors;
     let open = state.open;
-    let count_label = match state.tab {
-        BottomPanelTab::TradeHistory => {
-            let count = state.history.rows.len();
-            format!("{count} {}", if count == 1 { "trade" } else { "trades" })
-        }
-        BottomPanelTab::Positions => {
-            let count = state.positions.rows.len();
-            format!(
-                "{count} {}",
-                if count == 1 { "position" } else { "positions" }
-            )
-        }
-    };
     div()
         .h(px(SIDE_PANEL_HEADER_HEIGHT))
         .flex_none()
@@ -625,8 +615,13 @@ fn trade_history_header(
         })
         .text_xs()
         .text_color(gpui_color(colors.text_secondary))
-        .child(bottom_panel_tabs(terminal, state, theme))
-        .when(open, |header| header.child(count_label))
+        .child(
+            div()
+                .px_1()
+                .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                .text_color(gpui_color(colors.text_default))
+                .child(BOTTOM_PANEL_TITLE),
+        )
         .child(div().flex_1())
         .when(rithmic_attribution, |header| {
             header.child(super::terminal_chrome::rithmic_attribution(theme))
@@ -690,6 +685,7 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
             .child(
                 value
                     .text_sm()
+                    .font_family(aeris_design_system::platform_mono_font_family())
                     .font_weight(platform_font_weight(TypographyRole::Emphasis))
                     .font_features(platform_tabular_numerals()),
             )
@@ -712,8 +708,43 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
     ]
 }
 
-/// The panel's tabs. While the panel is collapsed no tab is selected; choosing the open tab
-/// again collapses the panel.
+/// The open panel's tab strip above the table, with the shown tab's row count at its end.
+fn bottom_panel_tab_bar(
+    terminal: &Entity<TerminalApp>,
+    state: &BottomPanelState,
+    theme: &AerisTheme,
+) -> Div {
+    let colors = theme.colors;
+    let count_label = match state.tab {
+        BottomPanelTab::TradeHistory => {
+            let count = state.history.rows.len();
+            format!("{count} {}", if count == 1 { "trade" } else { "trades" })
+        }
+        BottomPanelTab::Positions => {
+            let count = state.positions.rows.len();
+            format!(
+                "{count} {}",
+                if count == 1 { "position" } else { "positions" }
+            )
+        }
+    };
+    div()
+        .flex_none()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .text_color(gpui_color(colors.text_secondary))
+        .child(bottom_panel_tabs(terminal, state, theme))
+        .child(div().flex_1())
+        .child(count_label)
+}
+
 fn bottom_panel_tabs(
     terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
@@ -724,25 +755,18 @@ fn bottom_panel_tabs(
         .children(
             [BottomPanelTab::Positions, BottomPanelTab::TradeHistory].map(|tab| {
                 let select_terminal = terminal.clone();
-                let active = state.open && state.tab == tab;
-                let (id, label, show, hide) = match tab {
-                    BottomPanelTab::TradeHistory => (
-                        "trade_history_tab",
-                        "Trade history",
-                        "Show trade history",
-                        "Hide trade history",
-                    ),
-                    BottomPanelTab::Positions => (
-                        "positions_tab",
-                        "Positions",
-                        "Show open positions",
-                        "Hide open positions",
-                    ),
+                let (id, label, aria_label) = match tab {
+                    BottomPanelTab::TradeHistory => {
+                        ("trade_history_tab", "Trade history", "Show trade history")
+                    }
+                    BottomPanelTab::Positions => {
+                        ("positions_tab", "Positions", "Show open positions")
+                    }
                 };
                 Tab::new(id, theme)
                     .compact()
-                    .selected(active)
-                    .aria_label(if active { hide } else { show })
+                    .selected(state.tab == tab)
+                    .aria_label(aria_label)
                     .child(label)
                     .on_click(move |_, _, cx| {
                         select_terminal.update(cx, |terminal, terminal_cx| {
@@ -1004,17 +1028,17 @@ fn trade_history_row(
             theme,
         ))
         .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(side_color)))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             TRADE_HISTORY_QUANTITY_WIDTH,
             trade_history_text(quantity),
             theme,
         ))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             TRADE_HISTORY_PRICE_WIDTH,
             trade_history_text(entry_price),
             theme,
         ))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             TRADE_HISTORY_PRICE_WIDTH,
             trade_history_text(exit_price),
             theme,
@@ -1139,22 +1163,22 @@ fn position_row(
             theme,
         ))
         .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(side_color)))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             TRADE_HISTORY_QUANTITY_WIDTH,
             trade_history_decimal(position.quantity),
             theme,
         ))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             POSITION_PRICE_WIDTH,
             price(position.entry_price),
             theme,
         ))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             POSITION_PRICE_WIDTH,
             price(position.stop_loss),
             theme,
         ))
-        .child(numeric_cell(
+        .child(numeric_data_cell(
             POSITION_PRICE_WIDTH,
             price(position.take_profit),
             theme,
@@ -1251,7 +1275,7 @@ fn trade_history_pnl_cell(
     currency: &str,
     theme: &AerisTheme,
 ) -> Div {
-    numeric_cell(
+    numeric_data_cell(
         TRADE_HISTORY_PNL_WIDTH,
         trade_history_pnl_value(pnl, currency, theme),
         theme,
@@ -1340,6 +1364,17 @@ fn numeric_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Di
     table_cell(width, theme)
         .justify_end()
         .child(div().min_w_0().truncate().child(content))
+}
+
+/// A numeric row value in the platform mono face; column headers keep `numeric_cell`.
+fn numeric_data_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Div {
+    numeric_cell(
+        width,
+        div()
+            .font_family(aeris_design_system::platform_mono_font_family())
+            .child(content),
+        theme,
+    )
 }
 
 /// A row's last cell carries no divider.
@@ -1705,16 +1740,20 @@ mod tests {
     }
 
     #[test]
-    fn selecting_the_shown_tab_collapses_and_another_tab_switches() {
-        let mut state = BottomPanelState::default();
+    fn selecting_a_tab_switches_the_table_without_toggling_the_panel() {
+        let mut state = BottomPanelState {
+            open: true,
+            ..BottomPanelState::default()
+        };
+        state.select_tab(BottomPanelTab::TradeHistory);
+        assert!(state.open);
+        assert_eq!(state.tab, BottomPanelTab::TradeHistory);
+        state.select_tab(BottomPanelTab::TradeHistory);
+        assert!(state.open, "selecting the shown tab keeps the panel open");
+        assert_eq!(state.tab, BottomPanelTab::TradeHistory);
         state.select_tab(BottomPanelTab::Positions);
         assert!(state.open);
         assert_eq!(state.tab, BottomPanelTab::Positions);
-        state.select_tab(BottomPanelTab::TradeHistory);
-        assert!(state.open, "switching tabs keeps the panel open");
-        assert_eq!(state.tab, BottomPanelTab::TradeHistory);
-        state.select_tab(BottomPanelTab::TradeHistory);
-        assert!(!state.open);
     }
 
     #[test]

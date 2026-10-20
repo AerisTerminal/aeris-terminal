@@ -21,8 +21,21 @@ pub const MAXIMUM_CODE_BYTES: usize = 2048;
 pub const MAXIMUM_STATE_BYTES: usize = 256;
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
-const PLATFORM_FONT: &[u8] =
-    include_bytes!("../../../ui/design_system/assets/fonts/inter_regular.ttf");
+/// Inter faces at the weights `platform.css` uses for normal, emphasis and strong text.
+const PLATFORM_FONTS: [(&[u8], u16); 3] = [
+    (
+        include_bytes!("../../../ui/design_system/assets/fonts/inter_regular.ttf"),
+        400,
+    ),
+    (
+        include_bytes!("../../../ui/design_system/assets/fonts/inter_medium.ttf"),
+        500,
+    ),
+    (
+        include_bytes!("../../../ui/design_system/assets/fonts/inter_bold.ttf"),
+        700,
+    ),
+];
 const BRAND_FONT: &[u8] = include_bytes!(
     "../../../ui/design_system/assets/fonts/faculty-glyphic/FacultyGlyphic-Regular.ttf"
 );
@@ -208,11 +221,18 @@ fn browser_platform_styles() -> &'static str {
 }
 
 fn browser_font_faces() -> String {
-    let inter = STANDARD.encode(PLATFORM_FONT);
-    let faculty = STANDARD.encode(BRAND_FONT);
-    format!(
-        r#"@font-face{{font-family:"Inter";src:url("data:font/ttf;base64,{inter}") format("truetype");font-style:normal;font-weight:400;font-display:swap}}@font-face{{font-family:"Faculty Glyphic";src:url("data:font/ttf;base64,{faculty}") format("truetype");font-style:normal;font-weight:400;font-display:swap}}"#
-    )
+    PLATFORM_FONTS
+        .iter()
+        .map(|&(face, weight)| ("Inter", face, weight))
+        .chain([("Faculty Glyphic", BRAND_FONT, 400)])
+        .map(|(family, face, weight)| {
+            let face = STANDARD.encode(face);
+            format!(
+                r#"@font-face{{font-family:"{family}";src:url("data:font/ttf;base64,{face}") format("truetype");font-style:normal;font-weight:{weight};font-display:swap}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat()
 }
 
 fn outcome_page(success: bool, detail: &str) -> String {
@@ -423,6 +443,9 @@ mod tests {
         assert!(!response.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
         assert!(response.contains("font-family:\"Inter\""));
+        for weight in ["400", "500", "700"] {
+            assert!(response.contains(&format!("font-weight:{weight};font-display:swap")));
+        }
         assert!(response.contains("font-family:\"Faculty Glyphic\""));
         assert!(response.contains("data:font/ttf;base64,"));
         assert!(response.contains("classList.toggle('dark',d)"));

@@ -3,7 +3,8 @@ use crate::OrderBookRow;
 use crate::order_book::{compact_quantity_text, grouped_fixed_point_text};
 use crate::{OrderBookColumnLevel, OrderBookFrame};
 use aeris_design_system::{
-    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family, platform_typography,
+    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+    platform_mono_font_family, platform_typography,
 };
 use aeris_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
 use aeris_trading::{FixedPoint, OrderSide, project_unrealized_pnl};
@@ -1547,7 +1548,7 @@ fn render_level_row(
         .overflow_hidden()
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
-        .font_family(platform_font_family())
+        .font_family(platform_mono_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
@@ -1624,7 +1625,7 @@ fn render_empty_price_tick(
         .overflow_hidden()
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
-        .font_family(platform_font_family())
+        .font_family(platform_mono_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
@@ -2108,7 +2109,7 @@ fn spread_row(
             .border_b(px(theme.dimensions.border_width))
             .border_color(gpui_color(theme.colors.border))
             .bg(gpui_color(theme.colors.surface_secondary))
-            .font_family(platform_font_family())
+            .font_family(platform_mono_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .font_features(platform_tabular_numerals())
             .text_size(px(TEXT_SIZE))

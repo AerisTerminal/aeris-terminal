@@ -23,10 +23,16 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Dark `surface-secondary`, `surface-subtle` and `surface-raised` are translucent tints of `surface`.
   They only appear over an opaque `surface` (the window root) or `surface-popover`; never use them
   as the fill of a layer that floats over other content.
-- Floating layers (menus, dialogs, popovers, tooltips, toasts, hints, floating toolbars) use
+- Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) use
   `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
   fill, a `--border-width` `border-popover` hairline, and a 1px `border-popover-highlight` inner edge
   painted above the content.
+- Tooltips (`terminal_ui::tooltip`) use the secondary surface: `surface-secondary` resolved over
+  `surface-popover`, a `--border-width` `border-secondary` edge and `text-default`. A one-line
+  label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
+  opens beside its trigger on the caller's side (bottom by default, toward the content for edge
+  sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
+  and slides in from the trigger side and fades out when the pointer leaves, presses or scrolls.
 - Large workspace panels (the symbol, indicator and chart settings panels, the indicator settings
   dialogs and the header account menu) keep the popover edge and highlight but fill with the main
   `surface` (`surface_panel`, `MenuPanel::on_surface`, or `Dialog::panel_surface`). Their content
@@ -43,9 +49,15 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   when there is no room.
 - Focus is one style everywhere: the control's `--border-width` border turns `ring-primary` (no
   thicker ring, glow or background change).
-- Typography uses the bundled Inter Regular face for platform text and the bundled Faculty Glyphic
-  Regular face only for brand/display text. There is no HK Grotesk dependency. The CSS `--font-sans`
-  and native `platform_font_family()` both resolve to Inter; keep the web mirror in sync.
+- Typography uses the bundled Inter faces (Regular 400, Medium 500, Bold 700) for platform text and
+  the bundled Faculty Glyphic Regular face only for brand/display text. Changing numbers use Inter's
+  tabular figures (`tnum`). Geist Mono (Regular, Medium, Bold) is bundled as `--font-mono`
+  (`platform_mono_font_family()`) for numbers in data panels only: order book rows, time and sales
+  rows, position/order/trade values and screener numeric columns. Headers and labels stay Inter.
+  Its 0.600em digits are narrower than Inter's 0.648em tabular digits, so the existing column widths
+  hold. There is no HK Grotesk dependency. The CSS
+  `--font-sans` and native `platform_font_family()` both resolve to Inter; keep the web mirror in
+  sync.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
 

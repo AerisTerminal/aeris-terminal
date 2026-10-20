@@ -101,21 +101,21 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 |---|---|---|---|---|
 | MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | closed in ab5ff341 |
 | MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | market watchdog and trading practice gate closed; M4.8 GUI resting-order check outstanding |
-| MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | closed in this commit |
-| MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in this commit |
-| MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | closed in this commit |
-| MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | closed in this commit |
-| MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in this commit |
-| MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | M3.5 capability/presentation split and literal ban closed in this commit; provider-session registry remains M3.6 |
-| MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in this commit |
+| MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | closed in ecc749ab |
+| MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in ecc749ab |
+| MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | closed in 30a2d5d1 |
+| MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | closed in 8c61798d |
+| MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in 1303adbd |
+| MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | M3.5 capability/presentation split and literal ban closed in 2f3fd729; provider-session registry remains M3.6 |
+| MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in 0eae9355 |
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
-| MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in this commit |
-| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup and study wrappers closed in this commit; order-book demand M3.8 open |
-| MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in this commit; the bounded Indexed correction overlay still recomputes its retained bars |
+| MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in a00725b0 |
+| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup and study wrappers closed in e52e72f8; order-book demand M3.8 open |
+| MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in 8c61798d; the bounded Indexed correction overlay still recomputes its retained bars |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
 | MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments, M3.2 trade retention/demand-dirty/provider wording, and M3.5 Rithmic presentation and capability documentation closed; other items open |
-| MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | closed in this commit |
+| MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | closed in 0e77fa3c |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | provider-neutral session, feed-generation and per-class age gates in trading owner; GUI resting-order check outstanding |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | closed: one atomic step locks, cancels non-protective orders with the kill-switch cause and flattens priced positions; unpriced positions keep protection and are reported |
@@ -1514,35 +1514,35 @@ the repo root `AGENTS.md`.
 - Each data root has one process owner. Validation roots and vault namespaces are isolated unless the explicit
   stored-cTrader borrowing flag is present (M1.8, 3c42981b).
 - The four market coordinator characterization cases and exact test names remain in the boundary
-  test file, checked by `aeris_naming_check` (M2.1, this commit).
+  test file, checked by `aeris_naming_check` (M2.1, 20abd4cc).
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps come from
-  the injected clock; only `SystemClock` reads system time (M2.3, this commit).
+  the injected clock; only `SystemClock` reads system time (M2.3, b2b66d8d).
 - Provider reconnect attempts use capped policy backoff; Rithmic transport has
   only the adapter scheduler and a separate bounded non-transport delay
-  (M2.4, this commit).
-- Session/cadence resolution uses one provider-neutral calendar and one exchange-code table; generic calendar code cannot contain provider literals or import adapter calendars, and unsupported weekly/monthly live demand reports a typed error (M2.5, this commit).
-- Every live model's stall policy and every provider's practice-session check use calendar phases. Unknown sessions use a conservative 300-second stall threshold; closed sessions do not recover from silence (M2.6, this commit).
-- Dated provider calendar events are fenced at the coordinator and expire into the instrument's recurring calendar or Unknown; live session, week and month bars and tape dates use the same calendar (M2.7, this commit).
-- Typed provider events and history completions use registry-minted epochs and an equality fence; naming_check rejects a raw `ProviderEvent.generation` (M2.8, this commit).
-- Catalog callbacks use coordinator-owned command fences by consumer/provider/kind; startup resolution has an explicit lane and consumer retirement uses one registry cleanup path (M2.9, this commit).
-- `HistoryTracker` owns current/backfill retry, deferral, empty coverage, detached windows and cancellation behind exact provider/demand/sequence tickets; no parallel coordinator history maps (M2.10, this commit).
-- Candle series control and forming state belong to `lifecycle::SeriesLifecycles`; candle handlers and direct clocks in `lifecycle/` are forbidden (M3.1, this commit).
-- Trade-built series share that lifecycle owner; `SeriesLiveMap` cannot return to market-service production source (M3.2, this commit).
-- Generic market-service lifecycle/history/calendar/quote/outbox/coordinator/realtime/runtime/publication source contains no provider-id literals, including after test modules; provider replay aggregation does not live on `ChartInterval` (M3.5, this commit).
-- Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, this commit).
-- The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, this commit).
-- Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, this commit).
-- Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, this commit).
-- One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, this commit).
-- `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, this commit).
-- Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, this commit).
-- V20 persists only verified trading market routes; migrated legacy instruments remain route-less until the market owner publishes verified Terms. The owner bounds ticket interest at 64 and combined quote interest at 256 (M4.7 part 2/3, this commit).
+  (M2.4, a00725b0).
+- Session/cadence resolution uses one provider-neutral calendar and one exchange-code table; generic calendar code cannot contain provider literals or import adapter calendars, and unsupported weekly/monthly live demand reports a typed error (M2.5, 0eae9355).
+- Every live model's stall policy and every provider's practice-session check use calendar phases. Unknown sessions use a conservative 300-second stall threshold; closed sessions do not recover from silence (M2.6, 78085525).
+- Dated provider calendar events are fenced at the coordinator and expire into the instrument's recurring calendar or Unknown; live session, week and month bars and tape dates use the same calendar (M2.7, ecc749ab).
+- Typed provider events and history completions use registry-minted epochs and an equality fence; naming_check rejects a raw `ProviderEvent.generation` (M2.8, 09e43c35).
+- Catalog callbacks use coordinator-owned command fences by consumer/provider/kind; startup resolution has an explicit lane and consumer retirement uses one registry cleanup path (M2.9, 2fd43740).
+- `HistoryTracker` owns current/backfill retry, deferral, empty coverage, detached windows and cancellation behind exact provider/demand/sequence tickets; no parallel coordinator history maps (M2.10, 1303adbd).
+- Candle series control and forming state belong to `lifecycle::SeriesLifecycles`; candle handlers and direct clocks in `lifecycle/` are forbidden (M3.1, 0c4166cb).
+- Trade-built series share that lifecycle owner; `SeriesLiveMap` cannot return to market-service production source (M3.2, 8c61798d).
+- Generic market-service lifecycle/history/calendar/quote/outbox/coordinator/realtime/runtime/publication source contains no provider-id literals, including after test modules; provider replay aggregation does not live on `ChartInterval` (M3.5, 2f3fd729).
+- Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, 13837b86).
+- The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, 0e77fa3c).
+- Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, 6d559cd7).
+- Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, 6b248b2f).
+- One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, 98262ee5).
+- `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, f34adbc0).
+- Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, 836c9573).
+- V20 persists only verified trading market routes; migrated legacy instruments remain route-less until the market owner publishes verified Terms. The owner bounds ticket interest at 64 and combined quote interest at 256 (M4.7 part 2/3, 5c38b21e).
 - V21 reads and writes only `fill_accounting` and `trade_cycles` for P&L; legacy cycle tables and fill columns are preserved, unread, for deferred removal (M4.9).
-- Desktop source may not reference `SimulatedMarketObservation`; quote execution and current quote provenance are owned by the trading QuoteBook fed from the market runtime (M4.7 part 3/3, this commit).
+- Desktop source may not reference `SimulatedMarketObservation`; quote execution and current quote provenance are owned by the trading QuoteBook fed from the market runtime (M4.7 part 3/3, cd54c087).
 - Simulated order admission and fills require the trading owner's verified session, Live current-generation quote and class-specific freshness; a restart-time owner-local `eligible_after` fences restored orders without comparing provider generations across processes (M4.8).
-- Broker order commands reserve bounded venue request capacity before their SQLite commit; the request becomes visible to the relay only after commit, and queue rejection causes no durable change or compensating undo (M4.10 part 2/4, this commit).
-- Simulated mark-only quotes update unrealized P&L only in memory without cloning full trading state or writing SQLite; retention runs only hourly from the owner timer, with a 5,000-row-per-table cap per run (M4.10 part 4/4, this commit).
-- Simulated fill quantity and price policies live only in `trading_runtime::execution`; the approved `TouchLiquidity` and `TouchPrice` traits/implementations retain full order quantity and exact touch (M5.3 part 11, this commit).
+- Broker order commands reserve bounded venue request capacity before their SQLite commit; the request becomes visible to the relay only after commit, and queue rejection causes no durable change or compensating undo (M4.10 part 2/4, ce69e2bb).
+- Simulated mark-only quotes update unrealized P&L only in memory without cloning full trading state or writing SQLite; retention runs only hourly from the owner timer, with a 5,000-row-per-table cap per run (M4.10 part 4/4, 658a73bd).
+- Simulated fill quantity and price policies live only in `trading_runtime::execution`; the approved `TouchLiquidity` and `TouchPrice` traits/implementations retain full order quantity and exact touch (M5.3 part 11, a0ade75f).
 
 ## 6. Progress log
 
@@ -1803,6 +1803,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.3 Part 26 test(desktop): all 120 controller event permutations, all six GPUI snapshot/marker orders and 128 seeded 256-step interleavings passed. M6.3 stays unchecked for Parts 27-28.
 - 2026-10-20 M6.3 Part 27 fix(desktop): failing-first GPUI tests proved either readiness or covering history could uncover a changed instrument prematurely; the pane retains the neutral cover until both arrive. M6.3 stays unchecked for Part 28 guarded GUI storms.
 - 2026-10-20 M6.3 Part 28a test(desktop): six rapid interval requests ending on 3D retain the exact last pending generation under late superseded replies and publications. The GPUI regression passes; the initial 5m GUI outcome remains unexplained until corrected, dynamically located UIA actions are verified. M6.3 remains unchecked for Part 28b's literal three GUI clauses.
+- 2026-10-20 UI feat(desktop): typography and chrome polish with no stabilization item. Inter 4.1 Regular/Medium/Bold replace the single synthesized Inter face; Geist Mono (`platform_mono_font_family()`) renders numbers in the order book, time and sales, bottom-panel and screener cells; market panels move from the header to a right icon sidebar; the bottom panel's tabs move into its open body; tooltips become trigger-anchored secondary-surface pills with top/bottom/left/right placement and a spring fade, replacing GPUI's cursor-positioned tooltip. Backfilled the 35 "closed in this commit" placeholders in sections 3 and 5 with the commits that introduced them. On an isolated worktree holding only this change, fmt, Clippy and naming_check passed and every test passed except three naming_check self-tests that read CRLF-checked-out files there; they pass on the LF main tree (120/120). M6.3 and M6.4 stay unchecked.
 
 ## 7. Known gaps / deferred
 

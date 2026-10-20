@@ -47,8 +47,6 @@ fn active_header_state(
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
-        side_panels: workspace.side_panels,
-        context_visible: workspace.context_panel_visible,
         chart_link_group: workspace.chart_link_group,
         connection_state: workspace
             .connection_state

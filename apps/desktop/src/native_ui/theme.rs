@@ -1,6 +1,6 @@
 use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, ThemeMode, TypographyRole, platform_font_family,
-    platform_typography,
+    platform_mono_font_family, platform_typography,
 };
 use gpui::{Div, FontWeight, Hsla, Pixels, Styled, div, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
@@ -123,6 +123,7 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
         full: px(f32::from(RadiusToken::Full.logical_pixels())),
     };
     base.tokens.typography.sans = platform_font_family().into();
+    base.tokens.typography.mono = platform_mono_font_family().into();
     let normal_weight = FontWeight(f32::from(
         platform_typography().weight(TypographyRole::Normal),
     ));

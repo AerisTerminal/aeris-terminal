@@ -14,8 +14,16 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// The one bundled platform face referenced by `platform.css`.
-pub static PLATFORM_FONT_BYTES: [&[u8]; 1] = [include_bytes!("../assets/fonts/inter_regular.ttf")];
+/// The bundled platform faces referenced by `platform.css`: Inter (`--font-sans`)
+/// and Geist Mono (`--font-mono`) at the regular, medium and bold weights.
+pub static PLATFORM_FONT_BYTES: [&[u8]; 6] = [
+    include_bytes!("../assets/fonts/inter_regular.ttf"),
+    include_bytes!("../assets/fonts/inter_medium.ttf"),
+    include_bytes!("../assets/fonts/inter_bold.ttf"),
+    include_bytes!("../assets/fonts/geist_mono_regular.ttf"),
+    include_bytes!("../assets/fonts/geist_mono_medium.ttf"),
+    include_bytes!("../assets/fonts/geist_mono_bold.ttf"),
+];
 
 /// Bundled Aeris brand face. It is intentionally separate from the platform
 /// typography so only explicit brand lockups opt into it.
@@ -42,6 +50,7 @@ pub enum TypographyRole {
 pub struct PlatformTypography {
     stack: &'static str,
     family: &'static str,
+    mono_family: &'static str,
     normal_weight: u16,
     emphasis_weight: u16,
     strong_weight: u16,
@@ -57,6 +66,12 @@ impl PlatformTypography {
     #[must_use]
     pub const fn family(self) -> &'static str {
         self.family
+    }
+
+    /// The `--font-mono` family used for numeric data cells.
+    #[must_use]
+    pub const fn mono_family(self) -> &'static str {
+        self.mono_family
     }
 
     #[must_use]
@@ -80,6 +95,7 @@ pub fn platform_typography() -> PlatformTypography {
     PlatformTypography {
         stack: FONT_STACK,
         family: FONT_FAMILY,
+        mono_family: FONT_MONO_FAMILY,
         normal_weight: FONT_WEIGHT_NORMAL,
         emphasis_weight: FONT_WEIGHT_EMPHASIS,
         strong_weight: FONT_WEIGHT_STRONG,
@@ -100,6 +116,12 @@ pub fn platform_font_stack() -> &'static str {
 #[must_use]
 pub fn platform_font_family() -> &'static str {
     platform_typography().family()
+}
+
+/// Returns the primary family from the canonical `--font-mono` CSS value.
+#[must_use]
+pub fn platform_mono_font_family() -> &'static str {
+    platform_typography().mono_family()
 }
 
 /// Returns the dedicated Aeris brand font family.
@@ -489,7 +511,8 @@ impl RadiusToken {
 mod tests {
     use super::{
         AerisTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, brand_font_family,
-        platform_date_label, platform_font_family, platform_font_stack, platform_typography,
+        platform_date_label, platform_font_family, platform_font_stack, platform_mono_font_family,
+        platform_typography,
     };
 
     #[test]
@@ -836,8 +859,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         bundled_fonts.sort();
-        assert_eq!(bundled_fonts, ["inter_regular.ttf"]);
+        assert_eq!(
+            bundled_fonts,
+            [
+                "geist_mono_bold.ttf",
+                "geist_mono_medium.ttf",
+                "geist_mono_regular.ttf",
+                "inter_bold.ttf",
+                "inter_medium.ttf",
+                "inter_regular.ttf",
+            ]
+        );
         assert!(font_dir.join("inter_license.txt").is_file());
+        assert!(font_dir.join("geist_license.txt").is_file());
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
         assert!(brand_font.is_file());
@@ -903,12 +937,19 @@ mod tests {
         let css = include_str!("../platform.css");
         for required in [
             "--font-sans: \"Inter\", sans-serif;",
+            "--font-mono: \"Geist Mono\", monospace;",
             "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 700;",
             "--font-feature-tabular-numerals: \"tnum\";",
             "inter_regular.ttf",
+            "inter_medium.ttf",
+            "inter_bold.ttf",
+            "geist_mono_regular.ttf",
+            "geist_mono_medium.ttf",
+            "geist_mono_bold.ttf",
             "font-weight: 400;",
+            "font-weight: 500;",
             "font-weight: var(--font-weight-strong);",
             "font-variant-numeric: tabular-nums;",
             "-webkit-font-smoothing: antialiased;",
@@ -934,6 +975,7 @@ mod tests {
         assert!(css.contains("--sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);"));
         assert_eq!(platform_font_family(), "Inter");
         assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
+        assert_eq!(platform_mono_font_family(), "Geist Mono");
 
         let typography = platform_typography();
         assert_eq!(typography.weight(TypographyRole::Normal), 500);

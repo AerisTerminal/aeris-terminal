@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop::native_ui::tooltip::TooltipPlacement;
 use ChartDrawingKind as Kind;
 use assets::DrawingIcon as Glyph;
 
@@ -873,7 +874,7 @@ fn drawing_tool_slot(
     let group = &DRAWING_TOOL_GROUPS[slot.group];
     let entry = slot.entry;
     let arm = terminal.clone();
-    let button = chrome_tooltip(
+    let button = sidebar_tooltip(
         group.id,
         entry.label,
         drawing_toolbar_button(
@@ -934,7 +935,11 @@ fn drawing_tool_group_arrow(
         .variant(ButtonVariant::Ghost)
         .icon(Icon::new(Glyph::GroupArrow.path()).with_size(px(DRAWING_TOOL_GROUP_ARROW_ICON)))
         .aria_label(group.label)
-        .tooltip(TooltipSpec::new(group.label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .tooltip(
+            TooltipSpec::new(group.label, theme)
+                .show_delay(TOOLTIP_OPEN_DELAY)
+                .placement(TooltipPlacement::Right),
+        )
         .selected(slot.menu_open)
         .disabled(!slot.enabled)
         .on_press(move |_, _, cx| {
@@ -1125,7 +1130,7 @@ where
             .child(dot())
     };
     let spec = TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY);
-    div()
+    let grip = div()
         .id(id)
         .flex_none()
         .w(px(FLOATING_TOOLBAR_GRIP_WIDTH))
@@ -1141,10 +1146,9 @@ where
             on_grab(event.position, cx);
         })
         .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-        .tooltip(spec.builder())
-        .tooltip_show_delay(spec.delay())
         .child(column())
-        .child(column())
+        .child(column());
+    with_tooltip((id, usize::MAX), grip, &spec)
 }
 
 /// The default spot beside the drawing sidebar and below the chart header.
@@ -1327,7 +1331,7 @@ fn drawing_favorites_toggle(
         "Show favorites toolbar"
     };
     let toggle = terminal.clone();
-    chrome_tooltip(
+    sidebar_tooltip(
         "drawing_favorites_toggle",
         label,
         drawing_toolbar_button(
@@ -1490,7 +1494,20 @@ fn drawing_action_control(
     .on_click(move |_, _, cx| {
         app.update(cx, spec.action);
     });
-    chrome_tooltip(spec.id, spec.tooltip, button, theme)
+    sidebar_tooltip(spec.id, spec.tooltip, button, theme)
+}
+
+/// The sidebar sits on the window's left edge, so its tooltips open to the right.
+fn sidebar_tooltip(
+    id: &'static str,
+    label: impl Into<gpui::SharedString>,
+    trigger: impl IntoElement + 'static,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let spec = TooltipSpec::new(label, theme)
+        .show_delay(TOOLTIP_OPEN_DELAY)
+        .placement(TooltipPlacement::Right);
+    with_tooltip((id, usize::MAX), trigger, &spec).into_any_element()
 }
 
 pub(super) fn drawing_toolbar_expander(

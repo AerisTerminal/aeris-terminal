@@ -1,1 +1,3 @@
-pub(crate) use aeris_terminal_ui::tooltip::{TooltipSpec, with_tooltip};
+pub(crate) use aeris_terminal_ui::tooltip::{
+    TooltipPlacement, TooltipSpec, attach_tooltip, with_tooltip,
+};

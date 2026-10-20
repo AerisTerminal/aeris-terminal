@@ -46,7 +46,7 @@ pub(super) fn instrument_selector(
             terminal_provider_display(state.provider)
         ),
         Button::new("instrument_selector", theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .button_size(ButtonSize::Lg)
             .round()
             .leading(provider_exchange_mark(

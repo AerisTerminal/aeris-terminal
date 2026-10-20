@@ -33,6 +33,14 @@ fn main() {
     }
 }
 
+/// The first, quoted family of a CSS font stack such as `"Inter", sans-serif`.
+fn primary_family<'a>(stack: &'a str, property: &str) -> Result<&'a str, String> {
+    stack
+        .strip_prefix('"')
+        .and_then(|value| value.split_once('"').map(|(family, _)| family))
+        .ok_or_else(|| format!("--{property} must start with a quoted family"))
+}
+
 fn compile_tokens() -> Result<(), String> {
     let css = fs::read_to_string("platform.css").map_err(|error| error.to_string())?;
     let (root, dark_overrides) = parse_theme_blocks(&css)?;
@@ -41,13 +49,19 @@ fn compile_tokens() -> Result<(), String> {
     require_registered_colors(&dark)?;
     let mut output = String::new();
 
-    emit_string(&mut output, "FONT_STACK", &resolve(&root, "font-sans")?);
     let stack = resolve(&root, "font-sans")?;
-    let family = stack
-        .strip_prefix('"')
-        .and_then(|value| value.split_once('"').map(|(family, _)| family))
-        .ok_or_else(|| "--font-sans must start with a quoted family".to_owned())?;
-    emit_string(&mut output, "FONT_FAMILY", family);
+    emit_string(&mut output, "FONT_STACK", &stack);
+    emit_string(
+        &mut output,
+        "FONT_FAMILY",
+        primary_family(&stack, "font-sans")?,
+    );
+    let mono_stack = resolve(&root, "font-mono")?;
+    emit_string(
+        &mut output,
+        "FONT_MONO_FAMILY",
+        primary_family(&mono_stack, "font-mono")?,
+    );
     emit_u16(
         &mut output,
         "FONT_WEIGHT_NORMAL",

@@ -2834,7 +2834,6 @@ fn header_lifecycle_values_are_truthfully_labeled() {
     let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
     assert!(controls.enabled(HeaderControls::INSTRUMENT));
     assert!(controls.enabled(HeaderControls::SERIES));
-    assert!(controls.enabled(HeaderControls::MARKET_PANELS));
     assert!(controls.enabled(HeaderControls::INDICATOR));
     assert!(controls.enabled(HeaderControls::CHART_TYPE));
 }
