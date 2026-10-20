@@ -51,15 +51,16 @@ impl AerisChartView {
                     self.pending_settings_request = Some(ChartSettingsRequest::Drawing(id));
                 }
                 // Terminal has no pane click, crosshair, drawing-created, delta-tooltip range, or
-                // general-chart brush subscribers, and the engine runs drawing text editing
-                // through the GPUI input adapter.
+                // general-chart brush and legend subscribers, and the engine runs drawing text
+                // editing through the GPUI input adapter.
                 ChartInputEvent::Click { .. }
                 | ChartInputEvent::DoubleClick { .. }
                 | ChartInputEvent::CrosshairLeft
                 | ChartInputEvent::TextEditorOpened(_)
                 | ChartInputEvent::DrawingCreated(_)
                 | ChartInputEvent::DeltaTooltipChanged
-                | ChartInputEvent::GeneralBrushChanged => {}
+                | ChartInputEvent::GeneralBrushChanged
+                | ChartInputEvent::GeneralLegendChanged => {}
                 ChartInputEvent::RemoveSeries(series) => {
                     if self.remove_series_selection(series) {
                         self.engine.set_selected_series(None);
