@@ -897,6 +897,137 @@ fn pane_harness_snapshot_order_new_old_commit(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let requests = harness.commands.as_ref().expect("command receiver");
+
+    // Start on a different interval so the first 1m action is a real request.
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Hour4, cx));
+    });
+    let initial = requests
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("initial interval request");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence: initial })
+        .expect("initial selection");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+
+    let mut sequences = Vec::new();
+    for interval in [
+        ChartInterval::Minute1,
+        ChartInterval::Hour1,
+        ChartInterval::Day1,
+        ChartInterval::Day3,
+        ChartInterval::Minute5,
+        ChartInterval::Day3,
+    ] {
+        harness.pane.update(cx, |pane, cx| {
+            assert!(pane.select_interval(interval, cx), "{interval:?}");
+        });
+        let sequence = requests
+            .try_iter()
+            .find_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => {
+                    assert_eq!(request.interval, interval);
+                    Some(request.sequence)
+                }
+                _ => None,
+            })
+            .expect("one request per distinct pending interval");
+        sequences.push(sequence);
+        cx.read(|cx| {
+            let pane = harness.pane.read(cx);
+            assert_eq!(
+                pane.chart_pane_controller.pending_selection(),
+                Some(sequence)
+            );
+            assert_eq!(
+                pane.chart_pane_controller.pending_interval(),
+                Some(interval)
+            );
+            assert_eq!(pane.interval, ChartInterval::Hour4);
+        });
+    }
+
+    let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
+    let publication = |generation| {
+        MarketWorkerMessage::Update(MarketWorkerPublication {
+            update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
+            generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+                .with_selection_generation(generation),
+            subscription_id: snapshot.subscription_id.clone(),
+            worker_label: snapshot.worker_label.clone(),
+            ui_diagnostics: None,
+        })
+    };
+    let final_generation = *sequences.last().expect("final request");
+    deliver_retired_interval_outcomes(&mut harness, cx, &sequences, publication);
+    harness
+        .publications
+        .send(publication(final_generation))
+        .expect("early final publication");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.interval, ChartInterval::Hour4);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted {
+            sequence: final_generation,
+        })
+        .expect("final reply");
+    harness
+        .publications
+        .send(publication(final_generation))
+        .expect("final publication");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 2);
+        assert_eq!(pane.chart_pane_controller.pending_selection(), None);
+        assert_eq!(pane.interval, ChartInterval::Day3);
+        assert_eq!(pane.interval.label(), "3D");
+        assert!(!pane.chart_pane_controller.chart_needs_replacement());
+    });
+}
+
+fn deliver_retired_interval_outcomes(
+    harness: &mut PaneHarness,
+    cx: &mut VisualTestContext,
+    sequences: &[u64],
+    publication: impl Fn(u64) -> MarketWorkerMessage,
+) {
+    let final_generation = *sequences.last().expect("final request");
+    for &generation in sequences[..sequences.len() - 1].iter().rev() {
+        harness
+            .publications
+            .send(MarketWorkerMessage::EngineSelectionCommitted {
+                sequence: generation,
+            })
+            .expect("retired reply");
+        harness
+            .publications
+            .send(publication(generation))
+            .expect("retired publication");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 2);
+            assert_eq!(pane.interval, ChartInterval::Hour4);
+            assert_eq!(
+                pane.chart_pane_controller.pending_selection(),
+                Some(final_generation)
+            );
+        });
+    }
+}
+
+#[gpui::test]
 fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
