@@ -459,52 +459,8 @@ impl MarketWorkerSender {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(MarketWorkerSendError::Disconnected);
         }
-        if let MarketWorkerMessage::StudyOutput(next) = &message
-            && let Some(index) = queue.iter().position(|queued| {
-                matches!(
-                    queued,
-                    MarketWorkerMessage::StudyOutput(current)
-                        if current.output_id == next.output_id
-                )
-            })
-        {
-            queue[index] = message;
-            return Ok(());
-        }
-        if let MarketWorkerMessage::StudyRemoved(removed) = &message {
-            queue.retain(|queued| {
-                !matches!(
-                    queued,
-                    MarketWorkerMessage::StudyOutput(output)
-                        if removed.study_ids.contains(&output.study_id)
-                )
-            });
-        }
-        if let MarketWorkerMessage::StudyOutputsInvalidated(invalidated) = &message {
-            queue.retain(|queued| {
-                !matches!(
-                    queued,
-                    MarketWorkerMessage::StudyOutput(output)
-                        if invalidated.study_ids.contains(&output.study_id)
-                )
-            });
-        }
-        if let MarketWorkerMessage::OrderBook(next) = &message
-            && let Some(index) = queue.iter().position(|queued| {
-                matches!(
-                    queued,
-                    MarketWorkerMessage::OrderBook(current)
-                        if order_book_frame_can_be_superseded(current, next)
-                )
-            })
-        {
-            queue[index] = message;
-            return Ok(());
-        }
-        if let Some(index) = coalesced_trade_tape_index(&queue, &message) {
-            queue[index] = message;
-            return Ok(());
-        }
+        // Runtime publications already carry ordering and generation. Replacing a
+        // queued image in place would move it ahead of intervening control events.
         if matches!(message, MarketWorkerMessage::Diagnostics(_)) {
             if let Some(index) = queue
                 .iter()
@@ -555,39 +511,6 @@ impl MarketWorkerSender {
             .len();
         (current, self.mailbox.capacity)
     }
-}
-
-fn order_book_frame_can_be_superseded(current: &OrderBookFrame, next: &OrderBookFrame) -> bool {
-    current.provider_id == next.provider_id
-        && current.instrument_id == next.instrument_id
-        && current.entitlement_id == next.entitlement_id
-        && current.session_generation == next.session_generation
-        && current.selection_generation == next.selection_generation
-        && (next.revision > current.revision
-            || (next.revision == current.revision
-                && next.trade_source_watermark >= current.trade_source_watermark))
-}
-
-fn coalesced_trade_tape_index(
-    queue: &VecDeque<MarketWorkerMessage>,
-    message: &MarketWorkerMessage,
-) -> Option<usize> {
-    let MarketWorkerMessage::TradeTape(next) = message else {
-        return None;
-    };
-    queue.iter().position(|queued| {
-        matches!(
-            queued,
-            MarketWorkerMessage::TradeTape(current)
-                if current.consumer_id == next.consumer_id
-                    && current.generation == next.generation
-                    && current.provider_id == next.provider_id
-                    && current.instrument_id == next.instrument_id
-                    && current.entitlement_id == next.entitlement_id
-                    && current.provider_generation == next.provider_generation
-                    && next.revision >= current.revision
-        )
-    })
 }
 
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
@@ -1642,6 +1565,7 @@ mod tests {
     use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketTradeTapeSnapshot};
     use aeris_observability::{FeedDiagnostics, FeedIdentity};
     use aeris_study_sdk::builtins;
+    use std::collections::VecDeque;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
@@ -2003,6 +1927,55 @@ mod tests {
                 }
             ] if first == "loading" && second == "ready"
         ));
+    }
+
+    #[test]
+    fn bounded_bridge_drains_ten_thousand_outbox_events_in_emission_order() {
+        const FRAME_BUDGET: usize = 64;
+        const OUTBOX_EVENTS: u64 = 10_000;
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(256).expect("capacity is nonzero"));
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let snapshot = fixture
+            .publish_snapshot(2)
+            .expect("snapshot publishes")
+            .snapshot;
+        let mut outbox = (1..=OUTBOX_EVENTS).collect::<VecDeque<_>>();
+        let mut next_applied = 1;
+        let mut overflow_count = 0;
+        while next_applied <= OUTBOX_EVENTS {
+            while let Some(&generation) = outbox.front() {
+                let result = sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
+                    generation: MarketPublicationGeneration::from_tail(generation, 1, 1, 1),
+                    subscription_id: String::new(),
+                    worker_label: String::new(),
+                    ui_diagnostics: None,
+                }));
+                if result == Err(super::MarketWorkerSendError::Full) {
+                    overflow_count += 1;
+                    break;
+                }
+                result.expect("receiver is alive");
+                outbox.pop_front();
+            }
+            let (messages, disconnected) = receiver.drain_up_to(FRAME_BUDGET);
+            assert!(!disconnected);
+            assert!(!messages.is_empty());
+            assert!(messages.len() <= FRAME_BUDGET);
+            for message in messages {
+                let MarketWorkerMessage::Update(publication) = message else {
+                    panic!("unexpected outbox projection");
+                };
+                assert_eq!(
+                    publication.generation.publication_generation(),
+                    next_applied
+                );
+                next_applied += 1;
+            }
+        }
+        assert_eq!(next_applied, OUTBOX_EVENTS + 1);
+        assert!(overflow_count > 0, "bounded queue must report backpressure");
     }
 
     #[test]
@@ -3026,7 +2999,7 @@ mod tests {
     }
 
     #[test]
-    fn order_book_mailbox_coalesces_newer_frames_for_the_same_selection() {
+    fn order_book_mailbox_preserves_newer_frames_after_earlier_frames() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let frame = |revision| OrderBookFrame {
@@ -3054,17 +3027,18 @@ mod tests {
             .expect("first frame queues");
         sender
             .send(MarketWorkerMessage::OrderBook(frame(3)))
-            .expect("newer frame replaces it");
+            .expect("newer frame queues behind it");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::OrderBook(frame)] if frame.revision == 3
+            [MarketWorkerMessage::OrderBook(first), MarketWorkerMessage::OrderBook(second)]
+                if first.revision == 2 && second.revision == 3
         ));
     }
 
     #[test]
-    fn trade_tape_mailbox_keeps_one_latest_image_per_runtime_generation() {
+    fn trade_tape_mailbox_preserves_emission_order_per_runtime_generation() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let snapshot = |revision| MarketTradeTapeSnapshot {
@@ -3086,12 +3060,13 @@ mod tests {
             .expect("first tape queues");
         sender
             .send(MarketWorkerMessage::TradeTape(snapshot(3)))
-            .expect("newer tape replaces it");
+            .expect("newer tape queues behind it");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::TradeTape(snapshot)] if snapshot.revision == 3
+            [MarketWorkerMessage::TradeTape(first), MarketWorkerMessage::TradeTape(second)]
+                if first.revision == 2 && second.revision == 3
         ));
     }
 
