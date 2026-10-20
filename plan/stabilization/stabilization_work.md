@@ -1440,7 +1440,7 @@ Status: pending
     first GUI attempt's blind fixed-coordinate clicks. Part 28b still
     requires literal guarded VAL-DSK-013/014/015 GUI evidence; M6.3 remains
     unchecked.
-- [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
+- [x] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place (code complete; literal VAL-DSK-017 GUI switch/restart not yet validated)
   - Part 1: saved appearance and order-flow settings that fail to parse are no longer
     dropped silently. The pane records the rejected fields in its retained presentation and
     posts the one keyed "Chart settings could not be restored" notice. That notice survives
@@ -1476,6 +1476,13 @@ Status: pending
     a new `AerisChartView` on a covering snapshot; a drawing-preserving
     in-place cross-instrument reset remains an Aeris Charts operation for M7.9.
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
+  - Part 1: the desktop bridge accepts only the exact outstanding initial or
+    replacement selection reply. It consumes that reply once and rejects
+    repeats and retired generations, so a repeated Selected cannot install
+    the same pane identity twice. A GPUI pane test asserts one command per
+    user interval selection, one applied reply and no follow-up selection.
+    The restored-pane InstrumentRef command count, legacy selection API
+    removal and literal four-pane GUI restart remain; M6.5 stays unchecked.
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
@@ -1848,6 +1855,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.4 Part 3 test(desktop): verified actual chart style, two nondefault series colors and logarithmic scale across a committed instrument selection and proto round-trip/reopen; no behavior change was needed for those properties. Full presentation ownership remains M6.4 work, so do not check the item or claim VAL-DSK-016 complete.
 - 2026-10-20 M6.4 Part 4a fix(desktop): corrected the pending-chart save dropping pane-owned visibility, context and link edits; shared its capture with loaded-chart persistence and extended the combined restore-failure notice test. The pending-chart regression failed first with the old visibility and now covers protobuf reopen. M6.4 remains unchecked until full presentation ownership and every-field round trip, followed by the guarded GUI pass.
 - 2026-10-20 M6.4 Part 4b refactor(desktop): moved chart-setting application into a transient PanePresentation snapshot of the saved document plus pane-owned settings; the new GPUI regression checks nondefault chart preferences and study visibility through loading, protobuf decoding and a loaded chart. M6.4 remains unchecked pending guarded VAL-DSK-017 GUI evidence; a maintainer-owned release desktop is running. Cleaned only Cargo's dev profile after target reached 31.63 GiB, never the release profile.
+- 2026-10-20 M6.4 code closeout / M6.5 Part 1 fix(desktop): marked M6.4 code-complete with literal VAL-DSK-017 GUI evidence explicitly unvalidated pending the guarded final pass; fenced initial and replacement selection replies at the bridge and covered duplicate/retired outcomes plus one-command/no-follow-up pane dispatch. M6.5 remains unchecked for restored-pane identity and legacy API removal. Cleaned only Cargo's dev profile after target reached 28.14 GiB.
 
 ## 7. Known gaps / deferred
 

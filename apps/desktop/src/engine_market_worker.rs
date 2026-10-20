@@ -101,6 +101,9 @@ struct EndpointRecord {
     role: EndpointRole,
     pending_selection: Option<(u64, InstallProviderInstrument, ChartInterval)>,
     pending_catalog_selection: Option<(u64, u64)>,
+    /// The initial runtime selection has one reply, even when a replacement
+    /// request arrives before that reply or the runtime repeats an outcome.
+    initial_selection_pending: bool,
     /// Instrument and calendar revision of the last session status sent to the chart.
     session_status_sent: Option<(String, u64)>,
     endpoint: WorkerEndpoint,
@@ -645,6 +648,7 @@ fn worker_endpoint_with_wake(
         role: EndpointRole::Market,
         pending_selection: None,
         pending_catalog_selection: None,
+        initial_selection_pending: initial_generation != 0,
         session_status_sent: None,
         endpoint: WorkerEndpoint {
             consumer_id,

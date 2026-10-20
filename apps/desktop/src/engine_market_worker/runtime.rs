@@ -486,6 +486,13 @@ fn apply_received_event(
     Ok(false)
 }
 
+fn selection_matches_request(record: &EndpointRecord, generation: u64) -> bool {
+    match record.pending_selection.as_ref() {
+        Some((pending, _, _)) => *pending == generation,
+        None => record.initial_selection_pending && record.endpoint.active_generation == generation,
+    }
+}
+
 fn apply_selection_outcome(
     record: &mut EndpointRecord,
     outcome: aeris_market_runtime::SelectionOutcome,
@@ -497,12 +504,9 @@ fn apply_selection_outcome(
             ..
         } => {
             let selected = descriptor.instrument;
-            if record
-                .pending_selection
-                .as_ref()
-                .is_none_or(|(pending, _, _)| *pending == generation.0.get())
-            {
+            if selection_matches_request(record, generation.0.get()) {
                 record.product = selected.clone();
+                record.initial_selection_pending = false;
                 if let Some((_, _, interval)) = record.pending_selection.take() {
                     record.interval = interval;
                     if let Some((sequence, browser_generation)) =
@@ -543,11 +547,17 @@ fn apply_selection_outcome(
             }
         }
         aeris_market_runtime::SelectionOutcome::Failed { generation, error } => {
-            if record
-                .pending_selection
-                .as_ref()
-                .is_some_and(|(pending, _, _)| *pending == generation.0.get())
-            {
+            if selection_matches_request(record, generation.0.get()) {
+                if record.pending_selection.is_none() {
+                    record.initial_selection_pending = false;
+                    report_state(
+                        &record.endpoint.messages,
+                        Some(generation.0.get()),
+                        ChartState::Error,
+                        "Market history could not start. Try again.".to_string(),
+                    );
+                    return Ok(());
+                }
                 record.pending_selection = None;
                 if let Some((sequence, browser_generation)) =
                     record.pending_catalog_selection.take()
@@ -600,6 +610,91 @@ mod tests {
     use super::*;
     use aeris_trading_runtime::clock::ManualClock;
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn initial_and_replacement_selections_accept_one_exact_reply_each() {
+        let product = super::super::default_hyperliquid_product();
+        let (_pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            product.clone(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        assert!(selection_matches_request(&record, 7));
+        record.initial_selection_pending = false;
+        assert!(!selection_matches_request(&record, 7));
+        record.pending_selection = Some((8, product, aeris_market_data::ChartInterval::Hour1));
+        assert!(!selection_matches_request(&record, 7));
+        assert!(selection_matches_request(&record, 8));
+        record.pending_selection = None;
+        assert!(!selection_matches_request(&record, 8));
+        assert!(!selection_matches_request(&record, 9));
+    }
+
+    #[test]
+    fn selection_outcomes_publish_one_initial_and_one_replacement_reply() {
+        use aeris_market_runtime::{
+            InstrumentDescriptor, MarketGenerationId, ResolvedSeries, SelectionOutcome,
+        };
+        use std::num::NonZeroU64;
+
+        let product = super::super::default_hyperliquid_product();
+        let (mut pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            product.clone(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        let presentation =
+            super::super::provider_presentation(&product.provider).expect("fixture provider");
+        let outcome = |generation, interval| SelectionOutcome::Selected {
+            generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+            descriptor: Box::new(
+                InstrumentDescriptor::from_install(&product, presentation, true)
+                    .expect("fixture descriptor"),
+            ),
+            series: ResolvedSeries::resolve(&product, interval, presentation)
+                .expect("fixture series"),
+        };
+        apply_selection_outcome(
+            &mut record,
+            outcome(7, aeris_market_data::ChartInterval::Minute1),
+        )
+        .expect("initial outcome");
+        apply_selection_outcome(
+            &mut record,
+            outcome(7, aeris_market_data::ChartInterval::Minute1),
+        )
+        .expect("duplicate initial outcome");
+        assert!(matches!(
+            pane.worker.drain_messages().0.as_slice(),
+            [MarketWorkerMessage::SelectedInstrument { generation: 7, .. }]
+        ));
+
+        record.pending_selection =
+            Some((8, product.clone(), aeris_market_data::ChartInterval::Hour1));
+        apply_selection_outcome(
+            &mut record,
+            outcome(8, aeris_market_data::ChartInterval::Hour1),
+        )
+        .expect("replacement outcome");
+        apply_selection_outcome(
+            &mut record,
+            outcome(8, aeris_market_data::ChartInterval::Hour1),
+        )
+        .expect("duplicate replacement outcome");
+        assert!(matches!(
+            pane.worker.drain_messages().0.as_slice(),
+            [MarketWorkerMessage::EngineSelectionCommitted { sequence: 8 }]
+        ));
+        assert_eq!(record.interval, aeris_market_data::ChartInterval::Hour1);
+    }
 
     #[test]
     fn runtime_failure_uses_bounded_pane_mailbox_and_tolerates_retirement() {

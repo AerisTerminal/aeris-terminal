@@ -203,6 +203,52 @@ impl PaneHarness {
 }
 
 #[gpui::test]
+fn pane_harness_one_user_selection_command_and_one_applied_reply(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let requests = harness.commands.as_ref().expect("command receiver");
+    assert!(
+        requests
+            .try_iter()
+            .all(|command| !matches!(command, MarketWorkerCommand::EngineSelect(_))),
+        "startup sends no user selection"
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let selections: Vec<_> = requests
+        .try_iter()
+        .filter_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request),
+            _ => None,
+        })
+        .collect();
+    let [request] = selections.as_slice() else {
+        panic!("exactly one selection command");
+    };
+    assert_eq!(request.interval, ChartInterval::Minute5);
+    let sequence = request.sequence;
+    for _ in 0..2 {
+        harness
+            .publications
+            .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+            .expect("fixture reply enters mailbox");
+    }
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 2);
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+        assert_eq!(pane.chart_pane_controller.pending_selection(), None);
+        assert!(pane.chart_pane_controller.accept_publication(sequence));
+    });
+    assert!(
+        requests
+            .try_iter()
+            .all(|command| !matches!(command, MarketWorkerCommand::EngineSelect(_))),
+        "Selected sends no second selection"
+    );
+}
+
+#[gpui::test]
 fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut TestAppContext) {
     use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
 
