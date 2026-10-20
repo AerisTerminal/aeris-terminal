@@ -353,7 +353,7 @@ pub enum MarketWorkerMessage {
         study_id: StudyInstanceId,
         message: String,
     },
-    EngineSwitchMarker {
+    EngineSelectionCommitted {
         sequence: u64,
     },
     EngineSelectionFailed {
@@ -2133,7 +2133,7 @@ mod tests {
         }));
         for sequence in 1..=3 {
             sender
-                .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+                .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
                 .expect("switch marker sends");
         }
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2648,7 +2648,7 @@ mod tests {
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         sender
-            .send(MarketWorkerMessage::EngineSwitchMarker { sequence: 7 })
+            .send(MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 })
             .expect("switch marker sends");
         assert_eq!(
             sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
@@ -2673,7 +2673,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::EngineSwitchMarker { sequence: 7 },
+                MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 },
                 MarketWorkerMessage::SeriesState {
                     generation: 1,
                     state: ChartState::Loading,

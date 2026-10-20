@@ -190,6 +190,16 @@ impl PaneHarness {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
     }
+
+    fn reinstall_snapshot(&mut self, bar_count: usize, cx: &mut VisualTestContext) {
+        let snapshot = self
+            .market
+            .publish_snapshot(bar_count)
+            .expect("fixture snapshot");
+        self.pane.update(cx, |pane, cx| {
+            pane.install_snapshot_chart(&snapshot.snapshot, cx);
+        });
+    }
 }
 
 #[gpui::test]
@@ -255,7 +265,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker");
     harness
         .publications
@@ -352,7 +362,7 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("selection marker");
     harness
         .publications
@@ -487,7 +497,7 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("replacement marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -539,7 +549,7 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
         .expect("selection request");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -618,7 +628,7 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
             .expect("selection request");
         harness
             .publications
-            .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+            .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
             .expect("marker enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -688,7 +698,7 @@ fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -750,7 +760,7 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker");
     harness
         .publications
@@ -827,7 +837,7 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -909,7 +919,7 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("replacement marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -974,7 +984,7 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
     }
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1077,7 +1087,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
         .expect("selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1157,7 +1167,7 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1205,7 +1215,7 @@ fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
         if marker_first {
             harness
                 .publications
-                .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+                .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
                 .expect("marker enters mailbox");
         }
         harness
@@ -1275,14 +1285,14 @@ fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut Tes
 }
 
 #[gpui::test]
-fn pane_harness_selection_outcome_uses_controller_not_legacy_switch_flag(cx: &mut TestAppContext) {
+fn pane_harness_selection_outcome_uses_exact_pending_controller_generation(
+    cx: &mut TestAppContext,
+) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let requests = harness.commands.as_ref().expect("command receiver");
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_interval(ChartInterval::Minute5, cx));
-        // The controller, not the legacy presentation flag, owns outcome acceptance.
-        pane.rithmic_switch = RithmicSwitchState::Idle;
     });
     let sequence = requests
         .try_iter()
@@ -1293,7 +1303,7 @@ fn pane_harness_selection_outcome_uses_controller_not_legacy_switch_flag(cx: &mu
         .expect("pending selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("selection outcome enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1365,10 +1375,7 @@ fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mu
     let (mut harness, cx) = PaneHarness::open_with_restore(restore, cx);
     harness.publish_snapshot(12, cx);
     // A replacement covering snapshot recreates the chart and re-applies the surface zone.
-    harness.pane.update(cx, |pane, _| {
-        pane.rithmic_switch = RithmicSwitchState::Swapping;
-    });
-    harness.publish_snapshot(12, cx);
+    harness.reinstall_snapshot(12, cx);
     cx.run_until_parked();
     cx.read(|cx| {
         let toaster = &harness.window.read(cx).toaster;
@@ -1430,9 +1437,8 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
     });
     harness.pane.update(cx, |pane, cx| {
         pane.apply_initial_chart_settings(cx);
-        pane.rithmic_switch = RithmicSwitchState::Swapping;
     });
-    harness.publish_snapshot(12, cx);
+    harness.reinstall_snapshot(12, cx);
     cx.run_until_parked();
     cx.read(|cx| {
         let toaster = &harness.window.read(cx).toaster;
@@ -1453,9 +1459,8 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
     );
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.set_chart_time_zone("Etc/UTC", cx));
-        pane.rithmic_switch = RithmicSwitchState::Swapping;
     });
-    harness.publish_snapshot(12, cx);
+    harness.reinstall_snapshot(12, cx);
     cx.run_until_parked();
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
 }
@@ -2133,7 +2138,7 @@ fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);

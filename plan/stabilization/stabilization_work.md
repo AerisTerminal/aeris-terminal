@@ -1349,7 +1349,7 @@ Status: pending
       `StudyReinitializationFailed`, `StudyRemovalFailed` use the registered
       study ID and the consumer's pending reinitialization/removal state.
       These are consumer-scoped operations, not series publications.
-    - `EngineSwitchMarker` and `EngineSelectionFailed`: exact pending selection
+    - `EngineSelectionCommitted` and `EngineSelectionFailed`: exact pending selection
       sequence via `accept` and `reject` respectively (legacy pending-switch
       guards still also apply). `SelectedInstrument`: initial descriptor
       adoption only when there is no pending request and its generation is not
@@ -1398,6 +1398,18 @@ Status: pending
     regression checks retired target registration, replacement, acceptance and
     rejection. Part 25 stays open: remove `RithmicSwitchState` and
     `EngineSwitchMarker` next, then run the Part 26 interleavings.
+  - Part 25b2b: removed the `RithmicSwitchState` phase and its
+    `EngineSwitchMarker` mailbox variant. `ChartPaneController` alone tracks
+    the committed generation, the generation displayed by the installed chart,
+    and the exact pending request; the runtime now sends the explicit
+    `EngineSelectionCommitted` outcome. A replacement chart only accepts
+    incremental updates and retained tape after its covering snapshot is
+    installed, while instrument changes remain covered and interval-only
+    changes do not. The pane and controller tests verify these transitions,
+    including a superseded chart through consecutive commits and failure
+    restoration. This completes Part 25; M6.3 stays unchecked pending Part 26
+    fixed permutations and seeded interleavings, Part 27 cover-through-ready,
+    and Part 28 guarded isolated GUI storms.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1756,6 +1768,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 24 docs(desktop): audited every market-worker mailbox variant delivered to the chart pane and recorded its exact generation, lifecycle, pending-selection, consumer-scoped or app-scoped acceptance above. No new unfenced selection-bound route was found. M6.3 remains unchecked; Part 25 removes legacy switch guards, then Part 26 exercises fixed permutations and seeded interleavings, Part 27 verifies cover-through-ready and Part 28 runs isolated GUI storms.
 - 2026-10-20 M6.3 Part 25b1 refactor(desktop): removed duplicate legacy-flag acceptance from both selection commit and rejection, with a GPUI controller-authority regression; the remaining legacy switch state, marker variant and pending targets still need removal before Part 26.
 - 2026-10-20 M6.3 Part 25b2a refactor(desktop): consolidated pending chart target identity in ChartPaneController, removed duplicate pending interval/product fields and covered exact-sequence target ownership; legacy switch phase and mailbox marker remain for Part 25b2b before Part 26.
+- 2026-10-20 M6.3 Part 25b2b refactor(desktop): removed legacy switch phase and marker variant; chart presentation gates now follow the controller's installed-versus-committed selection generation. Focused GPUI pane regressions passed (39 tests); full workspace gate and hunk-isolated commit evidence recorded with this part. M6.3 remains unchecked pending Parts 26-28.
 
 ## 7. Known gaps / deferred
 

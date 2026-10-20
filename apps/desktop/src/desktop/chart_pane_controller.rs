@@ -13,6 +13,7 @@ pub(super) struct ChartPaneController {
     pending_target: Option<PendingChartTarget>,
     latest_selection: u64,
     current_generation: u64,
+    displayed_generation: Option<u64>,
 }
 
 impl Default for ChartPaneController {
@@ -22,6 +23,7 @@ impl Default for ChartPaneController {
             pending_target: None,
             latest_selection: 0,
             current_generation: 1,
+            displayed_generation: None,
         }
     }
 }
@@ -95,6 +97,25 @@ impl ChartPaneController {
     /// request is pending, the previous chart remains the displayed binding.
     pub(super) fn accept_publication(&self, generation: u64) -> bool {
         generation == self.current_generation
+    }
+
+    /// The installed chart is a projection of a specific selection, not necessarily
+    /// the most recently committed one. Keep it intact until a covering snapshot
+    /// for the committed selection replaces it.
+    pub(super) fn chart_installed(&mut self) {
+        self.displayed_generation = Some(self.current_generation);
+    }
+
+    pub(super) fn chart_needs_replacement(&self) -> bool {
+        self.displayed_generation != Some(self.current_generation)
+    }
+
+    pub(super) fn selection_in_progress(&self, replacement_readiness_pending: bool) -> bool {
+        self.pending_selection.is_some() || replacement_readiness_pending
+    }
+
+    pub(super) fn has_pending_selection(&self) -> bool {
+        self.pending_selection.is_some()
     }
 
     /// A previous series may keep publishing data while its replacement is
@@ -246,5 +267,25 @@ mod tests {
         assert!(!pane.accept_study_publication(Some(1)));
         assert!(pane.accept_study_publication(Some(2)));
         assert!(pane.accept_study_publication(None));
+    }
+
+    #[test]
+    fn displayed_chart_generation_changes_only_on_covering_install() {
+        let mut pane = ChartPaneController::default();
+        assert!(pane.chart_needs_replacement());
+        pane.chart_installed();
+        assert!(!pane.chart_needs_replacement());
+        pane.request(2);
+        assert!(!pane.chart_needs_replacement());
+        assert!(pane.accept(2));
+        assert!(pane.chart_needs_replacement());
+        pane.request(3);
+        assert!(pane.accept(3));
+        assert!(pane.chart_needs_replacement());
+        pane.chart_installed();
+        assert!(!pane.chart_needs_replacement());
+        pane.request(4);
+        assert!(pane.reject(4));
+        assert!(!pane.chart_needs_replacement());
     }
 }

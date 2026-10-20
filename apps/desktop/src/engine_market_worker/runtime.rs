@@ -522,7 +522,7 @@ fn apply_selection_outcome(
                         record
                             .endpoint
                             .messages
-                            .send(MarketWorkerMessage::EngineSwitchMarker {
+                            .send(MarketWorkerMessage::EngineSelectionCommitted {
                                 sequence: generation.0.get(),
                             })
                             .map_err(|error| error.to_string())?;

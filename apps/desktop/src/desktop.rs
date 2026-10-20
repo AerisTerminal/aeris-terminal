@@ -866,7 +866,6 @@ struct WorkspaceSurface {
     provider: TerminalProvider,
     symbol_provider: TerminalProvider,
     product: Option<InstallProviderInstrument>,
-    rithmic_switch: RithmicSwitchState,
     interval: ChartInterval,
     chart_pane_controller: chart_pane_controller::ChartPaneController,
     /// The selection to fall back to if the switch in flight never loads.
@@ -1691,54 +1690,6 @@ fn known_terminal_provider(provider: &str) -> Option<TerminalProvider> {
     TerminalProvider::ALL
         .into_iter()
         .find(|candidate| terminal_provider_id(*candidate) == provider)
-}
-
-/// Where a Rithmic symbol or timeframe change is in its handover.
-///
-/// A switch is a presentation change, so it never blanks the chart. The chart on
-/// screen keeps streaming its own series until the replacement's covering
-/// snapshot arrives, and only then is it swapped. `Pending` is the window
-/// between the request and the mailbox marker that orders it; `Swapping` is the
-/// window between that marker and the snapshot that replaces the chart;
-/// `Initializing` keeps that replacement covered until its live handoff lands.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum RithmicSwitchState {
-    #[default]
-    Idle,
-    Pending,
-    Swapping,
-    Initializing,
-}
-
-impl RithmicSwitchState {
-    const fn is_pending(self) -> bool {
-        matches!(self, Self::Pending)
-    }
-
-    /// Whether a chart is on screen that no longer matches the committed
-    /// selection, and must not be fed the replacement's incremental updates.
-    const fn is_swapping(self) -> bool {
-        matches!(self, Self::Swapping)
-    }
-
-    /// Whether the chart on screen may predate the committed selection. A selection
-    /// made while `Swapping` returns to `Pending` over that same superseded chart, so
-    /// projections keyed by the committed selection wait for the replacement chart.
-    const fn awaits_replacement_chart(self) -> bool {
-        matches!(self, Self::Pending | Self::Swapping)
-    }
-
-    const fn in_progress(self) -> bool {
-        matches!(self, Self::Pending | Self::Swapping | Self::Initializing)
-    }
-}
-
-const fn switch_requires_chart_cover(
-    has_chart: bool,
-    instrument_changed: bool,
-    state: RithmicSwitchState,
-) -> bool {
-    has_chart && instrument_changed && state.in_progress()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

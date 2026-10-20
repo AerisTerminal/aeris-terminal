@@ -7,9 +7,9 @@ use super::{
     ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
-    RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
-    SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
-    TerminalProvider, TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
+    SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision,
+    TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider,
+    TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
     WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
     WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
@@ -24,8 +24,8 @@ use super::{
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
     reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
-    should_finish_chrome_overlay_close, stabilized_connection_state, switch_requires_chart_cover,
-    symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    should_finish_chrome_overlay_close, stabilized_connection_state, symbol_input_action,
+    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
     timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
     timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
@@ -759,7 +759,7 @@ mod timeframe_input {
             assert_eq!(selections.len(), 1, "one request for {keys}");
             assert_eq!(selections[0].interval, interval);
             publications
-                .send(MarketWorkerMessage::EngineSwitchMarker {
+                .send(MarketWorkerMessage::EngineSelectionCommitted {
                     sequence: selections[0].sequence,
                 })
                 .expect("switch marker");
@@ -920,7 +920,7 @@ mod timeframe_input {
         let five_minutes =
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute5, cx);
         deliver(
-            MarketWorkerMessage::EngineSwitchMarker {
+            MarketWorkerMessage::EngineSelectionCommitted {
                 sequence: five_minutes,
             },
             cx,
@@ -946,7 +946,7 @@ mod timeframe_input {
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
         deliver(
-            MarketWorkerMessage::EngineSwitchMarker {
+            MarketWorkerMessage::EngineSelectionCommitted {
                 sequence: fifteen_minutes,
             },
             cx,
@@ -1292,11 +1292,12 @@ mod timeframe_input {
         // A symbol or interval switch swaps in a chart built from the replacement's snapshot.
         let first = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
         cx.update(|_, cx| {
-            surface.update(cx, |surface, _| {
-                surface.rithmic_switch = RithmicSwitchState::Swapping;
+            surface.update(cx, |surface, cx| {
+                surface.chart_pane_controller.request(2);
+                surface.commit_pending_selection(2, cx);
             });
         });
-        publish_snapshot(&surface, cx);
+        publish_snapshot_at_selection(&surface, 2, cx);
         let second = cx.read(|cx| surface.read(cx).chart.clone().expect("replacement chart"));
         assert_ne!(first.entity_id(), second.entity_id());
         drop(first);
@@ -2634,24 +2635,18 @@ fn a_superseded_chart_is_covered_and_named_not_left_looking_current() {
 
 #[test]
 fn engine_switch_keeps_partial_replacement_covered_until_handoff_is_current() {
-    assert!(!switch_requires_chart_cover(
-        false,
-        true,
-        RithmicSwitchState::Pending
-    ));
-    assert!(!switch_requires_chart_cover(
-        true,
-        true,
-        RithmicSwitchState::Idle
-    ));
-    for phase in [
-        RithmicSwitchState::Pending,
-        RithmicSwitchState::Swapping,
-        RithmicSwitchState::Initializing,
-    ] {
-        assert!(!switch_requires_chart_cover(true, false, phase));
-        assert!(switch_requires_chart_cover(true, true, phase));
-    }
+    let mut pane = super::chart_pane_controller::ChartPaneController::default();
+    pane.chart_installed();
+    pane.request(2);
+    assert!(!pane.chart_needs_replacement());
+    assert!(pane.selection_in_progress(false));
+    assert!(pane.accept(2));
+    assert!(pane.chart_needs_replacement());
+    assert!(pane.selection_in_progress(true));
+    pane.chart_installed();
+    assert!(!pane.chart_needs_replacement());
+    assert!(pane.selection_in_progress(true));
+    assert!(!pane.selection_in_progress(false));
 }
 
 #[test]

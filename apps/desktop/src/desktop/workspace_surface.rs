@@ -127,6 +127,10 @@ struct WorkspaceSurfaceInitialization {
 // One line per surface field; splitting the literal would only scatter the defaults.
 #[allow(clippy::too_many_lines)]
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
+    let mut chart_pane_controller = chart_pane_controller::ChartPaneController::default();
+    if init.startup.chart.is_some() {
+        chart_pane_controller.chart_installed();
+    }
     WorkspaceSurface {
         chart: init.startup.chart,
         order_book: init.order_book,
@@ -196,9 +200,8 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         provider: init.startup.provider,
         symbol_provider: init.startup.provider,
         product: init.startup.product,
-        rithmic_switch: RithmicSwitchState::Idle,
         interval: init.interval,
-        chart_pane_controller: chart_pane_controller::ChartPaneController::default(),
+        chart_pane_controller,
         rithmic_previous_selection: None,
         restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
         last_persisted_viewport: None,
@@ -2465,7 +2468,6 @@ impl WorkspaceSurface {
             self.chart_pane_controller.request(sequence);
             self.chart_pane_controller
                 .set_pending_target(sequence, interval, None);
-            self.rithmic_switch = RithmicSwitchState::Pending;
             self.chart_state = ChartState::Loading;
             self.clear_chart_failure(cx);
             Self::clear_indicator_failure("series_selection", cx);
@@ -2519,7 +2521,6 @@ impl WorkspaceSurface {
         self.chart_pane_controller.request(sequence);
         self.chart_pane_controller
             .set_pending_target(sequence, interval, Some(instrument.clone()));
-        self.rithmic_switch = RithmicSwitchState::Pending;
         self.chart_state = ChartState::Loading;
         self.clear_chart_failure(cx);
         Self::clear_indicator_failure("series_selection", cx);
@@ -3261,7 +3262,7 @@ impl WorkspaceSurface {
 
     /// Replaces the chart with one built from a covering snapshot and every retained surface
     /// state, before it is first drawn.
-    fn install_snapshot_chart(
+    pub(super) fn install_snapshot_chart(
         &mut self,
         snapshot: &aeris_application::ReplaySnapshot,
         cx: &mut Context<Self>,
@@ -3331,7 +3332,7 @@ impl WorkspaceSurface {
             .settle_chart(chart.read(cx));
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
-        self.rithmic_switch = RithmicSwitchState::Initializing;
+        self.chart_pane_controller.chart_installed();
         // Interval switches keep the instrument's tape; project it into the new chart now
         // instead of leaving the footprint empty until the next tape revision.
         if let Some(tape) = self.trade_tape.clone() {
@@ -3393,7 +3394,7 @@ impl WorkspaceSurface {
         // chart on screen. That chart belongs to the previous series, so the
         // replacement's incremental updates must not reach it; only its covering
         // snapshot may, and that snapshot is what swaps the chart.
-        let swapping = self.rithmic_switch.is_swapping();
+        let swapping = self.chart_pane_controller.chart_needs_replacement();
         let next_state = match (&self.chart, update) {
             (existing, aeris_application::ReplayStreamUpdate::Snapshot(snapshot))
                 if existing.is_none() || swapping =>
@@ -3578,21 +3579,23 @@ impl WorkspaceSurface {
     /// on screen while its replacement history loads; only a different
     /// instrument needs the neutral cover until its handoff is current.
     pub(super) fn showing_superseded_series(&self) -> bool {
-        let instrument_changed = if self.rithmic_switch.is_pending() {
-            self.chart_pane_controller
-                .pending_product()
-                .is_some_and(|product| Some(product) != self.product.as_ref())
-        } else {
+        let displayed_product = if self.chart_pane_controller.chart_needs_replacement() {
             self.rithmic_previous_selection
                 .as_ref()
-                .is_some_and(|(product, _)| product != &self.product)
+                .map_or(self.product.as_ref(), |(product, _)| product.as_ref())
+        } else {
+            self.product.as_ref()
         };
+        let selected_product = self
+            .chart_pane_controller
+            .pending_product()
+            .or(self.product.as_ref());
         super::provider_presentation(self.provider).is_some()
-            && switch_requires_chart_cover(
-                self.chart.is_some(),
-                instrument_changed,
-                self.rithmic_switch,
-            )
+            && self.chart.is_some()
+            && (self.chart_pane_controller.has_pending_selection()
+                || self.chart_pane_controller.chart_needs_replacement()
+                || self.rithmic_previous_selection.is_some())
+            && selected_product != displayed_product
     }
 
     fn set_chart_state(&mut self, state: ChartState, _message: String, cx: &mut Context<Self>) {
@@ -3682,7 +3685,7 @@ impl WorkspaceSurface {
                 state,
                 message,
             } => self.apply_series_state_message(generation, state, message, cx),
-            MarketWorkerMessage::EngineSwitchMarker { sequence } => {
+            MarketWorkerMessage::EngineSelectionCommitted { sequence } => {
                 self.commit_pending_selection(sequence, cx);
             }
             MarketWorkerMessage::EngineSelectionFailed { sequence } => {
@@ -4306,14 +4309,13 @@ impl WorkspaceSurface {
     ) {
         let engine_provider = super::provider_presentation(self.provider).is_some();
         if state == ChartState::Error && engine_provider {
-            let restoring_chart = self.rithmic_switch.is_swapping()
+            let restoring_chart = self.chart_pane_controller.chart_needs_replacement()
                 && self.chart.is_some()
                 && self.rithmic_previous_selection.is_some();
             let instrument_changed = self
                 .rithmic_previous_selection
                 .as_ref()
                 .is_some_and(|(product, _)| product != &self.product);
-            self.rithmic_switch = RithmicSwitchState::Idle;
             self.chart_pane_controller.clear();
             self.market_state.symbol_selection_pending = false;
             if restoring_chart {
@@ -4338,15 +4340,11 @@ impl WorkspaceSurface {
             }
             self.rithmic_previous_selection = None;
         } else if engine_provider && state == ChartState::Ready {
-            self.rithmic_switch = RithmicSwitchState::Idle;
             self.rithmic_previous_selection = None;
             self.market_state.symbol_selection_pending = false;
         } else if engine_provider && state == ChartState::AwaitingData {
-            // The selection itself succeeded. A chart still showing the previous
-            // series stays covered (`Swapping`) until the replacement's first
-            // snapshot; a replacement already on screen is simply this series.
-            if self.rithmic_switch == RithmicSwitchState::Initializing {
-                self.rithmic_switch = RithmicSwitchState::Idle;
+            // A chart awaiting the replacement's covering snapshot remains covered.
+            if !self.chart_pane_controller.chart_needs_replacement() {
                 self.rithmic_previous_selection = None;
             }
             self.market_state.symbol_selection_pending = false;
@@ -4425,7 +4423,6 @@ impl WorkspaceSurface {
         self.pending_linked_instrument = Some(instrument.clone());
         self.chart_pane_controller
             .set_pending_target(sequence, interval, Some(instrument));
-        self.rithmic_switch = RithmicSwitchState::Pending;
         self.commit_pending_selection(sequence, cx);
     }
 
@@ -4454,7 +4451,6 @@ impl WorkspaceSurface {
         }
         self.pending_linked_instrument = None;
         self.market_state.symbol_selection_pending = false;
-        self.rithmic_switch = RithmicSwitchState::Idle;
         self.chart_state = if self.chart.is_some() {
             ChartState::Ready
         } else {
@@ -4475,12 +4471,12 @@ impl WorkspaceSurface {
 
     /// Commits the exact pending selection's identity without touching the chart.
     ///
-    /// The marker only says "everything after this belongs to the new
+    /// The selection outcome says "everything after this belongs to the new
     /// selection". The chart the trader is looking at is left on screen — still
     /// its own series, still correct — under a loading notice, and is replaced
     /// in `apply_publication` when the replacement's covering snapshot arrives.
     /// Dropping it here is what produced the blank surface on every switch.
-    fn commit_pending_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
+    pub(super) fn commit_pending_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
         if super::provider_presentation(self.provider).is_none()
             || !self.chart_pane_controller.accept(sequence)
         {
@@ -4514,11 +4510,6 @@ impl WorkspaceSurface {
                 self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
             }
         }
-        self.rithmic_switch = if self.chart.is_some() {
-            RithmicSwitchState::Swapping
-        } else {
-            RithmicSwitchState::Idle
-        };
         self.restored_viewport = None;
         self.last_persisted_viewport = None;
         self.chart_state = ChartState::Loading;
@@ -4537,7 +4528,6 @@ impl WorkspaceSurface {
         self.product.clone_from(&product);
         self.interval = interval;
         self.chart_pane_controller.clear();
-        self.rithmic_switch = RithmicSwitchState::Idle;
         self.order_book.update(cx, |order_book, order_book_cx| {
             order_book.clear(order_book_cx);
         });
@@ -4550,7 +4540,6 @@ impl WorkspaceSurface {
             self.chart_pane_controller.request(sequence);
             self.chart_pane_controller
                 .set_pending_target(sequence, interval, None);
-            self.rithmic_switch = RithmicSwitchState::Pending;
         }
         cx.notify();
     }
@@ -5178,7 +5167,7 @@ impl WorkspaceSurface {
         // Retain the replacement's tape, but do not even invalidate the old
         // chart's resume cursor when its prefix was rewritten. Installation of
         // the covering snapshot projects the retained tape into the new chart.
-        if self.rithmic_switch.awaits_replacement_chart() {
+        if self.chart_pane_controller.chart_needs_replacement() {
             return;
         }
         let (Some(chart), Some(product)) = (self.chart.as_ref(), self.product.as_ref()) else {

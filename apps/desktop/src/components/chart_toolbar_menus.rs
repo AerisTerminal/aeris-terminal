@@ -218,7 +218,9 @@ pub(super) fn chrome_overlay_content(
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
-    let pending = app_state.rithmic_switch.in_progress();
+    let pending = app_state
+        .chart_pane_controller
+        .selection_in_progress(app_state.rithmic_previous_selection.is_some());
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,

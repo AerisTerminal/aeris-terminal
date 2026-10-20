@@ -37,7 +37,9 @@ fn active_header_state(
             .map(|account| account.display_name.clone()),
         pending: HeaderPendingState {
             symbol_selection: workspace.market_state.symbol_selection_pending,
-            series: workspace.rithmic_switch.in_progress(),
+            series: workspace
+                .chart_pane_controller
+                .selection_in_progress(workspace.rithmic_previous_selection.is_some()),
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(
@@ -694,7 +696,7 @@ impl TerminalApp {
                 terminal,
                 workspace: &self.workspaces[self.active],
                 active_surface: active,
-                expanded_drawing_toolbar: (!self.drawing_toolbar.is_collapsed()).then_some(
+                expanded_drawing_toolbar: self.chart_chrome.drawing_toolbar.shown().then_some(
                     DrawingSidebar {
                         menu: &self.drawing_tool_menu,
                         favorites: self.chart_chrome.drawing_favorites,
