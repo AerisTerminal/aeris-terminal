@@ -1751,6 +1751,27 @@ fn initialize_restored_chart(
     observe_chart(chart, cx);
 }
 
+/// Writes pane-owned presentation choices to the same document whether the chart is
+/// loaded or still waiting for a covering snapshot.
+struct PanePersistence<'a>(&'a WorkspaceSurface);
+
+impl PanePersistence<'_> {
+    fn apply_surface_fields(&self, state: &mut WorkspaceChartState) {
+        let surface = self.0;
+        state.time_zone.clone_from(&surface.chart_time_zone);
+        state.show_order_management_lines =
+            Some(surface.chart_trading_visibility.show_order_management_lines);
+        state.show_execution_marks = Some(surface.chart_trading_visibility.show_execution_marks);
+        state.extend_order_lines_left =
+            Some(surface.chart_trading_visibility.extend_order_lines_left);
+        state.context_panel_visible = surface.context_panel_visible;
+        state.context_panel_tab = surface.context_panel_tab.persisted();
+        state.context_panel_height = surface.context_panel_height.round().to_u32().unwrap_or(0);
+        state.chart_link_group = u32::from(surface.chart_link_group);
+        state.chart_link_flags = u32::from(surface.chart_link_flags);
+    }
+}
+
 impl WorkspaceSurface {
     pub(super) fn take_chart_persistence_dirty(&mut self) -> bool {
         std::mem::take(&mut self.chart_persistence_dirty)
@@ -1765,7 +1786,7 @@ impl WorkspaceSurface {
             .clone()
             .or_else(|| self.retained_chart_presentation.chart_state.clone())
             .map(|mut state| {
-                state.time_zone.clone_from(&self.chart_time_zone);
+                PanePersistence(self).apply_surface_fields(&mut state);
                 state.instrument_drawings = self.retained_chart_presentation.drawings.remembered();
                 state
             })
@@ -1799,7 +1820,7 @@ impl WorkspaceSurface {
         let studies = persisted_runtime_study_states(&self.studies, |study_id| {
             chart.study_visible(study_id.get())
         });
-        Some(WorkspaceChartState {
+        let mut state = WorkspaceChartState {
             chart_type: chart.chart_type().identifier().to_string(),
             chart_state_json: String::new(),
             indicators,
@@ -1810,20 +1831,12 @@ impl WorkspaceSurface {
             studies,
             appearance: Some(persisted_chart_appearance(&chart.appearance_settings())),
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
-            context_panel_visible: self.context_panel_visible,
-            context_panel_tab: self.context_panel_tab.persisted(),
-            context_panel_height: self.context_panel_height.round().to_u32().unwrap_or(0),
-            chart_link_group: u32::from(self.chart_link_group),
-            chart_link_flags: u32::from(self.chart_link_flags),
-            time_zone: self.chart_time_zone.clone(),
-            show_order_management_lines: Some(
-                self.chart_trading_visibility.show_order_management_lines,
-            ),
-            show_execution_marks: Some(self.chart_trading_visibility.show_execution_marks),
-            extend_order_lines_left: Some(self.chart_trading_visibility.extend_order_lines_left),
             legend: Some(persisted_chart_legend(chart.legend_options())),
             instrument_drawings,
-        })
+            ..WorkspaceChartState::default()
+        };
+        PanePersistence(self).apply_surface_fields(&mut state);
+        Some(state)
     }
 
     fn apply_restored_chart_state(

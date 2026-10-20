@@ -1437,6 +1437,99 @@ mod instrument_drawings {
     }
 
     #[gpui::test]
+    fn pane_settings_saved_during_chart_loading_match_the_loaded_chart(cx: &mut TestAppContext) {
+        use prost::Message as _;
+        let original = WorkspaceChartState {
+            chart_type: "bars".into(),
+            time_zone: "Etc/UTC".into(),
+            context_panel_tab: 1,
+            chart_link_group: 1,
+            show_order_management_lines: Some(true),
+            show_execution_marks: Some(true),
+            extend_order_lines_left: Some(true),
+            ..WorkspaceChartState::default()
+        };
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(original));
+        surface.update(cx, |surface, _| {
+            surface.chart_time_zone = "America/New_York".into();
+            surface.chart_trading_visibility = ChartTradingVisibilitySettings {
+                show_order_management_lines: false,
+                show_execution_marks: false,
+                extend_order_lines_left: false,
+            };
+            surface.context_panel_visible = true;
+            surface.context_panel_tab = ContextPanelTab::Energy;
+            surface.context_panel_height = 320.0;
+            surface.chart_link_group = 2;
+            surface.chart_link_flags = 1;
+        });
+        let pending = cx
+            .read(|cx| surface.read(cx).workspace_chart_state(cx))
+            .expect("presentation saves before the snapshot");
+        assert_eq!(pending.chart_type, "bars");
+        assert_eq!(pending.time_zone, "America/New_York");
+        assert_eq!(pending.show_order_management_lines, Some(false));
+        assert_eq!(pending.show_execution_marks, Some(false));
+        assert_eq!(pending.extend_order_lines_left, Some(false));
+        assert!(pending.context_panel_visible);
+        assert_eq!(
+            pending.context_panel_tab,
+            ContextPanelTab::Energy.persisted()
+        );
+        assert_eq!(pending.context_panel_height, 320);
+        assert_eq!(pending.chart_link_group, 2);
+        assert_eq!(pending.chart_link_flags, 1);
+
+        let decoded = WorkspaceChartState::decode(pending.encode_to_vec().as_slice())
+            .expect("pending presentation survives protobuf");
+        let (reopened, _requests, cx) = open_surface(cx, instrument("A"), Some(decoded));
+        show(&reopened, "A", cx);
+        let reopened_state = saved(&reopened, cx);
+        assert_eq!(reopened_state.time_zone, pending.time_zone);
+        assert_eq!(
+            reopened_state.show_order_management_lines,
+            pending.show_order_management_lines
+        );
+        assert_eq!(
+            reopened_state.show_execution_marks,
+            pending.show_execution_marks
+        );
+        assert_eq!(
+            reopened_state.extend_order_lines_left,
+            pending.extend_order_lines_left
+        );
+        assert_eq!(
+            reopened_state.context_panel_visible,
+            pending.context_panel_visible
+        );
+        assert_eq!(reopened_state.context_panel_tab, pending.context_panel_tab);
+        assert_eq!(
+            reopened_state.context_panel_height,
+            pending.context_panel_height
+        );
+        assert_eq!(reopened_state.chart_link_group, pending.chart_link_group);
+        assert_eq!(reopened_state.chart_link_flags, pending.chart_link_flags);
+
+        show(&surface, "A", cx);
+        let loaded = saved(&surface, cx);
+        assert_eq!(loaded.time_zone, pending.time_zone);
+        assert_eq!(
+            loaded.show_order_management_lines,
+            pending.show_order_management_lines
+        );
+        assert_eq!(loaded.show_execution_marks, pending.show_execution_marks);
+        assert_eq!(
+            loaded.extend_order_lines_left,
+            pending.extend_order_lines_left
+        );
+        assert_eq!(loaded.context_panel_visible, pending.context_panel_visible);
+        assert_eq!(loaded.context_panel_tab, pending.context_panel_tab);
+        assert_eq!(loaded.context_panel_height, pending.context_panel_height);
+        assert_eq!(loaded.chart_link_group, pending.chart_link_group);
+        assert_eq!(loaded.chart_link_flags, pending.chart_link_flags);
+    }
+
+    #[gpui::test]
     fn drawings_return_when_switching_back_and_after_a_restart(cx: &mut TestAppContext) {
         let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
         show(&surface, "A", cx);

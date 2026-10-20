@@ -1825,8 +1825,11 @@ fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mu
 fn pane_harness_invalid_saved_presentation_reports_one_notice_for_multiple_fields(
     cx: &mut TestAppContext,
 ) {
+    let private_zone = "private-credential-sentinel/Zone";
     let restore = WorkspaceSurfaceRestore {
         chart: Some(WorkspaceChartState {
+            time_zone: private_zone.into(),
+            extend_order_lines_left: Some(false),
             appearance: Some(WorkspaceChartAppearanceState {
                 grid_style: u32::MAX,
                 ..WorkspaceChartAppearanceState::default()
@@ -1844,13 +1847,25 @@ fn pane_harness_invalid_saved_presentation_reports_one_notice_for_multiple_field
     harness.reinstall_snapshot(12, cx);
     cx.run_until_parked();
     cx.read(|cx| {
+        assert!(
+            !harness
+                .pane
+                .read(cx)
+                .chart
+                .as_ref()
+                .expect("snapshot chart")
+                .read(cx)
+                .order_lines_extend_left(),
+            "invalid zone must not skip the other surface setter"
+        );
         let notices = harness.window.read(cx).toaster.notices();
         assert_eq!(
             notices.len(),
             1,
-            "both invalid saved fields share one notice"
+            "all rejected saved fields share one notice"
         );
         assert_eq!(notices[0].title, "Chart settings could not be restored");
+        assert!(!notices[0].detail.contains(private_zone));
         assert_eq!(
             notices[0].source,
             notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
@@ -1883,6 +1898,18 @@ fn pane_harness_invalid_saved_presentation_reports_one_notice_for_multiple_field
             },
             cx,
         );
+    });
+    harness.reinstall_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(
+            harness.window.read(cx).toaster.notices().len(),
+            1,
+            "the invalid zone still keeps the notice"
+        );
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.set_chart_time_zone("Etc/UTC", cx));
     });
     harness.reinstall_snapshot(12, cx);
     cx.run_until_parked();
