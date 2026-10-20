@@ -662,17 +662,46 @@ mod tests {
         WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceVolumeSettingsState,
         workspace_study_setting_state,
     };
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMPORARY_WORKSPACE: AtomicU64 = AtomicU64::new(0);
 
     fn temporary_workspace_path() -> PathBuf {
         let unique = format!(
-            "aeris-workspace-state-{}-{}",
+            "aeris-workspace-state-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system clock is after epoch")
-                .as_nanos()
+                .as_nanos(),
+            NEXT_TEMPORARY_WORKSPACE.fetch_add(1, Ordering::Relaxed)
         );
         std::env::temp_dir().join(unique).join(WORKSPACE_FILE)
+    }
+
+    #[test]
+    fn concurrent_workspace_fixtures_never_share_a_persistence_root() {
+        let paths = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..128)
+                            .map(|_| temporary_workspace_path())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("fixture worker completes"))
+                .collect::<Vec<_>>()
+        });
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "each test owns its workspace path"
+        );
     }
 
     #[test]

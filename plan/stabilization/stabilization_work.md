@@ -1476,6 +1476,14 @@ Status: pending
     a new `AerisChartView` on a covering snapshot; a drawing-preserving
     in-place cross-instrument reset remains an Aeris Charts operation for M7.9.
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
+  - Parallel test isolation: the workspace persistence fixture used a PID
+    and wall-clock timestamp as its temporary root, allowing concurrent
+    tests in the same process to alias when the clock repeats. An atomic
+    per-process sequence now distinguishes every root. A 16-thread,
+    2,048-path regression and 20 concurrent default-parallel desktop test
+    binary runs of the persistence module pass, including the previously
+    intermittent template round trip. This is test-fixture isolation, not
+    evidence for the remaining M6.5 GUI or restored-pane count clauses.
   - Part 1: the desktop bridge accepts only the exact outstanding initial or
     replacement selection reply. It consumes that reply once and rejects
     repeats and retired generations, so a repeated Selected cannot install
@@ -1875,6 +1883,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.5 Part 2 fix(desktop): separated saved workspace provenance from the provisional fresh default so a restored BTC pane no longer becomes `Default`; four saved panes carry exact `InstrumentRef` identity into the existing initial runtime selection. Fresh and explicit newly added pane paths remain distinct. The literal four-pane GUI assertion and instrumented restored-pane command/reply count are not yet validated. Removed only Cargo's dev profile after target reached 31.64 GiB; never touched release.
 - 2026-10-20 UI fix(desktop): no stabilization item. The panel sidebar's watchlist, order book, time and sales and context toggles now use the header's text-toggle style (`text-interactive` while off, `text-active` while on, no selected fill), so their icons no longer look active while the panel is closed. Verified in an isolated worktree at 821f8f76: fmt, desktop Clippy, desktop tests and naming_check passed; the workspace-wide gates were not rerun because the mission's uncommitted work shares the checkout.
 - 2026-10-20 M6.5 Part 3 refactor(desktop): removed legacy `try_select_engine` references from desktop production and tests, keeping the single runtime-owned instrument select-and-demand operation and its existing exact-reply fence. The first full suite had one isolated-pass persistence test failure; after a dev-only clean the second full suite and all other gates passed. Restored-pane command/reply instrumentation and guarded GUI restart remain before M6.5 closure.
+- 2026-10-20 M6.5 parallel-test isolation test(desktop): added a per-process atomic sequence to the timestamped temporary workspace root and covered concurrent path generation. Twenty simultaneous default-parallel desktop persistence test runs passed. The earlier one-off empty-template failure is consistent with a shared fixture root; M6.5 remains unchecked pending four-pane restored selection counts and GUI restart.
 
 ## 7. Known gaps / deferred
 
