@@ -176,7 +176,7 @@ fn watchlist_header_cell(
         .child(value.into())
 }
 
-fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {
+fn watchlist_value_frame(width: f32) -> Div {
     div()
         .w(px(width))
         .h_full()
@@ -188,7 +188,10 @@ fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div
         .text_right()
         .whitespace_nowrap()
         .text_ellipsis()
-        .child(value.into())
+}
+
+fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {
+    watchlist_value_frame(width).child(value.into())
 }
 
 fn watchlist_asset_cell(row: &WatchlistRow, theme: &AerisTheme) -> Div {
@@ -229,9 +232,33 @@ fn watchlist_asset_cell(row: &WatchlistRow, theme: &AerisTheme) -> Div {
         })
 }
 
+/// The last price with its changed digits in the tick direction's color.
+fn watchlist_last_cell(row: &WatchlistRow, last: Option<i64>, theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    let Some(last) = last else {
+        return watchlist_value_cell("—", WATCHLIST_LAST_WIDTH);
+    };
+    let text = market_summary_price(last, &row.instrument);
+    let tick = row
+        .tick_reference
+        .and_then(|reference| market_summary_tick(&text, last, reference, &row.instrument));
+    let Some(tick) = tick else {
+        return watchlist_value_cell(text, WATCHLIST_LAST_WIDTH);
+    };
+    let tone = if tick.direction == std::cmp::Ordering::Greater {
+        colors.text_positive
+    } else {
+        colors.text_negative
+    };
+    let (unchanged, changed) = text.split_at(tick.changed_from.min(text.len()));
+    let (unchanged, changed) = (unchanged.to_string(), changed.to_string());
+    watchlist_value_frame(WATCHLIST_LAST_WIDTH)
+        .child(unchanged)
+        .child(div().text_color(gpui_color(tone)).child(changed))
+}
+
 fn watchlist_row_content(row: &WatchlistRow, theme: &AerisTheme) -> Stateful<Div> {
     let colors = theme.colors;
-    let scale = row.instrument.price_scale;
     let values = market_summary_values(row.last, row.previous_close);
     let tone = values
         .change
@@ -260,18 +287,12 @@ fn watchlist_row_content(row: &WatchlistRow, theme: &AerisTheme) -> Stateful<Div
             item.hover(move |item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
         })
         .child(watchlist_asset_cell(row, theme))
-        .child(watchlist_value_cell(
-            values.last.map_or_else(
-                || "—".to_string(),
-                |value| market_summary_price(value, scale),
-            ),
-            WATCHLIST_LAST_WIDTH,
-        ))
+        .child(watchlist_last_cell(row, values.last, theme))
         .child(
             watchlist_value_cell(
                 values.change.map_or_else(
                     || "—".to_string(),
-                    |value| market_summary_change(value, scale),
+                    |value| market_summary_change(value, &row.instrument),
                 ),
                 WATCHLIST_CHANGE_WIDTH,
             )

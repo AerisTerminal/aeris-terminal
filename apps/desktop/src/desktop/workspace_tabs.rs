@@ -193,7 +193,6 @@ impl TerminalApp {
             workspaces,
             active,
             theme: AerisTheme::dark(),
-            drawing_toolbar: DrawingToolbarVisibility::Expanded,
             drawing_tool_menu: DrawingToolMenu::default(),
             drawing_favorites_grab: None,
             window_active: true,
@@ -377,6 +376,7 @@ impl TerminalApp {
                     instrument: instrument.clone(),
                     previous_close: summary.and_then(|summary| summary.previous_close),
                     last: summary.and_then(|summary| summary.last),
+                    tick_reference: summary.and_then(|summary| summary.tick_reference),
                     message: summary
                         .and_then(|summary| summary.message.clone())
                         .or_else(|| {
@@ -1022,6 +1022,7 @@ impl TerminalApp {
             order_flow: surface.chart_order_flow_settings(cx)?,
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
+            chart_trade_buttons_visible: self.chart_chrome.chart_trade_buttons.shown(),
             legend: surface.chart_legend_options(cx)?,
         })
     }
@@ -1311,6 +1312,11 @@ impl TerminalApp {
             cx.notify();
             return;
         }
+        if matches!(action, ChartSettingsAction::ToggleChartTradeButtons) {
+            let visible = !self.chart_chrome.chart_trade_buttons.shown();
+            self.set_chart_trade_buttons_visible(visible, cx);
+            return;
+        }
         if Self::apply_trading_visibility_action(&surface, action, cx)
             || Self::apply_legend_settings_action(&surface, action, cx)
             || Self::apply_order_flow_settings_action(&surface, action, cx)
@@ -1335,7 +1341,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleSymbolLegend
             | ChartSettingsAction::ToggleSymbolLegendValues
             | ChartSettingsAction::ToggleIndicatorLegend
-            | ChartSettingsAction::ToggleIndicatorLegendValues => unreachable!(),
+            | ChartSettingsAction::ToggleIndicatorLegendValues
+            | ChartSettingsAction::ToggleChartTradeButtons => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -1377,7 +1384,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleSymbolLegend
             | ChartSettingsAction::ToggleSymbolLegendValues
             | ChartSettingsAction::ToggleIndicatorLegend
-            | ChartSettingsAction::ToggleIndicatorLegendValues => unreachable!(),
+            | ChartSettingsAction::ToggleIndicatorLegendValues
+            | ChartSettingsAction::ToggleChartTradeButtons => unreachable!(),
         });
         cx.notify();
     }
@@ -1991,6 +1999,7 @@ impl TerminalApp {
             platform_menu::PlatformMenuContent {
                 update: self.update_presentation(),
                 window_frame: self.chart_chrome.window_frame,
+                drawing_toolbar_visible: self.chart_chrome.drawing_toolbar.shown(),
                 rithmic_notices: self.holds_rithmic_session(cx),
                 now_unix_seconds: self
                     .lifecycle
@@ -3109,9 +3118,44 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn toggle_drawing_toolbar(&mut self, cx: &mut Context<Self>) {
-        self.drawing_toolbar.toggle();
+    /// Shows or hides the drawing tools sidebar for every workspace and saves the choice.
+    pub(super) fn set_drawing_toolbar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let visibility = chart_chrome::ChromeVisibility::from_shown(visible);
+        if self.chart_chrome.drawing_toolbar == visibility {
+            return;
+        }
+        self.chart_chrome.drawing_toolbar = visibility;
         self.drawing_tool_menu.close();
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.chart_chrome.drawing_toolbar = visibility;
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
+    }
+
+    /// Shows or hides the chart Buy / quantity / Sell bar on every chart and saves the choice.
+    pub(super) fn set_chart_trade_buttons_visible(
+        &mut self,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let visibility = chart_chrome::ChromeVisibility::from_shown(visible);
+        if self.chart_chrome.chart_trade_buttons == visibility {
+            return;
+        }
+        self.chart_chrome.chart_trade_buttons = visibility;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.set_chart_trade_buttons(visibility, surface_cx);
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
         cx.notify();
     }
 

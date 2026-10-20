@@ -694,7 +694,7 @@ impl TerminalApp {
                 terminal,
                 workspace: &self.workspaces[self.active],
                 active_surface: active,
-                expanded_drawing_toolbar: (!self.drawing_toolbar.is_collapsed()).then_some(
+                expanded_drawing_toolbar: self.chart_chrome.drawing_toolbar.shown().then_some(
                     DrawingSidebar {
                         menu: &self.drawing_tool_menu,
                         favorites: self.chart_chrome.drawing_favorites,

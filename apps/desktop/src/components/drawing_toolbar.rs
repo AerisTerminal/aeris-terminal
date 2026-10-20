@@ -11,7 +11,6 @@ pub(super) struct DrawingToolbarState {
     pub(super) drawing_count: usize,
     pub(super) selection: DrawingToolbarSelection,
     pub(super) selected_locked: bool,
-    pub(super) time_axis_height: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -44,7 +43,6 @@ impl DrawingToolbarState {
             drawing_count: chart.drawing_count(),
             selection,
             selected_locked: chart.selected_drawing_locked(),
-            time_axis_height: chart.time_axis_height(),
         }
     }
 }
@@ -776,7 +774,7 @@ pub(super) struct DrawingSidebar<'a> {
 }
 
 pub(super) fn drawing_toolbar(
-    terminal: Entity<TerminalApp>,
+    terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
     sidebar: DrawingSidebar<'_>,
@@ -795,7 +793,7 @@ pub(super) fn drawing_toolbar(
             menu_open: menu.open == Some(group),
             enabled,
         })
-        .map(|slot| drawing_tool_slot(&terminal, slot, theme));
+        .map(|slot| drawing_tool_slot(terminal, slot, theme));
     div()
         .absolute()
         .top_0()
@@ -842,17 +840,8 @@ pub(super) fn drawing_toolbar(
                 .py_1()
                 .border_t_1()
                 .border_color(gpui_color(colors.border))
-                .child(drawing_favorites_toggle(
-                    &terminal,
-                    sidebar.favorites,
-                    theme,
-                )),
+                .child(drawing_favorites_toggle(terminal, sidebar.favorites, theme)),
         )
-        .child(drawing_toolbar_collapse(
-            terminal,
-            state.time_axis_height,
-            theme,
-        ))
 }
 
 const DRAWING_TOOL_MENU_WIDTH: f32 = 264.0;
@@ -1409,41 +1398,6 @@ fn drawing_toolbar_actions(
         ))
 }
 
-/// The axis share of the strip that fits the toggle button: the strip adds the pane's bottom
-/// inset, so the two together hold one `Sm` button. Until a chart reports its time strip (no
-/// chart is attached during startup), this keeps the button inside its row instead of drawing
-/// over the favorites button above it.
-const DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT: f32 =
-    ButtonSize::Sm.logical_height() - WORKSPACE_PANE_BOTTOM_INSET;
-
-fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
-    // Aeris Charts reserves the complete time strip inside the chart. The desktop pane then
-    // adds its bottom layout inset outside that canvas, so the adjacent control must span
-    // both regions to match the visible X-axis row from top border to workspace edge.
-    time_axis_height.max(DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT) + WORKSPACE_PANE_BOTTOM_INSET
-}
-
-fn drawing_toolbar_collapse(
-    terminal: Entity<TerminalApp>,
-    time_axis_height: f32,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let height = drawing_toolbar_toggle_height(time_axis_height);
-    drawing_toolbar_toggle_hit(
-        "drawing_toolbar_collapse",
-        HugeIcon::SidebarLeft,
-        "Collapse drawing toolbar",
-        theme,
-        move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
-    )
-    .flex_none()
-    .w_full()
-    .h(px(height))
-    .border_t_1()
-    .border_color(gpui_color(colors.border))
-}
-
 #[derive(Clone, Copy)]
 struct DrawingActionSpec {
     id: &'static str,
@@ -1508,51 +1462,6 @@ fn sidebar_tooltip(
         .show_delay(TOOLTIP_OPEN_DELAY)
         .placement(TooltipPlacement::Right);
     with_tooltip((id, usize::MAX), trigger, &spec).into_any_element()
-}
-
-pub(super) fn drawing_toolbar_expander(
-    terminal: Entity<TerminalApp>,
-    time_axis_height: f32,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let colors = theme.colors;
-    let height = drawing_toolbar_toggle_height(time_axis_height);
-    drawing_toolbar_toggle_hit(
-        "drawing_toolbar_expand",
-        HugeIcon::SidebarLeft,
-        "Expand drawing toolbar",
-        theme,
-        move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
-    )
-    .absolute()
-    .left_0()
-    .bottom_0()
-    .w(px(chart_chrome::CHART_CHROME_HEIGHT))
-    .h(px(height))
-    .border_t_1()
-    .border_r_1()
-    .border_color(gpui_color(colors.border))
-    .bg(gpui_color(colors.surface))
-}
-
-/// The strip aligned with the chart's time axis that holds the toolbar's collapse or expand
-/// button. The strip is only a frame; the button inside it is the control.
-fn drawing_toolbar_toggle_hit(
-    id: &'static str,
-    icon: HugeIcon,
-    tooltip: &'static str,
-    theme: &AerisTheme,
-    on_activate: impl Fn(&mut Window, &mut App) + 'static,
-) -> Div {
-    div().flex().items_center().justify_center().child(
-        Button::new(id, theme)
-            .variant(ButtonVariant::Ghost)
-            .button_size(ButtonSize::Sm)
-            .icon(header_icon(icon))
-            .aria_label(tooltip)
-            .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
-            .on_press(move |_, window, cx| on_activate(window, cx)),
-    )
 }
 
 /// A drawing-toolbar tool or action. Each glyph keeps its own optical size because the tool
@@ -1743,22 +1652,5 @@ mod tests {
         let separators = 2.0 * MENU_SEPARATOR_HEIGHT;
         let panel_chrome = 2.0 * (MENU_PANEL_INSET + theme.dimensions.border_width);
         assert_eq!(height, px(rows + titles + separators + panel_chrome));
-    }
-
-    #[test]
-    fn drawing_toggle_spans_the_engine_axis_and_host_bottom_inset() {
-        let height = drawing_toolbar_toggle_height(22.0);
-        assert!((height - 24.0).abs() < f32::EPSILON);
-        let taller_axis = drawing_toolbar_toggle_height(30.0);
-        assert!((taller_axis - 32.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn drawing_toggle_keeps_its_button_inside_the_row_before_a_chart_reports_its_axis() {
-        let detached = drawing_toolbar_toggle_height(0.0);
-        assert!(detached >= ButtonSize::Sm.logical_height());
-        // The startup row already has the default axis height, so attaching the chart does not
-        // shift the sidebar.
-        assert!((detached - drawing_toolbar_toggle_height(22.0)).abs() < f32::EPSILON);
     }
 }

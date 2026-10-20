@@ -2163,6 +2163,17 @@ fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
             )],
             ui.theme,
         ),
+        settings_group(
+            "Chart buttons",
+            [settings_switch_row(
+                ui,
+                "Quick trade buttons",
+                Some("Buy, quantity and Sell under the symbol on every chart"),
+                snapshot.chart_trade_buttons_visible,
+                ChartSettingsAction::ToggleChartTradeButtons,
+            )],
+            ui.theme,
+        ),
     ])
 }
 

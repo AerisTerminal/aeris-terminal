@@ -260,8 +260,12 @@ pub struct ChartChromePreferences {
     /// Instrument categories the symbol menu searches; at least one is always included.
     pub symbol_search_categories: InstrumentSearchCategories,
     pub window_frame: WindowFrame,
+    /// The drawing tools sidebar along the left edge of the charts.
+    pub drawing_toolbar: ChromeVisibility,
     pub drawing_favorites: DrawingFavorites,
     pub trading_shortcuts: TradingShortcutMode,
+    /// The Buy / quantity / Sell bar under each chart's symbol legend.
+    pub chart_trade_buttons: ChromeVisibility,
     /// Window-relative logical origin the selected-drawing toolbar was dragged to; `None` is
     /// the default spot.
     pub drawing_context_toolbar_origin: Option<(f32, f32)>,
@@ -404,6 +408,26 @@ impl WindowFrame {
     }
 }
 
+/// Whether an optional piece of shell chrome is shown.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChromeVisibility {
+    #[default]
+    Shown,
+    Hidden,
+}
+
+impl ChromeVisibility {
+    #[must_use]
+    pub const fn from_shown(shown: bool) -> Self {
+        if shown { Self::Shown } else { Self::Hidden }
+    }
+
+    #[must_use]
+    pub const fn shown(self) -> bool {
+        matches!(self, Self::Shown)
+    }
+}
+
 /// Whether trading shortcuts ask before they send.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TradingShortcutMode {
@@ -448,8 +472,10 @@ impl Default for ChartChromePreferences {
             chart_type: ChartType::Candles,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
             trading_shortcuts: TradingShortcutMode::Confirm,
+            chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
         }
     }
@@ -644,6 +670,8 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             && let Some(window_frame) = WindowFrame::from_identifier(value)
         {
             preferences.window_frame = window_frame;
+        } else if let Some(value) = line.strip_prefix("drawing_toolbar=") {
+            preferences.drawing_toolbar = ChromeVisibility::from_shown(parse_chrome_flag(value));
         } else if let Some(value) = line.strip_prefix("drawing_favorites=") {
             preferences.drawing_favorites.parse_tools(value);
         } else if let Some(value) = line.strip_prefix("drawing_favorites_toolbar=") {
@@ -652,6 +680,9 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             preferences.drawing_favorites.toolbar_origin = parse_toolbar_origin(value);
         } else if let Some(value) = line.strip_prefix("trading_shortcuts=") {
             preferences.trading_shortcuts = TradingShortcutMode::from_identifier(value);
+        } else if let Some(value) = line.strip_prefix("chart_trade_buttons=") {
+            preferences.chart_trade_buttons =
+                ChromeVisibility::from_shown(parse_chrome_flag(value));
         } else if let Some(value) = line.strip_prefix("drawing_context_toolbar_origin=") {
             preferences.drawing_context_toolbar_origin = parse_toolbar_origin(value);
         }
@@ -677,7 +708,7 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
         .map(|(x, y)| format!("drawing_context_toolbar_origin={x},{y}\n"))
         .unwrap_or_default();
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\ntrading_shortcuts={}\n{origin}{context_origin}",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\ndrawing_toolbar={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\ntrading_shortcuts={}\nchart_trade_buttons={}\n{origin}{context_origin}",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
         u8::from(preferences.indicator_price_lines_visible),
@@ -685,9 +716,11 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
         u8::from(preferences.symbol_search_categories.futures),
         u8::from(preferences.symbol_search_categories.equities),
         preferences.window_frame.identifier(),
+        u8::from(preferences.drawing_toolbar.shown()),
         favorites.encode_tools(),
         u8::from(favorites.toolbar_visible),
         preferences.trading_shortcuts.identifier(),
+        u8::from(preferences.chart_trade_buttons.shown()),
     )
 }
 
@@ -796,8 +829,8 @@ fn save_chart_chrome_preferences_to(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartChromePreferences, ChartChromeSaveState, DesktopPersistence, DrawingFavorites,
-        INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
+        ChartChromePreferences, ChartChromeSaveState, ChromeVisibility, DesktopPersistence,
+        DrawingFavorites, INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
         InstrumentSearchCategories, TradingShortcutMode, WindowFrame,
         encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
@@ -1023,17 +1056,19 @@ mod tests {
                 equities: false,
             },
             window_frame: WindowFrame::Frameless,
+            drawing_toolbar: ChromeVisibility::Hidden,
             drawing_favorites: DrawingFavorites {
                 toolbar_visible: false,
                 toolbar_origin: Some((120.5, 80.0)),
                 ..starred_trend_line_and_star()
             },
             trading_shortcuts: TradingShortcutMode::OneClick,
+            chart_trade_buttons: ChromeVisibility::Hidden,
             drawing_context_toolbar_origin: Some((640.0, 96.5)),
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
         );
         assert_eq!(defaults.drawing_context_toolbar_origin, None);
         assert_eq!(
@@ -1047,6 +1082,10 @@ mod tests {
             "only the exact one-click identifier skips confirmation"
         );
         assert_eq!(defaults.window_frame, WindowFrame::Framed);
+        assert!(
+            defaults.drawing_toolbar.shown() && defaults.chart_trade_buttons.shown(),
+            "a file without the keys keeps the drawing toolbar and trade buttons shown"
+        );
         assert_eq!(
             parse_chart_chrome_preferences("window_frame=unknown\n").window_frame,
             WindowFrame::Framed,
@@ -1090,8 +1129,10 @@ mod tests {
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
             trading_shortcuts: TradingShortcutMode::Confirm,
+            chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
         };
         save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
@@ -1128,8 +1169,10 @@ mod tests {
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
             trading_shortcuts: TradingShortcutMode::Confirm,
+            chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
         };
         let second = ChartChromePreferences {
@@ -1139,8 +1182,10 @@ mod tests {
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
             trading_shortcuts: TradingShortcutMode::Confirm,
+            chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
@@ -1189,8 +1234,10 @@ mod tests {
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
             trading_shortcuts: TradingShortcutMode::Confirm,
+            chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
         };
         let second = ChartChromePreferences {
@@ -1200,8 +1247,10 @@ mod tests {
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
             trading_shortcuts: TradingShortcutMode::Confirm,
+            chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
         };
         let state = Mutex::new(ChartChromeSaveState::default());

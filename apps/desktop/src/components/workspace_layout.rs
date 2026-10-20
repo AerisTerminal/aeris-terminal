@@ -482,16 +482,9 @@ pub(super) fn workspace_market_area(
         .child(center)
         .children(side_panel)
         .child(panel_sidebar)
-        .when(drawing_toolbar_collapsed, |market| {
-            market.child(drawing_toolbar_expander(
-                terminal.clone(),
-                drawing_state.time_axis_height,
-                theme,
-            ))
-        })
         .when_some(expanded_drawing_toolbar, |market, sidebar| {
             market.child(drawing_toolbar(
-                terminal.clone(),
+                terminal,
                 active_surface,
                 drawing_state,
                 sidebar,

@@ -3245,7 +3245,98 @@ fn market_price_presentation_trims_storage_padding_without_losing_precision() {
     assert_eq!(super::market_price_text(9_881_800_000, 8), "98.818");
     assert_eq!(super::market_price_text(-16_500_000, 8), "-0.165");
     assert_eq!(super::market_price_text(123, 0), "123");
-    assert_eq!(super::market_summary_change(13_100_000_000, 8), "+131.00");
+}
+
+fn tick_grid_instrument(price_increment: i64) -> InstallProviderInstrument {
+    let mut instrument = super::local_state::default_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("default watchlist instrument");
+    instrument.price_increment = Some(price_increment);
+    instrument
+}
+
+#[test]
+fn watchlist_prices_keep_the_tick_grid_precision() {
+    let equity = tick_grid_instrument(1_000_000);
+    assert_eq!(
+        super::market_summary_price(21_550_390_000, &equity),
+        "215.50"
+    );
+    assert_eq!(
+        super::market_summary_price(36_089_500_000, &equity),
+        "360.90"
+    );
+    assert_eq!(
+        super::market_summary_price(19_060_000_000, &equity),
+        "190.60"
+    );
+    assert_eq!(super::market_summary_change(72_130_000, &equity), "+0.72");
+    assert_eq!(super::market_summary_change(-36_770_000, &equity), "-0.37");
+    assert_eq!(super::market_summary_change(400_000, &equity), "0.00");
+
+    let future = tick_grid_instrument(25_000_000);
+    assert_eq!(
+        super::market_summary_price(773_800_000_000, &future),
+        "7738.00"
+    );
+    assert_eq!(
+        super::market_summary_change(3_375_000_000, &future),
+        "+33.75"
+    );
+
+    let ungridded = super::local_state::default_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("default watchlist instrument");
+    assert_eq!(
+        super::market_summary_change(13_100_000_000, &ungridded),
+        "+131.00"
+    );
+}
+
+#[test]
+fn watchlist_tick_colors_only_the_changed_presented_digits() {
+    let equity = tick_grid_instrument(1_000_000);
+    let tick = |last, reference| {
+        let text = super::market_summary_price(last, &equity);
+        super::market_summary_tick(&text, last, reference, &equity)
+    };
+    let up = tick(24_102_000_000, 24_101_000_000).expect("up tick");
+    assert_eq!(up.direction, std::cmp::Ordering::Greater);
+    assert_eq!(up.changed_from, 5);
+    let down = tick(9_338_000_000, 9_340_000_000).expect("down tick");
+    assert_eq!(down.direction, std::cmp::Ordering::Less);
+    assert_eq!(down.changed_from, 3);
+    let widened = tick(10_000_000_000, 9_999_000_000).expect("new digit");
+    assert_eq!(widened.changed_from, 0);
+    assert_eq!(tick(21_550_390_000, 21_550_000_000), None);
+}
+
+#[test]
+fn watchlist_tick_reference_ignores_sub_grid_prints() {
+    let mut entry = MarketSummaryEntry::new(
+        tick_grid_instrument(1_000_000),
+        None,
+        None,
+        ConsumerResourceClass::Background,
+    );
+    let bar = |close| MarketBar {
+        source_sequence: 1,
+        exchange_timestamp_seconds: 100,
+        exchange_timestamp_unix_nanos: 100_000_000_000,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 10,
+    };
+    entry.apply_bar(bar(21_550_000_000));
+    assert_eq!(entry.tick_reference, None);
+    entry.apply_bar(bar(21_550_390_000));
+    assert_eq!(entry.tick_reference, None);
+    entry.apply_bar(bar(21_545_000_000));
+    assert_eq!(entry.tick_reference, Some(21_550_390_000));
 }
 
 #[test]

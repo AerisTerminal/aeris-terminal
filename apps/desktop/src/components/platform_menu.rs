@@ -1,6 +1,7 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
 //! application-level section in a single panel: account (only while sign-in exists), Theme
-//! with a preview card per mode, Window with frameless mode, the keyboard shortcuts list, and
+//! with a preview card per mode, Window with frameless mode and the drawing toolbar switch, the
+//! keyboard shortcuts list, and
 //! About with version, system, build mode, Rithmic's notices while a Rithmic session is held, and
 //! updates.
 
@@ -27,7 +28,7 @@ const THEME_SECTION_HEIGHT: f32 = SECTION_TITLE_HEIGHT
     + SECTION_BOTTOM_PADDING;
 const WINDOW_SETTING_HEIGHT: f32 = 40.0;
 const WINDOW_SECTION_HEIGHT: f32 =
-    SECTION_TITLE_HEIGHT + WINDOW_SETTING_HEIGHT + SECTION_BOTTOM_PADDING;
+    SECTION_TITLE_HEIGHT + 2.0 * WINDOW_SETTING_HEIGHT + SECTION_BOTTOM_PADDING;
 const ABOUT_BRAND_HEIGHT: f32 = 40.0;
 const ABOUT_DETAIL_HEIGHT: f32 = 26.0;
 const ABOUT_UPDATE_HEIGHT: f32 = 44.0;
@@ -38,7 +39,7 @@ const THEME_MODES: [ThemeMode; 2] = [ThemeMode::Light, ThemeMode::Dark];
 
 type ThemeSelect = Rc<dyn Fn(ThemeMode, &mut Window, &mut App)>;
 type UpdateActivate = Rc<dyn Fn(UpdateAction, &mut Window, &mut App)>;
-type FramelessToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+type WindowToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
 /// Circular account avatar for the header toolbar. Signed-out sessions keep
 /// the asset-free muted person glyph; signed-in sessions render verified
@@ -149,6 +150,7 @@ fn account_avatar_face(
 pub(super) struct PlatformMenuContent<'a> {
     pub(super) update: Option<&'a UpdatePresentation>,
     pub(super) window_frame: chart_chrome::WindowFrame,
+    pub(super) drawing_toolbar_visible: bool,
     /// Rithmic's notices appear under About only while a Rithmic session is held.
     pub(super) rithmic_notices: bool,
     pub(super) now_unix_seconds: i64,
@@ -168,6 +170,7 @@ pub(super) fn platform_menu_layer(
     let PlatformMenuContent {
         update,
         window_frame,
+        drawing_toolbar_visible,
         rithmic_notices,
         now_unix_seconds,
     } = content;
@@ -203,17 +206,7 @@ pub(super) fn platform_menu_layer(
             terminal.set_theme_mode(mode, window, terminal_cx);
         });
     });
-    let frameless_terminal = terminal.clone();
-    let toggle_frameless: FramelessToggle = Rc::new(move |frameless, _, cx| {
-        let window_frame = if frameless {
-            chart_chrome::WindowFrame::Frameless
-        } else {
-            chart_chrome::WindowFrame::Framed
-        };
-        frameless_terminal.update(cx, |terminal, terminal_cx| {
-            terminal.set_window_frame(window_frame, terminal_cx);
-        });
-    });
+    let (toggle_frameless, toggle_drawing_toolbar) = window_toggles(terminal);
     let update_terminal = terminal.clone();
     let run_update: UpdateActivate = Rc::new(move |action, _, cx| {
         update_terminal.update(cx, |terminal, terminal_cx| match action {
@@ -242,8 +235,12 @@ pub(super) fn platform_menu_layer(
         .child(theme_section(theme, &select_theme))
         .separator()
         .child(window_section(
-            window_frame.frameless(),
+            WindowSettings {
+                frameless: window_frame.frameless(),
+                drawing_toolbar_visible,
+            },
             &toggle_frameless,
+            &toggle_drawing_toolbar,
             theme,
         ))
         .separator()
@@ -694,27 +691,76 @@ fn theme_preview(
         )
 }
 
-/// Window section: the frameless mode switch with a one-line description of what it does.
-fn window_section(frameless: bool, on_toggle: &FramelessToggle, theme: &AerisTheme) -> Div {
-    let on_toggle = on_toggle.clone();
+/// The frameless mode and drawing toolbar switch callbacks.
+fn window_toggles(terminal: &Entity<TerminalApp>) -> (WindowToggle, WindowToggle) {
+    let frameless_terminal = terminal.clone();
+    let toggle_frameless: WindowToggle = Rc::new(move |frameless, _, cx| {
+        let window_frame = if frameless {
+            chart_chrome::WindowFrame::Frameless
+        } else {
+            chart_chrome::WindowFrame::Framed
+        };
+        frameless_terminal.update(cx, |terminal, terminal_cx| {
+            terminal.set_window_frame(window_frame, terminal_cx);
+        });
+    });
+    let drawing_toolbar_terminal = terminal.clone();
+    let toggle_drawing_toolbar: WindowToggle = Rc::new(move |visible, _, cx| {
+        drawing_toolbar_terminal.update(cx, |terminal, terminal_cx| {
+            terminal.set_drawing_toolbar_visible(visible, terminal_cx);
+        });
+    });
+    (toggle_frameless, toggle_drawing_toolbar)
+}
+
+#[derive(Clone, Copy)]
+struct WindowSettings {
+    frameless: bool,
+    drawing_toolbar_visible: bool,
+}
+
+/// Window section: the frameless mode and drawing toolbar switches, each with a one-line
+/// description of what it does.
+fn window_section(
+    settings: WindowSettings,
+    on_frameless: &WindowToggle,
+    on_drawing_toolbar: &WindowToggle,
+    theme: &AerisTheme,
+) -> Div {
     section()
         .h(px(WINDOW_SECTION_HEIGHT))
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("Window", theme))
-        .child(
-            div().h(px(WINDOW_SETTING_HEIGHT)).flex_none().child(
-                SwitchRow::new(
-                    "platform_menu_frameless_window",
-                    "Frameless mode",
-                    frameless,
-                    theme,
-                )
-                .description("Show the tab bar when pointing at the top edge")
-                .on_change(move |enabled, _, window, cx| {
-                    on_toggle(enabled, window, cx);
-                }),
-            ),
-        )
+        .child(window_switch(
+            SwitchRow::new(
+                "platform_menu_frameless_window",
+                "Frameless mode",
+                settings.frameless,
+                theme,
+            )
+            .description("Show the tab bar when pointing at the top edge"),
+            on_frameless,
+        ))
+        .child(window_switch(
+            SwitchRow::new(
+                "platform_menu_drawing_toolbar",
+                "Drawing toolbar",
+                settings.drawing_toolbar_visible,
+                theme,
+            )
+            .description("Show the drawing tools beside the charts"),
+            on_drawing_toolbar,
+        ))
+}
+
+fn window_switch(row: SwitchRow, on_toggle: &WindowToggle) -> Div {
+    let on_toggle = on_toggle.clone();
+    div()
+        .h(px(WINDOW_SETTING_HEIGHT))
+        .flex_none()
+        .child(row.on_change(move |enabled, _, window, cx| {
+            on_toggle(enabled, window, cx);
+        }))
 }
 
 fn keyboard_shortcuts_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> AnyElement {
@@ -994,7 +1040,7 @@ mod tests {
             let theme = self.0;
             let ignore_theme: ThemeSelect = Rc::new(|_, _, _| {});
             let ignore_update: UpdateActivate = Rc::new(|_, _, _| {});
-            let ignore_frameless: FramelessToggle = Rc::new(|_, _, _| {});
+            let ignore_toggle: WindowToggle = Rc::new(|_, _, _| {});
             let account = aeris_desktop::account::unavailable_menu_state();
             div()
                 .w(px(PLATFORM_MENU_WIDTH))
@@ -1004,8 +1050,16 @@ mod tests {
                     theme_section(&theme, &ignore_theme).debug_selector(|| "theme_section".into()),
                 )
                 .child(
-                    window_section(true, &ignore_frameless, &theme)
-                        .debug_selector(|| "window_section".into()),
+                    window_section(
+                        WindowSettings {
+                            frameless: true,
+                            drawing_toolbar_visible: true,
+                        },
+                        &ignore_toggle,
+                        &ignore_toggle,
+                        &theme,
+                    )
+                    .debug_selector(|| "window_section".into()),
                 )
                 .child(
                     about_section(

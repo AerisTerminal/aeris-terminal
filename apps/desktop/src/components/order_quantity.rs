@@ -253,16 +253,47 @@ pub(super) struct ChartTradeBar {
     surface: WeakEntity<WorkspaceSurface>,
 }
 
-/// Puts the surface's trade bar under the symbol legend of a chart the surface now shows.
+/// Puts the surface's trade bar under the symbol legend of a chart the surface now shows,
+/// unless the chart trade buttons are turned off.
 pub(super) fn attach_chart_trade_bar(
     chart: &Entity<AerisChartView>,
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let surface = cx.weak_entity();
-    let trade_bar = cx.new(|_| ChartTradeBar { surface });
-    chart.update(cx, |chart, _| {
-        chart.set_legend_accessory(Some(trade_bar.into()));
+    let chart = chart.clone();
+    // The surface is mid-update here, so its preference is read once that update ends.
+    cx.defer(move |cx| {
+        if let Some(surface) = surface.upgrade() {
+            surface.update(cx, |surface, surface_cx| {
+                surface.show_chart_trade_bar(&chart, surface_cx);
+            });
+        }
     });
+}
+
+impl WorkspaceSurface {
+    /// Shows or hides the trade bar on this surface's chart and remembers the choice.
+    pub(super) fn set_chart_trade_buttons(
+        &mut self,
+        visibility: chart_chrome::ChromeVisibility,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_chrome.chart_trade_buttons = visibility;
+        if let Some(chart) = self.chart.clone() {
+            self.show_chart_trade_bar(&chart, cx);
+        }
+    }
+
+    fn show_chart_trade_bar(&self, chart: &Entity<AerisChartView>, cx: &mut Context<Self>) {
+        let trade_bar = self.chart_chrome.chart_trade_buttons.shown().then(|| {
+            let surface = cx.weak_entity();
+            gpui::AnyView::from(cx.new(|_| ChartTradeBar { surface }))
+        });
+        chart.update(cx, |chart, chart_cx| {
+            chart.set_legend_accessory(trade_bar);
+            chart_cx.notify();
+        });
+    }
 }
 
 impl Render for ChartTradeBar {

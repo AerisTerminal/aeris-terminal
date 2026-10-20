@@ -199,7 +199,7 @@ use drawing_settings_dialog::{DrawingSettingsDialogState, drawing_settings_dialo
 use drawing_toolbar::{
     DrawingFavoritesToolbar, DrawingSidebar, DrawingToolChoice, DrawingToolMenu,
     DrawingToolbarState, drawing_favorites_default_origin, drawing_favorites_toolbar_layer,
-    drawing_tool_menu_layer, drawing_toolbar, drawing_toolbar_expander,
+    drawing_tool_menu_layer, drawing_toolbar,
 };
 use frameless_title_bar::{
     FramelessTitleBar, TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row,
@@ -1759,27 +1759,6 @@ enum ProviderConnectionPresentation {
     Stopped,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum DrawingToolbarVisibility {
-    #[default]
-    Expanded,
-    Collapsed,
-}
-
-impl DrawingToolbarVisibility {
-    const fn is_collapsed(self) -> bool {
-        matches!(self, Self::Collapsed)
-    }
-
-    fn toggle(&mut self) {
-        *self = if self.is_collapsed() {
-            Self::Expanded
-        } else {
-            Self::Collapsed
-        };
-    }
-}
-
 impl ProviderConnectionPresentation {
     const fn from_connection(state: FeedConnectionState) -> Self {
         match state {
@@ -3281,6 +3260,7 @@ struct MarketSummaryEntry {
     worker: Option<MarketDataWorker>,
     previous_close: Option<i64>,
     last: Option<MarketBar>,
+    tick_reference: Option<i64>,
     message: Option<String>,
     resource_class: ConsumerResourceClass,
 }
@@ -3350,12 +3330,61 @@ pub(crate) fn market_price_text(value: i64, scale: u32) -> String {
     format!("{sign}{whole}.{fraction}")
 }
 
-fn market_summary_price(value: i64, scale: u32) -> String {
-    market_price_text(value, scale)
+/// Fixed decimal places for an instrument's summary prices: the precision of its tick when the
+/// provider supplies one, else its maximum price decimals. A fixed count keeps the column from
+/// changing width as prints land on and off the grid.
+fn market_summary_price_decimals(instrument: &InstallProviderInstrument) -> Option<u32> {
+    let scale = instrument.price_scale.min(18);
+    if let Some(mut increment) = instrument
+        .price_increment
+        .filter(|increment| *increment > 0)
+    {
+        let mut decimals = scale;
+        while decimals > 0 && increment % 10 == 0 {
+            increment /= 10;
+            decimals -= 1;
+        }
+        return Some(decimals);
+    }
+    instrument
+        .contract_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.price_max_decimals)
+        .map(|decimals| decimals.min(scale))
 }
 
-fn market_summary_change(value: i64, scale: u32) -> String {
-    let text = market_summary_price(value.abs(), scale);
+/// The value in units of the presented decimals, rounded half away from zero; the raw value when
+/// the instrument has no presentation grid.
+fn market_summary_presented_units(value: i64, instrument: &InstallProviderInstrument) -> i128 {
+    let Some(decimals) = market_summary_price_decimals(instrument) else {
+        return i128::from(value);
+    };
+    let step = 10_i128.pow(instrument.price_scale.min(18) - decimals);
+    let magnitude = (i128::from(value).abs() + step / 2) / step;
+    if value < 0 { -magnitude } else { magnitude }
+}
+
+fn market_summary_price(value: i64, instrument: &InstallProviderInstrument) -> String {
+    let Some(decimals) = market_summary_price_decimals(instrument) else {
+        return market_price_text(value, instrument.price_scale);
+    };
+    let units = market_summary_presented_units(value, instrument);
+    let factor = 10_i128.pow(decimals);
+    let sign = if units < 0 { "-" } else { "" };
+    let whole = units.abs() / factor;
+    if decimals == 0 {
+        return format!("{sign}{whole}");
+    }
+    let fraction = units.abs() % factor;
+    let width = usize::try_from(decimals).unwrap_or(18);
+    format!("{sign}{whole}.{fraction:0width$}")
+}
+
+fn market_summary_change(value: i64, instrument: &InstallProviderInstrument) -> String {
+    let text = market_summary_price(value.abs(), instrument);
+    if text.bytes().all(|byte| byte == b'0' || byte == b'.') {
+        return text;
+    }
     match value.cmp(&0) {
         std::cmp::Ordering::Greater => format!("+{text}"),
         std::cmp::Ordering::Less => format!("-{text}"),
@@ -3363,11 +3392,48 @@ fn market_summary_change(value: i64, scale: u32) -> String {
     }
 }
 
+/// How a presented last price moved from its previous distinct presented value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MarketSummaryTick {
+    direction: std::cmp::Ordering,
+    /// Byte offset in the presented text where the changed digits begin.
+    changed_from: usize,
+}
+
+fn market_summary_tick(
+    last_text: &str,
+    last: i64,
+    reference: i64,
+    instrument: &InstallProviderInstrument,
+) -> Option<MarketSummaryTick> {
+    let direction = market_summary_presented_units(last, instrument)
+        .cmp(&market_summary_presented_units(reference, instrument));
+    if direction == std::cmp::Ordering::Equal {
+        return None;
+    }
+    let reference_text = market_summary_price(reference, instrument);
+    let changed_from = if last_text.len() == reference_text.len() {
+        last_text
+            .bytes()
+            .zip(reference_text.bytes())
+            .position(|(current, previous)| current != previous)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Some(MarketSummaryTick {
+        direction,
+        changed_from,
+    })
+}
+
 #[derive(Clone)]
 struct WatchlistRow {
     instrument: InstallProviderInstrument,
     previous_close: Option<i64>,
     last: Option<MarketBar>,
+    /// The last close before its most recent presented change; colors the tick direction.
+    tick_reference: Option<i64>,
     message: Option<String>,
     active: bool,
     /// The selected account has a working order or an open position here.
@@ -3386,6 +3452,7 @@ impl MarketSummaryEntry {
             worker,
             previous_close: None,
             last: None,
+            tick_reference: None,
             message,
             resource_class,
         }
@@ -3411,21 +3478,37 @@ impl MarketSummaryEntry {
             Some(current)
                 if bar.exchange_timestamp_unix_nanos == current.exchange_timestamp_unix_nanos =>
             {
-                self.last = Some(bar);
+                self.replace_last(Some(bar));
             }
             Some(current) => {
                 self.previous_close = Some(current.close);
-                self.last = Some(bar);
+                self.replace_last(Some(bar));
             }
-            None => self.last = Some(bar),
+            None => self.replace_last(Some(bar)),
         }
+    }
+
+    /// Keeps the previous close as the tick reference only when the presented price changes, so
+    /// sub-grid prints do not flip the tick direction.
+    fn replace_last(&mut self, bar: Option<MarketBar>) {
+        match (self.last, bar) {
+            (Some(current), Some(next))
+                if market_summary_presented_units(current.close, &self.instrument)
+                    != market_summary_presented_units(next.close, &self.instrument) =>
+            {
+                self.tick_reference = Some(current.close);
+            }
+            (_, None) => self.tick_reference = None,
+            _ => {}
+        }
+        self.last = bar;
     }
 
     fn apply_update(&mut self, update: ReplayStreamUpdate) {
         match update {
             ReplayStreamUpdate::Snapshot(snapshot) => {
                 let mut bars = snapshot.bars().iter().rev();
-                self.last = bars.next().map(|item| *item.value());
+                self.replace_last(bars.next().map(|item| *item.value()));
                 self.previous_close = bars.next().map(|item| item.value().close);
             }
             ReplayStreamUpdate::Delta(delta) => self.apply_bar(*delta.item().value()),
@@ -5057,6 +5140,8 @@ enum ChartSettingsAction {
     ToggleSymbolLegendValues,
     ToggleIndicatorLegend,
     ToggleIndicatorLegendValues,
+    /// Applies to every chart: the Buy / quantity / Sell bar under the symbol legend.
+    ToggleChartTradeButtons,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5085,6 +5170,7 @@ struct ChartSettingsSnapshot {
     order_flow: OrderFlowSettings,
     time_zone: String,
     trading_visibility: ChartTradingVisibilitySettings,
+    chart_trade_buttons_visible: bool,
     legend: ChartLegendOptions,
 }
 
@@ -5126,7 +5212,6 @@ struct TerminalApp {
     workspaces: Vec<WorkspaceTab>,
     active: usize,
     theme: AerisTheme,
-    drawing_toolbar: DrawingToolbarVisibility,
     drawing_tool_menu: DrawingToolMenu,
     /// Pointer offset from the favorites toolbar origin while its grip is dragged.
     drawing_favorites_grab: Option<gpui::Point<Pixels>>,
