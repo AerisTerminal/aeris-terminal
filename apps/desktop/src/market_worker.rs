@@ -459,35 +459,13 @@ impl MarketWorkerSender {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(MarketWorkerSendError::Disconnected);
         }
-        // Runtime publications already carry ordering and generation. Replacing a
-        // queued image in place would move it ahead of intervening control events.
-        if matches!(message, MarketWorkerMessage::Diagnostics(_)) {
-            if let Some(index) = queue
-                .iter()
-                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-            {
-                queue[index] = message;
-                return Ok(());
-            }
-            if queue.len() >= self.mailbox.capacity {
-                return Ok(());
-            }
-            queue.push_back(message);
-            return Ok(());
-        }
+        // Diagnostics use the bounded control reserve and share FIFO ordering;
+        // a saturated mailbox reports backpressure instead of evicting events.
         let limit = if is_market_publication(&message) {
             self.mailbox.capacity
         } else {
             self.mailbox.capacity.saturating_add(CONTROL_RESERVE)
         };
-        if is_market_publication(&message)
-            && queue.len() >= limit
-            && let Some(index) = queue
-                .iter()
-                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-        {
-            queue.remove(index);
-        }
         if queue.len() >= limit {
             return Err(MarketWorkerSendError::Full);
         }
@@ -1979,7 +1957,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_snapshots_coalesce_without_displacing_market_updates() {
+    fn diagnostics_preserve_fifo_order_and_report_backpressure() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
         let snapshot = |generation| {
@@ -2011,10 +1989,53 @@ mod tests {
                 .is_ok()
         );
         let (messages, _) = receiver.drain();
-        assert!(matches!(
-            messages.as_slice(),
-            [MarketWorkerMessage::Diagnostics(_)]
-        ));
+        assert_eq!(messages.len(), 2);
+        for (index, message) in messages.iter().enumerate() {
+            let MarketWorkerMessage::Diagnostics(snapshot) = message else {
+                panic!("diagnostics must remain ordered");
+            };
+            assert_eq!(
+                snapshot.session_generation.map(NonZeroU64::get),
+                Some(index as u64 + 1)
+            );
+        }
+        sender
+            .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
+                NonZeroU64::MIN,
+            ))))
+            .expect("first diagnostic enters bounded queue");
+        sender
+            .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
+                NonZeroU64::new(2).expect("generation is nonzero"),
+            ))))
+            .expect("second diagnostic enters bounded queue");
+        for generation in 3..=10 {
+            sender
+                .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
+                    NonZeroU64::new(generation).expect("generation is nonzero"),
+                ))))
+                .expect("diagnostic enters bounded control reserve");
+        }
+        assert_eq!(
+            sender.send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
+                NonZeroU64::new(11).expect("generation is nonzero"),
+            )))),
+            Err(super::MarketWorkerSendError::Full)
+        );
+        assert_eq!(sender.occupancy(), (10, 2));
+        let (messages, _) = receiver.drain_up_to(1);
+        let (later, _) = receiver.drain();
+        let observed = messages
+            .into_iter()
+            .chain(later)
+            .map(|message| {
+                let MarketWorkerMessage::Diagnostics(snapshot) = message else {
+                    panic!("diagnostics must remain ordered");
+                };
+                snapshot.session_generation.map(NonZeroU64::get)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, (1..=10).map(Some).collect::<Vec<_>>());
     }
 
     #[test]
@@ -2444,7 +2465,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_never_reduce_market_mailbox_capacity() {
+    fn diagnostics_keep_fifo_order_with_market_publications() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let generation = NonZeroU64::MIN;
@@ -2486,13 +2507,27 @@ mod tests {
             .expect("delta publishes")
             .expect("fixture contains a delta");
         delta.ui_diagnostics = Some(PendingUiDiagnostics::new(generation));
-        assert!(sender.send(MarketWorkerMessage::Update(delta)).is_ok());
+        assert_eq!(
+            sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: delta.update.clone(),
+                generation: delta.generation,
+                subscription_id: delta.subscription_id.clone(),
+                worker_label: delta.worker_label.clone(),
+                ui_diagnostics: None,
+            })),
+            Err(super::MarketWorkerSendError::Full)
+        );
+        let (first, _) = receiver.drain_up_to(1);
+        assert!(matches!(first.as_slice(), [MarketWorkerMessage::Update(_)]));
+        sender
+            .send(MarketWorkerMessage::Update(delta))
+            .expect("publication enters after bounded drain");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Update(_),
+                MarketWorkerMessage::Diagnostics(_),
                 MarketWorkerMessage::Update(_)
             ]
         ));

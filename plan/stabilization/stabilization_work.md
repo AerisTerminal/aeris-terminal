@@ -1537,6 +1537,13 @@ Status: pending
     remaining diagnostic coalescing, parallel message/ChartState model,
     recovery panic and bridge collapse belong to later M6.6 parts; VAL-DSK-021
     and 022 are not yet claimed complete.
+  - Part 2: diagnostic snapshots now enter the same bounded FIFO mailbox,
+    using its control reserve. Enqueue no longer scans or replaces queued
+    diagnostics, and a full reserve reports `Full` rather than silently
+    discarding a snapshot. Tests cover diagnostic generation order, the
+    explicit saturation result, and interleaving with chart publications.
+    The parallel message/ChartState model, recovery panic and bridge discards
+    remain; VAL-DSK-021/022 are not yet complete.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
 - [ ] M6.9 descriptor-login-and-symbol-browser - Descriptor-driven provider connect, login form and symbol browser
@@ -1916,6 +1923,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-20 M6.5 Part 4 test(desktop): instrumented the production initial select-and-demand request builder in the restored four-pane endpoint test; four exact saved refs yield four requests and four applied replies despite duplicate outcomes. Focused regression and full workspace gates pass. PaneHarness and guarded four-pane GUI restart remain outstanding while a maintainer-owned release desktop runs; M6.5 remains unchecked.
 - 2026-10-20 M6.5 Part 5 fix(desktop): four restored GPUI panes capture four exact endpoint select-and-demand dispatches, reject altered duplicate initial replies and retain distinct saved identities and intervals; the user-selection GPUI regression counts one command/no follow-up. VAL-DSK-020 GUI restart remains unvalidated while the maintainer's release desktop runs; only M6.5 code is checked.
 - 2026-10-21 M6.6 Part 1 refactor(desktop): stopped in-place study, order-book and tape publication coalescing in the bounded GPUI mailbox; 10,000 ordered fixture publications survive frame-budgeted drains with explicit backpressure. All five workspace gates passed. M6.6 remains unchecked for full message collapse and VAL-DSK-021/022 completion.
+- 2026-10-21 M6.6 Part 2 refactor(desktop): removed the diagnostic replacement/eviction scans from market mailbox enqueue; diagnostic snapshots preserve FIFO order with publication events, use the bounded control reserve, and report full backpressure instead of silent loss. The message/ChartState collapse, recovery expect and bridge discards remain for later M6.6 parts.
 
 ## 7. Known gaps / deferred
 
