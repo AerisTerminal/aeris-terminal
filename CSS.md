@@ -15,8 +15,9 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Neutral text has three roles: `text-default` for content and labels, `text-secondary` for
   supporting text (AA 4.5:1 on every light and dark surface), and `text-muted` for placeholders and
   disabled text. Interactive items use `text-interactive` / `text-hover` / `text-active`.
-- Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
-  `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
+- Use tokens for what they name: fill with its paired text (`book-fill-text` on `book-bid-fill`
+  and `book-ask-fill`, `negative-subtle` + `text-negative`), `book-bid-text` / `book-ask-text` for
+  the book's price text beside the fills, `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
@@ -223,11 +224,12 @@ while invalid.
   --sell-disabled-foreground: #ffa2a2;
   --sell-foreground: #ffffff;
 
-  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
-  --book-bid-fill: #e0f3ef;
-  --book-bid-text: #067a66;
-  --book-ask-fill: #fdeef0;
-  --book-ask-text: #d91a2b;
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 60%, var(--surface));
+  --book-bid-text: var(--primary);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 40%, #000000);
+  --book-fill-text: #000000;
 
   /* Focus */
   --ring-primary: var(--primary);
@@ -343,11 +345,12 @@ while invalid.
   --sell-disabled-foreground: #ae8e90;
   --sell-foreground: #ffffff;
 
-  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
-  --book-bid-fill: #16332e;
-  --book-bid-text: #22c3a6;
-  --book-ask-fill: #3a2124;
-  --book-ask-text: #ff6b76;
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 60%, var(--surface));
+  --book-bid-text: color-mix(in srgb, var(--primary) 80%, #ffffff);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 40%, #ffffff);
+  --book-fill-text: #ffffff;
 
   /* Focus */
   --ring-primary: var(--primary);

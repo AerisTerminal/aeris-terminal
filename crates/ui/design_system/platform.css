@@ -151,11 +151,12 @@
   --sell-disabled-foreground: #ffa2a2;
   --sell-foreground: #ffffff;
 
-  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
-  --book-bid-fill: #e0f3ef;
-  --book-bid-text: #067a66;
-  --book-ask-fill: #fdeef0;
-  --book-ask-text: #d91a2b;
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 60%, var(--surface));
+  --book-bid-text: var(--primary);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 40%, #000000);
+  --book-fill-text: #000000;
 
   /* Focus */
   --ring-primary: var(--primary);
@@ -271,11 +272,12 @@
   --sell-disabled-foreground: #ae8e90;
   --sell-foreground: #ffffff;
 
-  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
-  --book-bid-fill: #16332e;
-  --book-bid-text: #22c3a6;
-  --book-ask-fill: #3a2124;
-  --book-ask-text: #ff6b76;
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 60%, var(--surface));
+  --book-bid-text: color-mix(in srgb, var(--primary) 80%, #ffffff);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 40%, #ffffff);
+  --book-fill-text: #ffffff;
 
   /* Focus */
   --ring-primary: var(--primary);

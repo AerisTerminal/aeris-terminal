@@ -1377,19 +1377,22 @@ enum BookColumnSide {
 struct OrderBookSideAppearance {
     fill: ThemeColor,
     text: ThemeColor,
+    fill_text: ThemeColor,
 }
 
-/// Each side's text token is tuned for 4.5:1 on its own fill, so a side's fill and
-/// text always travel together and are painted opaque, exactly as declared.
+/// A side's depth fill, its price text, and the shared text drawn over a fill travel
+/// together; fills are painted opaque, exactly as declared.
 fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
     match side {
         BookColumnSide::Bid => OrderBookSideAppearance {
             fill: theme.colors.book_bid_fill,
             text: theme.colors.book_bid_text,
+            fill_text: theme.colors.book_fill_text,
         },
         BookColumnSide::Ask => OrderBookSideAppearance {
             fill: theme.colors.book_ask_fill,
             text: theme.colors.book_ask_text,
+            fill_text: theme.colors.book_fill_text,
         },
     }
 }
@@ -1995,7 +1998,7 @@ fn trade_volume_cell(
     let cell = table_cell(column_width)
         .relative()
         .px_1()
-        .text_color(gpui_color(appearance.text))
+        .text_color(gpui_color(appearance.fill_text))
         .children((quantity > 0).then(|| {
             if align_right {
                 bar.right_0().into_any_element()
@@ -2028,7 +2031,7 @@ fn quantity_cell(
     let cell = table_cell(column_width)
         .relative()
         .px_1()
-        .text_color(gpui_color(appearance.text))
+        .text_color(gpui_color(appearance.fill_text))
         .children(level.map(|_| {
             if align_right {
                 bar.right_0().into_any_element()
@@ -2209,6 +2212,7 @@ mod tests {
                 OrderBookSideAppearance {
                     fill: theme.colors.book_bid_fill,
                     text: theme.colors.book_bid_text,
+                    fill_text: theme.colors.book_fill_text,
                 }
             );
             assert_eq!(
@@ -2216,6 +2220,7 @@ mod tests {
                 OrderBookSideAppearance {
                     fill: theme.colors.book_ask_fill,
                     text: theme.colors.book_ask_text,
+                    fill_text: theme.colors.book_fill_text,
                 }
             );
             assert!((theme.colors.book_bid_fill.alpha() - 1.0).abs() < f32::EPSILON);

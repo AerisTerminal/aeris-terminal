@@ -764,21 +764,36 @@ mod tests {
     fn order_book_tokens_match_the_platform_contract() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.book_bid_fill, ThemeColor::from_rgb8(224, 243, 239));
-        assert_eq!(light.book_bid_text, ThemeColor::from_rgb8(6, 122, 102));
-        assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(253, 238, 240));
-        assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(217, 26, 43));
-        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(22, 51, 46));
-        assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(34, 195, 166));
-        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(58, 33, 36));
-        assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 107, 118));
+        assert_eq!(light.book_bid_fill, ThemeColor::from_rgb8(102, 168, 235));
+        assert_eq!(light.book_bid_text, light.primary);
+        assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(255, 172, 191));
+        assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(102, 19, 38));
+        assert_eq!(light.book_fill_text, ThemeColor::from_rgb8(0, 0, 0));
+        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(9, 75, 142));
+        assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(51, 139, 228));
+        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(116, 33, 51));
+        assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 172, 191));
+        assert_eq!(dark.book_fill_text, ThemeColor::from_rgb8(255, 255, 255));
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
-        assert_eq!(token_source(&light_tokens, "book-bid-fill"), "#e0f3ef");
-        assert_eq!(token_source(&light_tokens, "book-ask-text"), "#d91a2b");
-        assert_eq!(token_source(&dark_tokens, "book-bid-text"), "#22c3a6");
-        assert_eq!(token_source(&dark_tokens, "book-ask-fill"), "#3a2124");
+        assert_eq!(
+            token_source(&light_tokens, "book-bid-fill"),
+            "color-mix(in srgb, var(--primary) 60%, var(--surface))"
+        );
+        assert_eq!(
+            token_source(&light_tokens, "book-ask-text"),
+            "color-mix(in srgb, #ff2f5e 40%, #000000)"
+        );
+        assert_eq!(
+            token_source(&dark_tokens, "book-bid-text"),
+            "color-mix(in srgb, var(--primary) 80%, #ffffff)"
+        );
+        assert_eq!(
+            token_source(&dark_tokens, "book-ask-fill"),
+            "color-mix(in srgb, #ff2f5e 40%, var(--surface))"
+        );
+        assert_eq!(token_source(&dark_tokens, "book-fill-text"), "#ffffff");
     }
 
     #[test]

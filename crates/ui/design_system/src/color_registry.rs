@@ -80,14 +80,16 @@ macro_rules! platform_color_registry {
             sell_disabled => "sell-disabled",
             sell_disabled_foreground => "sell-disabled-foreground",
             sell_foreground => "sell-foreground",
-            /// Order-book bid depth bar. Pair only with `book_bid_text`.
+            /// Order-book bid depth bar; text on it uses `book_fill_text`.
             book_bid_fill => "book-bid-fill",
-            /// Order-book bid price text; passes 4.5:1 on `book_bid_fill`.
+            /// Order-book bid price text, drawn beside the bid depth bars.
             book_bid_text => "book-bid-text",
-            /// Order-book ask depth bar. Pair only with `book_ask_text`.
+            /// Order-book ask depth bar; text on it uses `book_fill_text`.
             book_ask_fill => "book-ask-fill",
-            /// Order-book ask price text; passes 4.5:1 on `book_ask_fill`.
+            /// Order-book ask price text, drawn beside the ask depth bars.
             book_ask_text => "book-ask-text",
+            /// Quantity text drawn on top of either depth bar.
+            book_fill_text => "book-fill-text",
             /// The one focus ring for every control; always the `primary` color.
             ring_primary => "ring-primary",
             /// Chart candles and volume only. Aeris Charts remains authoritative for chart rendering.
