@@ -1,4 +1,4 @@
-use super::{AerisChartView, OrderFlowSettings};
+use super::{AerisChartView, ChartColor, OrderBookDepthSettings, OrderFlowSettings};
 use aeris_charts_engine::{DepthLevel, DepthOptions, DepthProfileOptions, DepthSnapshot};
 
 /// Levels kept per side of the drawn book; deeper levels of a larger book are dropped.
@@ -13,6 +13,7 @@ pub(super) struct OrderBookDepthState {
     identity: String,
     tick_size_bits: u64,
     pub(super) stream: u64,
+    pub(super) profile: u64,
     sequence: u64,
 }
 
@@ -31,10 +32,14 @@ impl AerisChartView {
         mut bids: Vec<DepthLevel>,
         mut asks: Vec<DepthLevel>,
     ) -> Result<(), String> {
-        if self.order_flow_settings.order_book_depth != Some(true) {
+        let Some(settings) = self
+            .order_flow_settings
+            .order_book_depth
+            .filter(|book| book.visible)
+        else {
             self.clear_order_book_depth();
             return Ok(());
-        }
+        };
         if identity.is_empty() || !tick_size.is_finite() || tick_size <= 0.0 {
             self.clear_order_book_depth();
             return Err("order-book identity and tick size must be valid".to_string());
@@ -45,7 +50,7 @@ impl AerisChartView {
             self.clear_order_book_depth();
         }
         if self.order_book_depth_state.is_none() {
-            self.configure_order_book_depth(identity, tick_size)?;
+            self.configure_order_book_depth(identity, tick_size, settings)?;
         }
         let Some((stream, sequence)) = self.order_book_depth_state.as_mut().map(|state| {
             state.sequence = state.sequence.saturating_add(1);
@@ -80,7 +85,12 @@ impl AerisChartView {
         }
     }
 
-    fn configure_order_book_depth(&mut self, identity: &str, tick_size: f64) -> Result<(), String> {
+    fn configure_order_book_depth(
+        &mut self,
+        identity: &str,
+        tick_size: f64,
+        settings: OrderBookDepthSettings,
+    ) -> Result<(), String> {
         let options = DepthOptions {
             tick_size,
             max_levels_per_side: MAX_LEVELS_PER_SIDE,
@@ -93,20 +103,46 @@ impl AerisChartView {
             .engine
             .add_depth_stream(identity, options)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = self
+        let profile = match self
             .engine
-            .add_depth_profile(stream, DepthProfileOptions::default())
+            .add_depth_profile(stream, depth_profile_options(settings))
         {
-            self.engine.remove_depth_stream(stream);
-            return Err(error.to_string());
-        }
+            Ok(profile) => profile,
+            Err(error) => {
+                self.engine.remove_depth_stream(stream);
+                return Err(error.to_string());
+            }
+        };
         self.order_book_depth_state = Some(OrderBookDepthState {
             identity: identity.to_string(),
             tick_size_bits: tick_size.to_bits(),
             stream,
+            profile,
             sequence: 0,
         });
         Ok(())
+    }
+
+    /// Restyles the drawn bars from the durable settings in place, keeping the drawn book.
+    /// Bars the engine refuses to restyle are removed and drawn again from the next book.
+    pub(super) fn sync_order_book_depth_options(&mut self) {
+        let (Some(settings), Some(profile)) = (
+            self.order_flow_settings.order_book_depth,
+            self.order_book_depth_state
+                .as_ref()
+                .map(|state| state.profile),
+        ) else {
+            return;
+        };
+        if self
+            .engine
+            .set_depth_profile_options(profile, depth_profile_options(settings))
+            .is_ok()
+        {
+            self.invalidate_series_frame();
+        } else {
+            self.clear_order_book_depth();
+        }
     }
 
     /// Removes the order-book indicator through the durable order-flow settings owner, so the
@@ -123,17 +159,30 @@ impl AerisChartView {
     }
 
     pub(super) fn set_order_book_depth_visible(&mut self, visible: bool) -> bool {
-        if self
+        let Some(book) = self
             .order_flow_settings
             .order_book_depth
-            .is_none_or(|shown| shown == visible)
-        {
+            .filter(|book| book.visible != visible)
+        else {
             return false;
-        }
+        };
         self.set_order_flow_settings(OrderFlowSettings {
-            order_book_depth: Some(visible),
+            order_book_depth: Some(OrderBookDepthSettings { visible, ..book }),
             ..self.order_flow_settings
         })
         .unwrap_or(false)
+    }
+}
+
+fn depth_profile_options(settings: OrderBookDepthSettings) -> DepthProfileOptions {
+    let rgba = |color: ChartColor| [color.r(), color.g(), color.b(), color.a()];
+    DepthProfileOptions {
+        pane_index: 0,
+        levels_per_side: usize::from(settings.levels_per_side),
+        max_width: f64::from(settings.max_width),
+        bid_rgba: settings.bid_color.map(rgba),
+        ask_rgba: settings.ask_color.map(rgba),
+        opacity: f32::from(settings.opacity_percent) / 100.0,
+        show_sizes: settings.show_sizes,
     }
 }

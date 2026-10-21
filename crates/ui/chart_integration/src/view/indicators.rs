@@ -177,7 +177,7 @@ impl AerisChartView {
                         identity,
                         series_id,
                         title: study.title(),
-                        settings_available: false,
+                        settings_available: true,
                         tone_from_primary: false,
                     })
                 })
@@ -216,9 +216,9 @@ impl AerisChartView {
             let item = LegendItem::BigTrades;
             insert_price_pane_legend_row(&mut rows, item, "Big Trades", big_trades.visible, true);
         }
-        if let Some(visible) = self.order_flow_settings.order_book_depth {
+        if let Some(book) = self.order_flow_settings.order_book_depth {
             let item = LegendItem::OrderBookDepth;
-            insert_price_pane_legend_row(&mut rows, item, "Order Book", visible, false);
+            insert_price_pane_legend_row(&mut rows, item, "Order Book", book.visible, true);
         }
         apply_legend_options(&mut rows, self.legend_options);
         rows

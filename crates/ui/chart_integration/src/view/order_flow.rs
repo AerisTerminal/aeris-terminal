@@ -1,13 +1,14 @@
 use super::{
-    AerisChartView, BigTradesFilter, BigTradesSettings, ChartTheme, FootprintDisplayMode,
-    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, platform_theme,
+    AerisChartView, BigTradesFilter, BigTradesSettings, ChartTheme, CumulativeDeltaReset,
+    CumulativeDeltaSettings, FootprintDisplayMode, OrderFlowAggregation, OrderFlowDefaultColors,
+    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, chart_color_hex, platform_theme,
 };
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
     BigTradesOptions, FootprintAggregationOptions, FootprintBarAggregation, FootprintCellMode,
     FootprintImbalanceOptions, FootprintTrade, FootprintVisualOptions, OrderFlowPresentation,
-    OrderFlowPresentationOptions,
+    OrderFlowPresentationOptions, TradeStudyOptions,
 };
 
 const SWEEP_AGGREGATION_WINDOW_MICROS: i64 = 100_000;
@@ -68,16 +69,42 @@ impl AerisChartView {
         {
             return Err("big-trades minimum volume must be finite and positive".to_string());
         }
+        if settings
+            .order_book_depth
+            .is_some_and(|book| !book.is_valid())
+        {
+            return Err("order-book settings are out of range".to_string());
+        }
         if self.order_flow_settings == settings {
             return Ok(false);
         }
+        let book_changed = self.order_flow_settings.order_book_depth != settings.order_book_depth;
         self.order_flow_settings = settings;
-        if settings.order_book_depth != Some(true) {
+        if settings.order_book_depth.is_some_and(|book| book.visible) {
+            if book_changed {
+                self.sync_order_book_depth_options();
+            }
+        } else {
             self.clear_order_book_depth();
         }
         self.reconfigure_order_flow();
         self.mark_user_state_changed();
         Ok(true)
+    }
+
+    /// The colors the order-flow indicators draw where their settings leave a color unset.
+    #[must_use]
+    pub fn order_flow_default_colors(&self) -> OrderFlowDefaultColors {
+        let layout = &self.engine.options.get().layout;
+        let hex = |css: &str| super::drawing_color_hex(css).unwrap_or_else(|| css.to_string());
+        let footprint = FootprintVisualOptions::default();
+        OrderFlowDefaultColors {
+            cumulative_delta_line: chart_color_hex(aeris_charts_engine::DEFAULT_LINE_COLOR),
+            bullish: hex(&layout.bullish_color),
+            bearish: hex(&layout.bearish_color),
+            delta_positive: chart_color_hex(footprint.positive_delta_color),
+            delta_negative: chart_color_hex(footprint.negative_delta_color),
+        }
     }
 
     /// The minimum order volume the drawn big-trades indicator applies; `None` before it is
@@ -319,8 +346,13 @@ impl AerisChartView {
             visual: footprint_visual_options(cell_mode(self.order_flow_settings.display_mode)),
             show_footprint: self.chart_type == super::ChartType::Footprint,
             show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
-            cumulative_delta_style: self.order_flow_settings.cumulative_delta_style,
+            cumulative_delta: cumulative_delta_options(self.order_flow_settings.cumulative_delta),
             show_delta_histogram: self.order_flow_settings.show_delta_histogram,
+            delta_histogram: TradeStudyOptions {
+                up_color: self.order_flow_settings.delta_histogram.up_color,
+                down_color: self.order_flow_settings.delta_histogram.down_color,
+                ..TradeStudyOptions::default()
+            },
             big_trades: self
                 .order_flow_settings
                 .big_trades
@@ -458,6 +490,22 @@ impl AerisChartView {
             || self.order_flow_settings.show_cumulative_delta
             || self.order_flow_settings.show_delta_histogram
             || self.order_flow_settings.big_trades.is_some()
+    }
+}
+
+const fn cumulative_delta_options(settings: CumulativeDeltaSettings) -> TradeStudyOptions {
+    TradeStudyOptions {
+        cumulative_delta_reset: match settings.reset {
+            CumulativeDeltaReset::Session => aeris_charts_engine::CumulativeDeltaReset::Session,
+            CumulativeDeltaReset::Continuous => {
+                aeris_charts_engine::CumulativeDeltaReset::Continuous
+            }
+        },
+        anchor_timestamp_micros: None,
+        style: settings.style,
+        line_color: settings.line_color,
+        up_color: settings.up_color,
+        down_color: settings.down_color,
     }
 }
 

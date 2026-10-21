@@ -430,6 +430,58 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// 0 draws CVD as a line and 1 as candles; absent in older workspaces, which drew lines.
     #[prost(uint32, tag = "10")]
     pub cumulative_delta_style: u32,
+    /// CVD reset and colors; absent in older workspaces, which reset each session in the
+    /// default colors.
+    #[prost(message, optional, tag = "11")]
+    pub cumulative_delta: Option<WorkspaceCumulativeDeltaState>,
+    /// Delta histogram colors; absent in older workspaces, which drew the default colors.
+    #[prost(message, optional, tag = "12")]
+    pub delta_histogram: Option<WorkspaceDeltaHistogramState>,
+    /// Order-book bar options while tag 9 records the indicator; absent in older workspaces,
+    /// which drew the default bars.
+    #[prost(message, optional, tag = "13")]
+    pub order_book_depth_options: Option<WorkspaceOrderBookDepthState>,
+}
+
+/// An empty color follows the chart default.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceCumulativeDeltaState {
+    /// 0 resets at each session open, 1 never resets.
+    #[prost(uint32, tag = "1")]
+    pub reset: u32,
+    #[prost(string, tag = "2")]
+    pub line_color: String,
+    #[prost(string, tag = "3")]
+    pub up_color: String,
+    #[prost(string, tag = "4")]
+    pub down_color: String,
+}
+
+/// An empty color follows the order-flow default.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceDeltaHistogramState {
+    #[prost(string, tag = "1")]
+    pub up_color: String,
+    #[prost(string, tag = "2")]
+    pub down_color: String,
+}
+
+/// An empty color follows the chart's up (bid) or down (ask) color.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceOrderBookDepthState {
+    #[prost(uint32, tag = "1")]
+    pub levels_per_side: u32,
+    /// Logical-pixel length of the largest level's bar.
+    #[prost(uint32, tag = "2")]
+    pub max_width: u32,
+    #[prost(uint32, tag = "3")]
+    pub opacity_percent: u32,
+    #[prost(bool, tag = "4")]
+    pub hide_sizes: bool,
+    #[prost(string, tag = "5")]
+    pub bid_color: String,
+    #[prost(string, tag = "6")]
+    pub ask_color: String,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]

@@ -824,12 +824,117 @@ fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderF
         ticks_per_row: settings.ticks_per_row,
         study_visibility_revision: 1,
         big_trades: settings.big_trades.map(persisted_big_trades),
-        order_book_depth: settings.order_book_depth,
-        cumulative_delta_style: match settings.cumulative_delta_style {
+        order_book_depth: settings.order_book_depth.map(|book| book.visible),
+        cumulative_delta_style: match settings.cumulative_delta.style {
             CumulativeDeltaStyle::Line => 0,
             CumulativeDeltaStyle::Candles => 1,
         },
+        cumulative_delta: Some(WorkspaceCumulativeDeltaState {
+            reset: match settings.cumulative_delta.reset {
+                CumulativeDeltaReset::Session => 0,
+                CumulativeDeltaReset::Continuous => 1,
+            },
+            line_color: persisted_chart_color(settings.cumulative_delta.line_color),
+            up_color: persisted_chart_color(settings.cumulative_delta.up_color),
+            down_color: persisted_chart_color(settings.cumulative_delta.down_color),
+        }),
+        delta_histogram: Some(WorkspaceDeltaHistogramState {
+            up_color: persisted_chart_color(settings.delta_histogram.up_color),
+            down_color: persisted_chart_color(settings.delta_histogram.down_color),
+        }),
+        order_book_depth_options: settings.order_book_depth.map(|book| {
+            WorkspaceOrderBookDepthState {
+                levels_per_side: u32::from(book.levels_per_side),
+                max_width: u32::from(book.max_width),
+                opacity_percent: u32::from(book.opacity_percent),
+                hide_sizes: !book.show_sizes,
+                bid_color: persisted_chart_color(book.bid_color),
+                ask_color: persisted_chart_color(book.ask_color),
+            }
+        }),
     }
+}
+
+/// An unset color persists as an empty string.
+fn persisted_chart_color(color: Option<ChartColor>) -> String {
+    color.map(chart_color_hex).unwrap_or_default()
+}
+
+/// A saved color that does not parse. The saved settings are rejected rather than guessed.
+struct DamagedChartColor;
+
+/// An empty string restores an unset color.
+fn restored_chart_color(value: &str) -> Result<Option<ChartColor>, DamagedChartColor> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    ChartColor::parse_css(value)
+        .map(Some)
+        .ok_or(DamagedChartColor)
+}
+
+/// Older workspaces without CVD options restore the session reset in default colors.
+fn restored_cumulative_delta(
+    style: u32,
+    state: Option<&WorkspaceCumulativeDeltaState>,
+) -> Option<CumulativeDeltaSettings> {
+    let style = match style {
+        0 => CumulativeDeltaStyle::Line,
+        1 => CumulativeDeltaStyle::Candles,
+        _ => return None,
+    };
+    let Some(state) = state else {
+        return Some(CumulativeDeltaSettings {
+            style,
+            ..CumulativeDeltaSettings::default()
+        });
+    };
+    Some(CumulativeDeltaSettings {
+        style,
+        reset: match state.reset {
+            0 => CumulativeDeltaReset::Session,
+            1 => CumulativeDeltaReset::Continuous,
+            _ => return None,
+        },
+        line_color: restored_chart_color(&state.line_color).ok()?,
+        up_color: restored_chart_color(&state.up_color).ok()?,
+        down_color: restored_chart_color(&state.down_color).ok()?,
+    })
+}
+
+fn restored_delta_histogram(
+    state: Option<&WorkspaceDeltaHistogramState>,
+) -> Option<DeltaHistogramSettings> {
+    let Some(state) = state else {
+        return Some(DeltaHistogramSettings::default());
+    };
+    Some(DeltaHistogramSettings {
+        up_color: restored_chart_color(&state.up_color).ok()?,
+        down_color: restored_chart_color(&state.down_color).ok()?,
+    })
+}
+
+/// Older workspaces carry no bar options and restore the defaults.
+fn restored_order_book_depth(
+    visible: bool,
+    state: Option<&WorkspaceOrderBookDepthState>,
+) -> Option<OrderBookDepthSettings> {
+    let Some(state) = state else {
+        return Some(OrderBookDepthSettings {
+            visible,
+            ..OrderBookDepthSettings::default()
+        });
+    };
+    let settings = OrderBookDepthSettings {
+        visible,
+        levels_per_side: u16::try_from(state.levels_per_side).ok()?,
+        max_width: u16::try_from(state.max_width).ok()?,
+        opacity_percent: u8::try_from(state.opacity_percent).ok()?,
+        show_sizes: !state.hide_sizes,
+        bid_color: restored_chart_color(&state.bid_color).ok()?,
+        ask_color: restored_chart_color(&state.ask_color).ok()?,
+    };
+    settings.is_valid().then_some(settings)
 }
 
 fn restored_order_flow_settings(
@@ -849,20 +954,27 @@ fn restored_order_flow_settings(
         Some(state) => Some(restored_big_trades(state)?),
         None => None,
     };
-    let cumulative_delta_style = match settings.cumulative_delta_style {
-        0 => CumulativeDeltaStyle::Line,
-        1 => CumulativeDeltaStyle::Candles,
-        _ => return None,
+    // Tag 9 records whether the order book is added and, when it is, whether it is shown.
+    let order_book_depth = match settings.order_book_depth {
+        Some(visible) => Some(restored_order_book_depth(
+            visible,
+            settings.order_book_depth_options.as_ref(),
+        )?),
+        None => None,
     };
     Some(OrderFlowSettings {
         display_mode,
         show_cumulative_delta: settings.study_visibility_revision >= 1
             && settings.show_cumulative_delta,
-        cumulative_delta_style,
+        cumulative_delta: restored_cumulative_delta(
+            settings.cumulative_delta_style,
+            settings.cumulative_delta.as_ref(),
+        )?,
         show_delta_histogram: settings.study_visibility_revision >= 1
             && settings.show_delta_histogram,
+        delta_histogram: restored_delta_histogram(settings.delta_histogram.as_ref())?,
         big_trades,
-        order_book_depth: settings.order_book_depth,
+        order_book_depth,
         ticks_per_row: settings.ticks_per_row,
     })
 }
@@ -3981,7 +4093,12 @@ impl WorkspaceSurface {
         let Some(chart) = &self.chart else {
             return;
         };
-        if chart.read(cx).order_flow_settings().order_book_depth != Some(true) {
+        if !chart
+            .read(cx)
+            .order_flow_settings()
+            .order_book_depth
+            .is_some_and(|book| book.visible)
+        {
             return;
         }
         let Some((identity, depth)) = self
@@ -5140,19 +5257,25 @@ impl WorkspaceSurface {
             OrderFlowMenuStudy::BigTrades => {
                 settings.big_trades = Some(settings.big_trades.unwrap_or_default());
             }
-            OrderFlowMenuStudy::OrderBookDepth => settings.order_book_depth = Some(true),
+            OrderFlowMenuStudy::OrderBookDepth => {
+                settings.order_book_depth = Some(OrderBookDepthSettings {
+                    visible: true,
+                    ..settings.order_book_depth.unwrap_or_default()
+                });
+            }
         }
         self.set_chart_order_flow_settings(settings, cx);
         true
     }
 
+    /// Applies `settings` through the chart, returning whether the chart holds them now.
     pub(super) fn set_chart_order_flow_settings(
         &mut self,
         settings: OrderFlowSettings,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(chart) = &self.chart else {
-            return;
+            return false;
         };
         match chart.update(cx, |chart, chart_cx| {
             let changed = chart.set_order_flow_settings(settings)?;
@@ -5171,14 +5294,18 @@ impl WorkspaceSurface {
                 self.sync_order_book_demand(cx);
                 self.apply_order_book_to_chart(cx);
                 cx.notify();
+                true
             }
-            Ok(false) => {}
-            Err(_) => Self::post_indicator_failure(
-                "order_flow",
-                "Order flow unavailable",
-                "The order-flow settings could not be applied.",
-                cx,
-            ),
+            Ok(false) => true,
+            Err(_) => {
+                Self::post_indicator_failure(
+                    "order_flow",
+                    "Order flow unavailable",
+                    "The order-flow settings could not be applied.",
+                    cx,
+                );
+                false
+            }
         }
     }
 
@@ -5881,7 +6008,11 @@ impl WorkspaceSurface {
     fn order_book_demanded(&self, cx: &App) -> bool {
         self.side_panels.needs_order_book()
             || self.chart.as_ref().is_some_and(|chart| {
-                chart.read(cx).order_flow_settings().order_book_depth == Some(true)
+                chart
+                    .read(cx)
+                    .order_flow_settings()
+                    .order_book_depth
+                    .is_some_and(|book| book.visible)
             })
     }
 
@@ -6358,6 +6489,7 @@ impl WorkspaceSurface {
             IndicatorSettingsDialog::Study(_) => "study",
             IndicatorSettingsDialog::Volume(_) => "volume_settings",
             IndicatorSettingsDialog::BigTrades(_) => "big_trades_settings",
+            IndicatorSettingsDialog::OrderFlow(_) => "order_flow_settings",
             IndicatorSettingsDialog::Drawing(_) => "drawing",
         };
         self.indicator_settings_dialog = Some(dialog);
@@ -6416,6 +6548,7 @@ impl WorkspaceSurface {
             Some(IndicatorSettingsDialog::Study(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::BigTrades(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::Volume(dialog)) => Some(&mut dialog.menu),
+            Some(IndicatorSettingsDialog::OrderFlow(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::Drawing(_)) | None => None,
         }
     }
@@ -6427,6 +6560,9 @@ impl WorkspaceSurface {
             dialog.color_picker = None;
         }
         if let Some(dialog) = self.study_settings_dialog_mut() {
+            dialog.color_picker = None;
+        }
+        if let Some(dialog) = self.order_flow_dialog_mut() {
             dialog.color_picker = None;
         }
         if let Some(open) = self.indicator_settings_menu_mut() {

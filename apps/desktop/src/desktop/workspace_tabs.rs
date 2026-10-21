@@ -917,6 +917,9 @@ impl TerminalApp {
                 LegendSettingsRequest::Volume => {
                     surface.open_volume_dialog(window, surface_cx);
                 }
+                LegendSettingsRequest::OrderFlow(indicator) => {
+                    surface.open_order_flow_dialog(indicator, window, surface_cx);
+                }
                 LegendSettingsRequest::Drawing(drawing) => {
                     surface.open_drawing_settings_dialog(drawing, window, surface_cx);
                 }
@@ -1020,7 +1023,6 @@ impl TerminalApp {
             series_colors: surface.chart_series_colors(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
-            trades_available: super::provider_trades_available(surface.provider),
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
             chart_trade_buttons_visible: self.chart_chrome.chart_trade_buttons.shown(),
@@ -1270,12 +1272,7 @@ impl TerminalApp {
     ) -> bool {
         if !matches!(
             action,
-            ChartSettingsAction::FootprintMode(_)
-                | ChartSettingsAction::ToggleCumulativeDelta
-                | ChartSettingsAction::CumulativeDeltaStyle(_)
-                | ChartSettingsAction::ToggleDeltaHistogram
-                | ChartSettingsAction::ToggleOrderBookDepth
-                | ChartSettingsAction::FootprintTicksPerRow(_)
+            ChartSettingsAction::FootprintMode(_) | ChartSettingsAction::FootprintTicksPerRow(_)
         ) {
             return false;
         }
@@ -1284,21 +1281,6 @@ impl TerminalApp {
         };
         match action {
             ChartSettingsAction::FootprintMode(mode) => settings.display_mode = mode,
-            ChartSettingsAction::ToggleCumulativeDelta => {
-                settings.show_cumulative_delta = !settings.show_cumulative_delta;
-            }
-            ChartSettingsAction::CumulativeDeltaStyle(style) => {
-                settings.cumulative_delta_style = style;
-            }
-            ChartSettingsAction::ToggleDeltaHistogram => {
-                settings.show_delta_histogram = !settings.show_delta_histogram;
-            }
-            ChartSettingsAction::ToggleOrderBookDepth => {
-                settings.order_book_depth = match settings.order_book_depth {
-                    Some(_) => None,
-                    None => Some(true),
-                };
-            }
             ChartSettingsAction::FootprintTicksPerRow(ticks) => settings.ticks_per_row = ticks,
             _ => unreachable!(),
         }
@@ -1344,10 +1326,6 @@ impl TerminalApp {
             ChartSettingsAction::GridStyle(style) => appearance.grid_style = style.min(4),
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
-            | ChartSettingsAction::ToggleCumulativeDelta
-            | ChartSettingsAction::CumulativeDeltaStyle(_)
-            | ChartSettingsAction::ToggleDeltaHistogram
-            | ChartSettingsAction::ToggleOrderBookDepth
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks
@@ -1389,10 +1367,6 @@ impl TerminalApp {
             }
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
-            | ChartSettingsAction::ToggleCumulativeDelta
-            | ChartSettingsAction::CumulativeDeltaStyle(_)
-            | ChartSettingsAction::ToggleDeltaHistogram
-            | ChartSettingsAction::ToggleOrderBookDepth
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks

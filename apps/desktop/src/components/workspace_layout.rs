@@ -279,6 +279,9 @@ fn pane_settings_dialog(
             Some(big_trades_dialog_layer(entity, dialog, theme))
         }
         IndicatorSettingsDialog::Volume(dialog) => Some(volume_dialog_layer(entity, dialog, theme)),
+        IndicatorSettingsDialog::OrderFlow(dialog) => {
+            Some(order_flow_dialog_layer(entity, dialog, theme))
+        }
         IndicatorSettingsDialog::Drawing(dialog) => {
             drawing_settings_dialog_layer(entity, dialog, theme, cx)
         }

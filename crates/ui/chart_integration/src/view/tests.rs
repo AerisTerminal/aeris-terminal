@@ -378,12 +378,162 @@ fn cumulative_delta_style_converts_the_drawn_cvd_in_place() {
     };
     assert_eq!(cvd(&chart), Some(aeris_charts_engine::SeriesKind::Line));
 
-    settings.cumulative_delta_style = CumulativeDeltaStyle::Candles;
+    settings.cumulative_delta.style = CumulativeDeltaStyle::Candles;
     assert!(chart.set_order_flow_settings(settings).unwrap());
     assert_eq!(
         cvd(&chart),
         Some(aeris_charts_engine::SeriesKind::Candlestick)
     );
+}
+
+#[test]
+fn order_flow_study_reset_and_colors_restyle_the_drawn_series_in_place() {
+    let mut chart = AerisChartView::empty();
+    let mut settings = chart.order_flow_settings();
+    settings.show_cumulative_delta = true;
+    settings.show_delta_histogram = true;
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            OrderFlowAggregation::TimeMicros(60_000_000),
+            0.25,
+            &[order_flow_trade(1, 60_000_000, 2.0)],
+        )
+        .unwrap();
+    let series = |chart: &AerisChartView, study| {
+        chart
+            .order_flow_state
+            .as_ref()
+            .and_then(|state| state.study_series(study))
+            .expect("study drawn")
+    };
+    let cvd = series(&chart, OrderFlowStudy::CumulativeDelta);
+    let delta = series(&chart, OrderFlowStudy::Delta);
+    assert_eq!(series_entry(&chart, cvd).line_color, None);
+
+    let line = ChartColor::rgb(0x12, 0x34, 0x56);
+    let up = ChartColor::rgba(0x00, 0xff, 0x00, 0x80);
+    settings.cumulative_delta = CumulativeDeltaSettings {
+        reset: CumulativeDeltaReset::Continuous,
+        line_color: Some(line),
+        up_color: Some(up),
+        ..settings.cumulative_delta
+    };
+    settings.delta_histogram = DeltaHistogramSettings {
+        up_color: Some(up),
+        down_color: None,
+    };
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    assert_eq!(series(&chart, OrderFlowStudy::CumulativeDelta), cvd);
+    assert_eq!(series(&chart, OrderFlowStudy::Delta), delta);
+    let entry = series_entry(&chart, cvd);
+    assert_eq!(entry.line_color.as_deref(), Some(line.to_css().as_str()));
+    assert_eq!(entry.up_color.as_deref(), Some(up.to_css().as_str()));
+    assert_eq!(entry.down_color, None);
+
+    let defaults = chart.order_flow_default_colors();
+    assert_eq!(
+        defaults.cumulative_delta_line,
+        chart_color_hex(aeris_charts_engine::DEFAULT_LINE_COLOR)
+    );
+    assert_eq!(chart_color_hex(up), "#00FF0080");
+}
+
+#[test]
+fn order_flow_indicator_legend_rows_offer_settings() {
+    let mut chart = AerisChartView::empty();
+    let mut settings = chart.order_flow_settings();
+    settings.show_cumulative_delta = true;
+    settings.show_delta_histogram = true;
+    settings.order_book_depth = Some(OrderBookDepthSettings::default());
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            OrderFlowAggregation::TimeMicros(60_000_000),
+            0.25,
+            &[order_flow_trade(1, 60_000_000, 2.0)],
+        )
+        .unwrap();
+    let rows = chart.legend_rows();
+    for item in [
+        LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta),
+        LegendItem::OrderFlow(OrderFlowStudy::Delta),
+        LegendItem::OrderBookDepth,
+    ] {
+        assert!(
+            rows.iter()
+                .any(|row| row.item == item && row.settings_available),
+            "{item:?} offers its settings"
+        );
+    }
+}
+
+#[test]
+fn order_book_settings_restyle_the_drawn_bars_in_place_and_reject_out_of_range_values() {
+    let level = |price, size| ChartDepthLevel {
+        price,
+        size,
+        order_count: None,
+    };
+    let mut chart = AerisChartView::empty();
+    let mut settings = chart.order_flow_settings();
+    settings.order_book_depth = Some(OrderBookDepthSettings::default());
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    chart
+        .apply_order_book_depth(
+            "instrument:test",
+            0.25,
+            vec![level(100.0, 3.0)],
+            vec![level(100.25, 2.0)],
+        )
+        .unwrap();
+    let drawn = |chart: &AerisChartView| {
+        chart
+            .order_book_depth_state
+            .as_ref()
+            .map(|state| (state.stream, state.profile))
+    };
+    let before = drawn(&chart).expect("bars drawn");
+
+    settings.order_book_depth = Some(OrderBookDepthSettings {
+        levels_per_side: 10,
+        max_width: 200,
+        opacity_percent: 80,
+        show_sizes: false,
+        bid_color: Some(ChartColor::rgb(0x11, 0x22, 0x33)),
+        ..OrderBookDepthSettings::default()
+    });
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    assert_eq!(
+        drawn(&chart),
+        Some(before),
+        "the drawn book is restyled in place"
+    );
+    assert!(chart.engine.depth_book(before.0).is_some());
+
+    for invalid in [
+        OrderBookDepthSettings {
+            levels_per_side: 0,
+            ..OrderBookDepthSettings::default()
+        },
+        OrderBookDepthSettings {
+            max_width: 401,
+            ..OrderBookDepthSettings::default()
+        },
+        OrderBookDepthSettings {
+            opacity_percent: 5,
+            ..OrderBookDepthSettings::default()
+        },
+    ] {
+        let mut rejected = settings;
+        rejected.order_book_depth = Some(invalid);
+        assert!(chart.set_order_flow_settings(rejected).is_err());
+    }
+    assert_eq!(chart.order_flow_settings(), settings);
 }
 
 #[test]
@@ -418,7 +568,7 @@ fn order_book_depth_follows_the_indicator_and_its_legend_row() {
     );
 
     let mut settings = chart.order_flow_settings();
-    settings.order_book_depth = Some(true);
+    settings.order_book_depth = Some(OrderBookDepthSettings::default());
     assert!(chart.set_order_flow_settings(settings).unwrap());
     let (bids, asks) = book();
     chart
@@ -443,7 +593,13 @@ fn order_book_depth_follows_the_indicator_and_its_legend_row() {
     assert_eq!(drawn(&chart), None);
 
     assert!(chart.set_legend_item_visible(LegendItem::OrderBookDepth, false));
-    assert_eq!(chart.order_flow_settings().order_book_depth, Some(false));
+    assert_eq!(
+        chart
+            .order_flow_settings()
+            .order_book_depth
+            .map(|book| book.visible),
+        Some(false)
+    );
     let (bids, asks) = book();
     chart
         .apply_order_book_depth("instrument:test", 0.25, bids, asks)

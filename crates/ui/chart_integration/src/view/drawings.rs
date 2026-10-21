@@ -2,8 +2,8 @@
 //! module exposes them to the shell's toolbar and menus.
 
 use super::{
-    AerisChartView, ChartDrawingKind, ChartDrawingStamp, DrawingId, DrawingsLockSummary, css_hex,
-    price_format_min_move,
+    AerisChartView, ChartDrawingKind, ChartDrawingStamp, DrawingId, DrawingsLockSummary,
+    chart_color_hex, price_format_min_move,
 };
 use aeris_charts_engine::{
     ChartEngine, ChartTimeZone, DrawingIntervalVisibility, DrawingLabelOptions, DrawingLevel,
@@ -93,7 +93,7 @@ impl ChartDrawingSettings {
 /// An engine CSS color as `#RRGGBB` or `#RRGGBBAA`, the form the host color picker edits.
 #[must_use]
 pub fn drawing_color_hex(css: &str) -> Option<String> {
-    Color::parse_css(css).map(css_hex)
+    Color::parse_css(css).map(chart_color_hex)
 }
 
 /// One anchor's coordinates as editable text: the price at the chart's precision and, when the

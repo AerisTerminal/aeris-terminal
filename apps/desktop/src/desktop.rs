@@ -56,6 +56,8 @@ mod notification_center;
 mod order_book_panel;
 #[path = "components/order_entry_panel.rs"]
 mod order_entry_panel;
+#[path = "components/order_flow_dialog.rs"]
+mod order_flow_dialog;
 #[path = "components/order_quantity.rs"]
 mod order_quantity;
 #[path = "components/order_ticket.rs"]
@@ -104,7 +106,7 @@ use aeris_chart_integration::{
     BigTradesSettings, BigTradesSize, ChartAggressorSide, ChartAlertCondition,
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
-    ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
+    ChartAppearanceSettings, ChartBridgeMetrics, ChartColor, ChartContextKind, ChartContextRequest,
     ChartDepthLevel, ChartDrawingId, ChartDrawingKind, ChartDrawingStamp, ChartExecutionId,
     ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot,
     ChartHostTimeWindow, ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata,
@@ -116,10 +118,12 @@ use aeris_chart_integration::{
     ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
     ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
     ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
-    ChartWorkspaceLayout, CumulativeDeltaStyle, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode,
-    MAXIMUM_STUDY_LINE_WIDTH, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
-    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind,
-    VolumeAverageSettings, VolumePlacement, VolumeSettings, classify_order_flow_sweeps,
+    ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
+    DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, FootprintDisplayMode,
+    MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowDefaultColors,
+    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
+    VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings, chart_color_hex,
+    classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -128,8 +132,9 @@ use aeris_contracts::{
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState, WorkspaceChartAppearanceState,
     WorkspaceChartIndicatorState, WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState,
-    WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
-    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
+    WorkspaceChartState, WorkspaceChartStudyState, WorkspaceCumulativeDeltaState,
+    WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState, WorkspaceInstrumentDrawingsState,
+    WorkspaceLayoutState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
     WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
     WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
     WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
@@ -248,6 +253,7 @@ use native_ui::{
 };
 use num_traits::ToPrimitive;
 use order_book_panel::OrderBookPanelState;
+use order_flow_dialog::{OrderFlowDialogState, OrderFlowIndicator, order_flow_dialog_layer};
 use order_ticket::TradingOrderControlsState;
 use platform_menu::platform_menu_layer;
 use price_alert_dialog::{
@@ -1327,6 +1333,7 @@ enum LegendSettingsRequest {
     Study(StudyInstanceId),
     BigTrades,
     Volume,
+    OrderFlow(OrderFlowIndicator),
     Drawing(ChartDrawingId),
 }
 
@@ -1335,6 +1342,7 @@ enum IndicatorSettingsDialog {
     Study(StudySettingsDialogState),
     BigTrades(BigTradesDialogState),
     Volume(VolumeDialogState),
+    OrderFlow(OrderFlowDialogState),
     Drawing(Box<DrawingSettingsDialogState>),
 }
 
@@ -2993,6 +3001,21 @@ fn chart_intent_has_confirmation_evidence(intent: &ChartTradingIntent) -> bool {
     }
 }
 
+fn legend_settings_request(request: ChartSettingsRequest) -> Option<LegendSettingsRequest> {
+    let order_flow = |indicator| Some(LegendSettingsRequest::OrderFlow(indicator));
+    match request {
+        ChartSettingsRequest::Study(study_id) => {
+            StudyInstanceId::try_from_u64(study_id).map(LegendSettingsRequest::Study)
+        }
+        ChartSettingsRequest::BigTrades => Some(LegendSettingsRequest::BigTrades),
+        ChartSettingsRequest::Volume => Some(LegendSettingsRequest::Volume),
+        ChartSettingsRequest::CumulativeDelta => order_flow(OrderFlowIndicator::CumulativeDelta),
+        ChartSettingsRequest::DeltaHistogram => order_flow(OrderFlowIndicator::DeltaHistogram),
+        ChartSettingsRequest::OrderBookDepth => order_flow(OrderFlowIndicator::OrderBook),
+        ChartSettingsRequest::Drawing(id) => Some(LegendSettingsRequest::Drawing(id)),
+    }
+}
+
 fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         order_quantity::attach_chart_trade_bar(chart, cx);
@@ -3049,15 +3072,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 app.pending_chart_context_menu = Some(request);
             }
             let had_settings_request = settings_request.is_some();
-            let settings_request = settings_request.and_then(|request| match request {
-                ChartSettingsRequest::Study(study_id) => {
-                    StudyInstanceId::try_from_u64(study_id).map(LegendSettingsRequest::Study)
-                }
-                ChartSettingsRequest::BigTrades => Some(LegendSettingsRequest::BigTrades),
-                ChartSettingsRequest::Volume => Some(LegendSettingsRequest::Volume),
-                ChartSettingsRequest::Drawing(id) => Some(LegendSettingsRequest::Drawing(id)),
-            });
-            if let Some(request) = settings_request {
+            if let Some(request) = settings_request.and_then(legend_settings_request) {
                 app.pending_settings_request = Some(request);
             }
             let had_study_remove_request = study_remove_request.is_some();
@@ -5170,10 +5185,6 @@ enum ChartSettingsAction {
     LineWidth(u8),
     LineStyle(u8),
     FootprintMode(FootprintDisplayMode),
-    ToggleCumulativeDelta,
-    CumulativeDeltaStyle(CumulativeDeltaStyle),
-    ToggleDeltaHistogram,
-    ToggleOrderBookDepth,
     /// Instrument ticks per footprint row; zero is automatic.
     FootprintTicksPerRow(u32),
     ToggleOrderManagementLines,
@@ -5211,8 +5222,6 @@ struct ChartSettingsSnapshot {
     series_colors: ChartSeriesColors,
     crosshair_mode: u8,
     order_flow: OrderFlowSettings,
-    /// Whether the provider publishes trade prints, which the tape-derived studies need.
-    trades_available: bool,
     time_zone: String,
     trading_visibility: ChartTradingVisibilitySettings,
     chart_trade_buttons_visible: bool,

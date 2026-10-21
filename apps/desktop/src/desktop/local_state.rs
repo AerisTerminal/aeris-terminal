@@ -668,11 +668,12 @@ mod tests {
     use super::*;
     use aeris_contracts::{
         WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
-        WorkspaceChartState, WorkspaceChartStudyState, WorkspaceInstrumentDrawingsState,
-        WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-        WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-        WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceVolumeSettingsState,
-        workspace_study_setting_state,
+        WorkspaceChartState, WorkspaceChartStudyState, WorkspaceCumulativeDeltaState,
+        WorkspaceDeltaHistogramState, WorkspaceInstrumentDrawingsState,
+        WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState,
+        WorkspacePriceAxisState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+        WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+        WorkspaceVolumeSettingsState, workspace_study_setting_state,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -854,6 +855,24 @@ mod tests {
             }),
             order_book_depth: Some(false),
             cumulative_delta_style: 1,
+            cumulative_delta: Some(WorkspaceCumulativeDeltaState {
+                reset: 1,
+                line_color: "#112233".to_string(),
+                up_color: String::new(),
+                down_color: "#44556680".to_string(),
+            }),
+            delta_histogram: Some(WorkspaceDeltaHistogramState {
+                up_color: "#26A69A".to_string(),
+                down_color: String::new(),
+            }),
+            order_book_depth_options: Some(WorkspaceOrderBookDepthState {
+                levels_per_side: 60,
+                max_width: 200,
+                opacity_percent: 70,
+                hide_sizes: true,
+                bid_color: String::new(),
+                ask_color: "#EF5350".to_string(),
+            }),
         }
     }
 

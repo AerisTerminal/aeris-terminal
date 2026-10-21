@@ -459,6 +459,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
 }
 
 mod timeframe_input {
+    use super::super::order_flow_dialog::{OrderFlowColorTarget, OrderFlowDialogDraft};
     use super::super::*;
     use aeris_desktop::market_worker::{
         EngineWorkerStartup, MarketWorkerCommand, MarketWorkerSender, market_worker_channel,
@@ -499,6 +500,16 @@ mod timeframe_input {
                     .debug_selector(|| "volume_dialog".into())
                     .child(volume_dialog_layer(&self.0, dialog, &AerisTheme::dark()))
             });
+            let order_flow_dialog = surface.order_flow_dialog().map(|dialog| {
+                div()
+                    .size_full()
+                    .debug_selector(|| "order_flow_dialog".into())
+                    .child(order_flow_dialog_layer(
+                        &self.0,
+                        dialog,
+                        &AerisTheme::dark(),
+                    ))
+            });
             div()
                 .size_full()
                 .track_focus(&surface.chrome_focus)
@@ -515,6 +526,7 @@ mod timeframe_input {
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
                 .children(big_trades_dialog)
                 .children(volume_dialog)
+                .children(order_flow_dialog)
         }
     }
 
@@ -1787,6 +1799,296 @@ mod timeframe_input {
             chart_volume(&surface, cx),
             Some(applied),
             "only Apply changes the chart"
+        );
+    }
+
+    fn chart_order_flow(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &VisualTestContext,
+    ) -> OrderFlowSettings {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart_order_flow_settings(cx)
+                .expect("chart is installed")
+        })
+    }
+
+    /// A chart showing CVD, the delta histogram and a hidden order book, with the CVD dialog
+    /// refused while it is not added.
+    fn install_order_flow_chart(surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.chart = Some(cx.new(|_| AerisChartView::new()));
+                surface.open_order_flow_dialog(OrderFlowIndicator::CumulativeDelta, window, cx);
+                assert!(
+                    surface.order_flow_dialog().is_none(),
+                    "CVD is not added yet"
+                );
+                assert!(surface.set_chart_order_flow_settings(
+                    OrderFlowSettings {
+                        show_cumulative_delta: true,
+                        show_delta_histogram: true,
+                        order_book_depth: Some(OrderBookDepthSettings {
+                            visible: false,
+                            ..OrderBookDepthSettings::default()
+                        }),
+                        ..OrderFlowSettings::default()
+                    },
+                    cx,
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn order_flow_study_dialogs_apply_only_the_draft_of_their_own_indicator(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        install_order_flow_chart(&surface, cx);
+        let before = chart_order_flow(&surface, cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_order_flow_dialog(OrderFlowIndicator::CumulativeDelta, window, cx);
+                let dialog = surface.order_flow_dialog().expect("CVD dialog");
+                assert_eq!(
+                    dialog.effective_color(OrderFlowColorTarget::CumulativeDeltaLine),
+                    dialog.defaults.cumulative_delta_line,
+                    "an unset color shows the color the chart draws"
+                );
+                surface.set_order_flow_dialog_style(CumulativeDeltaStyle::Candles, cx);
+                surface.set_order_flow_dialog_reset(CumulativeDeltaReset::Continuous, cx);
+                surface.toggle_order_flow_dialog_color_picker(
+                    OrderFlowColorTarget::CumulativeDeltaUp,
+                    window,
+                    cx,
+                );
+                surface.set_order_flow_dialog_color(
+                    OrderFlowColorTarget::CumulativeDeltaUp,
+                    "not a color",
+                    cx,
+                );
+                let dialog = surface.order_flow_dialog().expect("CVD dialog");
+                assert!(
+                    dialog
+                        .color_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.error.is_some()),
+                    "an invalid color is reported in its picker"
+                );
+                surface.set_order_flow_dialog_color(
+                    OrderFlowColorTarget::CumulativeDeltaUp,
+                    "#123456",
+                    cx,
+                );
+                surface.set_order_flow_dialog_color(
+                    OrderFlowColorTarget::DeltaPositive,
+                    "#654321",
+                    cx,
+                );
+            });
+        });
+        assert!(cx.debug_bounds("order_flow_dialog").is_some());
+        assert_eq!(
+            chart_order_flow(&surface, cx),
+            before,
+            "drafts wait for Apply"
+        );
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.chart_persistence_dirty = false;
+                surface.apply_order_flow_dialog(cx);
+            });
+        });
+        let expected_cvd = CumulativeDeltaSettings {
+            style: CumulativeDeltaStyle::Candles,
+            reset: CumulativeDeltaReset::Continuous,
+            up_color: ChartColor::from_hex("#123456"),
+            ..CumulativeDeltaSettings::default()
+        };
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert!(surface.order_flow_dialog().is_none());
+            assert!(surface.chart_persistence_dirty);
+        });
+        assert!(cx.debug_bounds("order_flow_dialog").is_none());
+        let applied = chart_order_flow(&surface, cx);
+        assert_eq!(
+            applied,
+            OrderFlowSettings {
+                cumulative_delta: expected_cvd,
+                ..before
+            },
+            "a color of another indicator is not part of the CVD draft"
+        );
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_order_flow_dialog(OrderFlowIndicator::CumulativeDelta, window, cx);
+                surface.reset_order_flow_dialog(window, cx);
+                let dialog = surface.order_flow_dialog().expect("CVD dialog");
+                assert!(matches!(
+                    dialog.draft,
+                    OrderFlowDialogDraft::CumulativeDelta(draft)
+                        if draft == CumulativeDeltaSettings::default()
+                ));
+                surface.close_order_flow_dialog(cx);
+            });
+        });
+        assert_eq!(
+            chart_order_flow(&surface, cx).cumulative_delta,
+            expected_cvd,
+            "reset changes only the draft"
+        );
+    }
+
+    #[gpui::test]
+    fn delta_histogram_dialog_cancel_discards_and_apply_changes_only_its_colors(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        install_order_flow_chart(&surface, cx);
+        let before = chart_order_flow(&surface, cx);
+        let pick_negative = |surface: &mut WorkspaceSurface,
+                             window: &mut Window,
+                             cx: &mut Context<WorkspaceSurface>| {
+            surface.open_order_flow_dialog(OrderFlowIndicator::DeltaHistogram, window, cx);
+            surface.set_order_flow_dialog_color(
+                OrderFlowColorTarget::DeltaNegative,
+                "#ABCDEF80",
+                cx,
+            );
+        };
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                pick_negative(surface, window, cx);
+                surface.close_order_flow_dialog(cx);
+            });
+        });
+        assert_eq!(chart_order_flow(&surface, cx), before, "Cancel discards");
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                pick_negative(surface, window, cx);
+                surface.apply_order_flow_dialog(cx);
+                assert!(surface.order_flow_dialog().is_none());
+            });
+        });
+        assert_eq!(
+            chart_order_flow(&surface, cx),
+            OrderFlowSettings {
+                delta_histogram: DeltaHistogramSettings {
+                    up_color: None,
+                    down_color: ChartColor::from_hex("#ABCDEF80"),
+                },
+                ..before
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn order_book_dialog_validates_its_numbers_and_keeps_visibility(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        install_order_flow_chart(&surface, cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_order_flow_dialog(OrderFlowIndicator::OrderBook, window, cx);
+            });
+        });
+        assert!(cx.debug_bounds("order_flow_dialog").is_some());
+        let inputs = cx.read(|cx| {
+            let dialog = surface.read(cx).order_flow_dialog().expect("book dialog");
+            let OrderFlowDialogDraft::OrderBook(draft) = &dialog.draft else {
+                panic!("the order book draft");
+            };
+            assert_eq!(draft.levels_per_side.read(cx).value(), "40");
+            assert_eq!(draft.max_width.read(cx).value(), "120");
+            assert_eq!(draft.opacity_percent.read(cx).value(), "50");
+            [
+                draft.levels_per_side.clone(),
+                draft.max_width.clone(),
+                draft.opacity_percent.clone(),
+            ]
+        });
+        let [levels, width, opacity] = inputs;
+        cx.update(|window, cx| {
+            levels.update(cx, |input, cx| input.set_value("0", window, cx));
+            surface.update(cx, WorkspaceSurface::apply_order_flow_dialog);
+        });
+        cx.read(|cx| {
+            let dialog = surface
+                .read(cx)
+                .order_flow_dialog()
+                .expect("dialog stays open");
+            assert!(
+                dialog
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("1 to 200")),
+                "{:?}",
+                dialog.message
+            );
+        });
+        assert_eq!(
+            chart_order_flow(&surface, cx).order_book_depth,
+            Some(OrderBookDepthSettings {
+                visible: false,
+                ..OrderBookDepthSettings::default()
+            })
+        );
+
+        cx.update(|window, cx| {
+            levels.update(cx, |input, cx| input.set_value(" 80 ", window, cx));
+            width.update(cx, |input, cx| input.set_value("200", window, cx));
+            opacity.update(cx, |input, cx| input.set_value("70", window, cx));
+            surface.update(cx, |surface, cx| {
+                surface.set_order_flow_dialog_show_sizes(false, cx);
+                surface.set_order_flow_dialog_color(OrderFlowColorTarget::Bid, "#112233", cx);
+                surface.apply_order_flow_dialog(cx);
+                assert!(surface.order_flow_dialog().is_none());
+            });
+        });
+        let applied = OrderBookDepthSettings {
+            visible: false,
+            levels_per_side: 80,
+            max_width: 200,
+            opacity_percent: 70,
+            show_sizes: false,
+            bid_color: ChartColor::from_hex("#112233"),
+            ask_color: None,
+        };
+        assert_eq!(
+            chart_order_flow(&surface, cx).order_book_depth,
+            Some(applied)
+        );
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_order_flow_dialog(OrderFlowIndicator::OrderBook, window, cx);
+                surface.reset_order_flow_dialog(window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let dialog = surface.read(cx).order_flow_dialog().expect("book dialog");
+            let OrderFlowDialogDraft::OrderBook(draft) = &dialog.draft else {
+                panic!("the order book draft");
+            };
+            assert_eq!(
+                draft.settings,
+                OrderBookDepthSettings {
+                    visible: false,
+                    ..OrderBookDepthSettings::default()
+                },
+                "reset keeps the legend's visibility"
+            );
+            assert_eq!(draft.levels_per_side.read(cx).value(), "40");
+            assert_eq!(draft.max_width.read(cx).value(), "120");
+            assert_eq!(draft.opacity_percent.read(cx).value(), "50");
+        });
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_order_flow_dialog));
+        assert_eq!(
+            chart_order_flow(&surface, cx).order_book_depth,
+            Some(applied)
         );
     }
 }

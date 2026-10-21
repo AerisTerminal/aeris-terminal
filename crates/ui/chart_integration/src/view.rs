@@ -39,6 +39,7 @@ pub use aeris_charts_engine::{
     ExternalStudyThresholdRegion as ChartStudyThresholdRegion,
 };
 use aeris_charts_render::color::Color;
+pub use aeris_charts_render::color::Color as ChartColor;
 use aeris_charts_render::draw_list::{LineStyle, Prim};
 use aeris_charts_render_gpui::backend::measure_text;
 use aeris_charts_render_gpui::input::{GpuiChartInput, install_text_metrics};
@@ -460,13 +461,14 @@ pub enum FootprintDisplayMode {
 pub struct OrderFlowSettings {
     pub display_mode: FootprintDisplayMode,
     pub show_cumulative_delta: bool,
-    pub cumulative_delta_style: CumulativeDeltaStyle,
+    pub cumulative_delta: CumulativeDeltaSettings,
     pub show_delta_histogram: bool,
+    pub delta_histogram: DeltaHistogramSettings,
     /// Big-trades bubbles over the price series; `None` while the indicator is not added.
     pub big_trades: Option<BigTradesSettings>,
     /// Current-book bars at the price pane's right edge; `None` while the indicator is not
-    /// added, otherwise whether it is shown.
-    pub order_book_depth: Option<bool>,
+    /// added.
+    pub order_book_depth: Option<OrderBookDepthSettings>,
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
@@ -477,13 +479,101 @@ impl Default for OrderFlowSettings {
         Self {
             display_mode: FootprintDisplayMode::BidAsk,
             show_cumulative_delta: false,
-            cumulative_delta_style: CumulativeDeltaStyle::Line,
+            cumulative_delta: CumulativeDeltaSettings::default(),
             show_delta_histogram: false,
+            delta_histogram: DeltaHistogramSettings::default(),
             big_trades: None,
             order_book_depth: None,
             ticks_per_row: 0,
         }
     }
+}
+
+/// Where the cumulative delta starts again from zero.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CumulativeDeltaReset {
+    /// At each trading session open.
+    #[default]
+    Session,
+    /// Never: the delta accumulates across every bar on the chart.
+    Continuous,
+}
+
+/// Durable CVD study settings. A color left at `None` follows the chart default: the series
+/// line color for lines and the chart's up and down colors for candles.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CumulativeDeltaSettings {
+    pub style: CumulativeDeltaStyle,
+    pub reset: CumulativeDeltaReset,
+    pub line_color: Option<ChartColor>,
+    pub up_color: Option<ChartColor>,
+    pub down_color: Option<ChartColor>,
+}
+
+/// Durable delta histogram settings. A color left at `None` follows the order-flow buy (positive)
+/// and sell (negative) colors.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeltaHistogramSettings {
+    pub up_color: Option<ChartColor>,
+    pub down_color: Option<ChartColor>,
+}
+
+/// Durable order-book indicator settings. A color left at `None` follows the chart's up (bid)
+/// and down (ask) colors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderBookDepthSettings {
+    pub visible: bool,
+    pub levels_per_side: u16,
+    /// Length in logical pixels of the largest level's bar; every other bar scales against it.
+    pub max_width: u16,
+    pub opacity_percent: u8,
+    pub show_sizes: bool,
+    pub bid_color: Option<ChartColor>,
+    pub ask_color: Option<ChartColor>,
+}
+
+impl OrderBookDepthSettings {
+    /// Book levels drawn on each side the settings accept.
+    pub const LEVELS_PER_SIDE: std::ops::RangeInclusive<u16> = 1..=200;
+    /// Largest-bar lengths the settings accept, in logical pixels.
+    pub const MAX_WIDTHS: std::ops::RangeInclusive<u16> = 20..=400;
+    /// Bar opacities the settings accept, in percent.
+    pub const OPACITY_PERCENTS: std::ops::RangeInclusive<u8> = 10..=100;
+
+    /// Whether every bounded value is inside its accepted range.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        Self::LEVELS_PER_SIDE.contains(&self.levels_per_side)
+            && Self::MAX_WIDTHS.contains(&self.max_width)
+            && Self::OPACITY_PERCENTS.contains(&self.opacity_percent)
+    }
+}
+
+impl Default for OrderBookDepthSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            levels_per_side: 40,
+            max_width: 120,
+            opacity_percent: 50,
+            show_sizes: true,
+            bid_color: None,
+            ask_color: None,
+        }
+    }
+}
+
+/// The colors order-flow indicators draw where their settings leave a color unset, as
+/// `#RRGGBB` or `#RRGGBBAA` for the color picker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderFlowDefaultColors {
+    pub cumulative_delta_line: String,
+    /// The chart's up color: rising CVD candles and order-book bids.
+    pub bullish: String,
+    /// The chart's down color: falling CVD candles and order-book asks.
+    pub bearish: String,
+    pub delta_positive: String,
+    pub delta_negative: String,
 }
 
 /// Durable big-trades indicator settings. Aeris Charts rebuilds and filters the orders; the
@@ -564,7 +654,7 @@ impl VolumeSettings {
     pub fn effective_up_color(&self) -> String {
         self.up_color
             .clone()
-            .unwrap_or_else(|| css_hex(aeris_charts_engine::DEFAULT_VOLUME_UP_COLOR))
+            .unwrap_or_else(|| chart_color_hex(aeris_charts_engine::DEFAULT_VOLUME_UP_COLOR))
     }
 
     /// The falling-bar column color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
@@ -572,7 +662,7 @@ impl VolumeSettings {
     pub fn effective_down_color(&self) -> String {
         self.down_color
             .clone()
-            .unwrap_or_else(|| css_hex(aeris_charts_engine::DEFAULT_VOLUME_DOWN_COLOR))
+            .unwrap_or_else(|| chart_color_hex(aeris_charts_engine::DEFAULT_VOLUME_DOWN_COLOR))
     }
 
     /// The moving-average line color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
@@ -581,11 +671,13 @@ impl VolumeSettings {
         self.average
             .color
             .clone()
-            .unwrap_or_else(|| css_hex(aeris_charts_engine::DEFAULT_LINE_COLOR))
+            .unwrap_or_else(|| chart_color_hex(aeris_charts_engine::DEFAULT_LINE_COLOR))
     }
 }
 
-fn css_hex(color: Color) -> String {
+/// A chart color as `#RRGGBB`, or `#RRGGBBAA` when it is translucent.
+#[must_use]
+pub fn chart_color_hex(color: Color) -> String {
     if color.a() == u8::MAX {
         format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
     } else {
@@ -607,6 +699,9 @@ pub enum ChartSettingsRequest {
     Study(u64),
     BigTrades,
     Volume,
+    CumulativeDelta,
+    DeltaHistogram,
+    OrderBookDepth,
     /// One drawing, by its Aeris Charts identity.
     Drawing(DrawingId),
 }
@@ -3046,7 +3141,11 @@ fn legend_row_controls(
     if row.settings_available
         && matches!(
             row.item,
-            LegendItem::Study { .. } | LegendItem::BigTrades | LegendItem::Volume
+            LegendItem::Study { .. }
+                | LegendItem::BigTrades
+                | LegendItem::Volume
+                | LegendItem::OrderFlow(_)
+                | LegendItem::OrderBookDepth
         )
     {
         controls = controls.child(
@@ -3138,6 +3237,13 @@ fn legend_control(
                         }
                         LegendItem::BigTrades => Some(ChartSettingsRequest::BigTrades),
                         LegendItem::Volume => Some(ChartSettingsRequest::Volume),
+                        LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta) => {
+                            Some(ChartSettingsRequest::CumulativeDelta)
+                        }
+                        LegendItem::OrderFlow(OrderFlowStudy::Delta) => {
+                            Some(ChartSettingsRequest::DeltaHistogram)
+                        }
+                        LegendItem::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
                         _ => None,
                     };
                     if let Some(request) = request {

@@ -1604,7 +1604,7 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
     let title = snapshot.chart_type.label();
     let appearance = &snapshot.appearance;
     let colors = &snapshot.series_colors;
-    let mut groups = match snapshot.chart_type {
+    let groups = match snapshot.chart_type {
         ChartType::Candles
         | ChartType::HollowCandles
         | ChartType::HollowCandlesBullish
@@ -1620,11 +1620,6 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
         ],
         ChartType::Baseline => vec![baseline_group(ui, title, appearance, colors)],
     };
-    groups.push(order_flow_group(
-        ui,
-        snapshot.order_flow,
-        snapshot.trades_available,
-    ));
     settings_section(groups)
 }
 
@@ -1760,58 +1755,6 @@ fn footprint_group(
         ],
         ui.theme,
     )
-}
-
-/// Order-flow indicators every chart type can show. The tape-derived rows need trade prints;
-/// the order book needs only the resting book.
-fn order_flow_group(
-    ui: SettingsUi<'_>,
-    settings: OrderFlowSettings,
-    trades_available: bool,
-) -> AnyElement {
-    let style = |label, style| {
-        (
-            label,
-            settings.cumulative_delta_style == style,
-            ChartSettingsAction::CumulativeDeltaStyle(style),
-        )
-    };
-    let mut rows = Vec::with_capacity(4);
-    if trades_available {
-        rows.extend([
-            settings_switch_row(
-                ui,
-                "Cumulative delta",
-                None,
-                settings.show_cumulative_delta,
-                ChartSettingsAction::ToggleCumulativeDelta,
-            ),
-            settings_select_row(
-                ui,
-                ChoiceRow::new("cumulative_delta_style", "CVD style")
-                    .enabled(settings.show_cumulative_delta),
-                &[
-                    style("Line", CumulativeDeltaStyle::Line),
-                    style("Candles", CumulativeDeltaStyle::Candles),
-                ],
-            ),
-            settings_switch_row(
-                ui,
-                "Delta histogram",
-                None,
-                settings.show_delta_histogram,
-                ChartSettingsAction::ToggleDeltaHistogram,
-            ),
-        ]);
-    }
-    rows.push(settings_switch_row(
-        ui,
-        "Order book on chart",
-        Some("Resting size at each price on the right edge"),
-        settings.order_book_depth.is_some(),
-        ChartSettingsAction::ToggleOrderBookDepth,
-    ));
-    settings_group("Order flow", rows, ui.theme)
 }
 
 fn bar_group(

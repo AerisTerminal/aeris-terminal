@@ -166,6 +166,9 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         big_trades: None,
         order_book_depth: None,
         cumulative_delta_style: 0,
+        cumulative_delta: None,
+        delta_histogram: None,
+        order_book_depth_options: None,
     };
     let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
     assert!(!restored.show_cumulative_delta);
@@ -194,6 +197,9 @@ fn retired_footprint_trade_bubbles_restore_without_big_trades() {
         big_trades: None,
         order_book_depth: None,
         cumulative_delta_style: 0,
+        cumulative_delta: None,
+        delta_histogram: None,
+        order_book_depth_options: None,
     }
     .encode_to_vec();
     // Tag 4 (varint) enabled the footprint trade bubbles; tag 5 (fixed64) held their threshold.
@@ -292,12 +298,41 @@ fn big_trades_settings_round_trip_and_invalid_state_is_rejected() {
 }
 
 #[test]
-fn order_book_depth_and_cvd_style_round_trip_and_unknown_style_is_rejected() {
-    for order_book_depth in [None, Some(true), Some(false)] {
-        for cumulative_delta_style in [CumulativeDeltaStyle::Line, CumulativeDeltaStyle::Candles] {
+fn order_flow_indicator_settings_round_trip() {
+    let color = ChartColor::from_hex;
+    let books = [
+        None,
+        Some(OrderBookDepthSettings::default()),
+        Some(OrderBookDepthSettings {
+            visible: false,
+            levels_per_side: 200,
+            max_width: 20,
+            opacity_percent: 100,
+            show_sizes: false,
+            bid_color: color("#112233"),
+            ask_color: color("#44556680"),
+        }),
+    ];
+    let cumulative = [
+        CumulativeDeltaSettings::default(),
+        CumulativeDeltaSettings {
+            style: CumulativeDeltaStyle::Candles,
+            reset: CumulativeDeltaReset::Continuous,
+            line_color: color("#ABCDEF"),
+            up_color: color("#00FF0080"),
+            down_color: None,
+        },
+    ];
+    for order_book_depth in books {
+        for cumulative_delta in cumulative {
             let settings = OrderFlowSettings {
                 show_cumulative_delta: true,
-                cumulative_delta_style,
+                cumulative_delta,
+                show_delta_histogram: true,
+                delta_histogram: DeltaHistogramSettings {
+                    up_color: color("#26A69A"),
+                    down_color: None,
+                },
                 order_book_depth,
                 ..OrderFlowSettings::default()
             };
@@ -305,18 +340,118 @@ fn order_book_depth_and_cvd_style_round_trip_and_unknown_style_is_rejected() {
             assert_eq!(restored_order_flow_settings(&persisted), Some(settings));
         }
     }
+}
+
+#[test]
+fn older_order_flow_settings_restore_indicator_defaults() {
     let older = WorkspaceOrderFlowSettingsState {
         study_visibility_revision: 1,
+        order_book_depth: Some(false),
+        cumulative_delta_style: 1,
         ..WorkspaceOrderFlowSettingsState::default()
     };
     let restored = restored_order_flow_settings(&older).expect("older settings restore");
-    assert_eq!(restored.cumulative_delta_style, CumulativeDeltaStyle::Line);
-    assert_eq!(restored.order_book_depth, None);
-    let unknown = WorkspaceOrderFlowSettingsState {
-        cumulative_delta_style: 2,
+    assert_eq!(
+        restored.cumulative_delta,
+        CumulativeDeltaSettings {
+            style: CumulativeDeltaStyle::Candles,
+            ..CumulativeDeltaSettings::default()
+        }
+    );
+    assert_eq!(restored.delta_histogram, DeltaHistogramSettings::default());
+    assert_eq!(
+        restored.order_book_depth,
+        Some(OrderBookDepthSettings {
+            visible: false,
+            ..OrderBookDepthSettings::default()
+        })
+    );
+    let without_book = WorkspaceOrderFlowSettingsState {
+        order_book_depth: None,
         ..older
     };
-    assert_eq!(restored_order_flow_settings(&unknown), None);
+    let restored = restored_order_flow_settings(&without_book).expect("older settings restore");
+    assert_eq!(restored.order_book_depth, None);
+}
+
+#[test]
+fn damaged_order_flow_indicator_settings_are_rejected() {
+    let valid = persisted_order_flow_settings(OrderFlowSettings {
+        order_book_depth: Some(OrderBookDepthSettings::default()),
+        ..OrderFlowSettings::default()
+    });
+    assert!(restored_order_flow_settings(&valid).is_some());
+    let cumulative = valid.cumulative_delta.clone().expect("persisted CVD");
+    let delta = valid.delta_histogram.clone().expect("persisted delta");
+    let book = valid
+        .order_book_depth_options
+        .clone()
+        .expect("persisted book");
+    let damaged_books = [
+        WorkspaceOrderBookDepthState {
+            levels_per_side: 0,
+            ..book.clone()
+        },
+        WorkspaceOrderBookDepthState {
+            levels_per_side: 201,
+            ..book.clone()
+        },
+        WorkspaceOrderBookDepthState {
+            max_width: 19,
+            ..book.clone()
+        },
+        WorkspaceOrderBookDepthState {
+            opacity_percent: 101,
+            ..book.clone()
+        },
+        WorkspaceOrderBookDepthState {
+            opacity_percent: 70_000,
+            ..book.clone()
+        },
+        WorkspaceOrderBookDepthState {
+            bid_color: "not a color".to_string(),
+            ..book
+        },
+    ];
+    let damaged = [
+        WorkspaceOrderFlowSettingsState {
+            cumulative_delta_style: 2,
+            ..valid.clone()
+        },
+        WorkspaceOrderFlowSettingsState {
+            cumulative_delta: Some(WorkspaceCumulativeDeltaState {
+                reset: 2,
+                ..cumulative.clone()
+            }),
+            ..valid.clone()
+        },
+        WorkspaceOrderFlowSettingsState {
+            cumulative_delta: Some(WorkspaceCumulativeDeltaState {
+                line_color: "not a color".to_string(),
+                ..cumulative
+            }),
+            ..valid.clone()
+        },
+        WorkspaceOrderFlowSettingsState {
+            delta_histogram: Some(WorkspaceDeltaHistogramState {
+                down_color: "not a color".to_string(),
+                ..delta
+            }),
+            ..valid.clone()
+        },
+    ]
+    .into_iter()
+    .chain(
+        damaged_books
+            .into_iter()
+            .map(|book| WorkspaceOrderFlowSettingsState {
+                order_book_depth_options: Some(book),
+                ..valid.clone()
+            }),
+    );
+    for state in damaged {
+        assert_eq!(restored_order_flow_settings(&state), None, "{state:?}");
+    }
 }
 
 #[test]
