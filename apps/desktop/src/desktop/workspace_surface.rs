@@ -3682,6 +3682,79 @@ impl WorkspaceSurface {
         }
     }
 
+    fn apply_runtime_series_publication(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        received_unix_nanos: i64,
+        cx: &mut Context<Self>,
+    ) {
+        use aeris_market_runtime::MarketRuntimeEvent;
+        let (generation, provider, update) = match event.value {
+            MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
+                let generation = snapshot.generation.0.get();
+                if !self.chart_pane_controller.accept_publication(generation) {
+                    return;
+                }
+                let provider = snapshot.snapshot.series.provider_id.clone();
+                let replay = engine_market_worker::replay_runtime_snapshot(
+                    &snapshot,
+                    self.product.as_ref(),
+                    received_unix_nanos,
+                )
+                .map(ReplayStreamUpdate::Snapshot);
+                (generation, provider, replay)
+            }
+            MarketRuntimeEvent::SeriesUpdate(tail) => {
+                let generation = tail.generation.0.get();
+                if !self.chart_pane_controller.accept_publication(generation) {
+                    return;
+                }
+                let provider = tail.series.provider_id.clone();
+                let replay =
+                    engine_market_worker::replay_runtime_tail_update(&tail, received_unix_nanos)
+                        .map(ReplayStreamUpdate::Tail);
+                (generation, provider, replay)
+            }
+            _ => {
+                diagnostic!("Aeris pane received an unexpected runtime bar event");
+                return;
+            }
+        };
+        let update = match update {
+            Ok(update) => update,
+            Err(error) => {
+                self.set_chart_state(ChartState::Error, error, cx);
+                return;
+            }
+        };
+        let evidence = match &update {
+            ReplayStreamUpdate::Snapshot(snapshot) => {
+                MarketPublicationGeneration::from_snapshot(snapshot)
+            }
+            ReplayStreamUpdate::Tail(tail) => {
+                let sequence = tail.item().value().source_sequence;
+                MarketPublicationGeneration::from_tail(
+                    tail.publication_generation(),
+                    0,
+                    sequence,
+                    sequence,
+                )
+            }
+            ReplayStreamUpdate::Delta(_) => unreachable!("runtime publishes snapshots or tails"),
+        };
+        let (subscription_id, worker_label) = engine_market_worker::worker_identity(&provider);
+        self.apply_publication(
+            MarketWorkerPublication {
+                update,
+                generation: evidence.with_selection_generation(generation),
+                subscription_id: subscription_id.to_string(),
+                worker_label: worker_label.to_string(),
+                ui_diagnostics: None,
+            },
+            cx,
+        );
+    }
+
     fn reject_incremental_publication(
         &mut self,
         diagnostics: Option<PendingUiDiagnostics>,
@@ -3896,11 +3969,12 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RuntimeSeriesState(event) => {
                 self.apply_runtime_series_state(event, cx);
             }
+            MarketWorkerMessage::RuntimeSeriesPublication {
+                event,
+                received_unix_nanos,
+            } => self.apply_runtime_series_publication(event, received_unix_nanos, cx),
             MarketWorkerMessage::Diagnostics(snapshot) => {
-                #[cfg(feature = "diagnostics")]
-                diagnostic!("desktop market diagnostics: {snapshot:?}");
-                #[cfg(not(feature = "diagnostics"))]
-                drop(snapshot);
+                Self::report_market_diagnostics(&snapshot);
             }
             MarketWorkerMessage::Recovery {
                 generation,
@@ -3990,6 +4064,14 @@ impl WorkspaceSurface {
             MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),
         }
     }
+
+    #[cfg(feature = "diagnostics")]
+    fn report_market_diagnostics(snapshot: &aeris_observability::FeedDiagnosticsSnapshot) {
+        diagnostic!("desktop market diagnostics: {snapshot:?}");
+    }
+
+    #[cfg(not(feature = "diagnostics"))]
+    fn report_market_diagnostics(_: &aeris_observability::FeedDiagnosticsSnapshot) {}
 
     fn apply_selected_instrument(
         &mut self,
@@ -4899,9 +4981,13 @@ impl WorkspaceSurface {
             .market_worker
             .drain_messages_up_to(MARKET_MESSAGES_PER_FRAME);
         let applied = messages.len();
-        let chart_update_received = messages
-            .iter()
-            .any(|message| matches!(message, MarketWorkerMessage::Update(_)));
+        let chart_update_received = messages.iter().any(|message| {
+            matches!(
+                message,
+                MarketWorkerMessage::Update(_)
+                    | MarketWorkerMessage::RuntimeSeriesPublication { .. }
+            )
+        });
         for message in messages {
             self.apply_market_worker_message(message, cx);
         }

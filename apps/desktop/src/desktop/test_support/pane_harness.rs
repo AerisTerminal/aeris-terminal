@@ -1191,6 +1191,186 @@ fn deliver_retired_interval_outcomes(
     }
 }
 
+fn runtime_bar_snapshot_message(
+    product: &InstallProviderInstrument,
+    series: &aeris_market_data::BarSeriesKey,
+    bar: aeris_market_data::MarketBar,
+    envelope: &aeris_market_runtime::fence::Fenced<aeris_market_runtime::fence::ConsumerTag, ()>,
+    generation: u64,
+    publication_generation: u64,
+) -> MarketWorkerMessage {
+    use aeris_market_runtime::{
+        CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
+        MarketProviderGeneration, MarketRuntimeEvent, MarketSeriesSnapshot, fence::Fenced,
+    };
+    use std::num::NonZeroU64;
+
+    MarketWorkerMessage::RuntimeSeriesPublication {
+        event: Fenced {
+            epoch: envelope.epoch,
+            value: MarketRuntimeEvent::SeriesSnapshot(MarketSeriesSnapshot {
+                consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                generation: MarketGenerationId(NonZeroU64::new(generation).expect("selection")),
+                publication_generation,
+                snapshot: Arc::new(CanonicalMarketSeriesSnapshot {
+                    series: series.clone(),
+                    provider_generation: MarketProviderGeneration(
+                        NonZeroU64::new(product.session_generation).expect("provider"),
+                    ),
+                    publication_generation,
+                    price_scale: u8::try_from(product.price_scale).expect("price scale"),
+                    quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+                    forming: false,
+                    bars: Arc::from([bar]),
+                }),
+            }),
+        },
+        received_unix_nanos: 301_000_000_000,
+    }
+}
+
+fn publish_runtime_bar_tail(
+    harness: &mut PaneHarness,
+    cx: &mut VisualTestContext,
+    series: aeris_market_data::BarSeriesKey,
+    bar: aeris_market_data::MarketBar,
+    provider_generation: aeris_market_runtime::MarketProviderGeneration,
+    envelope: &aeris_market_runtime::fence::Fenced<aeris_market_runtime::fence::ConsumerTag, ()>,
+    sequence: u64,
+) {
+    use aeris_market_runtime::{
+        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketSeriesUpdate,
+        SeriesTailOperation, fence::Fenced,
+    };
+    use std::num::NonZeroU64;
+    harness
+        .publications
+        .send(MarketWorkerMessage::RuntimeSeriesPublication {
+            event: Fenced {
+                epoch: envelope.epoch,
+                value: MarketRuntimeEvent::SeriesUpdate(MarketSeriesUpdate {
+                    consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                    generation: MarketGenerationId(NonZeroU64::new(sequence).expect("selection")),
+                    publication_generation: 2,
+                    series,
+                    provider_generation,
+                    forming: true,
+                    operation: SeriesTailOperation::Append,
+                    bar: aeris_market_data::MarketBar {
+                        source_sequence: 2,
+                        exchange_timestamp_seconds: 600,
+                        exchange_timestamp_unix_nanos: 600_000_000_000,
+                        ..bar
+                    },
+                }),
+            },
+            received_unix_nanos: 601_000_000_000,
+        })
+        .expect("tail update");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+        assert!(!pane.chart_pane_controller.chart_needs_replacement());
+    });
+}
+
+#[gpui::test]
+fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut TestAppContext) {
+    use aeris_market_data::MarketBar;
+    use aeris_market_runtime::{
+        MarketProviderGeneration,
+        fence::{ConsumerTag, EpochSequence, Fenced},
+    };
+    use std::num::NonZeroU64;
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let series = engine_market_worker::series_key(&product, ChartInterval::Minute5)
+        .expect("replacement series");
+    let bar = MarketBar {
+        source_sequence: 1,
+        exchange_timestamp_seconds: 300,
+        exchange_timestamp_unix_nanos: 300_000_000_000,
+        open: 100,
+        high: 110,
+        low: 90,
+        close: 105,
+        volume: 7,
+    };
+    let provider_generation =
+        MarketProviderGeneration(NonZeroU64::new(product.session_generation).expect("provider"));
+    let mut epochs = EpochSequence::<ConsumerTag>::default();
+    let epoch = epochs.next();
+    let envelope = Fenced { epoch, value: () };
+    let snapshot = |generation, publication_generation| {
+        runtime_bar_snapshot_message(
+            &product,
+            &series,
+            bar,
+            &envelope,
+            generation,
+            publication_generation,
+        )
+    };
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    harness
+        .publications
+        .send(snapshot(sequence, 1))
+        .expect("early snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.interval, ChartInterval::Minute1);
+        assert!(!pane.chart_pane_controller.chart_needs_replacement());
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .expect("commit");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert!(pane.chart_pane_controller.chart_needs_replacement());
+    });
+    harness
+        .publications
+        .send(snapshot(1, 99))
+        .expect("retired higher revision");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert!(pane.chart_pane_controller.chart_needs_replacement());
+    });
+    harness
+        .publications
+        .send(snapshot(sequence, 1))
+        .expect("covering snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert!(!pane.chart_pane_controller.chart_needs_replacement());
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+    });
+    publish_runtime_bar_tail(
+        &mut harness,
+        cx,
+        series,
+        bar,
+        provider_generation,
+        &envelope,
+        sequence,
+    );
+}
+
 #[gpui::test]
 fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     cx: &mut TestAppContext,

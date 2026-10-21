@@ -483,8 +483,54 @@ fn apply_received_event(
         )?;
         return Ok(false);
     }
+    if is_bar_publication(&event) {
+        deliver_runtime_series_publication(
+            endpoint,
+            aeris_market_runtime::MarketConsumerEvent {
+                epoch: consumer_epoch,
+                value: event,
+            },
+            clock.wall_unix_nanos(),
+        )?;
+        return Ok(false);
+    }
     forward_runtime_publication(event, endpoint, &record.product, generation, clock);
     Ok(false)
+}
+
+fn is_bar_publication(event: &MarketRuntimeEvent) -> bool {
+    matches!(
+        event,
+        MarketRuntimeEvent::SeriesSnapshot(_) | MarketRuntimeEvent::SeriesUpdate(_)
+    )
+}
+
+pub(super) fn deliver_runtime_series_publication(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+    received_unix_nanos: i64,
+) -> Result<(), String> {
+    let (consumer_id, generation) = match &event.value {
+        MarketRuntimeEvent::SeriesSnapshot(snapshot) => (snapshot.consumer_id, snapshot.generation),
+        MarketRuntimeEvent::SeriesUpdate(update) => (update.consumer_id, update.generation),
+        _ => return Err("unexpected runtime bar event".into()),
+    };
+    if consumer_id.0.get() != endpoint.consumer_id {
+        return Err("engine realtime bar consumer mismatched".into());
+    }
+    if generation.0.get() < endpoint.active_generation {
+        return Ok(());
+    }
+    if generation.0.get() > endpoint.active_generation {
+        return Err("engine realtime bar generation advanced unexpectedly".into());
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeSeriesPublication {
+            event,
+            received_unix_nanos,
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn forward_runtime_publication(

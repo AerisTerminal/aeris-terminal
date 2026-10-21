@@ -1589,6 +1589,15 @@ Status: pending
     VAL-DSK-021/022 remain unclaimed. The naming-check test fixture reader
     normalizes Windows CRLF for its LF-only source-literal assertions; this
     repaired two baseline test failures after the concurrent UI commits.
+  - Part 5c: runtime bar snapshots and tail updates now keep their coordinator
+    consumer envelope and emission order in the bounded pane queue. The GPUI
+    pane rejects pending/retired selections before converting canonical bars
+    into replay presentation; the bridge rejects wrong consumers and future
+    generations. A bridge regression checks fenced snapshot/tail FIFO and
+    retired rejection; a GPUI regression checks early, retired and covering
+    snapshots plus the accepted tail. Fixture `Update`, the older worker
+    conversion tests, synthetic `SeriesState`, `ChartState` and the other
+    routes remain until Parts 5d-8; VAL-DSK-021/022 remain open.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2003,6 +2012,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 UI fix(desktop): no stabilization item. Pinned Aeris Charts to 9f819dcb (depth profile ticks merge into rows at least one label tall at any zoom). A restored chart that opened the order book before its saved instrument resolved now keeps that intent and applies the depth stream once the selection is adopted, so the chart book receives full depth instead of staying on the top of book. A regression covers depth opened during restored-selection resolution. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-21 UI feat(desktop): no stabilization item. Pinned Aeris Charts to 7dbd7ad9 (CVD reset and colors, delta colors, in-place depth profile options). CVD, Delta and Order Book on chart each open their own settings window from the legend gear (CVD style, reset and colors; delta colors; order-book levels, width, opacity, sizes and colors); the chart Settings menu no longer carries those controls. The options persist with the pane in new optional workspace fields, and older workspaces restore the defaults. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-21 M6.6 Part 5b refactor(desktop): runtime series readiness retains the fenced coordinator envelope through the bounded pane queue and projects at the GPUI consumer after the exact selection/lifecycle fence. The GPUI regression exercises early, retired and current readiness. Bars, synthetic failures and remaining routes still use the old message shape; M6.6 and VAL-DSK-021/022 remain open.
+- 2026-10-21 M6.6 Part 5c refactor(desktop): runtime snapshots/tail updates retain the fenced coordinator event through the bounded pane queue; GPUI projects canonical bars after exact selection acceptance. Bridge and pane regressions cover FIFO, pending/retired rejection, covering snapshot and tail. Legacy fixture/worker conversions, ChartState and other routes still require Parts 5d-8; M6.6 remains unchecked.
 
 ## 7. Known gaps / deferred
 

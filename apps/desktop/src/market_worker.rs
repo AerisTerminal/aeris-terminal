@@ -298,6 +298,11 @@ pub enum MarketWorkerMessage {
     /// The coordinator's consumer-lifetime envelope is retained until the
     /// pane projects readiness under its exact selection generation.
     RuntimeSeriesState(aeris_market_runtime::MarketConsumerEvent),
+    /// Coordinator-fenced bars; the pane converts them only after selection acceptance.
+    RuntimeSeriesPublication {
+        event: aeris_market_runtime::MarketConsumerEvent,
+        received_unix_nanos: i64,
+    },
     StudyOutput(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),

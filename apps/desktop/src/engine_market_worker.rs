@@ -806,7 +806,7 @@ struct PushedEventContext<'a> {
     received_unix_nanos: i64,
 }
 
-fn worker_identity(provider: &str) -> (&'static str, &'static str) {
+pub(crate) fn worker_identity(provider: &str) -> (&'static str, &'static str) {
     if provider == "hyperliquid" {
         (HYPERLIQUID_SUBSCRIPTION_ID, HYPERLIQUID_WORKER_LABEL)
     } else {
@@ -818,7 +818,7 @@ fn worker_identity(provider: &str) -> (&'static str, &'static str) {
 mod replay_conversion;
 #[cfg(test)]
 use replay_conversion::{replay_bar_definition, snapshot_instrument};
-use replay_conversion::{replay_runtime_snapshot, replay_runtime_tail_update};
+pub(crate) use replay_conversion::{replay_runtime_snapshot, replay_runtime_tail_update};
 pub(crate) use replay_conversion::{runtime_order_book_frame, series_key};
 
 fn default_product(product_id: &str) -> InstallProviderInstrument {
@@ -1064,6 +1064,81 @@ mod tests {
             operation,
             bar,
         }
+    }
+
+    #[test]
+    fn runtime_bar_bridge_keeps_coordinator_envelopes_and_rejects_retired_selection() {
+        use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
+        let product = default_hyperliquid_product();
+        let (mut pane, record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
+        let series = series_key(&product, ChartInterval::Minute1).expect("series");
+        let bar = MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        };
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let epoch = epochs.next();
+        let snapshot = |generation| Fenced {
+            epoch,
+            value: MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
+                41,
+                generation,
+                series.clone(),
+                product.session_generation,
+                product.price_scale,
+                product.quantity_scale,
+                vec![bar],
+                1,
+                false,
+            )),
+        };
+        runtime::deliver_runtime_series_publication(&record.endpoint, snapshot(2), 10)
+            .expect("retired snapshot is ignored");
+        runtime::deliver_runtime_series_publication(&record.endpoint, snapshot(3), 11)
+            .expect("current snapshot is queued");
+        let tail = Fenced {
+            epoch,
+            value: MarketRuntimeEvent::SeriesUpdate(runtime_update(
+                41,
+                3,
+                series,
+                product.session_generation,
+                bar,
+                true,
+                2,
+                SeriesTailOperation::Append,
+            )),
+        };
+        runtime::deliver_runtime_series_publication(&record.endpoint, tail, 12)
+            .expect("current tail is queued after snapshot");
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event: Fenced {
+                        epoch: snapshot_epoch,
+                        value: MarketRuntimeEvent::SeriesSnapshot(_),
+                    },
+                    received_unix_nanos: 11,
+                },
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event: Fenced {
+                        epoch: tail_epoch,
+                        value: MarketRuntimeEvent::SeriesUpdate(_),
+                    },
+                    received_unix_nanos: 12,
+                },
+            ] if *snapshot_epoch == epoch && *tail_epoch == epoch
+        ));
     }
 
     #[test]
