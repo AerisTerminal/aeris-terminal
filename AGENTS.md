@@ -430,7 +430,8 @@ maintainer's machine. Twenty is the source of truth for outreach status, not thi
   the CRM yet.
 - Supported in Aeris is only for connections that are approved and working (Rithmic). A firm that
   has closed gets `outreachStatus` out of business and `fit` not a fit, with the closure date and
-  source in `fitReason`. Saved Opportunity views split the list into Supported
+  source in `fitReason`. A firm we dropped ourselves gets `outreachStatus` rejected by us,
+  `aerisRole` not a target, `fit` not a fit, the decision date in `fitReason` and no `nextAction`. Saved Opportunity views split the list into Supported
   in Aeris, Active pipeline, Later (needs new work) and Dead ends; keep a deal's role and fit accurate
   so it lands in the right view.
 - Tradovate/NinjaTrader-only firms are not out of reach: Tradovate gives no API access for prop or
