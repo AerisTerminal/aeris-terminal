@@ -55,6 +55,49 @@ impl Render for PaneWindow {
 }
 
 impl PaneHarness {
+    fn fixture_snapshot(
+        &mut self,
+        product: &InstallProviderInstrument,
+        interval: ChartInterval,
+        generation: u64,
+        bar_count: usize,
+    ) -> MarketWorkerMessage {
+        let series = engine_market_worker::series_key(product, interval).expect("fixture series");
+        let route = FixtureSeries {
+            series,
+            provider_generation: product.session_generation,
+            price_scale: u8::try_from(product.price_scale).expect("price scale"),
+            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+        };
+        let event = self
+            .market
+            .publish_runtime_snapshot(bar_count, &route, generation, &self.market_events)
+            .expect("canonical fixture snapshot");
+        MarketWorkerMessage::RuntimeSeriesPublication {
+            event,
+            received_unix_nanos: 301_000_000_000,
+        }
+    }
+
+    fn fixture_readiness(
+        &self,
+        generation: u64,
+        state: aeris_contracts::SeriesLoadState,
+        detail: &str,
+    ) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeSeriesStatus(
+            self.market_events.readiness(generation, state, detail),
+        )
+    }
+
+    fn fixture_recovering(&self, generation: u64, detail: &str) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeSeriesStatus(self.market_events.demand_error(
+            generation,
+            aeris_market_runtime::MarketDemandErrorScope::Series,
+            detail,
+        ))
+    }
+
     fn open(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
         Self::open_with_restore(WorkspaceSurfaceRestore::default(), cx)
     }
@@ -184,23 +227,9 @@ impl PaneHarness {
 
     fn publish_snapshot(&mut self, bar_count: usize, cx: &mut VisualTestContext) {
         let product = cx.read(|cx| self.pane.read(cx).product.clone().expect("product"));
-        let series = engine_market_worker::series_key(&product, ChartInterval::Minute1)
-            .expect("fixture series");
-        let route = FixtureSeries {
-            series,
-            provider_generation: product.session_generation,
-            price_scale: u8::try_from(product.price_scale).expect("price scale"),
-            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
-        };
-        let snapshot = self
-            .market
-            .publish_runtime_snapshot(bar_count, &route, 1, &self.market_events)
-            .expect("canonical fixture snapshot");
+        let snapshot = self.fixture_snapshot(&product, ChartInterval::Minute1, 1, bar_count);
         self.publications
-            .send(MarketWorkerMessage::RuntimeSeriesPublication {
-                event: snapshot,
-                received_unix_nanos: 301_000_000_000,
-            })
+            .send(snapshot)
             .expect("bounded fixture mailbox accepts publication");
         self.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -636,11 +665,7 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
     harness.publish_snapshot(12, cx);
     harness
         .publications
-        .send(MarketWorkerMessage::SeriesState {
-            generation: 1,
-            state: ChartState::Stale,
-            message: "fixture stream invalid".into(),
-        })
+        .send(harness.fixture_recovering(1, "fixture stream invalid"))
         .expect("stream invalidation");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -730,11 +755,11 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
     let state_before_retired_failure = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(MarketWorkerMessage::SeriesState {
-            generation: 1,
-            state: ChartState::Error,
-            message: "retired provider failure".into(),
-        })
+        .send(harness.fixture_readiness(
+            1,
+            aeris_contracts::SeriesLoadState::Failed,
+            "retired provider failure",
+        ))
         .expect("retired failure enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -743,11 +768,11 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
     });
     harness
         .publications
-        .send(MarketWorkerMessage::SeriesState {
-            generation: sequence,
-            state: ChartState::Error,
-            message: "private provider failure".into(),
-        })
+        .send(harness.fixture_readiness(
+            sequence,
+            aeris_contracts::SeriesLoadState::Failed,
+            "private provider failure",
+        ))
         .expect("failure enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -808,11 +833,11 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
         });
         harness
             .publications
-            .send(MarketWorkerMessage::SeriesState {
-                generation: sequence,
-                state: ChartState::Error,
-                message: "private provider failure".into(),
-            })
+            .send(harness.fixture_readiness(
+                sequence,
+                aeris_contracts::SeriesLoadState::Failed,
+                "private provider failure",
+            ))
             .expect("failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -913,19 +938,13 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
             _ => None,
         })
         .expect("selection");
-    let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
-    let publication = |selection_generation| MarketWorkerPublication {
-        update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
-        generation: snapshot
-            .generation
-            .with_selection_generation(selection_generation),
-        subscription_id: snapshot.subscription_id.clone(),
-        worker_label: snapshot.worker_label.clone(),
-        ui_diagnostics: None,
-    };
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let early = harness.fixture_snapshot(&product, ChartInterval::Minute5, sequence, 13);
+    let retired = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 13);
+    let current = harness.fixture_snapshot(&product, ChartInterval::Minute5, sequence, 13);
     harness
         .publications
-        .send(MarketWorkerMessage::Update(publication(sequence)))
+        .send(early)
         .expect("early replacement snapshot");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -938,7 +957,7 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
         .expect("marker");
     harness
         .publications
-        .send(MarketWorkerMessage::Update(publication(1)))
+        .send(retired)
         .expect("retired snapshot");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 2);
@@ -951,25 +970,42 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     });
     harness
         .publications
-        .send(MarketWorkerMessage::Update(publication(sequence)))
+        .send(current)
         .expect("replacement snapshot");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_ne!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
     });
     let current_label = cx.read(|cx| harness.pane.read(cx).replay_label.clone());
-    let previous_sequence = snapshot.snapshot.sequence_range().1;
-    let stale_delta = harness
-        .market
-        .publish_delta(previous_sequence)
-        .expect("fixture delta")
-        .expect("next fixture bar");
+    let stale_delta = harness.market_events.update(
+        &FixtureSeries {
+            series: engine_market_worker::series_key(&product, ChartInterval::Minute1)
+                .expect("retired series"),
+            provider_generation: product.session_generation,
+            price_scale: u8::try_from(product.price_scale).expect("price scale"),
+            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+        },
+        1,
+        100,
+        aeris_market_runtime::SeriesTailOperation::Append,
+        aeris_market_data::MarketBar {
+            source_sequence: 14,
+            exchange_timestamp_seconds: 840,
+            exchange_timestamp_unix_nanos: 840_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        },
+        true,
+    );
     harness
         .publications
-        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-            generation: stale_delta.generation.with_selection_generation(1),
-            ..stale_delta
-        }))
+        .send(MarketWorkerMessage::RuntimeSeriesPublication {
+            event: stale_delta,
+            received_unix_nanos: 841_000_000_000,
+        })
         .expect("retired update");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1002,21 +1038,30 @@ fn check_snapshot_switch_order(order: [u8; 3], cx: &mut TestAppContext) {
             _ => None,
         })
         .expect("interval selection");
-    let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let events = FixtureMarketEvents::default();
     let mut committed = false;
     let mut replacement_installed = false;
     for event in order {
         let message = match event {
             0 => MarketWorkerMessage::EngineSelectionCommitted { sequence },
-            1 | 2 => MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
-                generation: snapshot
-                    .generation
-                    .with_selection_generation(if event == 1 { 1 } else { sequence }),
-                subscription_id: snapshot.subscription_id.clone(),
-                worker_label: snapshot.worker_label.clone(),
-                ui_diagnostics: None,
-            }),
+            1 | 2 => {
+                let interval = if event == 1 {
+                    ChartInterval::Minute1
+                } else {
+                    ChartInterval::Minute5
+                };
+                let series =
+                    engine_market_worker::series_key(&product, interval).expect("fixture series");
+                runtime_bar_snapshot_message(
+                    &product,
+                    &series,
+                    fixture_bar(),
+                    &events,
+                    if event == 1 { 1 } else { sequence },
+                    14,
+                )
+            }
             _ => panic!("unknown switch event"),
         };
         harness.publications.send(message).expect("fixture message");
@@ -1133,15 +1178,16 @@ fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppCo
         });
     }
 
-    let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let events = FixtureMarketEvents::default();
     let publication = |generation| {
-        MarketWorkerMessage::Update(MarketWorkerPublication {
-            update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
-            generation: snapshot.generation.with_selection_generation(generation),
-            subscription_id: snapshot.subscription_id.clone(),
-            worker_label: snapshot.worker_label.clone(),
-            ui_diagnostics: None,
-        })
+        let interval = if generation == *sequences.last().expect("final request") {
+            ChartInterval::Day3
+        } else {
+            ChartInterval::Hour4
+        };
+        let series = engine_market_worker::series_key(&product, interval).expect("fixture series");
+        runtime_bar_snapshot_message(&product, &series, fixture_bar(), &events, generation, 14)
     };
     let final_generation = *sequences.last().expect("final request");
     deliver_retired_interval_outcomes(&mut harness, cx, &sequences, publication);
@@ -1198,6 +1244,19 @@ fn deliver_retired_interval_outcomes(
                 Some(final_generation)
             );
         });
+    }
+}
+
+fn fixture_bar() -> aeris_market_data::MarketBar {
+    aeris_market_data::MarketBar {
+        source_sequence: 1,
+        exchange_timestamp_seconds: 300,
+        exchange_timestamp_unix_nanos: 300_000_000_000,
+        open: 100,
+        high: 110,
+        low: 90,
+        close: 105,
+        volume: 7,
     }
 }
 
@@ -1541,15 +1600,13 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
             _ => None,
         })
         .expect("selection");
-    let state = |generation, chart_state| MarketWorkerMessage::SeriesState {
-        generation,
-        state: chart_state,
-        message: "fixture series state".into(),
+    let state = |generation, load_state| {
+        harness.fixture_readiness(generation, load_state, "fixture series state")
     };
     let pending_state = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(state(sequence, ChartState::Ready))
+        .send(state(sequence, aeris_contracts::SeriesLoadState::Live))
         .expect("early state");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1566,7 +1623,7 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     let committed_state = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(state(1, ChartState::Error))
+        .send(state(1, aeris_contracts::SeriesLoadState::Failed))
         .expect("retired state");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1574,7 +1631,7 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(state(sequence, ChartState::Recovering))
+        .send(harness.fixture_recovering(sequence, "fixture series recovering"))
         .expect("current state");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1588,11 +1645,7 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
     harness.publish_snapshot(12, cx);
     harness
         .publications
-        .send(MarketWorkerMessage::SeriesState {
-            generation: 1,
-            state: ChartState::Stale,
-            message: "fixture stream invalid".into(),
-        })
+        .send(harness.fixture_recovering(1, "fixture stream invalid"))
         .expect("stream invalidation");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1671,11 +1724,11 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
         .expect("selection");
     harness
         .publications
-        .send(MarketWorkerMessage::SeriesState {
-            generation: 1,
-            state: ChartState::Error,
-            message: "retired private series failure".into(),
-        })
+        .send(harness.fixture_readiness(
+            1,
+            aeris_contracts::SeriesLoadState::Failed,
+            "retired private series failure",
+        ))
         .expect("old series error");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1685,14 +1738,13 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
         );
         assert_eq!(pane.chart_state, ChartState::Loading);
     });
-    for state in [ChartState::Ready, ChartState::AwaitingData] {
+    for state in [
+        aeris_contracts::SeriesLoadState::Live,
+        aeris_contracts::SeriesLoadState::Empty,
+    ] {
         harness
             .publications
-            .send(MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state,
-                message: "retired series settled".into(),
-            })
+            .send(harness.fixture_readiness(1, state, "retired series settled"))
             .expect("old series lifecycle");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1756,11 +1808,11 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
     });
     harness
         .publications
-        .send(MarketWorkerMessage::SeriesState {
-            generation: 1,
-            state: ChartState::Error,
-            message: "retired private error".into(),
-        })
+        .send(harness.fixture_readiness(
+            1,
+            aeris_contracts::SeriesLoadState::Failed,
+            "retired private error",
+        ))
         .expect("old series error");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1915,7 +1967,9 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
             .clone()
             .expect("original instrument")
     });
-    replacement.instrument_id = "different-instrument".into();
+    replacement.instrument_id = "hyperliquid:perp:ETH".into();
+    replacement.provider_symbol = "ETH".into();
+    replacement.display_symbol = "ETH-USDC".into();
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_installed_instrument(&replacement, cx));
     });
@@ -1938,22 +1992,12 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
         assert!(pane.showing_superseded_series());
     });
 
-    let snapshot = harness
-        .market
-        .publish_snapshot(13)
-        .expect("replacement bars");
-    let covering = MarketWorkerMessage::Update(MarketWorkerPublication {
-        update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
-        generation: snapshot.generation.with_selection_generation(sequence),
-        subscription_id: snapshot.subscription_id,
-        worker_label: snapshot.worker_label,
-        ui_diagnostics: None,
-    });
-    let ready = MarketWorkerMessage::SeriesState {
-        generation: sequence,
-        state: ChartState::Ready,
-        message: "replacement series ready".into(),
-    };
+    let covering = harness.fixture_snapshot(&replacement, ChartInterval::Minute1, sequence, 13);
+    let ready = harness.fixture_readiness(
+        sequence,
+        aeris_contracts::SeriesLoadState::Live,
+        "replacement series ready",
+    );
     let events = if snapshot_first {
         [covering, ready]
     } else {
@@ -2016,7 +2060,9 @@ fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestA
             .clone()
             .expect("original instrument")
     });
-    replacement.instrument_id = "different-instrument".into();
+    replacement.instrument_id = "hyperliquid:perp:ETH".into();
+    replacement.provider_symbol = "ETH".into();
+    replacement.display_symbol = "ETH-USDC".into();
     let appearance = harness.pane.update(cx, |pane, cx| {
         pane.set_chart_type(ChartType::HollowCandles, cx);
         let chart = pane.chart.as_ref().expect("original chart").clone();
@@ -2047,16 +2093,10 @@ fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestA
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
     });
-    let snapshot = harness.market.publish_snapshot(13).expect("new bars");
+    let snapshot = harness.fixture_snapshot(&replacement, ChartInterval::Minute1, sequence, 13);
     harness
         .publications
-        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-            update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
-            generation: snapshot.generation.with_selection_generation(sequence),
-            subscription_id: snapshot.subscription_id,
-            worker_label: snapshot.worker_label,
-            ui_diagnostics: None,
-        }))
+        .send(snapshot)
         .expect("covering snapshot");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3395,11 +3435,11 @@ fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state: ChartState::Error,
-                message: "private-credential-sentinel".into(),
-            })
+            .send(harness.fixture_readiness(
+                1,
+                aeris_contracts::SeriesLoadState::Failed,
+                "private-credential-sentinel",
+            ))
             .expect("bounded fixture mailbox accepts failure");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);

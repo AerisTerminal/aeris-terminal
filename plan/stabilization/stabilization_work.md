@@ -1619,6 +1619,30 @@ Status: pending
     pane_harness_runtime_demand_error_projects_only_current_series.
     The remaining pane, mailbox and diagnostic fixtures are Parts 5d2a2-4;
     the old production route is removed only in 5d2b. M6.6 stays unchecked.
+  - Part 5d2a2: migrated the remaining pane fixture's old bar `Update` and
+    synthetic `SeriesState` messages to canonical coordinator-fenced runtime
+    snapshots, tails, readiness, failures and demand errors. Migrated tests:
+    pane_harness_retired_recovery_cannot_fail_the_replacement_chart,
+    pane_harness_failed_committed_interval_restores_previous_chart_with_one_notice,
+    pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicates_notice,
+    pane_harness_bar_publications_reject_retired_selection,
+    pane_harness_snapshot_order_commit_old_new,
+    pane_harness_snapshot_order_commit_new_old,
+    pane_harness_snapshot_order_old_commit_new,
+    pane_harness_snapshot_order_old_new_commit,
+    pane_harness_snapshot_order_new_commit_old,
+    pane_harness_snapshot_order_new_old_commit,
+    pane_harness_rapid_interval_storm_keeps_final_day3_binding,
+    pane_harness_series_state_rejects_early_and_retired_selection,
+    pane_harness_old_recovery_failure_during_pending_switch_keeps_request,
+    pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection,
+    pane_harness_catalog_request_fences_old_series_before_catalog_reply,
+    pane_harness_instrument_cover_waits_for_snapshot_after_ready,
+    pane_harness_instrument_cover_waits_for_ready_after_snapshot,
+    pane_harness_symbol_switch_retains_style_colors_and_scale_mode and
+    pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears.
+    The direct chart-reinstall setter fixture is unchanged; mailbox and
+    diagnostic migrations remain Parts 5d2a3-4, before production deletion.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2036,6 +2060,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 5c refactor(desktop): runtime snapshots/tail updates retain the fenced coordinator event through the bounded pane queue; GPUI projects canonical bars after exact selection acceptance. Bridge and pane regressions cover FIFO, pending/retired rejection, covering snapshot and tail. Legacy fixture/worker conversions, ChartState and other routes still require Parts 5d-8; M6.6 remains unchecked.
 - 2026-10-21 M6.6 Part 5d1 refactor(desktop): coordinator-fenced series failures and demand errors reach the GPUI pane unchanged; the pane rejects pending/retired lifecycle generations, distinguishes older-history diagnostics and retryable recovery, and retains failed-replacement restoration. Focused bridge and GPUI regressions pass. Part 5d2 must remove synthetic worker readiness and old bar conversions, then ChartState; M6.6 stays unchecked.
 - 2026-10-21 M6.6 Part 5d2a1 test(desktop): shared fixture coordinator-event builder and canonical disconnected snapshot migrate the pane's initial snapshot/readiness and the existing fenced examples. The pane's displayed worker identity now matches production's runtime projection; the fixture's disconnected label remains asserted at the source. Remaining 5d2a2-4 fixtures and 5d2b production deletion are outstanding.
+- 2026-10-21 M6.6 Part 5d2a2 test(desktop): pane switch permutations, retired/early bar and status fences, replacement cover, recovery, presentation and redacted failure cases use canonical fenced coordinator events through the production GPUI projection; direct setter-reinstall fixture remains deliberate. M6.6 stays unchecked pending mailbox/diagnostic migration, old-route deletion and later parts.
 
 ## 7. Known gaps / deferred
 
