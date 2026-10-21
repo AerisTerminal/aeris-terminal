@@ -147,10 +147,9 @@ use aeris_design_system::{
 };
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
-    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure,
-    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
-    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
-    UiDiagnosticsFeedback,
+    MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
+    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
 use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
 use aeris_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
@@ -183,6 +182,7 @@ use chart_context_menus::{
     clamp_chart_capture_flyout_origin, clamp_chart_context_menu_origin,
     clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
 };
+use chart_pane_controller::ChartState;
 use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
     chrome_overlay_layer, chrome_typeahead_blocked, chrome_typeahead_char,

@@ -1711,6 +1711,11 @@ Status: pending
     The book/tape/study cases remain on their current route for Part 6.
     Part 5d2c still moves ChartState to pane presentation; M6.6 and
     VAL-DSK-021/022 remain open.
+  - Part 5d2c: moved the chart's loading, readiness, connection and recovery
+    presentation state out of the market-worker mailbox declaration and into
+    `ChartPaneController`. The pane keeps the same selection-fenced projection
+    and its labels and readiness-only transition gate have direct controller
+    coverage. M6.6 and VAL-DSK-021/022 remain open for Parts 6-8.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2132,6 +2137,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 5d2a3 fix(desktop): mailbox order, frame-budget, explicit overflow, foreground/background and wake tests now exercise canonical fenced bars and readiness. Fixed the discovered mailbox classification gap so fenced bars share the market-publication capacity and suppression policy. Diagnostic fixtures and the production legacy-route deletion remain; M6.6 stays unchecked.
 - 2026-10-21 M6.6 Part 5d2a4 test(desktop): the diagnostic 10,000-event burst and bounded endurance fixture now send and inspect canonical fenced coordinator snapshots while retaining their generation continuity, high-water, memory and checkpoint assertions. Part 5d2a is complete; production legacy deletion is next.
 - 2026-10-21 M6.6 Part 5d2b refactor(desktop): removed superseded production bar and readiness conversion and its message consumers in one change; market-summary bars use the fenced coordinator event, local endpoint failures have their own generation-stamped message, and engine characterization runs against the fenced path. Recovery request fencing and replay converters remain. M6.6 stays unchecked pending ChartState relocation and Parts 6-8.
+- 2026-10-21 M6.6 Part 5d2c refactor(desktop): ChartState and its labels/readiness gate now belong to ChartPaneController, not the market-worker mailbox; the existing pane projection and its exact selection fence stay intact. M6.6 remains unchecked pending Parts 6-8 and VAL-DSK-021/022.
 
 ## 7. Known gaps / deferred
 

@@ -2,6 +2,38 @@
 
 use super::{ChartInterval, InstallProviderInstrument};
 
+/// The pane's presentation state, projected only after its selection fence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChartState {
+    Loading,
+    Ready,
+    Stale,
+    Recovering,
+    /// The provider answered the demand with no market history; the live
+    /// subscription stays up and nothing is wrong or retrying.
+    AwaitingData,
+    Error,
+}
+
+impl ChartState {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "Loading chart",
+            Self::Ready => "Chart ready",
+            Self::Stale => "Chart stale",
+            Self::Recovering => "Reconnecting chart",
+            Self::AwaitingData => "Waiting for market data",
+            Self::Error => "Chart unavailable",
+        }
+    }
+
+    /// States that only an engine readiness report may leave; a bar
+    /// publication alone does not make the chart current.
+    pub(super) const fn awaits_engine_readiness(self) -> bool {
+        matches!(self, Self::Loading | Self::AwaitingData)
+    }
+}
+
 /// The requested target belongs to the same exact selection as its outcome.
 pub(super) struct PendingChartTarget {
     pub(super) interval: ChartInterval,
@@ -153,6 +185,26 @@ impl ChartPaneController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_states_have_explicit_user_facing_labels_and_readiness_gate() {
+        assert_eq!(ChartState::Loading.label(), "Loading chart");
+        assert_eq!(ChartState::Ready.label(), "Chart ready");
+        assert_eq!(ChartState::Stale.label(), "Chart stale");
+        assert_eq!(ChartState::Recovering.label(), "Reconnecting chart");
+        assert_eq!(ChartState::AwaitingData.label(), "Waiting for market data");
+        assert_eq!(ChartState::Error.label(), "Chart unavailable");
+        assert!(ChartState::Loading.awaits_engine_readiness());
+        assert!(ChartState::AwaitingData.awaits_engine_readiness());
+        for state in [
+            ChartState::Ready,
+            ChartState::Stale,
+            ChartState::Recovering,
+            ChartState::Error,
+        ] {
+            assert!(!state.awaits_engine_readiness());
+        }
+    }
 
     #[test]
     fn initial_descriptor_is_consumed_once_even_for_the_same_generation() {
