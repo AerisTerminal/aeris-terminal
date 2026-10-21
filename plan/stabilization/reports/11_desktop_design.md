@@ -484,7 +484,7 @@ errors. Add `[lints.clippy] let_underscore_must_use = "deny"` (and `let_undersco
 | `replay_conversion.rs:209-344` id parsing and `validate_product_identity` literals | deleted; runtime descriptors |
 | `engine_market_worker.rs:696,714,733` provider branches (`worker_identity`) | descriptor capabilities |
 | `default_rithmic_contract_index` ("MNQ"), `DEFAULT_RITHMIC_LISTING_QUERY`, `default_product` | `DefaultInstrument` in M2; the catalog's default-contract policy |
-| Per-provider connect actions (`ConnectRithmic` and the removed brokers' actions), `HostedBroker` | `ConnectProvider(ProviderId)`; behavior from `ProviderDescriptor.connect` (`HostedBrokerOAuth`, `VaultCredentials { form }`, `Public`) |
+| Per-provider connect actions (`ConnectRithmic`) | `ConnectProvider(ProviderId)`; behavior from `ProviderDescriptor.connect` (`VaultCredentials { form }`, `Public`) |
 | `components/rithmic_login.rs` | `components/provider_login.rs`: a form rendered from the descriptor's login schema; it still writes only to the native vault |
 | `rithmic_shell.rs` / `RithmicSymbolBrowser`, `FeedIdentity "rithmic"` | `provider_symbol_browser.rs` driven by the descriptor's symbol-browser capability |
 | Provider-named close-request text in `trading.rs` flatten feedback | text built from `ProviderDescriptor::display_name` |
@@ -651,8 +651,7 @@ commit and waits only on M1. D9b can land as soon as T4 lands.
 9. Account isolation as a module rather than a cargo feature (1.6): chosen because refresh quiesce is live in
    production. If the maintainer prefers a feature flag, the live quiesce path must first move out of `account/`.
 10. Provider login as a descriptor-driven form (D7c) touches the vault boundary. It needs a manual check with real
-    Rithmic credentials through the native vault, which only the maintainer can do; hosted-broker OAuth stays
-    unverifiable until the AWS broker exists.
+    Rithmic credentials through the native vault, which only the maintainer can do.
 11. Measured claims: idle CPU (D11) and the 100k-trade tape apply (D15) must be recorded before and after. No
     performance improvement may be reported without those numbers.
 12. Interleaving tests rely on M1 putting a generation on every publication kind, including viewport and recovery.

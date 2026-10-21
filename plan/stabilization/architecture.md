@@ -515,7 +515,7 @@ market.attach_trading_feed(TradingFeedLink { events: Box::new(move |e| inbox.pus
   is installed, so a failed selection leaves the previous chart live and the desktop restores by re-adopting the
   previous binding epoch with no second command.
 - Published descriptors: `ProviderDescriptor { id, display_name, logo: LogoKey, connect: ConnectMethod
-  (HostedBrokerOAuth | VaultCredentials { form } | Public), symbol_browser: bool, autoload_catalog: bool }`,
+  (VaultCredentials { form } | Public), symbol_browser: bool, autoload_catalog: bool }`,
   `InstrumentDescriptor { key, display_symbol, venue, asset_class, currency, price_scale, price_grid, offered_intervals,
   calendar_source, quote_capability, logo }`, `ResolvedSeries { interval, key: BarSeriesKey, cadence }`. Typed
   `ProviderEvent::CatalogReady { provider }` replaces `RITHMIC_CATALOG_READY_MESSAGE` text matching.

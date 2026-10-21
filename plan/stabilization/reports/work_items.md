@@ -1420,7 +1420,7 @@ Title: Fix dependency direction and reduce `contracts` to the persisted schema
 Milestone: lifecycle-and-trim   Crates: study_sdk, market_runtime, platform_runtime, adapters, application, contracts, tools/naming_check   Depends on: M8.1, M7.8
 Scope:
 - `study_sdk` depends on the `market_data` contracts, not `market_runtime` (G1).
-- `hosted_broker` moves out of `platform_runtime` (G2).
+- G2 is closed: `hosted_broker` was deleted with the removed broker integrations on 2026-10-21, so nothing moves.
 - The `EmbeddedReplaySource` demo data in `application` moves to test support (G5).
 - `contracts` keeps only the persisted workspace schema. In-process DTOs move to their owning crates, and `GetAccountStatus` and `RefreshAccountProfile` are deleted (G4).
 - naming_check gets direction rules from `Cargo.toml`.

@@ -91,7 +91,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   hardcoding provider names in `components/accounts_panel.rs`.
 - [x] `market_runtime` publishes provider presentation descriptors through a provider-neutral
   contract: id, display name, chart intervals, default/empty-query listing, search hint, logo key,
-  catalog-symbol source, depth capability, connection kind (credentials, hosted broker, public).
+  catalog-symbol source, depth capability, connection kind (credentials, public).
 - [x] Replace `TerminalProvider` branches in `apps/desktop/src/desktop.rs`,
   `desktop/workspace_surface.rs`, `components/{symbol_menu,terminal_view,watchlist_panel,time_sales_panel}.rs`,
   `engine_market_worker*.rs`, `market_worker.rs` and `desktop/local_state.rs` with descriptors.
@@ -102,7 +102,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     by descriptor ID instead of positional provider matches. Provider-specific selection payloads and
     product-policy branches remain provider-owned; generic engine lifecycle and depth checks now use
     descriptor presence/capabilities instead of enumerating provider variants; viewport persistence
-    and hosted-broker prompt labels follow the same metadata. Startup catalog matching now reads
+    and connection-kind prompt labels follow the same metadata. Startup catalog matching now reads
     the descriptor's catalog-symbol source and selection entitlement instead of naming a provider;
     generic menu selection carries only its result index instead of provider-tagged variants;
     startup metadata refresh is descriptor-declared and the time-and-sales history header is

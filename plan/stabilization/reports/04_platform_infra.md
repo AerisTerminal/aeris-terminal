@@ -79,7 +79,7 @@ App
 | ID | Edge / placement | Problem |
 |----|------------------|---------|
 | G1 | `study_sdk -> market_runtime` | An SDK meant for study authors depends on the full runtime and therefore every provider adapter. `market_runtime` dev-depends back on `study_sdk`. The SDK should depend on `market_data` contracts only. |
-| G2 | `platform_runtime::hosted_broker` | Product protocol with hardcoded `https://app.aeristerminal.com` (`crates/platform/platform_runtime/src/hosted_broker.rs:20`) lives in the platform crate; adapters depend on `platform_runtime` to reach it. Product policy sits in a platform crate. |
+| G2 | `platform_runtime::hosted_broker` | Product protocol with hardcoded `https://app.aeristerminal.com` (`crates/platform/platform_runtime/src/hosted_broker.rs:20`) lives in the platform crate; adapters depend on `platform_runtime` to reach it. Product policy sits in a platform crate. Closed 2026-10-21: the module was deleted with the removed broker integrations. |
 | G3 | `platform_runtime` as catch-all | Contains OS facilities (power, network, session shutdown, credential vault, atomic files), product release lifecycle (launcher, update, rollout, release identity), test-only gates (`live_market_gate`), and a display-timing module used only by stale tools. No cohesive responsibility. |
 | G4 | `contracts` | Mixes in-process prost DTOs (a leftover of the removed process boundary) with the persisted workspace schema. Unused RPC messages remain (`GetAccountStatus`, `RefreshAccountProfile`). |
 | G5 | `application` | `EmbeddedReplaySource` demo data is used only by `AerisChartView::new`/`Default`, which only tests call. Demo data ships in the production graph. |
@@ -352,5 +352,5 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 4. Remove dormant subsystems: delete or feature-gate launcher/update/rollout (PL-01) and `account_runtime` plus the reqwest stack (PL-07); delete `display_timing`, `atomic_file` unsafe, unused exports (PL-10, PL-19); update AGENTS release and auth sections in the same change.
 5. Isolate unsafe: one FFI crate with documented `SAFETY` blocks; restore `forbid` elsewhere (PL-02).
 6. Slim `naming_check` to structural checks based on `cargo metadata` and paths; delete dormant-code assertions; recurse the markdown inventory (PL-08).
-7. Fix dependency direction: `study_sdk` on contracts only (PL-13); split `platform_runtime` into OS facilities and product modules, moving `hosted_broker` out (G2, G3); reduce `contracts` to the persisted schema (PL-14).
+7. Fix dependency direction: `study_sdk` on contracts only (PL-13); split `platform_runtime` into OS facilities and product modules (G3; G2 closed when `hosted_broker` was deleted); reduce `contracts` to the persisted schema (PL-14).
 8. Clean the repository: remove `plan/`, stale tools, legacy brand migrations after a marker (PL-11, PL-10, PL-16); trim `gpui_base` (PL-12).
