@@ -1222,6 +1222,7 @@ fn discard_unregistered_runtime_studies(studies: &mut RuntimeStudiesState) -> bo
         pending.remove_on_registration = true;
     }
     studies.deferred.clear();
+    studies.registration_retry = None;
     changed
 }
 
@@ -4270,19 +4271,33 @@ impl WorkspaceSurface {
         let Some(index) = next_deferred_runtime_study_index(&self.studies) else {
             return;
         };
-        let state = self.studies.deferred.remove(index);
-        if let Err(error) = self.enqueue_runtime_study(state) {
-            let (state, _) = *error;
-            self.studies.deferred.insert(index, state);
-            Self::post_indicator_failure(
-                "study",
-                "Study unavailable",
-                "The study could not be queued. Try again.",
-                cx,
-            );
+        let series = self.current_runtime_series().ok();
+        let now = Instant::now();
+        if !self.studies.registration_due(series.as_ref(), now) {
+            return;
         }
-        if !self.studies.deferred.is_empty() {
-            cx.notify();
+        let state = self.studies.deferred.remove(index);
+        match self.enqueue_runtime_study(state) {
+            Ok(_) => {
+                self.studies.registration_retry = None;
+                cx.notify();
+            }
+            Err(error) => {
+                let (state, reason) = *error;
+                // A blocked study is never retried, so its one failure is reported now;
+                // anything else waits before the same series is tried again.
+                let report = state.blocked || self.studies.defer_registration(series, now);
+                self.studies.deferred.insert(index, state);
+                if report {
+                    diagnostic!("Aeris study could not be queued: {reason}");
+                    Self::post_indicator_failure(
+                        "study",
+                        "Study unavailable",
+                        "The study could not be queued. Try again.",
+                        cx,
+                    );
+                }
+            }
         }
     }
 
@@ -4349,10 +4364,12 @@ impl WorkspaceSurface {
             .map(|state| state.study_id)
             .collect::<Vec<_>>();
         for study_id in stale {
-            if self
-                .queue_runtime_study_reinitialization(study_id, series.clone())
-                .is_err()
+            if let Err(reason) = self.queue_runtime_study_reinitialization(study_id, series.clone())
+                && self
+                    .studies
+                    .defer_reinitialization(study_id, series.clone(), now)
             {
+                diagnostic!("Aeris study could not be updated: {reason}");
                 Self::post_indicator_failure(
                     "study",
                     "Study unavailable",

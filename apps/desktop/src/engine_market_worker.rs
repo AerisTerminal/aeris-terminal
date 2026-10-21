@@ -2778,6 +2778,21 @@ mod tests {
     }
 
     #[test]
+    fn rithmic_series_keys_accept_the_selected_market_entitlement() {
+        // Catalog selections install the provider's registered selection
+        // entitlement; studies and recovery key their series on it.
+        let entitlement = provider_presentation("rithmic")
+            .expect("Rithmic presentation")
+            .selection_entitlement_id;
+        let mut product = default_product("MNQZ6");
+        product.entitlement_id = entitlement.to_string();
+        let series = series_key(&product, ChartInterval::Minute1).expect("selected series");
+        assert_eq!(series.entitlement_id, entitlement);
+        product.entitlement_id = " ".to_string();
+        assert!(series_key(&product, ChartInterval::Minute1).is_err());
+    }
+
+    #[test]
     fn structured_demand_errors_render_stage_and_elapsed_context() {
         let error = MarketDemandError {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),

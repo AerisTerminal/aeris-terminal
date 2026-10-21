@@ -796,11 +796,7 @@ fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_seri
     assert!(!studies.reinitializing.contains_key(&study_id));
     assert!(!studies.reinitialization_due(study_id, &rejected, now));
     assert!(studies.reinitialization_due(study_id, &other, now));
-    assert!(studies.reinitialization_due(
-        study_id,
-        &rejected,
-        now + STUDY_REINITIALIZATION_RETRY_DELAY
-    ));
+    assert!(studies.reinitialization_due(study_id, &rejected, now + STUDY_RETRY_DELAY));
 
     studies.begin_reinitialization(
         study_id,
@@ -811,6 +807,35 @@ fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_seri
     );
     assert_eq!(studies.complete_reinitialization(study_id), Some(false));
     assert!(studies.reinitialization_due(study_id, &rejected, now));
+}
+
+#[test]
+fn unqueued_study_work_reports_once_and_waits_before_retrying_the_same_series() {
+    let study_id = StudyInstanceId::try_from_u64(1).expect("study id");
+    let failed = custom_package_series("instrument:rithmic:CME:MNQ");
+    let other = custom_package_series("instrument:rithmic:CME:ES");
+    let now = std::time::Instant::now();
+    let later = now + STUDY_RETRY_DELAY;
+    let mut studies = RuntimeStudiesState::default();
+
+    assert!(studies.registration_due(Some(&failed), now));
+    assert!(studies.defer_registration(Some(failed.clone()), now));
+    assert!(!studies.registration_due(Some(&failed), now));
+    assert!(studies.registration_due(Some(&other), now));
+    assert!(studies.registration_due(None, now));
+    assert!(studies.registration_due(Some(&failed), later));
+    assert!(!studies.defer_registration(Some(failed.clone()), later));
+    assert!(studies.defer_registration(None, later));
+    assert!(!studies.registration_due(None, later));
+    assert!(!discard_unregistered_runtime_studies(&mut studies));
+    assert!(studies.registration_due(None, later));
+
+    assert!(studies.defer_reinitialization(study_id, failed.clone(), now));
+    assert!(!studies.reinitialization_due(study_id, &failed, now));
+    assert!(studies.reinitialization_due(study_id, &other, now));
+    assert!(studies.reinitialization_due(study_id, &failed, later));
+    assert!(!studies.defer_reinitialization(study_id, failed, later));
+    assert!(studies.defer_reinitialization(study_id, other, later));
 }
 
 fn reinitializing_dependency_chain() -> (

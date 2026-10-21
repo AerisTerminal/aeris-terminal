@@ -249,22 +249,15 @@ pub(super) fn snapshot_instrument(
 fn validate_product_identity(product: &InstallProviderInstrument) -> Result<(), String> {
     // The provider field must agree with the installed instrument identity:
     // a Hyperliquid product can never demand a Rithmic series and vice
-    // versa, so a mismatch fails here instead of misrouting demand.
+    // versa, so a mismatch fails here instead of misrouting demand. The
+    // entitlement is the runtime's opaque grant for the installed selection
+    // and is carried into the series key unchanged.
     if !matches!(product.provider.as_str(), "rithmic" | "hyperliquid")
         || product.venue_id.trim().is_empty()
+        || product.entitlement_id.trim().is_empty()
         || product.price_scale > 18
         || product.quantity_scale > 18
     {
-        return Err(format!(
-            "{} installed instrument identity is invalid",
-            provider_display_name(product.provider.as_str())
-        ));
-    }
-    if product.provider == "rithmic" {
-        if !product.entitlement_id.starts_with("rithmic-test:") {
-            return Err("Rithmic installed instrument identity is invalid".to_string());
-        }
-    } else if product.provider == "hyperliquid" && product.entitlement_id != "hyperliquid-public" {
         return Err(format!(
             "{} installed instrument identity is invalid",
             provider_display_name(product.provider.as_str())

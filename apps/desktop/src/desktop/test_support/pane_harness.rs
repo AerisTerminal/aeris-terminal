@@ -3255,6 +3255,103 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
 }
 
+fn deferred_sma_study() -> PendingRuntimeStudyState {
+    PendingRuntimeStudyState {
+        persisted: workspace_surface::legacy_runtime_study(1, ChartIndicator::Sma, true)
+            .expect("fixture study"),
+        resolved_chart_series: None,
+        remove_on_registration: false,
+        persist_on_registration: false,
+        blocked: false,
+    }
+}
+
+#[gpui::test]
+fn pane_harness_deferred_study_registers_on_a_selected_rithmic_market(cx: &mut TestAppContext) {
+    let entitlement = aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| descriptor.id == "rithmic")
+        .expect("Rithmic presentation")
+        .selection_entitlement_id;
+    let product = InstallProviderInstrument {
+        provider: "rithmic".into(),
+        session_generation: 1,
+        selection_generation: 1,
+        instrument_id: "instrument:rithmic:CME:MNQZ6".into(),
+        provider_symbol: "MNQZ6".into(),
+        display_symbol: "MNQZ6".into(),
+        venue_id: "CME".into(),
+        price_scale: 2,
+        quantity_scale: 0,
+        entitlement_id: entitlement.into(),
+        ..InstallProviderInstrument::default()
+    };
+    let (mut harness, cx) = PaneHarness::open_with_product(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        false,
+        product,
+        ChartInterval::Minute1,
+        cx,
+    );
+    harness.publish_snapshot(12, cx);
+    let requests = harness.commands.take().expect("command receiver");
+    requests.try_iter().for_each(drop);
+    harness.pane.update(cx, |pane, cx| {
+        pane.studies.deferred.push(deferred_sma_study());
+        pane.poll_market_worker(cx);
+        assert_eq!(pane.studies.deferred, [] as [PendingRuntimeStudyState; 0]);
+        assert_eq!(pane.studies.pending.len(), 1);
+    });
+    assert!(
+        requests
+            .try_iter()
+            .any(|command| matches!(command, MarketWorkerCommand::RegisterStudy(_)))
+    );
+}
+
+#[gpui::test]
+fn pane_harness_unqueueable_deferred_study_reports_once_instead_of_every_poll(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let requests = harness.commands.take().expect("command receiver");
+    requests.try_iter().for_each(drop);
+    let study_posts = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    cx.update(|_, cx| {
+        let study_posts = study_posts.clone();
+        cx.subscribe(&harness.pane, move |_, event: &PaneNoticeEvent, _| {
+            if let PaneNoticeEvent::Post(notice) = event
+                && notice.key.kind == "study"
+            {
+                study_posts.set(study_posts.get() + 1);
+            }
+        })
+        .detach();
+    });
+    harness.pane.update(cx, |pane, cx| {
+        pane.product
+            .as_mut()
+            .expect("product")
+            .entitlement_id
+            .clear();
+        pane.studies.deferred.push(deferred_sma_study());
+        for _ in 0..3 {
+            pane.poll_market_worker(cx);
+        }
+        assert_eq!(pane.studies.deferred.len(), 1);
+        assert!(pane.studies.pending.is_empty());
+    });
+    cx.run_until_parked();
+    assert_eq!(study_posts.get(), 1);
+    assert!(
+        requests
+            .try_iter()
+            .all(|command| !matches!(command, MarketWorkerCommand::RegisterStudy(_)))
+    );
+}
+
 #[gpui::test]
 fn pane_harness_removed_volume_settings_renders_once_and_readd_clears(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);

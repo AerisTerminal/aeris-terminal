@@ -541,9 +541,9 @@ const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const CHROME_OVERLAY_EXIT_DURATION: Duration = Duration::from_millis(100);
 const CHART_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(600);
 const CHART_COPY_SUCCESS_ANIMATION_DURATION: Duration = Duration::from_millis(180);
-/// Minimum wait before an automatic study reinitialization the runtime rejected
-/// is sent again for the same chart series.
-const STUDY_REINITIALIZATION_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// Minimum wait before a study registration or automatic reinitialization that
+/// failed is attempted again for the same chart series.
+const STUDY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 mod lifecycle;
 use lifecycle::DesktopLifecycle;
@@ -1350,6 +1350,9 @@ struct RuntimeStudiesState {
     automatic_removals: HashSet<StudyInstanceId>,
     removing: HashSet<StudyInstanceId>,
     deferred: Vec<PendingRuntimeStudyState>,
+    /// The chart series (none when the selection cannot form one) whose deferred
+    /// registration last failed to queue, and when it may be tried again.
+    registration_retry: Option<(Option<BarSeriesKey>, Instant)>,
     next_local_id: u64,
 }
 
@@ -1364,6 +1367,7 @@ impl Default for RuntimeStudiesState {
             automatic_removals: HashSet::new(),
             removing: HashSet::new(),
             deferred: Vec::new(),
+            registration_retry: None,
             next_local_id: 1,
         }
     }
@@ -1414,11 +1418,45 @@ impl RuntimeStudiesState {
         if let Some(pending) = self.reinitializing.remove(&study_id)
             && pending.replacement_persisted.is_none()
         {
-            self.reinitialization_retries.insert(
-                study_id,
-                (pending.series, now + STUDY_REINITIALIZATION_RETRY_DELAY),
-            );
+            self.reinitialization_retries
+                .insert(study_id, (pending.series, now + STUDY_RETRY_DELAY));
         }
+    }
+
+    /// Holds back an automatic reinitialization the pane could not queue. Returns
+    /// whether the series had not already failed, so the failure is reported once
+    /// instead of on every market poll.
+    fn defer_reinitialization(
+        &mut self,
+        study_id: StudyInstanceId,
+        series: BarSeriesKey,
+        now: Instant,
+    ) -> bool {
+        let first = self
+            .reinitialization_retries
+            .get(&study_id)
+            .is_none_or(|(failed, _)| *failed != series);
+        self.reinitialization_retries
+            .insert(study_id, (series, now + STUDY_RETRY_DELAY));
+        first
+    }
+
+    /// Holds back deferred registrations after one could not be queued. Returns
+    /// whether the series had not already failed, so the failure is reported once
+    /// instead of on every market poll.
+    fn defer_registration(&mut self, series: Option<BarSeriesKey>, now: Instant) -> bool {
+        let first = self
+            .registration_retry
+            .as_ref()
+            .is_none_or(|(failed, _)| *failed != series);
+        self.registration_retry = Some((series, now + STUDY_RETRY_DELAY));
+        first
+    }
+
+    fn registration_due(&self, series: Option<&BarSeriesKey>, now: Instant) -> bool {
+        self.registration_retry
+            .as_ref()
+            .is_none_or(|(failed, retry_at)| failed.as_ref() != series || now >= *retry_at)
     }
 
     fn reinitialization_due(
