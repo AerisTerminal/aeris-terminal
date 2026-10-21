@@ -1643,6 +1643,34 @@ Status: pending
     pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears.
     The direct chart-reinstall setter fixture is unchanged; mailbox and
     diagnostic migrations remain Parts 5d2a3-4, before production deletion.
+  - Part 5d2a3: migrated mailbox fixture bar snapshots, append/revise tails
+    and synthetic readiness/failure states to canonical coordinator-fenced
+    runtime events. Migrated tests:
+    engine_background_transition_discards_stale_ui_market_publications,
+    idempotent_foreground_assignment_preserves_initial_covering_snapshot,
+    control_states_preserve_fifo_order_in_the_bounded_mailbox,
+    bounded_bridge_drains_ten_thousand_outbox_events_in_emission_order,
+    mailbox_wake_fires_once_per_edge_until_drained,
+    live_tail_updates_share_one_frame_wake_until_the_mailbox_is_drained,
+    queued_append_is_delivered_before_its_same_candle_revision,
+    live_tails_for_distinct_bars_are_all_delivered,
+    full_market_mailbox_returns_backpressure_without_mutating_queued_bars,
+    mailbox_wake_fires_for_queued_messages_on_registration,
+    mailbox_wake_stops_after_receiver_drops,
+    diagnostics_keep_fifo_order_with_market_publications,
+    terminal_control_preserves_a_queued_covering_snapshot,
+    market_publication_waits_behind_a_full_control_queue,
+    queued_covering_snapshot_is_unchanged_when_next_update_is_backpressured,
+    control_messages_remain_fifo_while_market_publication_is_backpressured,
+    terminal_and_failed_recovery_messages_survive_lower_priority_states,
+    successful_recovery_and_newer_stream_update_preserve_fifo_order,
+    series_state_survives_catalog_rejection_in_the_bounded_mailbox and
+    mailbox_does_not_filter_publication_generations. The existing wake,
+    recovery acknowledgement and legacy ChartState characterization tests
+    remain; canonical bars now share market-publication background suppression
+    and the bounded market capacity rather than the control reserve.
+    Part 5d2a4 diagnostic fixture migration and 5d2b legacy route deletion
+    remain; M6.6 and VAL-DSK-021/022 stay open.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2061,6 +2089,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 5d1 refactor(desktop): coordinator-fenced series failures and demand errors reach the GPUI pane unchanged; the pane rejects pending/retired lifecycle generations, distinguishes older-history diagnostics and retryable recovery, and retains failed-replacement restoration. Focused bridge and GPUI regressions pass. Part 5d2 must remove synthetic worker readiness and old bar conversions, then ChartState; M6.6 stays unchecked.
 - 2026-10-21 M6.6 Part 5d2a1 test(desktop): shared fixture coordinator-event builder and canonical disconnected snapshot migrate the pane's initial snapshot/readiness and the existing fenced examples. The pane's displayed worker identity now matches production's runtime projection; the fixture's disconnected label remains asserted at the source. Remaining 5d2a2-4 fixtures and 5d2b production deletion are outstanding.
 - 2026-10-21 M6.6 Part 5d2a2 test(desktop): pane switch permutations, retired/early bar and status fences, replacement cover, recovery, presentation and redacted failure cases use canonical fenced coordinator events through the production GPUI projection; direct setter-reinstall fixture remains deliberate. M6.6 stays unchecked pending mailbox/diagnostic migration, old-route deletion and later parts.
+- 2026-10-21 M6.6 Part 5d2a3 fix(desktop): mailbox order, frame-budget, explicit overflow, foreground/background and wake tests now exercise canonical fenced bars and readiness. Fixed the discovered mailbox classification gap so fenced bars share the market-publication capacity and suppression policy. Diagnostic fixtures and the production legacy-route deletion remain; M6.6 stays unchecked.
 
 ## 7. Known gaps / deferred
 

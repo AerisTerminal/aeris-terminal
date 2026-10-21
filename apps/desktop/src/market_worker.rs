@@ -498,6 +498,7 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
         MarketWorkerMessage::Update(_)
+            | MarketWorkerMessage::RuntimeSeriesPublication { .. }
             | MarketWorkerMessage::StudyOutput(_)
             | MarketWorkerMessage::OrderBook(_)
             | MarketWorkerMessage::TradeTape(_)
@@ -1527,13 +1528,10 @@ mod tests {
     use super::{
         ChartState, ChartViewportUpdate, ConsumerResourceClass, MarketDataWorker,
         MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
-        MarketWorkerMessage, MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
-        ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
+        MarketWorkerMessage, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
+        UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
-    use crate::test_support::FixtureMarketWorker;
-    use aeris_application::{
-        Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
-    };
+    use crate::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
     use aeris_contracts::{
         InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
         SearchProviderInstruments, SelectProviderInstrument,
@@ -1543,7 +1541,10 @@ mod tests {
         BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
     };
     use aeris_market_runtime::study::StudyInstanceId;
-    use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketTradeTapeSnapshot};
+    use aeris_market_runtime::{
+        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeSnapshot,
+        SeriesTailOperation,
+    };
     use aeris_observability::{FeedDiagnostics, FeedIdentity};
     use aeris_study_sdk::builtins;
     use std::collections::VecDeque;
@@ -1558,12 +1559,16 @@ mod tests {
         time::Duration,
     };
 
-    fn tail_operation(message: &MarketWorkerMessage) -> Option<ReplayTailOperation> {
+    fn tail_operation(message: &MarketWorkerMessage) -> Option<SeriesTailOperation> {
         match message {
-            MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Tail(tail),
+            MarketWorkerMessage::RuntimeSeriesPublication {
+                event:
+                    aeris_market_runtime::fence::Fenced {
+                        value: MarketRuntimeEvent::SeriesUpdate(update),
+                        ..
+                    },
                 ..
-            }) => Some(tail.operation()),
+            } => Some(update.operation),
             _ => None,
         }
     }
@@ -1580,10 +1585,84 @@ mod tests {
 
     fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
         match message {
-            MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Tail(tail),
+            MarketWorkerMessage::RuntimeSeriesPublication {
+                event:
+                    aeris_market_runtime::fence::Fenced {
+                        value: MarketRuntimeEvent::SeriesUpdate(update),
+                        ..
+                    },
                 ..
-            }) => Some(tail.item().value().source_sequence),
+            } => Some(update.bar.source_sequence),
+            _ => None,
+        }
+    }
+
+    fn fixture_series() -> FixtureSeries {
+        FixtureSeries {
+            series: BarSeriesKey {
+                provider_id: "hyperliquid".into(),
+                instrument_id: "hyperliquid:perp:BTC".into(),
+                entitlement_id: "fixture".into(),
+                period: BarPeriod::Time { seconds: 60 },
+                definition_version: 1,
+            },
+            provider_generation: 1,
+            price_scale: 2,
+            quantity_scale: 3,
+        }
+    }
+
+    fn snapshot_message(fixture: &mut FixtureMarketWorker, count: usize) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeSeriesPublication {
+            event: fixture
+                .publish_runtime_snapshot(
+                    count,
+                    &fixture_series(),
+                    1,
+                    &FixtureMarketEvents::default(),
+                )
+                .expect("fixture snapshot publishes"),
+            received_unix_nanos: 0,
+        }
+    }
+
+    fn update_message(
+        generation: u64,
+        bar: aeris_market_data::MarketBar,
+        operation: SeriesTailOperation,
+    ) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeSeriesPublication {
+            event: FixtureMarketEvents::default().update(
+                &fixture_series(),
+                1,
+                generation,
+                operation,
+                bar,
+                true,
+            ),
+            received_unix_nanos: 0,
+        }
+    }
+
+    fn status_message(
+        state: aeris_contracts::SeriesLoadState,
+        detail: &str,
+    ) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeSeriesStatus(
+            FixtureMarketEvents::default().readiness(1, state, detail),
+        )
+    }
+
+    fn snapshot_generation(message: &MarketWorkerMessage) -> Option<u64> {
+        match message {
+            MarketWorkerMessage::RuntimeSeriesPublication {
+                event:
+                    aeris_market_runtime::fence::Fenced {
+                        value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                        ..
+                    },
+                ..
+            } => Some(snapshot.publication_generation),
             _ => None,
         }
     }
@@ -1803,17 +1882,8 @@ mod tests {
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
-        let make_publication = |bootstrap: super::MarketWorkerBootstrap| MarketWorkerPublication {
-            generation: bootstrap.generation,
-            update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-            subscription_id: bootstrap.subscription_id,
-            worker_label: bootstrap.worker_label,
-            ui_diagnostics: None,
-        };
-        let publication =
-            make_publication(fixture.publish_snapshot(2).expect("snapshot publishes"));
         message_tx
-            .send(MarketWorkerMessage::Update(publication))
+            .send(snapshot_message(&mut fixture, 2))
             .expect("foreground publication queues");
 
         worker
@@ -1828,10 +1898,8 @@ mod tests {
         let (messages, _) = worker.drain_messages();
         assert!(messages.is_empty());
 
-        let publication =
-            make_publication(fixture.publish_snapshot(2).expect("snapshot republishes"));
         message_tx
-            .send(MarketWorkerMessage::Update(publication))
+            .send(snapshot_message(&mut fixture, 2))
             .expect("hidden publication is harmlessly suppressed");
         let (messages, _) = worker.drain_messages();
         assert!(messages.is_empty());
@@ -1839,15 +1907,13 @@ mod tests {
         worker
             .try_set_market_resource_class(ConsumerResourceClass::Foreground)
             .expect("foreground transition is accepted");
-        let publication =
-            make_publication(fixture.publish_snapshot(2).expect("snapshot republishes"));
         message_tx
-            .send(MarketWorkerMessage::Update(publication))
+            .send(snapshot_message(&mut fixture, 2))
             .expect("foreground publication queues");
         let (messages, _) = worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Update(_)]
+            [MarketWorkerMessage::RuntimeSeriesPublication { .. }]
         ));
 
         drop(command_rx);
@@ -1858,15 +1924,8 @@ mod tests {
     fn idempotent_foreground_assignment_preserves_initial_covering_snapshot() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
-        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         sender
-            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                generation: bootstrap.generation,
-                update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                subscription_id: bootstrap.subscription_id,
-                worker_label: bootstrap.worker_label,
-                ui_diagnostics: None,
-            }))
+            .send(snapshot_message(&mut fixture, 2))
             .expect("initial snapshot queues");
 
         receiver.set_market_publications_enabled(true);
@@ -1875,10 +1934,13 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(_),
+            [MarketWorkerMessage::RuntimeSeriesPublication {
+                event: aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesSnapshot(_),
+                    ..
+                },
                 ..
-            })]
+            }]
         ));
     }
 
@@ -1887,20 +1949,18 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Loading,
-                    message: "loading".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Resolving,
+                    "loading"
+                ))
                 .is_ok()
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Ready,
-                    message: "ready".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Ready,
+                    "ready"
+                ))
                 .is_ok()
         );
 
@@ -1909,17 +1969,16 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Loading,
-                    message: first,
-                },
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Ready,
-                    message: second,
-                }
-            ] if first == "loading" && second == "ready"
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(first), ..
+                }),
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(second), ..
+                })
+            ] if first.state == aeris_contracts::SeriesLoadState::Resolving
+                && first.detail.as_deref() == Some("loading")
+                && second.state == aeris_contracts::SeriesLoadState::Ready
+                && second.detail.as_deref() == Some("ready")
         ));
     }
 
@@ -1930,22 +1989,27 @@ mod tests {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(256).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
-        let snapshot = fixture
-            .publish_snapshot(2)
-            .expect("snapshot publishes")
-            .snapshot;
+        let snapshot = snapshot_message(&mut fixture, 2);
         let mut outbox = (1..=OUTBOX_EVENTS).collect::<VecDeque<_>>();
         let mut next_applied = 1;
         let mut overflow_count = 0;
         while next_applied <= OUTBOX_EVENTS {
             while let Some(&generation) = outbox.front() {
-                let result = sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
-                    generation: MarketPublicationGeneration::from_tail(generation, 1, 1, 1),
-                    subscription_id: String::new(),
-                    worker_label: String::new(),
-                    ui_diagnostics: None,
-                }));
+                let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &snapshot else {
+                    panic!("fixture snapshot is canonical");
+                };
+                let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
+                    panic!("fixture snapshot has series data");
+                };
+                let result = sender.send(MarketWorkerMessage::RuntimeSeriesPublication {
+                    event: FixtureMarketEvents::default().snapshot(
+                        &fixture_series(),
+                        1,
+                        generation,
+                        publication.snapshot.bars.clone(),
+                    ),
+                    received_unix_nanos: 0,
+                });
                 if result == Err(super::MarketWorkerSendError::Full) {
                     overflow_count += 1;
                     break;
@@ -1958,13 +2022,10 @@ mod tests {
             assert!(!messages.is_empty());
             assert!(messages.len() <= FRAME_BUDGET);
             for message in messages {
-                let MarketWorkerMessage::Update(publication) = message else {
+                let Some(generation) = snapshot_generation(&message) else {
                     panic!("unexpected outbox projection");
                 };
-                assert_eq!(
-                    publication.generation.publication_generation(),
-                    next_applied
-                );
+                assert_eq!(generation, next_applied);
                 next_applied += 1;
             }
         }
@@ -2116,11 +2177,7 @@ mod tests {
         }));
         assert_eq!(wake_count.load(Ordering::Acquire), 0);
 
-        let message = || MarketWorkerMessage::SeriesState {
-            generation: 1,
-            state: ChartState::Ready,
-            message: "ready".to_string(),
-        };
+        let message = || status_message(aeris_contracts::SeriesLoadState::Ready, "ready");
         sender.send(message()).expect("first state sends");
         sender.send(message()).expect("second state sends");
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2181,26 +2238,12 @@ mod tests {
                 i64::try_from(publication_generation).expect("test generation fits"),
             );
             bar.high = bar.high.max(bar.close);
-            let tail = ReplayTailUpdate::try_new(
-                Provenanced::new(bar, source.provenance().clone()),
-                publication_generation,
-                true,
-                ReplayTailOperation::Revise,
-            )
-            .expect("tail validates");
             sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Tail(tail),
-                    generation: MarketPublicationGeneration::from_tail(
-                        publication_generation,
-                        2,
-                        1,
-                        2,
-                    ),
-                    subscription_id: "tail".to_string(),
-                    worker_label: "tail".to_string(),
-                    ui_diagnostics: None,
-                }))
+                .send(update_message(
+                    publication_generation,
+                    bar,
+                    SeriesTailOperation::Revise,
+                ))
                 .expect("tail sends");
         }
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2210,9 +2253,14 @@ mod tests {
         let generations = messages
             .iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::Update(publication) => {
-                    Some(publication.generation.publication_generation())
-                }
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event:
+                        aeris_market_runtime::fence::Fenced {
+                            value: MarketRuntimeEvent::SeriesUpdate(update),
+                            ..
+                        },
+                    ..
+                } => Some(update.publication_generation),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -2236,35 +2284,14 @@ mod tests {
         bar.exchange_timestamp_seconds = bar.exchange_timestamp_seconds.saturating_add(60);
         bar.exchange_timestamp_unix_nanos =
             bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
-        let mut provenance = source.provenance().clone();
-        provenance.source_sequence = bar.source_sequence;
-        provenance.exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
         for (generation, close, operation) in [
-            (3, bar.close, ReplayTailOperation::Append),
-            (4, bar.close.saturating_add(1), ReplayTailOperation::Revise),
+            (3, bar.close, SeriesTailOperation::Append),
+            (4, bar.close.saturating_add(1), SeriesTailOperation::Revise),
         ] {
             bar.close = close;
             bar.high = bar.high.max(close);
-            let tail = ReplayTailUpdate::try_new(
-                Provenanced::new(bar, provenance.clone()),
-                generation,
-                true,
-                operation,
-            )
-            .expect("tail validates");
             sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Tail(tail),
-                    generation: MarketPublicationGeneration::from_tail(
-                        generation,
-                        3,
-                        1,
-                        bar.source_sequence,
-                    ),
-                    subscription_id: "tail".to_string(),
-                    worker_label: "tail".to_string(),
-                    ui_diagnostics: None,
-                }))
+                .send(update_message(generation, bar, operation))
                 .expect("tail sends");
         }
 
@@ -2276,7 +2303,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             operations,
-            [ReplayTailOperation::Append, ReplayTailOperation::Revise]
+            [SeriesTailOperation::Append, SeriesTailOperation::Revise]
         );
     }
 
@@ -2307,29 +2334,8 @@ mod tests {
                 .saturating_add(60 * i64::try_from(offset).expect("offset fits"));
             bar.exchange_timestamp_unix_nanos =
                 bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
-            let mut provenance = source.provenance().clone();
-            provenance.source_sequence = bar.source_sequence;
-            provenance.exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
-            let tail = ReplayTailUpdate::try_new(
-                Provenanced::new(bar, provenance),
-                offset.saturating_add(2),
-                true,
-                ReplayTailOperation::Append,
-            )
-            .expect("tail validates");
             sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Tail(tail),
-                    generation: MarketPublicationGeneration::from_tail(
-                        offset.saturating_add(2),
-                        2,
-                        1,
-                        2,
-                    ),
-                    subscription_id: "tail".to_string(),
-                    worker_label: "tail".to_string(),
-                    ui_diagnostics: None,
-                }))
+                .send(update_message(offset + 2, bar, SeriesTailOperation::Append))
                 .expect("tail sends");
         }
 
@@ -2359,13 +2365,20 @@ mod tests {
             .expect("tail exists");
         let first_sequence = source.value().source_sequence;
         sender
-            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot.clone()),
-                generation: bootstrap.generation,
-                subscription_id: "burst".to_string(),
-                worker_label: "burst".to_string(),
-                ui_diagnostics: None,
-            }))
+            .send(MarketWorkerMessage::RuntimeSeriesPublication {
+                event: FixtureMarketEvents::default().snapshot(
+                    &fixture_series(),
+                    1,
+                    bootstrap.generation.publication_generation(),
+                    bootstrap
+                        .snapshot
+                        .bars()
+                        .iter()
+                        .map(|item| *item.value())
+                        .collect::<Vec<_>>(),
+                ),
+                received_unix_nanos: 0,
+            })
             .expect("covering snapshot sends");
 
         for offset in 1_u64..=4 {
@@ -2376,28 +2389,7 @@ mod tests {
                 .saturating_add(60 * i64::try_from(offset).expect("offset fits"));
             bar.exchange_timestamp_unix_nanos =
                 bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
-            let mut provenance = source.provenance().clone();
-            provenance.source_sequence = bar.source_sequence;
-            provenance.exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
-            let tail = ReplayTailUpdate::try_new(
-                Provenanced::new(bar, provenance),
-                offset.saturating_add(2),
-                true,
-                ReplayTailOperation::Append,
-            )
-            .expect("tail validates");
-            let result = sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Tail(tail),
-                generation: MarketPublicationGeneration::from_tail(
-                    offset.saturating_add(2),
-                    2,
-                    1,
-                    2,
-                ),
-                subscription_id: "burst".to_string(),
-                worker_label: "burst".to_string(),
-                ui_diagnostics: None,
-            }));
+            let result = sender.send(update_message(offset + 2, bar, SeriesTailOperation::Append));
             if offset < 4 {
                 assert!(result.is_ok());
             } else {
@@ -2417,10 +2409,13 @@ mod tests {
         );
         assert!(matches!(
             messages.first(),
-            Some(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(_),
+            Some(MarketWorkerMessage::RuntimeSeriesPublication {
+                event: aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesSnapshot(_),
+                    ..
+                },
                 ..
-            }))
+            })
         ));
     }
 
@@ -2428,11 +2423,10 @@ mod tests {
     fn mailbox_wake_fires_for_queued_messages_on_registration() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         sender
-            .send(MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state: ChartState::Loading,
-                message: "loading".to_string(),
-            })
+            .send(status_message(
+                aeris_contracts::SeriesLoadState::Resolving,
+                "loading",
+            ))
             .expect("state sends before wake registration");
 
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2469,11 +2463,10 @@ mod tests {
         drop(receiver);
         assert!(
             sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Ready,
-                    message: "ready".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Ready,
+                    "ready"
+                ))
                 .is_err()
         );
         drop(sender);
@@ -2484,21 +2477,16 @@ mod tests {
     fn diagnostics_keep_fifo_order_with_market_publications() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
-        let generation = NonZeroU64::MIN;
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
-        let previous_sequence = bootstrap.snapshot.stream().last_sequence();
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
-                    subscription_id: bootstrap.subscription_id,
-                    worker_label: bootstrap.worker_label,
-                    ui_diagnostics: Some(PendingUiDiagnostics::new(generation)),
-                }))
-                .is_ok()
-        );
+        let snapshot = snapshot_message(&mut worker, 2);
+        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &snapshot else {
+            panic!("canonical fixture snapshot");
+        };
+        let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
+            panic!("canonical fixture snapshot");
+        };
+        let source = *publication.snapshot.bars.last().expect("last bar");
+        assert!(sender.send(snapshot).is_ok());
         let mut diagnostics = FeedDiagnostics::new(
             FeedIdentity::try_new("rithmic", "advanced_trade_public", "production")
                 .expect("identity validates"),
@@ -2516,25 +2504,22 @@ mod tests {
                 .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)))
                 .is_ok()
         );
-        let mut delta = worker
-            .publish_delta(previous_sequence)
-            .expect("delta publishes")
-            .expect("fixture contains a delta");
-        delta.ui_diagnostics = Some(PendingUiDiagnostics::new(generation));
+        let mut next = source;
+        next.source_sequence += 1;
+        next.exchange_timestamp_seconds += 60;
+        next.exchange_timestamp_unix_nanos = next.exchange_timestamp_seconds * 1_000_000_000;
+        let delta = || update_message(3, next, SeriesTailOperation::Append);
         assert_eq!(
-            sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: delta.update.clone(),
-                generation: delta.generation,
-                subscription_id: delta.subscription_id.clone(),
-                worker_label: delta.worker_label.clone(),
-                ui_diagnostics: None,
-            })),
+            sender.send(delta()),
             Err(super::MarketWorkerSendError::Full)
         );
         let (first, _) = receiver.drain_up_to(1);
-        assert!(matches!(first.as_slice(), [MarketWorkerMessage::Update(_)]));
+        assert!(matches!(
+            first.as_slice(),
+            [MarketWorkerMessage::RuntimeSeriesPublication { .. }]
+        ));
         sender
-            .send(MarketWorkerMessage::Update(delta))
+            .send(delta())
             .expect("publication enters after bounded drain");
 
         let (messages, _) = receiver.drain();
@@ -2542,7 +2527,7 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Diagnostics(_),
-                MarketWorkerMessage::Update(_)
+                MarketWorkerMessage::RuntimeSeriesPublication { .. }
             ]
         ));
     }
@@ -2551,25 +2536,13 @@ mod tests {
     fn terminal_control_preserves_a_queued_covering_snapshot() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
+        assert!(sender.send(snapshot_message(&mut worker, 2)).is_ok());
         assert!(
             sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
-                    subscription_id: bootstrap.subscription_id,
-                    worker_label: bootstrap.worker_label,
-                    ui_diagnostics: None,
-                }))
-                .is_ok()
-        );
-        assert!(
-            sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Error,
-                    message: "terminal".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Failed,
+                    "terminal"
+                ))
                 .is_ok()
         );
 
@@ -2577,15 +2550,22 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(_),
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event: aeris_market_runtime::fence::Fenced {
+                        value: MarketRuntimeEvent::SeriesSnapshot(_),
+                        ..
+                    },
                     ..
-                }),
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Error,
+                },
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(
+                        aeris_market_runtime::MarketSeriesState {
+                            state: aeris_contracts::SeriesLoadState::Failed,
+                            ..
+                        }
+                    ),
                     ..
-                }
+                })
             ]
         ));
     }
@@ -2595,21 +2575,16 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Ready,
-                    message: "ready".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Ready,
+                    "ready"
+                ))
                 .is_ok()
         );
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
-        let publication = worker
-            .publish_delta(bootstrap.snapshot.stream().last_sequence())
-            .expect("delta publishes")
-            .expect("fixture has a following delta");
+        let snapshot = snapshot_message(&mut worker, 2);
         assert_eq!(
-            sender.send(MarketWorkerMessage::Update(publication)),
+            sender.send(snapshot),
             Err(super::MarketWorkerSendError::Full)
         );
 
@@ -2617,11 +2592,10 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state: ChartState::Ready,
-                message: ready,
-            }] if ready == "ready"
+            [MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                value: MarketRuntimeEvent::SeriesState(state), ..
+            })] if state.state == aeris_contracts::SeriesLoadState::Ready
+                && state.detail.as_deref() == Some("ready")
         ));
     }
 
@@ -2629,25 +2603,22 @@ mod tests {
     fn queued_covering_snapshot_is_unchanged_when_next_update_is_backpressured() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
-        let previous_sequence = bootstrap.snapshot.stream().last_sequence();
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
-                    subscription_id: bootstrap.subscription_id,
-                    worker_label: bootstrap.worker_label,
-                    ui_diagnostics: None,
-                }))
-                .is_ok()
-        );
-        let publication = worker
-            .publish_delta(previous_sequence)
-            .expect("delta publishes")
-            .expect("fixture has a following delta");
+        let snapshot = snapshot_message(&mut worker, 2);
+        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &snapshot else {
+            panic!("fixture snapshot is canonical");
+        };
+        let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
+            panic!("fixture snapshot contains bars");
+        };
+        let mut next = *publication.snapshot.bars.last().expect("last bar");
+        next.source_sequence += 1;
+        next.exchange_timestamp_seconds += 60;
+        next.exchange_timestamp_unix_nanos = next.exchange_timestamp_seconds * 1_000_000_000;
+        let next_generation = publication.publication_generation + 1;
+        assert!(sender.send(snapshot).is_ok());
+        let publication = update_message(next_generation, next, SeriesTailOperation::Append);
         assert_eq!(
-            sender.send(MarketWorkerMessage::Update(publication)),
+            sender.send(publication),
             Err(super::MarketWorkerSendError::Full)
         );
 
@@ -2655,8 +2626,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Update(publication)]
-                if matches!(publication.update, ReplayStreamUpdate::Snapshot(_))
+            [publication] if snapshot_generation(publication) == Some(next_generation - 1)
         ));
     }
 
@@ -2664,26 +2634,18 @@ mod tests {
     fn control_messages_remain_fifo_while_market_publication_is_backpressured() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         sender
             .send(MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 })
             .expect("switch marker sends");
         assert_eq!(
-            sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                generation: bootstrap.generation,
-                subscription_id: bootstrap.subscription_id,
-                worker_label: bootstrap.worker_label,
-                ui_diagnostics: None,
-            })),
+            sender.send(snapshot_message(&mut worker, 2)),
             Err(super::MarketWorkerSendError::Full)
         );
         sender
-            .send(MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state: ChartState::Loading,
-                message: "switching".to_string(),
-            })
+            .send(status_message(
+                aeris_contracts::SeriesLoadState::Resolving,
+                "switching",
+            ))
             .expect("state sends after the marker");
 
         let (messages, disconnected) = receiver.drain();
@@ -2692,12 +2654,10 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 },
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Loading,
-                    message,
-                }
-            ] if message == "switching"
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(state), ..
+                })
+            ] if state.detail.as_deref() == Some("switching")
         ));
     }
 
@@ -2706,37 +2666,34 @@ mod tests {
         let (error_sender, error_receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             error_sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Error,
-                    message: "terminal".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Failed,
+                    "terminal"
+                ))
                 .is_ok()
         );
         assert!(
             error_sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Ready,
-                    message: "obsolete".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Ready,
+                    "obsolete"
+                ))
                 .is_ok()
         );
         let (messages, _) = error_receiver.drain();
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Error,
-                    message: terminal,
-                },
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Ready,
-                    message: obsolete,
-                }
-            ] if terminal == "terminal" && obsolete == "obsolete"
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(terminal), ..
+                }),
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(obsolete), ..
+                })
+            ] if terminal.state == aeris_contracts::SeriesLoadState::Failed
+                && terminal.detail.as_deref() == Some("terminal")
+                && obsolete.state == aeris_contracts::SeriesLoadState::Ready
+                && obsolete.detail.as_deref() == Some("obsolete")
         ));
 
         let (recovery_sender, recovery_receiver) = market_worker_channel(NonZeroUsize::MIN);
@@ -2751,11 +2708,10 @@ mod tests {
         );
         assert!(
             recovery_sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Recovering,
-                    message: "obsolete".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Resolving,
+                    "obsolete"
+                ))
                 .is_ok()
         );
         let (messages, _) = recovery_receiver.drain();
@@ -2763,12 +2719,10 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 7, .. },
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Recovering,
-                    message,
-                }
-            ] if message == "obsolete"
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(state), ..
+                })
+            ] if state.detail.as_deref() == Some("obsolete")
         ));
     }
 
@@ -2778,10 +2732,11 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
-        let publication = fixture
-            .publish_delta(bootstrap.snapshot.stream().last_sequence())
-            .expect("delta publishes")
-            .expect("fixture has a following delta");
+        let mut bar = *bootstrap.snapshot.bars().last().expect("last bar").value();
+        let next_publication_generation = bootstrap.generation.publication_generation() + 1;
+        bar.source_sequence += 1;
+        bar.exchange_timestamp_seconds += 60;
+        bar.exchange_timestamp_unix_nanos = bar.exchange_timestamp_seconds * 1_000_000_000;
         assert!(
             covered_sender
                 .send(MarketWorkerMessage::Recovery {
@@ -2793,7 +2748,11 @@ mod tests {
         );
         assert!(
             covered_sender
-                .send(MarketWorkerMessage::Update(publication))
+                .send(update_message(
+                    next_publication_generation,
+                    bar,
+                    SeriesTailOperation::Append
+                ))
                 .is_ok()
         );
         let (messages, _) = covered_receiver.drain();
@@ -2801,7 +2760,7 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 8, .. },
-                MarketWorkerMessage::Update(_)
+                MarketWorkerMessage::RuntimeSeriesPublication { .. }
             ]
         ));
 
@@ -2821,11 +2780,10 @@ mod tests {
         );
         assert!(
             stale_sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Stale,
-                    message: "network changed".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Partial,
+                    "network changed"
+                ))
                 .is_ok()
         );
         let (messages, _) = stale_receiver.drain();
@@ -2833,12 +2791,10 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 9, .. },
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Stale,
-                    message,
-                }
-            ] if message == "network changed"
+                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(state), ..
+                })
+            ] if state.detail.as_deref() == Some("network changed")
         ));
     }
 
@@ -2916,11 +2872,10 @@ mod tests {
         let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
         assert!(
             sender
-                .send(MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state: ChartState::Error,
-                    message: "terminal".to_string(),
-                })
+                .send(status_message(
+                    aeris_contracts::SeriesLoadState::Failed,
+                    "terminal"
+                ))
                 .is_ok()
         );
         assert!(
@@ -2943,11 +2898,13 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(
             messages[0],
-            MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state: ChartState::Error,
+            MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                value: MarketRuntimeEvent::SeriesState(aeris_market_runtime::MarketSeriesState {
+                    state: aeris_contracts::SeriesLoadState::Failed,
+                    ..
+                }),
                 ..
-            }
+            })
         ));
         assert!(matches!(
             messages[1],
@@ -2960,33 +2917,36 @@ mod tests {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
-        let snapshot = fixture
-            .publish_snapshot(2)
-            .expect("snapshot publishes")
-            .snapshot;
-        let publication = |generation, snapshot| {
-            MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(snapshot),
-                generation: MarketPublicationGeneration::from_tail(generation, 1, 1, 1),
-                subscription_id: "fixture".to_string(),
-                worker_label: "fixture".to_string(),
-                ui_diagnostics: None,
-            })
+        let snapshot = snapshot_message(&mut fixture, 2);
+        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = snapshot else {
+            panic!("fixture snapshot is canonical");
+        };
+        let MarketRuntimeEvent::SeriesSnapshot(publication) = event.value else {
+            panic!("fixture snapshot contains bars");
+        };
+        let publication = |generation| MarketWorkerMessage::RuntimeSeriesPublication {
+            event: FixtureMarketEvents::default().snapshot(
+                &fixture_series(),
+                1,
+                generation,
+                publication.snapshot.bars.clone(),
+            ),
+            received_unix_nanos: 0,
         };
         sender
-            .send(publication(2, snapshot.clone()))
+            .send(publication(2))
             .expect("newer publication queues");
         sender
-            .send(publication(1, snapshot))
+            .send(publication(1))
             .expect("older publication queues behind it");
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Update(first),
-                MarketWorkerMessage::Update(second),
-            ] if first.generation.publication_generation() == 2
-                && second.generation.publication_generation() == 1
+                first,
+                second,
+            ] if snapshot_generation(first) == Some(2)
+                && snapshot_generation(second) == Some(1)
         ));
     }
 
