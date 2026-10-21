@@ -11,18 +11,20 @@ use crate::desktop::frame_poll_gate::FramePollGate;
 
 use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
-    ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason,
+    ReplayStreamUpdate, ResnapshotReason,
 };
 use aeris_desktop::market_worker::{
-    MarketPublicationGeneration, MarketWorkerMessage, MarketWorkerPublication,
-    MarketWorkerReceiver, MarketWorkerSendError, MarketWorkerSender, market_worker_channel,
+    MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSendError, MarketWorkerSender,
+    market_worker_channel,
 };
-use aeris_desktop::test_support::FixtureMarketWorker;
+use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
 use aeris_instruments::InstrumentPrecision;
 use aeris_market_data::{
-    BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, OrderBook,
-    OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
+    BarPeriod, BarSeriesKey, BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata,
+    MarketBar, MarketEvent, OrderBook, OrderBookApplyOutcome, OrderBookRecoveryReason,
+    OrderBookState, QualifiedTimestamp,
 };
+use aeris_market_runtime::MarketRuntimeEvent;
 use aeris_platform_runtime::{
     LIVE_MARKET_GATE_EVIDENCE_SCOPE, LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES,
     LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,
@@ -38,12 +40,68 @@ use std::{
     io::Read,
     num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const BURST_UPDATES: usize = 10_000;
+
+fn fixture_series() -> FixtureSeries {
+    FixtureSeries {
+        series: BarSeriesKey {
+            provider_id: "hyperliquid".into(),
+            instrument_id: "hyperliquid:perp:BTC".into(),
+            entitlement_id: "fixture".into(),
+            period: BarPeriod::Time { seconds: 60 },
+            definition_version: 1,
+        },
+        provider_generation: 1,
+        price_scale: 2,
+        quantity_scale: 3,
+    }
+}
+
+fn fixture_runtime_bars() -> Result<Arc<[MarketBar]>, Box<dyn Error>> {
+    let mut fixture = FixtureMarketWorker::try_new()?;
+    let event = fixture.publish_runtime_snapshot(
+        2,
+        &fixture_series(),
+        1,
+        &FixtureMarketEvents::default(),
+    )?;
+    let MarketRuntimeEvent::SeriesSnapshot(publication) = event.value else {
+        return Err("fixture did not publish a canonical series snapshot".into());
+    };
+    Ok(publication.snapshot.bars.clone())
+}
+
+fn fixture_bar_message(
+    bars: &Arc<[MarketBar]>,
+    publication_generation: u64,
+) -> MarketWorkerMessage {
+    MarketWorkerMessage::RuntimeSeriesPublication {
+        event: FixtureMarketEvents::default().snapshot(
+            &fixture_series(),
+            1,
+            publication_generation,
+            Arc::clone(bars),
+        ),
+        received_unix_nanos: 0,
+    }
+}
+
+fn runtime_snapshot_generation(message: MarketWorkerMessage) -> Option<u64> {
+    let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = message else {
+        return None;
+    };
+    let MarketRuntimeEvent::SeriesSnapshot(publication) = event.value else {
+        return None;
+    };
+    Some(publication.publication_generation)
+}
+
 /// Where each live market gate records its own outcome, relative to the
 /// repository root. A gate is a separate, credentialed, network-bound run; a
 /// missing file means it did not run, which is not a pass.
@@ -376,8 +434,7 @@ impl ProcessMemoryProbe {
 
 fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let mut memory = ProcessMemoryProbe::new()?;
-    let mut fixture = FixtureMarketWorker::try_new()?;
-    let snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let bars = fixture_runtime_bars()?;
     let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
     let (sender, receiver) = market_worker_channel(capacity);
     let mut mailbox_high_water_items = 0_usize;
@@ -389,13 +446,12 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
             return Err::<(), Box<dyn Error>>("desktop burst mailbox disconnected".into());
         }
         for message in messages {
-            let MarketWorkerMessage::Update(publication) = message else {
+            let Some(generation) = runtime_snapshot_generation(message) else {
                 return Err("desktop burst received an unexpected presentation message".into());
             };
             delivered_updates = delivered_updates.saturating_add(1);
             last_delivered_publication_generation =
-                usize::try_from(publication.generation.publication_generation())
-                    .unwrap_or(usize::MAX);
+                usize::try_from(generation).unwrap_or(usize::MAX);
         }
         Ok(())
     };
@@ -403,18 +459,7 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     for generation in 1..=BURST_UPDATES {
         let publication_generation = u64::try_from(generation).unwrap_or(u64::MAX);
         loop {
-            match sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
-                generation: MarketPublicationGeneration::from_tail(
-                    publication_generation,
-                    1,
-                    publication_generation,
-                    publication_generation,
-                ),
-                subscription_id: "readiness_fixture".to_string(),
-                worker_label: "readiness fixture".to_string(),
-                ui_diagnostics: None,
-            })) {
+            match sender.send(fixture_bar_message(&bars, publication_generation)) {
                 Ok(()) => break,
                 Err(MarketWorkerSendError::Full) => {
                     let (messages, disconnected) = receiver.drain();
@@ -854,13 +899,12 @@ fn observe_endurance_messages(
         return;
     }
     for message in messages {
-        let MarketWorkerMessage::Update(publication) = message else {
+        let Some(generation) = runtime_snapshot_generation(message) else {
             counters.stale_or_gapped_publications =
                 counters.stale_or_gapped_publications.saturating_add(1);
             continue;
         };
-        let received =
-            usize::try_from(publication.generation.publication_generation()).unwrap_or(usize::MAX);
+        let received = usize::try_from(generation).unwrap_or(usize::MAX);
         if received != counters.last_delivered_generation.saturating_add(1) {
             counters.stale_or_gapped_publications =
                 counters.stale_or_gapped_publications.saturating_add(1);
@@ -872,7 +916,7 @@ fn observe_endurance_messages(
 fn run_endurance_frame(
     sender: &MarketWorkerSender,
     receiver: &MarketWorkerReceiver,
-    snapshot: &ReplaySnapshot,
+    bars: &Arc<[MarketBar]>,
     gate: &mut FramePollGate,
     counters: &mut EnduranceCounters,
 ) -> Result<(), Box<dyn Error>> {
@@ -892,18 +936,7 @@ fn run_endurance_frame(
             .ok_or("desktop endurance generation overflowed")?;
         let publication_generation = u64::try_from(counters.last_generation).unwrap_or(u64::MAX);
         loop {
-            match sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
-                generation: MarketPublicationGeneration::from_tail(
-                    publication_generation,
-                    1,
-                    publication_generation,
-                    publication_generation,
-                ),
-                subscription_id: "endurance_fixture".to_string(),
-                worker_label: "endurance fixture".to_string(),
-                ui_diagnostics: None,
-            })) {
+            match sender.send(fixture_bar_message(bars, publication_generation)) {
                 Ok(()) => {
                     counters.updates_published = counters.updates_published.saturating_add(1);
                     break;
@@ -939,8 +972,7 @@ fn collect_endurance_with_checkpoints(
     if checkpoint_interval.is_zero() {
         return Err("desktop endurance checkpoint interval must be nonzero".into());
     }
-    let mut fixture = FixtureMarketWorker::try_new()?;
-    let snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let bars = fixture_runtime_bars()?;
     let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
     let (sender, receiver) = market_worker_channel(capacity);
     let mut memory = ProcessMemoryProbe::new()?;
@@ -957,7 +989,7 @@ fn collect_endurance_with_checkpoints(
     // Production endurance runs pass zero and remain strictly time-bounded.
     while Instant::now() < deadline || counters.frame_cycles < minimum_frames {
         let frame_started = Instant::now();
-        run_endurance_frame(&sender, &receiver, &snapshot, &mut gate, &mut counters)?;
+        run_endurance_frame(&sender, &receiver, &bars, &mut gate, &mut counters)?;
 
         let now = Instant::now();
         if now >= next_memory_sample {

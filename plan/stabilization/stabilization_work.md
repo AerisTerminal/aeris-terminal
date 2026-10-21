@@ -1671,6 +1671,17 @@ Status: pending
     and the bounded market capacity rather than the control reserve.
     Part 5d2a4 diagnostic fixture migration and 5d2b legacy route deletion
     remain; M6.6 and VAL-DSK-021/022 stay open.
+  - Part 5d2a4: diagnostic burst and endurance mailbox producers now send
+    canonical fenced coordinator snapshots built from validated fixture bars;
+    their observers read publication generations from that envelope instead
+    of the legacy replay `Update`. Migrated tests:
+    burst_delivery_is_bounded_and_backpressured,
+    short_endurance_preserves_continuity_and_bounds and
+    interrupted_endurance_retains_an_atomic_incomplete_checkpoint. The
+    separate replay-model ordering and history-gap characterization cases
+    remain unchanged because they exercise the model, not the mailbox.
+    Part 5d2a is complete. Part 5d2b must delete the old production chart
+    route before M6.6 and VAL-DSK-021/022 can close.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2090,6 +2101,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 5d2a1 test(desktop): shared fixture coordinator-event builder and canonical disconnected snapshot migrate the pane's initial snapshot/readiness and the existing fenced examples. The pane's displayed worker identity now matches production's runtime projection; the fixture's disconnected label remains asserted at the source. Remaining 5d2a2-4 fixtures and 5d2b production deletion are outstanding.
 - 2026-10-21 M6.6 Part 5d2a2 test(desktop): pane switch permutations, retired/early bar and status fences, replacement cover, recovery, presentation and redacted failure cases use canonical fenced coordinator events through the production GPUI projection; direct setter-reinstall fixture remains deliberate. M6.6 stays unchecked pending mailbox/diagnostic migration, old-route deletion and later parts.
 - 2026-10-21 M6.6 Part 5d2a3 fix(desktop): mailbox order, frame-budget, explicit overflow, foreground/background and wake tests now exercise canonical fenced bars and readiness. Fixed the discovered mailbox classification gap so fenced bars share the market-publication capacity and suppression policy. Diagnostic fixtures and the production legacy-route deletion remain; M6.6 stays unchecked.
+- 2026-10-21 M6.6 Part 5d2a4 test(desktop): the diagnostic 10,000-event burst and bounded endurance fixture now send and inspect canonical fenced coordinator snapshots while retaining their generation continuity, high-water, memory and checkpoint assertions. Part 5d2a is complete; production legacy deletion is next.
 
 ## 7. Known gaps / deferred
 
