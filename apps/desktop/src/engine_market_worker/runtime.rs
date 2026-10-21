@@ -405,53 +405,14 @@ fn apply_received_event(
         .role
         .demands_series()
         .then_some(record.endpoint.active_generation);
-    let endpoint = &mut record.endpoint;
     let (catalog, event) = classify_provider_catalog_event(event);
-    let event = match catalog {
-        Some(event) => {
-            let mut changed = false;
-            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
-                && record.role == EndpointRole::Market
-                && record.product.provider == instrument.provider
-                && record.product.instrument_id == instrument.instrument_id
-                && instrument.selection_generation >= record.product.selection_generation
-                && instrument.session_generation >= record.product.session_generation
-            {
-                // Verified Terms supersede the provisional selected descriptor, not
-                // a different pane selection. Ticket demand uses the same identity.
-                record.product = instrument.clone();
-                changed = true;
-            }
-            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
-                && record.role != EndpointRole::MarketScreen
-            {
-                let status = market.market_session_status(instrument, clock.wall_unix_nanos());
-                endpoint
-                    .messages
-                    .send(MarketWorkerMessage::MarketSessionStatus {
-                        generation: endpoint.active_generation,
-                        status,
-                    })
-                    .map_err(|error| error.to_string())?;
-            }
-            match endpoint
-                .messages
-                .send(MarketWorkerMessage::ProviderCatalog(event))
-            {
-                Ok(()) => return Ok(changed),
-                Err(MarketWorkerSendError::Disconnected) => {
-                    // A released pane cannot receive this catalog result; its
-                    // command channel closure retires the runtime consumer.
-                    return Ok(false);
-                }
-                Err(MarketWorkerSendError::Full) => {
-                    return Err("market catalog presentation mailbox is full".to_string());
-                }
-            }
-        }
-        None => event,
-    };
+    if let Some(catalog) = catalog {
+        return Ok(deliver_provider_catalog_event(
+            market, record, catalog, clock,
+        ));
+    }
     let Some(event) = event else { return Ok(false) };
+    let endpoint = &mut record.endpoint;
     // A screen consumer owns no series, so any other event is not addressed to its presentation.
     if record.role == EndpointRole::MarketScreen {
         return Ok(false);
@@ -487,6 +448,64 @@ fn apply_received_event(
     }
     forward_runtime_publication(event, endpoint, &record.product, generation);
     Ok(false)
+}
+
+/// Delivers one provider catalog result to its pane and reports whether the
+/// worker's selected product changed.
+fn deliver_provider_catalog_event(
+    market: &MarketService,
+    record: &mut EndpointRecord,
+    event: ProviderCatalogEvent,
+    clock: &dyn Clock,
+) -> bool {
+    let mut changed = false;
+    if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
+        && record.role == EndpointRole::Market
+        && record.product.provider == instrument.provider
+        && record.product.instrument_id == instrument.instrument_id
+        && instrument.selection_generation >= record.product.selection_generation
+        && instrument.session_generation >= record.product.session_generation
+    {
+        // Verified Terms supersede the provisional selected descriptor, not
+        // a different pane selection. Ticket demand uses the same identity.
+        record.product = instrument.clone();
+        changed = true;
+    }
+    let endpoint = &record.endpoint;
+    if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
+        && record.role != EndpointRole::MarketScreen
+    {
+        let status = market.market_session_status(instrument, clock.wall_unix_nanos());
+        if let Err(MarketWorkerSendError::Full) =
+            endpoint
+                .messages
+                .send(MarketWorkerMessage::MarketSessionStatus {
+                    generation: endpoint.active_generation,
+                    status,
+                })
+        {
+            // A chart's status is resent by the session-status pass once its
+            // mailbox drains; one pane's backlog must not stop the workspace
+            // market worker.
+            diagnostic!("Aeris market session status could not enter the pane mailbox");
+        }
+    }
+    match endpoint
+        .messages
+        .send(MarketWorkerMessage::ProviderCatalog(event))
+    {
+        Ok(()) => changed,
+        // A released pane cannot receive this catalog result; its command
+        // channel closure retires the runtime consumer.
+        Err(MarketWorkerSendError::Disconnected) => false,
+        Err(MarketWorkerSendError::Full) => {
+            // This result is lost and the pane's next search or selection
+            // supersedes it; one pane's backlog must not stop the workspace
+            // market worker.
+            diagnostic!("Aeris market catalog result could not enter the pane mailbox");
+            changed
+        }
+    }
 }
 
 fn is_series_status(event: &MarketRuntimeEvent) -> bool {
@@ -1062,6 +1081,58 @@ mod tests {
             receiver.drain().0.is_empty(),
             "do not repeat an acknowledged status"
         );
+    }
+
+    #[test]
+    fn a_full_or_closed_pane_mailbox_does_not_stop_the_market_worker() {
+        let market = MarketService::start().expect("market runtime");
+        let clock = ManualClock::new(1_781_568_000_000_000_000);
+        let product = super::super::default_product("ES");
+        let (_pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            product.clone(),
+            3,
+            super::super::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        record.endpoint.messages = messages;
+        let mut records = vec![record];
+        for _ in 0..9 {
+            records[0]
+                .endpoint
+                .messages
+                .send(MarketWorkerMessage::EndpointFailure {
+                    generation: 1,
+                    message: String::new(),
+                })
+                .expect("fill bounded control reserve");
+        }
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let epoch = epochs.next();
+        let selection = || {
+            (
+                3,
+                Fenced {
+                    epoch,
+                    value: MarketRuntimeEvent::ProviderInstrumentSelection(
+                        aeris_market_runtime::MarketProviderInstrumentSelection {
+                            consumer_id: MarketConsumerId(NonZeroU64::new(3).expect("consumer")),
+                            instrument: product.clone(),
+                            command_generation: 1,
+                        },
+                    ),
+                },
+            )
+        };
+        apply_received_event(&market, 1, selection(), &mut records, &clock)
+            .expect("a full pane mailbox is not fatal");
+        assert_eq!(receiver.drain().0.len(), 9);
+        drop(receiver);
+        apply_received_event(&market, 1, selection(), &mut records, &clock)
+            .expect("a closed pane mailbox is not fatal");
     }
 
     #[test]

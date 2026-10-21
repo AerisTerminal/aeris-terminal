@@ -234,6 +234,9 @@ the check.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider
   and command kind. Startup resolution uses its own kind, not a numeric generation sentinel;
   consumer retirement clears every pending command through `ConsumerRegistry::remove_consumer`.
+  Every search and selection carries a 45-second response deadline after which the coordinator
+  rejects it as timed out, and a catalog rejection names its search or selection lane explicitly;
+  consumers never infer the lane from the rejection reason.
 - Chart selections, including startup and restored instruments, resolve and install demand through
   the coordinator's `select_and_demand` command; desktop code never owns startup catalog resolution
   or interprets provider display text as a readiness signal.

@@ -2947,6 +2947,32 @@ fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
 }
 
 #[test]
+fn catalog_rejection_lane_comes_from_the_runtime_not_the_reason() {
+    for (selection, expected) in [
+        (false, ProviderCatalogCommand::Search),
+        (true, ProviderCatalogCommand::Selection),
+    ] {
+        let event = aeris_market_runtime::MarketRuntimeEvent::ProviderCatalogRejected {
+            rejection: aeris_contracts::ProviderCatalogRejected {
+                consumer_id: 1,
+                provider: "rithmic".into(),
+                provider_generation: None,
+                command_generation: 3,
+                reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+            },
+            selection,
+        };
+        assert!(matches!(
+            aeris_desktop::market_worker::classify_provider_catalog_event(event).0,
+            Some(aeris_desktop::market_worker::ProviderCatalogEvent::CommandRejected {
+                command,
+                ..
+            }) if command == expected
+        ));
+    }
+}
+
+#[test]
 fn first_rithmic_connection_is_not_presented_as_recovery_and_autoloads_catalog() {
     let shell =
         crate::desktop::rithmic_shell::RithmicShellState::local().expect("fixed Rithmic profile");

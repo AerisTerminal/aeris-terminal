@@ -53,6 +53,7 @@ impl TimerKey {
     const SESSION_TRANSITION: u8 = 4;
     const TRADE_TAPE: u8 = 8;
     const CONTROL_RETRY: u8 = 16;
+    const CATALOG_DEADLINE: u8 = 32;
 
     fn contains(self, timer: u8) -> bool {
         self.0 & timer != 0
@@ -220,6 +221,9 @@ fn coordinator_turn(
     }
     if due.contains(TimerKey::HISTORY_RETRY) {
         coordinator.retry_history();
+    }
+    if due.contains(TimerKey::CATALOG_DEADLINE) {
+        coordinator.expire_catalog_commands();
     }
     if active || due.contains(TimerKey::CONTROL_RETRY) {
         coordinator.resolve_trading_routes();
@@ -1064,6 +1068,9 @@ impl Coordinator<'_> {
         }
         if let Some(at) = self.provider_registry.next_retry() {
             deadlines.entry(at).or_default().0 |= TimerKey::CONTROL_RETRY;
+        }
+        if let Some(at) = self.command_fences.next_deadline() {
+            deadlines.entry(at).or_default().0 |= TimerKey::CATALOG_DEADLINE;
         }
         for (series, live) in self.series.iter() {
             if !live.connected || !live.history_ready() {
@@ -8186,6 +8193,7 @@ mod tests {
             "rithmic".into(),
             super::super::CommandKind::Search,
             8,
+            coordinator.clock.monotonic(),
         );
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
@@ -8236,6 +8244,57 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn unanswered_catalog_search_times_out_to_its_consumer_once() {
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(1_000_000_000));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator.command_fences.record(
+            consumer,
+            "rithmic".into(),
+            super::super::CommandKind::Search,
+            8,
+            coordinator.clock.monotonic(),
+        );
+        let armed = |coordinator: &mut Coordinator<'_>| {
+            coordinator.refresh_deadlines();
+            coordinator
+                .deadlines
+                .values()
+                .any(|timer| timer.contains(TimerKey::CATALOG_DEADLINE))
+        };
+        assert!(armed(&mut coordinator));
+
+        clock.advance(Duration::from_secs(44));
+        let due = coordinator.take_due_timers(coordinator.clock.monotonic());
+        assert!(!due.contains(TimerKey::CATALOG_DEADLINE));
+        clock.advance(Duration::from_secs(1));
+        let due = coordinator.take_due_timers(coordinator.clock.monotonic());
+        assert!(due.contains(TimerKey::CATALOG_DEADLINE));
+        coordinator.expire_catalog_commands();
+
+        assert!(matches!(
+            coordinator
+                .events
+                .get(&consumer)
+                .expect("consumer outbox")
+                .catalog_search,
+            Some(MarketRuntimeEvent::ProviderCatalogRejected {
+                ref rejection,
+                selection: false,
+            }) if rejection.command_generation == 8
+                && rejection.reason
+                    == aeris_contracts::ProviderCatalogRejectionReason::SearchTimedOut
+        ));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+        assert!(!armed(&mut coordinator));
+    }
+
     fn market_screen(consumer: ConsumerId, screen_generation: u64) -> ProviderMarketScreen {
         ProviderMarketScreen {
             consumer_id: consumer.0.get(),
@@ -8260,6 +8319,7 @@ mod tests {
             "hyperliquid".into(),
             super::super::CommandKind::Screen,
             4,
+            coordinator.clock.monotonic(),
         );
 
         coordinator.handle_catalog_screen(market_screen(consumer, 3));
@@ -8321,6 +8381,7 @@ mod tests {
             "hyperliquid".into(),
             super::super::CommandKind::Screen,
             9,
+            coordinator.clock.monotonic(),
         );
 
         coordinator.reject_overflowed_catalog("hyperliquid");
@@ -8350,12 +8411,14 @@ mod tests {
             "hyperliquid".into(),
             super::super::CommandKind::StartupResolve,
             17,
+            coordinator.clock.monotonic(),
         );
         coordinator.command_fences.record(
             consumer,
             "hyperliquid".into(),
             super::super::CommandKind::Search,
             1,
+            coordinator.clock.monotonic(),
         );
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
@@ -8658,6 +8721,7 @@ mod tests {
                 "hyperliquid".into(),
                 super::super::CommandKind::StartupResolve,
                 generation,
+                coordinator.clock.monotonic(),
             );
         }
         for generation in [17, 18] {
@@ -8692,6 +8756,7 @@ mod tests {
             super::super::CommandKind::StartupResolve,
             17,
             true,
+            coordinator.clock.monotonic(),
         );
         coordinator.command_fences.record_operation(
             consumer,
@@ -8699,6 +8764,7 @@ mod tests {
             super::super::CommandKind::Select,
             3,
             true,
+            coordinator.clock.monotonic(),
         );
 
         coordinator.handle_catalog_selection(consumer.0.get(), 17, instrument());
@@ -8726,7 +8792,7 @@ mod tests {
         )));
         assert!(delivered.iter().any(|event| matches!(
             event,
-            MarketRuntimeEvent::ProviderCatalogRejected(rejection)
+            MarketRuntimeEvent::ProviderCatalogRejected { rejection, selection: true }
                 if rejection.command_generation == 3
         )));
     }
@@ -8745,6 +8811,7 @@ mod tests {
             super::super::CommandKind::Select,
             12,
             true,
+            coordinator.clock.monotonic(),
         );
 
         let mut stale = instrument();
@@ -8810,6 +8877,7 @@ mod tests {
                 super::super::CommandKind::Select,
                 12,
                 true,
+                coordinator.clock.monotonic(),
             );
             let mut resolution = resolved.clone();
             resolution.selection_generation = 12;
@@ -8841,7 +8909,10 @@ mod tests {
                 assert_eq!(installed, None, "{}", resolved.provider);
                 assert!(matches!(
                     published,
-                    Some(MarketRuntimeEvent::ProviderCatalogRejected(_))
+                    Some(MarketRuntimeEvent::ProviderCatalogRejected {
+                        selection: true,
+                        ..
+                    })
                 ));
             }
         }
@@ -8883,9 +8954,13 @@ mod tests {
                 super::super::CommandKind::Screen,
                 super::super::CommandKind::StartupResolve,
             ] {
-                coordinator
-                    .command_fences
-                    .record(owner, "rithmic".into(), kind, 10);
+                coordinator.command_fences.record(
+                    owner,
+                    "rithmic".into(),
+                    kind,
+                    10,
+                    coordinator.clock.monotonic(),
+                );
             }
             assert_eq!(coordinator.command_fences.count_for(owner), 4);
             assert!(coordinator.engine.has_subscription(&selected));

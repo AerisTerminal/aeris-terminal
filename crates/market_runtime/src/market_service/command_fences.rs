@@ -2,7 +2,16 @@
 
 use super::ConsumerId;
 use aeris_market_engine::fence::{CommandTag, Epoch, EpochSequence};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
+
+/// Longest a search or selection may wait for its provider callback. Adapters
+/// answer or reject every command they accept; this bounds a lost callback so a
+/// consumer never waits forever, while leaving room for the provider login a
+/// first command waits behind.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum CommandKind {
@@ -19,6 +28,17 @@ struct Pending {
     epoch: Epoch<CommandTag>,
     selection: bool,
     completed: bool,
+    deadline: Instant,
+}
+
+/// A catalog command whose provider callback did not arrive in time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ExpiredCommand {
+    pub(super) consumer: ConsumerId,
+    pub(super) provider: String,
+    pub(super) kind: CommandKind,
+    pub(super) wire_generation: u64,
+    pub(super) selection: bool,
 }
 
 #[derive(Default)]
@@ -34,8 +54,9 @@ impl CommandFences {
         provider: String,
         kind: CommandKind,
         wire_generation: u64,
+        now: Instant,
     ) -> Epoch<CommandTag> {
-        self.record_operation(consumer, provider, kind, wire_generation, false)
+        self.record_operation(consumer, provider, kind, wire_generation, false, now)
     }
 
     pub(super) fn record_operation(
@@ -45,6 +66,7 @@ impl CommandFences {
         kind: CommandKind,
         wire_generation: u64,
         selection: bool,
+        now: Instant,
     ) -> Epoch<CommandTag> {
         let epoch = self.sequence.next();
         self.pending.insert(
@@ -54,9 +76,41 @@ impl CommandFences {
                 epoch,
                 selection,
                 completed: false,
+                deadline: now + RESPONSE_TIMEOUT,
             },
         );
         epoch
+    }
+
+    /// Earliest response deadline among commands still awaiting a callback.
+    /// Screens and completed searches are not answered by a later callback.
+    pub(super) fn next_deadline(&self) -> Option<Instant> {
+        self.awaiting_callback()
+            .map(|(_, pending)| pending.deadline)
+            .min()
+    }
+
+    /// Commands whose response deadline has passed. They stay recorded until
+    /// the caller rejects them through the normal rejection path.
+    pub(super) fn expired(&self, now: Instant) -> Vec<ExpiredCommand> {
+        self.awaiting_callback()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|((consumer, provider, kind), pending)| ExpiredCommand {
+                consumer: *consumer,
+                provider: provider.clone(),
+                kind: *kind,
+                wire_generation: pending.wire_generation,
+                selection: pending.selection,
+            })
+            .collect()
+    }
+
+    fn awaiting_callback(
+        &self,
+    ) -> impl Iterator<Item = (&(ConsumerId, String, CommandKind), &Pending)> {
+        self.pending
+            .iter()
+            .filter(|((_, _, kind), pending)| *kind != CommandKind::Screen && !pending.completed)
     }
 
     pub(super) fn accepts(
@@ -169,8 +223,21 @@ mod tests {
     fn superseded_startup_search_does_not_accept_old_result() {
         let consumer = ConsumerId(NonZeroU64::MIN);
         let mut fences = CommandFences::default();
-        let old = fences.record(consumer, "rithmic".into(), CommandKind::StartupResolve, 17);
-        let current = fences.record(consumer, "rithmic".into(), CommandKind::StartupResolve, 18);
+        let now = Instant::now();
+        let old = fences.record(
+            consumer,
+            "rithmic".into(),
+            CommandKind::StartupResolve,
+            17,
+            now,
+        );
+        let current = fences.record(
+            consumer,
+            "rithmic".into(),
+            CommandKind::StartupResolve,
+            18,
+            now,
+        );
         assert_ne!(old, current);
         assert!(
             fences
@@ -195,10 +262,55 @@ mod tests {
             CommandKind::Screen,
             CommandKind::StartupResolve,
         ] {
-            fences.record(consumer, "rithmic".into(), kind, 1);
+            fences.record(consumer, "rithmic".into(), kind, 1, Instant::now());
         }
         assert_eq!(fences.count_for(consumer), 5);
         fences.remove_consumer(consumer);
         assert_eq!(fences.count_for(consumer), 0);
+    }
+
+    #[test]
+    fn unanswered_commands_expire_but_screens_and_completed_searches_do_not() {
+        let consumer = ConsumerId(NonZeroU64::MIN);
+        let mut fences = CommandFences::default();
+        let start = Instant::now();
+        fences.record(consumer, "rithmic".into(), CommandKind::Search, 4, start);
+        fences.record(consumer, "rithmic".into(), CommandKind::Screen, 5, start);
+        fences.record_operation(
+            consumer,
+            "rithmic".into(),
+            CommandKind::Select,
+            6,
+            true,
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(fences.next_deadline(), Some(start + RESPONSE_TIMEOUT));
+        assert_eq!(fences.expired(start + Duration::from_secs(44)), []);
+        assert_eq!(
+            fences.expired(start + RESPONSE_TIMEOUT),
+            [ExpiredCommand {
+                consumer,
+                provider: "rithmic".into(),
+                kind: CommandKind::Search,
+                wire_generation: 4,
+                selection: false,
+            }]
+        );
+
+        fences.complete_search(consumer, "rithmic", 4);
+        assert_eq!(
+            fences.next_deadline(),
+            Some(start + Duration::from_secs(1) + RESPONSE_TIMEOUT)
+        );
+        assert_eq!(
+            fences.expired(start + Duration::from_secs(1) + RESPONSE_TIMEOUT),
+            [ExpiredCommand {
+                consumer,
+                provider: "rithmic".into(),
+                kind: CommandKind::Select,
+                wire_generation: 6,
+                selection: true,
+            }]
+        );
     }
 }

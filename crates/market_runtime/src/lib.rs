@@ -244,7 +244,9 @@ pub struct MarketStudyOutputsInvalidated {
 #[derive(Clone, Debug)]
 pub enum MarketRuntimeEvent {
     SelectionOutcome(market_service::SelectionOutcome),
-    CatalogReady { provider: String },
+    CatalogReady {
+        provider: String,
+    },
     ProviderState(aeris_contracts::ProviderState),
     SeriesSnapshot(aeris_market_engine::ConsumerPublication),
     SeriesUpdate(aeris_market_engine::ConsumerSeriesUpdate),
@@ -258,7 +260,13 @@ pub enum MarketRuntimeEvent {
     PriceAlertTriggered(MarketPriceAlertTrigger),
     ProviderInstrumentSearchResult(aeris_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
-    ProviderCatalogRejected(aeris_contracts::ProviderCatalogRejected),
+    /// A search or selection the provider or runtime refused. `selection`
+    /// says which command lane failed, because the rejection reason alone
+    /// (for example an unavailable dispatch) does not identify it.
+    ProviderCatalogRejected {
+        rejection: aeris_contracts::ProviderCatalogRejected,
+        selection: bool,
+    },
     ProviderMarketScreen(aeris_contracts::ProviderMarketScreen),
     ProviderMarketScreenRejected(aeris_contracts::ProviderCatalogRejected),
     Fault(aeris_contracts::Fault),
@@ -282,7 +290,7 @@ impl MarketRuntimeEvent {
             | Self::PriceAlertTriggered(_)
             | Self::ProviderInstrumentSearchResult(_)
             | Self::ProviderInstrumentSelection(_)
-            | Self::ProviderCatalogRejected(_)
+            | Self::ProviderCatalogRejected { .. }
             | Self::ProviderMarketScreen(_)
             | Self::ProviderMarketScreenRejected(_)
             | Self::Fault(_) => None,

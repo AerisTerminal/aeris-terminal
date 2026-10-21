@@ -255,6 +255,7 @@ impl Coordinator<'_> {
             super::CommandKind::StartupResolve,
             request.generation,
             true,
+            self.clock.monotonic(),
         );
         Ok(())
     }
@@ -330,6 +331,7 @@ impl Coordinator<'_> {
                         super::CommandKind::Selection,
                         request.generation,
                         true,
+                        self.clock.monotonic(),
                     );
                     self.pending_selections
                         .insert(consumer, (client_id, request, provider));
@@ -370,8 +372,13 @@ impl Coordinator<'_> {
             .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search));
         match dispatched {
             Ok(()) => {
-                self.command_fences
-                    .record(consumer, provider.clone(), kind, request.generation);
+                self.command_fences.record(
+                    consumer,
+                    provider.clone(),
+                    kind,
+                    request.generation,
+                    self.clock.monotonic(),
+                );
                 self.pending_selections
                     .insert(consumer, (client_id, request, provider));
             }
@@ -602,8 +609,13 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            self.command_fences
-                .record(consumer_id, provider, kind, generation);
+            self.command_fences.record(
+                consumer_id,
+                provider,
+                kind,
+                generation,
+                self.clock.monotonic(),
+            );
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 *events.catalog_search_slot(kind) = None;
             }
@@ -634,8 +646,14 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            self.command_fences
-                .record_operation(consumer_id, provider, kind, generation, true);
+            self.command_fences.record_operation(
+                consumer_id,
+                provider,
+                kind,
+                generation,
+                true,
+                self.clock.monotonic(),
+            );
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 *events.catalog_selection_slot(kind) = None;
             }
@@ -666,6 +684,7 @@ impl Coordinator<'_> {
                 provider,
                 super::CommandKind::Screen,
                 generation,
+                self.clock.monotonic(),
             );
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 events.catalog_screen = None;
@@ -994,6 +1013,7 @@ impl Coordinator<'_> {
                         super::CommandKind::Selection,
                         result.search_generation,
                         true,
+                        self.clock.monotonic(),
                     );
                 }
                 Err(error) => {
@@ -1069,13 +1089,16 @@ impl Coordinator<'_> {
                     command_generation,
                 })
             }
-            Err(_) => MarketRuntimeEvent::ProviderCatalogRejected(ProviderCatalogRejected {
-                consumer_id,
-                provider,
-                provider_generation: Some(instrument.session_generation),
-                command_generation,
-                reason: ProviderCatalogRejectionReason::SubscriptionRejected,
-            }),
+            Err(_) => MarketRuntimeEvent::ProviderCatalogRejected {
+                rejection: ProviderCatalogRejected {
+                    consumer_id,
+                    provider,
+                    provider_generation: Some(instrument.session_generation),
+                    command_generation,
+                    reason: ProviderCatalogRejectionReason::SubscriptionRejected,
+                },
+                selection: true,
+            },
         };
         if let Some(events) = self.events.get_mut(&id) {
             *events.catalog_selection_slot(kind) = Some(publication);
@@ -1207,6 +1230,45 @@ impl Coordinator<'_> {
         }
     }
 
+    /// Rejects every search and selection whose provider callback is overdue,
+    /// so a lost callback reaches its consumer as an explicit timeout.
+    pub(super) fn expire_catalog_commands(&mut self) {
+        for expired in self.command_fences.expired(self.clock.monotonic()) {
+            let (operation, reason) = if expired.selection {
+                (
+                    "selection",
+                    ProviderCatalogRejectionReason::SelectionTimedOut,
+                )
+            } else {
+                ("search", ProviderCatalogRejectionReason::SearchTimedOut)
+            };
+            aeris_observability::diagnostic!(
+                "Market catalog {operation} timed out for provider {}",
+                expired.provider
+            );
+            self.reject_catalog_command(
+                expired.consumer,
+                expired.kind,
+                ProviderCatalogRejected {
+                    consumer_id: expired.consumer.0.get(),
+                    provider: expired.provider.clone(),
+                    provider_generation: None,
+                    command_generation: expired.wire_generation,
+                    reason,
+                },
+                expired.selection,
+            );
+            // An overdue fence must never stay armed, or its past deadline
+            // would wake the coordinator continuously.
+            self.command_fences.take(
+                expired.consumer,
+                &expired.provider,
+                expired.kind,
+                expired.wire_generation,
+            );
+        }
+    }
+
     pub(super) fn handle_catalog_rejection(
         &mut self,
         rejection: ProviderCatalogRejected,
@@ -1226,6 +1288,16 @@ impl Coordinator<'_> {
         ) else {
             return;
         };
+        self.reject_catalog_command(consumer_id, kind, rejection, selection);
+    }
+
+    fn reject_catalog_command(
+        &mut self,
+        consumer_id: ConsumerId,
+        kind: super::CommandKind,
+        rejection: ProviderCatalogRejected,
+        selection: bool,
+    ) {
         if kind == super::CommandKind::Selection {
             self.fail_pending_selection(
                 consumer_id,
@@ -1245,7 +1317,10 @@ impl Coordinator<'_> {
             } else {
                 events.catalog_search_slot(kind)
             };
-            *slot = Some(MarketRuntimeEvent::ProviderCatalogRejected(rejection));
+            *slot = Some(MarketRuntimeEvent::ProviderCatalogRejected {
+                rejection,
+                selection,
+            });
         }
     }
 }

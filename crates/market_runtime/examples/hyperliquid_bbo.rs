@@ -67,7 +67,7 @@ fn run(market: &MarketService, symbol: &str, seconds: u64) -> Result<(), String>
                         )?,
                     );
                 }
-                MarketRuntimeEvent::ProviderCatalogRejected(rejection) => {
+                MarketRuntimeEvent::ProviderCatalogRejected { rejection, .. } => {
                     return Err(format!("catalog rejected: {:?}", rejection.reason));
                 }
                 _ => {}

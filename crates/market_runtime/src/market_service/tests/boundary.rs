@@ -329,6 +329,7 @@ fn select_and_demand_supersedes_pending_catalog_and_drops_late_callback() {
         "rithmic".into(),
         super::super::super::CommandKind::Selection,
         pending.generation,
+        boundary.coordinator.clock.monotonic(),
     );
     boundary.coordinator.pending_selections.insert(
         boundary.consumer,
@@ -387,6 +388,7 @@ fn catalog_symbol_selection_commits_only_after_its_fenced_resolution() {
         super::super::super::CommandKind::Selection,
         request.generation,
         true,
+        boundary.coordinator.clock.monotonic(),
     );
     boundary.coordinator.pending_selections.insert(
         boundary.consumer,

@@ -680,7 +680,11 @@ fn handle_catalog_message(
                 );
                 Ok(())
             }
-            Ok(CollectionProgress::Unhandled(_)) | Err(_) => Err(malformed()),
+            Ok(CollectionProgress::Unhandled(_)) => Err(malformed()),
+            Err(error) => {
+                diagnostic!("Aeris Rithmic symbol search response was invalid: {error:?}");
+                Err(malformed())
+            }
         },
         PendingCatalogCommand::Reference { selection, .. } => {
             let DecodedCatalogMessage::InstrumentReference(reference) = message else {

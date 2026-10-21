@@ -214,11 +214,14 @@ fn required_string(field: &'static str, value: Option<String>) -> Result<String,
     Ok(value)
 }
 
+/// Rithmic sends some optional descriptive fields as present but empty; that
+/// is treated as absent rather than as a malformed frame.
 #[cfg(rithmic_kit)]
 fn optional_string(
     field: &'static str,
     value: Option<String>,
 ) -> Result<Option<String>, ProtocolError> {
+    let value = value.filter(|value| !value.is_empty());
     if let Some(value) = &value {
         validate_string(field, value)?;
     }
@@ -318,6 +321,66 @@ mod tests {
                 price_precision: Some(2),
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn empty_optional_catalog_fields_decode_as_absent() {
+        let codec = RithmicProtocolCodec;
+        let result = rti::ResponseSearchSymbols {
+            template_id: 110,
+            rq_handler_rp_code: vec!["0".to_string()],
+            symbol: Some("MNQZ5".to_string()),
+            exchange: Some("CME".to_string()),
+            symbol_name: Some(String::new()),
+            product_code: Some("MNQ".to_string()),
+            instrument_type: Some(String::new()),
+            expiration_date: Some(String::new()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec.decode_catalog(&result).expect("result decodes"),
+            DecodedCatalogMessage::SearchResult(SymbolSearchResult {
+                symbol: "MNQZ5".to_string(),
+                exchange: "CME".to_string(),
+                name: None,
+                product_code: Some("MNQ".to_string()),
+                instrument_type: None,
+                expiration_date: None,
+            })
+        );
+
+        let reference = rti::ResponseReferenceData {
+            template_id: 15,
+            rp_code: vec!["0".to_string()],
+            symbol: Some("MNQZ5".to_string()),
+            exchange: Some("CME".to_string()),
+            exchange_symbol: Some(String::new()),
+            currency: Some(String::new()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_catalog(&reference).expect("reference decodes"),
+            DecodedCatalogMessage::InstrumentReference(Some(InstrumentReference {
+                exchange_symbol: None,
+                currency: None,
+                ..
+            }))
+        ));
+
+        let empty_symbol = rti::ResponseSearchSymbols {
+            template_id: 110,
+            rq_handler_rp_code: vec!["0".to_string()],
+            symbol: Some(String::new()),
+            exchange: Some("CME".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_catalog(&empty_symbol),
+            Err(ProtocolError::EmptyField("search.symbol"))
         ));
     }
 

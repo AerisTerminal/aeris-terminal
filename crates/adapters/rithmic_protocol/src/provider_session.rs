@@ -200,10 +200,6 @@ impl RithmicSymbolSearch {
         SymbolSearchCollectionRequest {
             exchange: self.exchange.clone(),
             product_code: self.product_code.clone(),
-            instrument_type: self
-                .instrument_type
-                .map(instrument_type_name)
-                .map(str::to_string),
             maximum_results: self.maximum_results,
         }
     }
@@ -554,21 +550,6 @@ fn valid_command_field(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= MAXIMUM_IDENTITY_BYTES
         && !value.chars().any(char::is_control)
-}
-
-const fn instrument_type_name(instrument_type: InstrumentType) -> &'static str {
-    match instrument_type {
-        InstrumentType::Future => "FUTURE",
-        InstrumentType::FutureOption => "FUTURE_OPTION",
-        InstrumentType::FutureStrategy => "FUTURE_STRATEGY",
-        InstrumentType::Equity => "EQUITY",
-        InstrumentType::EquityOption => "EQUITY_OPTION",
-        InstrumentType::EquityStrategy => "EQUITY_STRATEGY",
-        InstrumentType::Index => "INDEX",
-        InstrumentType::IndexOption => "INDEX_OPTION",
-        InstrumentType::Spread => "SPREAD",
-        InstrumentType::Synthetic => "SYNTHETIC",
-    }
 }
 
 impl RithmicProviderInstrument {

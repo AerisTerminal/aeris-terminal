@@ -5,15 +5,16 @@ use aeris_rithmic_protocol_adapter::{
     AuthenticationState, CollectionProgress, DecodedCatalogMessage, DecodedControlMessage,
     DecodedMarketMessage, DecodedTimeBarType, DepthByOrderSnapshotMessage,
     DepthByOrderSnapshotRequest, DepthByOrderSubscription, HistoryBars, HistoryCollectionRequest,
-    HistoryCollector, HistorySeries, InstrumentReferenceRequest, MarketDataSubscription,
-    ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
-    RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication,
-    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCredentialBytes,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicSession,
-    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming,
-    SearchPattern, SessionGeneration, SubscriptionAction, SymbolSearchCollectionRequest,
-    SymbolSearchCollector, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
-    TimeBarType, collect_rithmic_covering_recovery_evidence,
+    HistoryCollector, HistorySeries, InstrumentReferenceRequest, InstrumentType,
+    MarketDataSubscription, ProviderInvalidationReason, ProviderSessionDriver,
+    ProviderSessionEvent, RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE,
+    RithmicApplication, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
+    RithmicCredentialBytes, RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents,
+    RithmicSession, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
+    RithmicSessionTiming, SearchPattern, SessionGeneration, SubscriptionAction,
+    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
+    TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
+    collect_rithmic_covering_recovery_evidence,
 };
 use std::{
     io::{self, Write},
@@ -304,14 +305,13 @@ fn search_and_reference(
             search_text: SYMBOL,
             exchange: None,
             product_code: None,
-            instrument_type: None,
+            instrument_type: Some(InstrumentType::Future),
             pattern: SearchPattern::Equals,
         })
         .map_err(|error| format!("symbol_search_send_failed={error}"))?;
     let mut collector = SymbolSearchCollector::try_new(SymbolSearchCollectionRequest {
         exchange: None,
         product_code: None,
-        instrument_type: None,
         maximum_results: NonZeroUsize::new(128).ok_or("search_limit_invalid")?,
     })
     .map_err(|error| error.to_string())?;
@@ -353,9 +353,10 @@ fn search_and_reference(
     );
     for result in results.results.iter().take(32) {
         println!(
-            "rithmic_search_result symbol={} exchange={} expiration={}",
+            "rithmic_search_result symbol={} exchange={} type={} expiration={}",
             result.symbol,
             result.exchange,
+            result.instrument_type.as_deref().unwrap_or("-"),
             result.expiration_date.as_deref().unwrap_or("-")
         );
     }

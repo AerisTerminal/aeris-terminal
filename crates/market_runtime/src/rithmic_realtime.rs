@@ -24,7 +24,7 @@ use aeris_platform_runtime::{
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
 use aeris_rithmic_protocol_adapter::{
-    AppliedRithmicEvent, InstrumentContractMetadata, InstrumentDescriptor,
+    AppliedRithmicEvent, InstrumentContractMetadata, InstrumentDescriptor, InstrumentType,
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
     ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
     RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicCallbackLimits,
@@ -464,7 +464,14 @@ fn catalog_session_failed(
     while events.has_ready() {
         match try_recv_rithmic_event(runtime, events, retries, Instant::now()) {
             Ok(Some(AppliedRithmicEvent::RetryScheduled(_)) | None) => break,
-            Ok(Some(AppliedRithmicEvent::TerminalFailure { .. })) | Err(_) => return true,
+            Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
+                diagnostic!("Aeris Rithmic catalog session failed: {reason:?}");
+                return true;
+            }
+            Err(error) => {
+                diagnostic!("Aeris Rithmic catalog callback failed: {error}");
+                return true;
+            }
             Ok(Some(AppliedRithmicEvent::Semantic(_))) => {}
         }
     }
@@ -518,6 +525,9 @@ fn dispatch_catalog_control(
                 );
                 return;
             };
+            // Aeris charts Rithmic futures only. Filtering at the provider keeps
+            // a broad query's options and strategies from filling the bounded
+            // result set ahead of the futures contracts.
             let request =
                 bounded_search_results(search.maximum_results).and_then(|maximum_results| {
                     RithmicSymbolSearch::try_new(
@@ -525,7 +535,7 @@ fn dispatch_catalog_control(
                         search.query,
                         None,
                         None,
-                        None,
+                        Some(InstrumentType::Future),
                         SearchPattern::Equals,
                         maximum_results,
                     )
@@ -652,9 +662,12 @@ fn publish_catalog_callback(
             reason,
             ..
         } => {
+            // A superseded search is reported for a selection that named a
+            // search result the session no longer holds.
             let selection = matches!(
                 reason,
-                RithmicCatalogRejection::InstrumentUnavailable
+                RithmicCatalogRejection::SupersededSearch
+                    | RithmicCatalogRejection::InstrumentUnavailable
                     | RithmicCatalogRejection::SubscriptionRejected
                     | RithmicCatalogRejection::SelectionDispatchUnavailable
             );
@@ -1276,14 +1289,14 @@ fn run_demand(
     {
         channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, None));
     }
-    loop {
+    let end = 'session: loop {
         if channels.coordinator_wake.overflowed("rithmic", generation) {
             let _ = runtime.stop();
-            return SelectionExit::Replace {
+            break LiveSessionEnd::Exit(SelectionExit::Replace {
                 demand,
                 generation,
                 transport_recovery: true,
-            };
+            });
         }
         match poll_environment(
             environment,
@@ -1302,13 +1315,13 @@ fn run_demand(
             Ok(None) => {}
             Err(()) => {
                 let _ = runtime.stop();
-                return SelectionExit::Closed { generation };
+                break LiveSessionEnd::Exit(SelectionExit::Closed { generation });
             }
         }
         if channels.login_changed(login) {
             // Idle publishes a recoverable disconnect, so the coordinator
             // reissues this demand on a session that reads the new login.
-            return stop_selection(&mut runtime, generation);
+            break LiveSessionEnd::Exit(stop_selection(&mut runtime, generation));
         }
         loop {
             match channels.realtime_controls.try_recv() {
@@ -1316,16 +1329,19 @@ fn run_demand(
                     demand = replacement;
                     subscription_dirty = true;
                     if demand.is_empty() {
-                        return stop_selection(&mut runtime, generation);
+                        break 'session LiveSessionEnd::Exit(stop_selection(
+                            &mut runtime,
+                            generation,
+                        ));
                     }
                 }
                 Ok(RithmicRealtimeControl::Stop) => {
-                    return stop_selection(&mut runtime, generation);
+                    break 'session LiveSessionEnd::Exit(stop_selection(&mut runtime, generation));
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     let _ = runtime.stop();
-                    return SelectionExit::Closed { generation };
+                    break 'session LiveSessionEnd::Exit(SelectionExit::Closed { generation });
                 }
             }
         }
@@ -1337,7 +1353,7 @@ fn run_demand(
             &mut searches,
             &mut selections,
         ) {
-            return exit;
+            break LiveSessionEnd::Exit(exit);
         }
         if drain_live_events(
             &mut runtime,
@@ -1348,14 +1364,9 @@ fn run_demand(
             &mut subscription_generation,
         ) == LiveDrain::SessionEnded
         {
-            return wait_for_replacement(
-                channels,
-                login,
-                environment,
-                environment_state,
-                generation,
-                true,
-            );
+            break LiveSessionEnd::Failed {
+                transport_recovery: true,
+            };
         }
         if subscription_dirty
             && subscription_generation
@@ -1371,14 +1382,9 @@ fn run_demand(
                 Err(RithmicProviderCommandError::InvalidRequest) => {
                     channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                     let _ = runtime.stop();
-                    return wait_for_replacement(
-                        channels,
-                        login,
-                        environment,
-                        environment_state,
-                        generation,
-                        false,
-                    );
+                    break LiveSessionEnd::Failed {
+                        transport_recovery: false,
+                    };
                 }
             }
         }
@@ -1389,14 +1395,9 @@ fn run_demand(
                 if retries.ticket().is_none() {
                     channels.publish_realtime(RithmicRealtimeEvent::Failed(generation, error));
                     let _ = runtime.stop();
-                    return wait_for_replacement(
-                        channels,
-                        login,
-                        environment,
-                        environment_state,
-                        generation,
-                        false,
-                    );
+                    break LiveSessionEnd::Failed {
+                        transport_recovery: false,
+                    };
                 }
                 false
             }
@@ -1413,7 +1414,35 @@ fn run_demand(
             channels.publish_realtime(RithmicRealtimeEvent::Connecting(generation));
         }
         std::thread::sleep(ADAPTER_CONTROL_WAIT);
+    };
+    // Every exit has stopped the session, so no callback can still answer
+    // its searches or selections.
+    reject_pending_catalog(
+        channels.catalog_publications,
+        generation,
+        &mut searches,
+        &mut selections,
+    );
+    match end {
+        LiveSessionEnd::Exit(exit) => exit,
+        LiveSessionEnd::Failed { transport_recovery } => wait_for_replacement(
+            channels,
+            login,
+            environment,
+            environment_state,
+            generation,
+            transport_recovery,
+        ),
     }
+}
+
+/// How one live session loop ended. The session is stopped in both cases.
+enum LiveSessionEnd {
+    Exit(SelectionExit),
+    /// The session failed; wait for the coordinator's replacement demand.
+    Failed {
+        transport_recovery: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1597,7 +1626,8 @@ fn poll_environment(
 
 /// Waits after a failed session for replacement demand. A login saved since
 /// the failed session read the vault ends the wait as idle: that publishes a
-/// recoverable disconnect, and the coordinator reissues its demand.
+/// recoverable disconnect, and the coordinator reissues its demand. No session
+/// exists meanwhile, so catalog commands are rejected instead of left waiting.
 fn wait_for_replacement(
     channels: ProviderChannels<'_>,
     login: u64,
@@ -1613,6 +1643,19 @@ fn wait_for_replacement(
                 return SelectionExit::Closed { generation };
             }
             Err(TryRecvError::Empty) => {}
+        }
+        loop {
+            match channels.catalog_controls.try_recv() {
+                Ok(control) => {
+                    reject_catalog_control(
+                        channels.catalog_publications,
+                        control,
+                        Some(generation),
+                    );
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return SelectionExit::Closed { generation },
+            }
         }
         if channels.login_changed(login) {
             return SelectionExit::Idle { generation };
@@ -1854,15 +1897,18 @@ mod tests {
     };
 
     use super::{
-        EnvironmentState, MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogEvent,
-        bounded_search_results, catalog_selection_subscription, next_generation,
-        publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
-        reject_pending_catalog, retire_pending_catalog_generation,
+        EnvironmentState, MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogControl,
+        RithmicCatalogEvent, RithmicRealtimeControl, bounded_search_results,
+        catalog_selection_subscription, next_generation, publish_catalog_callback,
+        queue_depth_snapshot, reject_catalog_generation, reject_pending_catalog,
+        retire_pending_catalog_generation,
     };
+    use aeris_contracts::{InstrumentSearchCategories, SearchProviderInstruments};
     use aeris_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
     use aeris_platform_runtime::{NetworkEvent, PowerEvent};
     use aeris_rithmic_protocol_adapter::{
-        RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
+        RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
+        RithmicEnvironmentEvent,
     };
 
     #[test]
@@ -2099,6 +2145,101 @@ mod tests {
             RithmicCatalogEvent::Rejected { rejection, .. }
                 if rejection.provider_generation == Some(9)
         )));
+    }
+
+    #[test]
+    fn superseded_search_rejection_answers_the_pending_selection() {
+        let (publications, published) = mpsc::sync_channel(1);
+        let publications = super::CatalogPublisher::new(
+            publications,
+            "rithmic",
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
+        let mut searches = BTreeMap::from([(2, 41)]);
+        let mut selections = BTreeMap::from([(2, 42)]);
+        let callback = AdapterCatalogEvent::command_rejected(
+            Some(NonZeroU64::MIN),
+            NonZeroUsize::new(2).expect("generation"),
+            RithmicCatalogRejection::SupersededSearch,
+        );
+
+        assert!(
+            publish_catalog_callback(&publications, 7, callback, &mut searches, &mut selections)
+                .is_none()
+        );
+
+        assert!(matches!(
+            published.recv().expect("rejection is published"),
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: true,
+            } if rejection.consumer_id == 42 && rejection.command_generation == 2
+        ));
+        assert_eq!(searches.len(), 1, "the search lane is untouched");
+        assert!(selections.is_empty());
+    }
+
+    #[test]
+    fn catalog_commands_are_rejected_while_waiting_for_a_replacement_session() {
+        let (catalog_sender, catalog_controls) = mpsc::sync_channel(2);
+        let (publications, published) = mpsc::sync_channel(2);
+        let catalog_publications = super::CatalogPublisher::new(
+            publications,
+            "rithmic",
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
+        let (realtime_sender, realtime_controls) = mpsc::sync_channel(1);
+        let (realtime_publications, _realtime_events) = mpsc::sync_channel(1);
+        let coordinator_wake = crate::market_service::ProviderCoordinatorWake::for_tests();
+        let login = super::RithmicLoginRevision::default();
+        let channels = super::ProviderChannels {
+            catalog_controls: &catalog_controls,
+            catalog_publications: &catalog_publications,
+            realtime_controls: &realtime_controls,
+            realtime_publications: &realtime_publications,
+            coordinator_wake: &coordinator_wake,
+            reconnect_delay: std::time::Duration::ZERO,
+            login: &login,
+        };
+        let (_environment_sender, environment) = mpsc::sync_channel(1);
+        let mut environment_state = EnvironmentState {
+            network: NetworkEvent::Available,
+            suspended: false,
+        };
+        catalog_sender
+            .send(RithmicCatalogControl::Search(SearchProviderInstruments {
+                consumer_id: 41,
+                search_generation: 5,
+                startup_resolve: false,
+                provider: "rithmic".into(),
+                query: "MNQ".into(),
+                maximum_results: 32,
+                categories: InstrumentSearchCategories::ALL,
+            }))
+            .expect("search queued");
+        realtime_sender
+            .send(RithmicRealtimeControl::Stop)
+            .expect("stop queued");
+
+        let exit = super::wait_for_replacement(
+            channels,
+            login.current(),
+            &environment,
+            &mut environment_state,
+            9,
+            false,
+        );
+
+        assert!(matches!(exit, super::SelectionExit::Idle { generation: 9 }));
+        assert!(matches!(
+            published.try_recv().expect("search rejection is published"),
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: false,
+            } if rejection.consumer_id == 41
+                && rejection.command_generation == 5
+                && rejection.provider_generation == Some(9)
+        ));
     }
 
     #[test]

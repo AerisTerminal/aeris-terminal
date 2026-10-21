@@ -5,9 +5,9 @@
 use aeris_application::ReplayRecoveryCommand;
 use aeris_application::{ReplaySnapshot, ReplayStreamUpdate};
 use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, ProviderMarketScreen, ScreenProviderMarkets,
-    SearchProviderInstruments, SelectProviderInstrument,
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
+    ProviderMarketScreen, ScreenProviderMarkets, SearchProviderInstruments,
+    SelectProviderInstrument,
 };
 use aeris_market_data::ChartInterval;
 use aeris_market_data::OrderBookFrame;
@@ -146,10 +146,17 @@ pub fn classify_provider_catalog_event(
                 None,
             )
         }
-        MarketRuntimeEvent::ProviderCatalogRejected(rejection) => (
+        MarketRuntimeEvent::ProviderCatalogRejected {
+            rejection,
+            selection,
+        } => (
             Some(ProviderCatalogEvent::CommandRejected {
-                command: provider_catalog_command(rejection.reason),
                 rejection,
+                command: if selection {
+                    ProviderCatalogCommand::Selection
+                } else {
+                    ProviderCatalogCommand::Search
+                },
             }),
             None,
         ),
@@ -160,18 +167,6 @@ pub fn classify_provider_catalog_event(
             (Some(ProviderCatalogEvent::ScreenRejected(rejection)), None)
         }
         event => (None, Some(event)),
-    }
-}
-
-#[must_use]
-pub const fn provider_catalog_command(
-    reason: ProviderCatalogRejectionReason,
-) -> ProviderCatalogCommand {
-    match reason {
-        ProviderCatalogRejectionReason::SearchRejected
-        | ProviderCatalogRejectionReason::SupersededSearch
-        | ProviderCatalogRejectionReason::SearchTimedOut => ProviderCatalogCommand::Search,
-        _ => ProviderCatalogCommand::Selection,
     }
 }
 

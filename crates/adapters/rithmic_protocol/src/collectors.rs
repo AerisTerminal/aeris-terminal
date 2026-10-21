@@ -55,18 +55,21 @@ enum CollectorState {
 }
 
 /// Exact optional filters and memory bound for one symbol search.
+///
+/// An instrument-type filter is applied by the provider only: responses spell
+/// the type differently from the request enumeration (`Future`, not `FUTURE`),
+/// so it is not echo-checked here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SymbolSearchCollectionRequest {
     pub exchange: Option<String>,
     pub product_code: Option<String>,
-    pub instrument_type: Option<String>,
     pub maximum_results: NonZeroUsize,
 }
 
 impl SymbolSearchCollectionRequest {
     fn validate(&self) -> Result<(), CollectorError> {
         if self.maximum_results.get() > MAX_SEARCH_RESULTS
-            || [&self.exchange, &self.product_code, &self.instrument_type]
+            || [&self.exchange, &self.product_code]
                 .into_iter()
                 .flatten()
                 .any(String::is_empty)
@@ -110,10 +113,14 @@ impl SymbolSearchCollector {
 
     /// Accepts one search result or terminal frame.
     ///
+    /// A broad query can match more instruments than one search may return,
+    /// so only the lowest `maximum_results` exchange/symbol keys are kept,
+    /// independent of arrival order. A repeated key keeps its first result.
+    ///
     /// # Errors
     ///
-    /// Returns an error for rejection, mismatched filters, conflicting
-    /// duplicates, excess results, or any frame after a terminal outcome.
+    /// Returns an error for rejection, mismatched filters, or any frame after
+    /// a terminal outcome.
     pub fn accept(
         &mut self,
         message: DecodedCatalogMessage,
@@ -136,19 +143,14 @@ impl SymbolSearchCollector {
             DecodedCatalogMessage::SearchResult(result) => {
                 self.validate_result(&result)?;
                 let key = (result.exchange.clone(), result.symbol.clone());
-                if let Some(existing) = self.results.get(&key) {
-                    if existing != &result {
-                        return Err(CollectorError::ConflictingDuplicate);
-                    }
+                if self.results.contains_key(&key) {
                     self.duplicate_count = self.duplicate_count.saturating_add(1);
                     return Ok(CollectionProgress::Pending);
                 }
-                if self.results.len() >= self.request.maximum_results.get() {
-                    return Err(CollectorError::ResultLimitExceeded {
-                        maximum: self.request.maximum_results.get(),
-                    });
-                }
                 self.results.insert(key, result);
+                if self.results.len() > self.request.maximum_results.get() {
+                    self.results.pop_last();
+                }
                 Ok(CollectionProgress::Pending)
             }
             DecodedCatalogMessage::SearchComplete { accepted: false } => {
@@ -173,10 +175,6 @@ impl SymbolSearchCollector {
             (
                 self.request.product_code.as_ref(),
                 result.product_code.as_ref(),
-            ),
-            (
-                self.request.instrument_type.as_ref(),
-                result.instrument_type.as_ref(),
             ),
         ] {
             if expected.is_some() && expected != actual {
@@ -512,27 +510,50 @@ mod tests {
     use crate::{BarIdentity, Ohlc, TickBarKey};
 
     #[test]
-    fn symbol_search_filters_deduplicates_bounds_and_latches_failures() {
+    fn symbol_search_keeps_the_lowest_bounded_keys_and_first_duplicate() {
         let mut collector =
             SymbolSearchCollector::try_new(search_request(2)).expect("valid search");
-        let first = search_result("ESM7");
-        collector
-            .accept(DecodedCatalogMessage::SearchResult(first.clone()))
-            .expect("accept result");
-        collector
-            .accept(DecodedCatalogMessage::SearchResult(first))
-            .expect("deduplicate identical result");
-        collector
-            .accept(DecodedCatalogMessage::SearchResult(search_result("NQM7")))
-            .expect("accept second result");
+        let first = search_result("NQM7");
+        let mut conflicting = first.clone();
+        conflicting.name = Some("renamed".to_string());
+        for result in [
+            first,
+            conflicting,
+            search_result("YMM7"),
+            search_result("ESM7"),
+            search_result("CLM7"),
+        ] {
+            assert_eq!(
+                collector
+                    .accept(DecodedCatalogMessage::SearchResult(result))
+                    .expect("search result stays within the session"),
+                CollectionProgress::Pending
+            );
+        }
+        let complete = collector
+            .accept(DecodedCatalogMessage::SearchComplete { accepted: true })
+            .expect("excess results still complete");
         assert!(matches!(
-            collector.accept(DecodedCatalogMessage::SearchResult(search_result("YMM7"))),
-            Err(CollectorError::ResultLimitExceeded { maximum: 2 })
+            complete,
+            CollectionProgress::Complete(CollectedSymbols { results, duplicate_count: 1 })
+                if results.iter().map(|result| result.symbol.as_str()).collect::<Vec<_>>() == ["CLM7", "ESM7"]
         ));
-        assert!(matches!(
+    }
+
+    #[test]
+    fn symbol_search_exchange_mismatch_latches_failure() {
+        let mut collector =
+            SymbolSearchCollector::try_new(search_request(2)).expect("valid search");
+        let mut other_exchange = search_result("ESM7");
+        other_exchange.exchange = "NYMEX".to_string();
+        assert_eq!(
+            collector.accept(DecodedCatalogMessage::SearchResult(other_exchange)),
+            Err(CollectorError::IdentityMismatch)
+        );
+        assert_eq!(
             collector.accept(DecodedCatalogMessage::SearchComplete { accepted: true }),
             Err(CollectorError::AlreadyTerminal)
-        ));
+        );
     }
 
     #[test]
@@ -710,7 +731,6 @@ mod tests {
         SymbolSearchCollectionRequest {
             exchange: Some("CME".to_string()),
             product_code: None,
-            instrument_type: Some("FUTURE".to_string()),
             maximum_results: NonZeroUsize::new(maximum).expect("nonzero"),
         }
     }
@@ -746,7 +766,7 @@ mod tests {
             exchange: "CME".to_string(),
             name: None,
             product_code: None,
-            instrument_type: Some("FUTURE".to_string()),
+            instrument_type: Some("Future".to_string()),
             expiration_date: None,
         }
     }
