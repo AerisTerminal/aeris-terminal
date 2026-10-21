@@ -70,40 +70,6 @@ fn dispatch_hyperliquid_catalog(
     try_send_hyperliquid_catalog(controls, control, provider)
 }
 
-pub(super) fn dispatch_tastytrade_catalog(
-    controls: &SyncSender<super::tastytrade::CatalogControl>,
-    provider: &str,
-    command: ProviderCatalogCommand,
-) -> Result<(), String> {
-    let control = match command {
-        ProviderCatalogCommand::Search(value) => super::tastytrade::CatalogControl::Search(value),
-        ProviderCatalogCommand::Select(value) => super::tastytrade::CatalogControl::Select(value),
-        ProviderCatalogCommand::Screen(_) => {
-            return Err(format!("{provider} does not provide a market screen"));
-        }
-    };
-    controls
-        .try_send(control)
-        .map_err(|_| "Provider catalog capacity is exhausted or unavailable".to_string())
-}
-
-pub(super) fn dispatch_ctrader_catalog(
-    controls: &SyncSender<super::ctrader::CatalogControl>,
-    provider: &str,
-    command: ProviderCatalogCommand,
-) -> Result<(), String> {
-    let control = match command {
-        ProviderCatalogCommand::Search(value) => super::ctrader::CatalogControl::Search(value),
-        ProviderCatalogCommand::Select(value) => super::ctrader::CatalogControl::Select(value),
-        ProviderCatalogCommand::Screen(_) => {
-            return Err(format!("{provider} does not provide a market screen"));
-        }
-    };
-    controls
-        .try_send(control)
-        .map_err(|_| "Provider catalog capacity is exhausted or unavailable".to_string())
-}
-
 impl HistorySource for LiveRithmicHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
         fetch_rithmic_history(request)
@@ -222,13 +188,8 @@ impl ProviderRuntimeRegistry {
         let cancellation = Arc::new(AtomicBool::new(false));
         let lifecycle = Arc::new(ProviderRuntimeLifecycle::default());
         let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
-        let super::HistorySourceKind::DedicatedWorker(worker_name) =
-            spec.descriptor.capabilities.history.source
-        else {
-            return Err("Provider history source is not a dedicated worker".to_string());
-        };
         let history_worker = spawn_history_worker(
-            worker_name,
+            spec.descriptor.capabilities.history.worker,
             spec.history
                 .ok_or_else(|| "Provider history source is unavailable".to_string())?,
             history_rx,
@@ -278,60 +239,6 @@ impl ProviderRuntimeRegistry {
         let descriptor = spec.descriptor;
         let started = Self::start_history_runtime(spec, completions, active_workers)?;
         Self::start_hyperliquid_record(started, descriptor, enabled, wake, engine, active_workers)
-    }
-
-    pub(super) fn start_tastytrade_runtime(
-        spec: ProviderRuntimeSpec,
-        completions: &SyncSender<Command>,
-        wake: ProviderCoordinatorWake,
-        _engine: &MarketEngine,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        context: &super::ProviderStartContext,
-    ) -> Result<ProviderRuntimeRecord, String> {
-        let ProviderRuntimeSpec {
-            descriptor,
-            history,
-            ..
-        } = spec;
-        if descriptor.capabilities.history.source != super::HistorySourceKind::ProviderSession
-            || history.is_some()
-        {
-            return Err("Provider history source must be runtime-owned".to_string());
-        }
-        super::tastytrade::start_record(
-            descriptor,
-            completions,
-            wake,
-            active_workers,
-            &context.tastytrade,
-        )
-    }
-
-    pub(super) fn start_ctrader_runtime(
-        spec: ProviderRuntimeSpec,
-        completions: &SyncSender<Command>,
-        wake: ProviderCoordinatorWake,
-        _engine: &MarketEngine,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        context: &super::ProviderStartContext,
-    ) -> Result<ProviderRuntimeRecord, String> {
-        let ProviderRuntimeSpec {
-            descriptor,
-            history,
-            ..
-        } = spec;
-        if descriptor.capabilities.history.source != super::HistorySourceKind::ProviderSession
-            || history.is_some()
-        {
-            return Err("Provider history source must be runtime-owned".to_string());
-        }
-        super::ctrader::start_record(
-            descriptor,
-            completions,
-            wake,
-            active_workers,
-            &context.ctrader,
-        )
     }
 
     fn start_rithmic_record(
@@ -408,8 +315,6 @@ impl ProviderRuntimeRegistry {
             cancellation: started.cancellation,
             lifecycle: started.lifecycle,
             hyperliquid: None,
-            ctrader: None,
-            tastytrade: None,
             // A history-only runtime has no realtime receiver. Do not
             // register its intentionally closed control channel as a session.
             rithmic: enabled.then_some(super::RithmicChannels {
@@ -511,8 +416,6 @@ impl ProviderRuntimeRegistry {
                 display_controls,
                 display_events,
             }),
-            ctrader: None,
-            tastytrade: None,
             rithmic: None,
             catalog: ProviderCatalogChannels {
                 enabled,
@@ -644,9 +547,7 @@ impl ProviderRuntimeRegistry {
                         descriptor: record.descriptor,
                         history: &record.history,
                         lifecycle: Some(&record.lifecycle),
-                        ctrader: record.ctrader.as_ref(),
                         hyperliquid: record.hyperliquid.as_ref(),
-                        tastytrade: record.tastytrade.as_ref(),
                         rithmic: record.rithmic.as_ref(),
                         catalog,
                     },
@@ -658,11 +559,7 @@ impl ProviderRuntimeRegistry {
             let Some(record) = records.get(provider_id) else {
                 continue;
             };
-            if record.ctrader.is_some()
-                || record.hyperliquid.is_some()
-                || record.tastytrade.is_some()
-                || record.rithmic.is_some()
-            {
+            if record.hyperliquid.is_some() || record.rithmic.is_some() {
                 lanes.push(ProviderEventLane::Realtime(provider_id));
             }
             if record.catalog.is_some() {
@@ -689,8 +586,6 @@ impl ProviderRuntimeRegistry {
             let ProviderRuntimeRecord {
                 history,
                 hyperliquid: _,
-                ctrader: _,
-                tastytrade: _,
                 rithmic: _,
                 catalog,
                 workers,
@@ -828,43 +723,6 @@ impl ProviderDispatch<'_> {
                 })
                 .map(ProviderRuntimeEvent::BoundRealtime)
                 .or_else(|| {
-                    self.records
-                        .get(provider_id)?
-                        .ctrader?
-                        .events
-                        .try_recv()
-                        .ok()
-                        .and_then(|bound| {
-                            let wire = super::ProviderEvent::ctrader(bound.value);
-                            (wire.generation == bound.epoch.get().get()).then_some(
-                                ProviderRuntimeEvent::BoundRealtime(super::ProviderEvent {
-                                    provider: wire.provider,
-                                    generation: bound.epoch,
-                                    wire_generation: wire.generation,
-                                    kind: wire.kind,
-                                }),
-                            )
-                        })
-                })
-                .or_else(|| {
-                    let bound = self
-                        .records
-                        .get(provider_id)?
-                        .tastytrade?
-                        .events
-                        .try_recv()
-                        .ok()?;
-                    let wire = super::ProviderEvent::tastytrade(bound.value);
-                    (wire.generation == bound.epoch.get().get()).then_some(
-                        ProviderRuntimeEvent::BoundRealtime(super::ProviderEvent {
-                            provider: wire.provider,
-                            generation: bound.epoch,
-                            wire_generation: wire.generation,
-                            kind: wire.kind,
-                        }),
-                    )
-                })
-                .or_else(|| {
                     let bound = self
                         .records
                         .get(provider_id)?
@@ -962,25 +820,6 @@ impl ProviderDispatch<'_> {
 }
 
 impl MarketService {
-    /// Revision of the runtime-owned exchange calendars. It changes whenever a calendar is
-    /// loaded, refreshed or cleared; a session status computed under an older revision is stale.
-    #[must_use]
-    pub fn market_session_revision(&self) -> u64 {
-        self.runtime.broker_api.calendar_revision()
-    }
-
-    /// Locked or crossed cTrader books withheld from canonical state since startup.
-    #[must_use]
-    pub fn ctrader_stream_statistics(&self) -> super::CtraderStreamStatistics {
-        self.runtime.ctrader.counters.snapshot()
-    }
-
-    /// Attaches the trading owner's venue generation to the cTrader supervisor, which
-    /// relays it over the shared demo session (D8). A newer attachment retires an older one.
-    pub fn attach_ctrader_venue(&self, link: super::CtraderVenueLink) {
-        self.runtime.ctrader.venue.put(link);
-    }
-
     /// Returns the runtime-owned dated session projection for one installed instrument.
     #[must_use]
     pub fn market_session_status(
@@ -988,59 +827,24 @@ impl MarketService {
         instrument: &aeris_contracts::InstallProviderInstrument,
         now_unix_nanos: i64,
     ) -> aeris_contracts::MarketSessionStatus {
-        self.calendar_for(instrument, now_unix_nanos).status(
+        Self::calendar_for(instrument).status(
             &instrument.instrument_id,
             now_unix_nanos.div_euclid(1_000_000),
         )
     }
 
     fn calendar_for(
-        &self,
         instrument: &aeris_contracts::InstallProviderInstrument,
-        now_unix_nanos: i64,
     ) -> super::calendar::MarketCalendarService {
         use super::calendar::{CalendarSource, MarketCalendarService};
         let capabilities = super::BUILT_IN_PROVIDER_DESCRIPTORS
             .iter()
             .find(|descriptor| descriptor.id == instrument.provider)
             .map(|descriptor| descriptor.capabilities);
-        let provider_calendar = if capabilities.is_some_and(|capabilities| {
-            capabilities.calendar == super::CalendarCapability::ProviderPublished
-        }) {
-            let status = self.runtime.broker_api.market_session_status(
-                &instrument.instrument_id,
-                &instrument.provider_symbol,
-                now_unix_nanos,
-            );
-            (status.source == aeris_contracts::MarketSessionSource::ProviderCalendar)
-                .then_some(status)
-        } else {
-            None
-        };
         let mut calendar = MarketCalendarService::default();
-        calendar.resolve(instrument, None);
+        calendar.resolve(instrument);
         if capabilities.is_some_and(|capabilities| capabilities.always_open) {
             calendar.insert(instrument.instrument_id.clone(), CalendarSource::AlwaysOpen);
-        }
-        if let Some(status) = provider_calendar {
-            let valid_from = if status.phase == aeris_contracts::MarketSessionPhase::Closed {
-                now_unix_nanos
-            } else {
-                status.session_start_unix_nanos.unwrap_or(now_unix_nanos)
-            };
-            let valid_until = if status.phase == aeris_contracts::MarketSessionPhase::Closed {
-                status.next_open_unix_nanos
-            } else {
-                status.session_end_unix_nanos
-            };
-            if let Some(valid_until) = valid_until {
-                calendar.publish_provider_calendar(
-                    &instrument.instrument_id,
-                    status,
-                    valid_from.div_euclid(1_000_000),
-                    valid_until.div_euclid(1_000_000),
-                );
-            }
         }
         calendar
     }
@@ -1076,8 +880,6 @@ impl MarketService {
         Self::start_composed(vec![
             ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
             ProviderRuntimeSpec::hyperliquid(Box::<LiveHyperliquidHistory>::default(), true),
-            ProviderRuntimeSpec::tastytrade(),
-            ProviderRuntimeSpec::ctrader(),
         ])
     }
 
@@ -1090,14 +892,6 @@ impl MarketService {
             .iter()
             .map(|provider| provider.descriptor)
             .collect::<Vec<_>>();
-        let provider_search_preparers = descriptors
-            .iter()
-            .filter_map(|descriptor| {
-                descriptor
-                    .prepare_search
-                    .map(|prepare| (descriptor.id, prepare))
-            })
-            .collect();
         let engine = super::configured_engine_from_descriptors(&descriptors)?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let quote_releases = Arc::new(Mutex::new(Vec::new()));
@@ -1106,10 +900,7 @@ impl MarketService {
         let outbox = Arc::new(super::outbox::ConsumerOutbox::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
-        let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
         let start_context = super::ProviderStartContext {
-            tastytrade: Arc::clone(&broker_api),
-            ctrader: super::ctrader::CtraderShared::default(),
             rithmic_login: RithmicLoginRevision::default(),
         };
         let provider_registry = ProviderRuntimeRegistry::start(
@@ -1140,7 +931,6 @@ impl MarketService {
             start_context,
             MarketServiceProviders {
                 presentations: provider_presentations,
-                search_preparers: provider_search_preparers,
             },
             RuntimeChannels {
                 releases: quote_releases,
@@ -1148,7 +938,7 @@ impl MarketService {
                 trading_feed,
                 outbox,
             },
-        )?;
+        );
         Ok(market)
     }
 
@@ -1156,52 +946,28 @@ impl MarketService {
         commands: SyncSender<Command>,
         shutdown: Arc<AtomicBool>,
         active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
-        mut workers: Vec<thread::JoinHandle<()>>,
+        workers: Vec<thread::JoinHandle<()>>,
         context: super::ProviderStartContext,
         providers: MarketServiceProviders,
         channels: RuntimeChannels,
-    ) -> Result<Self, String> {
+    ) -> Self {
         let RuntimeChannels {
             releases: quote_releases,
             latest: quotes,
             trading_feed,
             outbox,
         } = channels;
-        let super::ProviderStartContext {
-            tastytrade: broker_api,
-            ctrader,
-            rithmic_login,
-        } = context;
-        let (broker_authorization, worker) =
-            match super::broker_authorization::BrokerAuthorization::start(
-                &shutdown,
-                Arc::clone(&broker_api),
-            ) {
-                Ok(started) => started,
-                Err(error) => {
-                    shutdown.store(true, Ordering::Release);
-                    // A full queue already makes the coordinator runnable.
-                    let _ = commands.try_send(Command::ProviderWake);
-                    join_runtime_workers(workers);
-                    return Err(error);
-                }
-            };
-        workers.push(worker);
+        let super::ProviderStartContext { rithmic_login } = context;
         let shutdown_wake = commands.clone();
         let MarketServiceProviders {
             presentations: provider_presentations,
-            search_preparers: provider_search_preparers,
         } = providers;
-        Ok(Self {
+        Self {
             commands,
             runtime: Arc::new(MarketRuntime {
                 shutdown,
                 shutdown_wake,
-                broker_api,
-                ctrader,
                 provider_presentations,
-                provider_search_preparers,
-                broker_authorization,
                 rithmic_login: super::rithmic_login::RithmicLogin::new(rithmic_login),
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
@@ -1210,7 +976,7 @@ impl MarketService {
                 trading_feed,
                 outbox,
             }),
-        })
+        }
     }
 
     /// Cancels provider work, drains accepted provider events, and joins owned workers.
@@ -1223,7 +989,6 @@ impl MarketService {
         self.runtime.outbox.notify_attached();
         // A full queue already makes the coordinator runnable.
         let _ = self.commands.try_send(Command::ProviderWake);
-        self.runtime.broker_api.cancel_searches();
         let mut workers = self
             .runtime
             .workers
@@ -1582,30 +1347,13 @@ impl MarketService {
         search: SearchProviderInstruments,
     ) -> Result<(), String> {
         validate_provider_search(&search)?;
-        let preparation = self
-            .runtime
-            .provider_search_preparers
-            .get(search.provider.as_str())
-            .copied()
-            .map(|prepare| {
-                (
-                    prepare,
-                    search.consumer_id,
-                    search.search_generation,
-                    search.startup_resolve,
-                )
-            });
         self.request(|reply| {
             Ok(Command::SearchProviderInstruments(
                 ClientId(id(client_id)?),
                 search,
                 reply,
             ))
-        })?;
-        if let Some((prepare, consumer, generation, startup)) = preparation {
-            prepare(&self.runtime.broker_api, consumer, generation, startup)?;
-        }
-        Ok(())
+        })
     }
 
     /// Schedules one bounded listed-market statistics screen for an owned consumer. The
@@ -2090,12 +1838,9 @@ mod tests {
             Arc::new(Mutex::new(BTreeSet::new())),
             Vec::new(),
             super::super::ProviderStartContext {
-                tastytrade: Arc::new(super::super::tastytrade::BrokerApi::default()),
-                ctrader: super::super::ctrader::CtraderShared::default(),
                 rithmic_login: RithmicLoginRevision::default(),
             },
             MarketServiceProviders {
-                search_preparers: BTreeMap::new(),
                 presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
             },
             RuntimeChannels {
@@ -2104,8 +1849,7 @@ mod tests {
                 trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
                 outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
             },
-        )
-        .expect("test runtime starts");
+        );
         assert_eq!(service.provider_presentations()[0].id, "rithmic");
         let result =
             service.request_with_timeout(|reply| Ok(Command::Status(reply)), Duration::ZERO);
@@ -2129,12 +1873,9 @@ mod tests {
             Arc::new(Mutex::new(BTreeSet::new())),
             Vec::new(),
             super::super::ProviderStartContext {
-                tastytrade: Arc::new(super::super::tastytrade::BrokerApi::default()),
-                ctrader: super::super::ctrader::CtraderShared::default(),
                 rithmic_login: RithmicLoginRevision::default(),
             },
             MarketServiceProviders {
-                search_preparers: BTreeMap::new(),
                 presentations: vec![],
             },
             RuntimeChannels {
@@ -2143,8 +1884,7 @@ mod tests {
                 trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
                 outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
             },
-        )
-        .unwrap();
+        );
         let service_for_thread = service.clone();
         let subscriber = thread::spawn(move || {
             service_for_thread.subscribe_quotes(
@@ -2189,8 +1929,7 @@ mod tests {
         spec.descriptor.id = "fourth-test-provider";
         spec.descriptor.presentation = &FOURTH_PRESENTATION;
         spec.descriptor.capabilities.account_id = "fourth-test-account";
-        spec.descriptor.capabilities.history.source =
-            super::super::HistorySourceKind::DedicatedWorker("aeris-fourth-history");
+        spec.descriptor.capabilities.history.worker = "aeris-fourth-history";
         spec.descriptor.flush_demand = |_| {};
         let service = MarketService::start_composed(vec![spec]).expect("fourth runtime starts");
         assert!(

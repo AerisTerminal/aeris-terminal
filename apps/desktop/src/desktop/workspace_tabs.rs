@@ -242,7 +242,6 @@ impl TerminalApp {
             command_palette_message: None,
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
             keyboard_shortcuts_open: false,
-            broker_connection_task: None,
             data_connections: DataConnections::default(),
             rithmic_login: rithmic_login::RithmicLoginFlow::default(),
             linked_sync_revisions: BTreeMap::new(),

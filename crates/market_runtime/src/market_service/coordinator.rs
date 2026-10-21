@@ -278,28 +278,6 @@ impl<'a> Coordinator<'a> {
                     clock.as_ref(),
                 );
             }
-            if let Some(channels) = record.ctrader {
-                provider_registry.register(
-                    id,
-                    Box::new(super::provider_session::CtraderSession {
-                        controls: channels.controls.clone(),
-                        history: record.history.clone(),
-                    }),
-                    record.descriptor.capabilities.reconnect,
-                    clock.as_ref(),
-                );
-            }
-            if let Some(channels) = record.tastytrade {
-                provider_registry.register(
-                    id,
-                    Box::new(super::provider_session::TastytradeSession {
-                        controls: channels.controls.clone(),
-                        history: record.history.clone(),
-                    }),
-                    record.descriptor.capabilities.reconnect,
-                    clock.as_ref(),
-                );
-            }
             if let Some(channels) = record.rithmic {
                 provider_registry.register(
                     id,
@@ -313,7 +291,7 @@ impl<'a> Coordinator<'a> {
                 );
             }
         }
-        let mut coordinator = Self {
+        Self {
             engine,
             studies: configured_studies(),
             providers,
@@ -352,11 +330,7 @@ impl<'a> Coordinator<'a> {
             command_fences: super::CommandFences::default(),
             pending_selections: BTreeMap::new(),
             selection_epochs: BTreeMap::new(),
-        };
-        for provider in coordinator.provider_registry.catalog_connect_ids() {
-            let _ = coordinator.ensure_provider_connection(provider);
         }
-        coordinator
     }
 }
 
@@ -777,7 +751,6 @@ mod performance_tests {
             super::ProviderGeneration(std::num::NonZeroU64::MIN),
             "",
             "",
-            super::super::CandleGapPolicy::Contiguous,
             clock.clone(),
         );
         live.connected = true;
@@ -816,7 +789,6 @@ mod performance_tests {
                 super::ProviderGeneration(std::num::NonZeroU64::MIN),
                 "",
                 "",
-                super::super::CandleGapPolicy::Contiguous,
                 clock.clone(),
             );
             live.connected = true;
@@ -1021,7 +993,6 @@ impl Coordinator<'_> {
         let due = self.provider_registry.due_ids(self.clock.monotonic());
         for id in due {
             if !self.has_provider_live_demand(id)
-                && !self.provider_registry.catalog_uses_session(id)
                 && !self
                     .provider_registry
                     .release_idle(id)
@@ -1041,7 +1012,6 @@ impl Coordinator<'_> {
         for (id, epoch, reason) in self.provider_registry.take_failures() {
             self.session_mut(id).demand_dirty = false;
             self.session_mut(id).pending = None;
-            self.session_mut(id).authorization = None;
             self.provider_epochs.bind(id, epoch);
             self.mark_lifecycle_failed(id, epoch.get().get(), reason);
         }
@@ -1053,11 +1023,7 @@ impl Coordinator<'_> {
             .extend(self.series.iter().filter_map(|(key, live)| {
                 let dirty = live.trade_model().map_or(
                     live.dirty || !live.pending_publications.is_empty(),
-                    |model| {
-                        model.dirty
-                            || !model.pending_publications.is_empty()
-                            || !model.pending_corrections.is_empty()
-                    },
+                    |model| model.dirty || !model.pending_publications.is_empty(),
                 );
                 dirty.then(|| key.clone())
             }));
@@ -1171,9 +1137,10 @@ impl Coordinator<'_> {
             }
         }
         if self.control_retry
-            || self.provider_registry.controls().any(|session| {
-                session.pending.is_some() || session.demand_dirty || session.authorization.is_some()
-            })
+            || self
+                .provider_registry
+                .controls()
+                .any(|session| session.pending.is_some() || session.demand_dirty)
         {
             deadlines
                 .entry(now + Duration::from_millis(100))
@@ -1250,8 +1217,7 @@ impl Coordinator<'_> {
             }
             #[cfg(feature = "probe")]
             command @ Command::ProbeFailWebSocket(..) => self.handle_service_command(command),
-            command @ (Command::BrokerAuthorizationChanged(..)
-            | Command::AvailableStreams(..)
+            command @ (Command::AvailableStreams(..)
             | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
@@ -1262,43 +1228,6 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_service_command(&mut self, command: Command) {
         match command {
-            Command::BrokerAuthorizationChanged(provider, ready, reply) => {
-                let Some(descriptor) = self.providers.descriptor(provider).filter(|descriptor| {
-                    descriptor.capabilities.connection_kind
-                        == super::ProviderConnectionKind::BrokerCapability
-                }) else {
-                    let _ = reply.send(Err("Broker market-data provider is unavailable".into()));
-                    return;
-                };
-                self.session_mut(provider).suspended = !ready;
-                self.session_mut(provider).authorization = Some(ready);
-                if !ready
-                    && let Some(generation) = self
-                        .engine
-                        .provider_status(provider)
-                        .and_then(|s| s.generation)
-                {
-                    self.session_mut(provider).generation_floor =
-                        generation.0.get().saturating_add(1);
-                    self.mark_lifecycle_recovering(
-                        provider,
-                        generation.0.get(),
-                        descriptor.capabilities.live_model,
-                        descriptor.capabilities.authorization_revoked_detail,
-                    );
-                    let _ = self.engine.end_provider_session(provider, generation);
-                }
-                self.flush_session_managed_demand(provider);
-                self.broadcast_provider_for(
-                    provider,
-                    if ready {
-                        None
-                    } else {
-                        Some(descriptor.capabilities.authorization_revoked_detail)
-                    },
-                );
-                let _ = reply.send(Ok(()));
-            }
             Command::AvailableStreams(provider, requested, reply) => {
                 let mut supported = StreamRequirements::NONE;
                 for stream in [
@@ -1443,8 +1372,7 @@ impl Coordinator<'_> {
             | Command::Attach(..)
             | Command::Detach(..)
             | Command::DrainClient(..)
-            | Command::AvailableStreams(..)
-            | Command::BrokerAuthorizationChanged(..) => {
+            | Command::AvailableStreams(..) => {
                 unreachable!("command was routed to the wrong dispatcher")
             }
         }
@@ -1566,15 +1494,6 @@ impl Coordinator<'_> {
             {
                 continue;
             }
-            if self.ensure_catalog_session(&route.provider_id).is_err() {
-                self.control_retry = true;
-                continue;
-            }
-            let current = self
-                .engine
-                .provider_status(&route.provider_id)
-                .and_then(|status| status.generation)
-                .map(|generation| generation.0.get());
             let generation = self.next_trading_route_command.saturating_add(1);
             if generation == self.next_trading_route_command {
                 self.control_retry = true;
@@ -2389,11 +2308,8 @@ impl Coordinator<'_> {
                     diagnostic!("Aeris market instrument references an unregistered provider");
                     continue;
                 };
-                let mut book = ProviderOrderBook::new(
-                    instrument,
-                    descriptor.capabilities.trade_continuity,
-                    descriptor.capabilities.depth.is_none(),
-                );
+                let mut book =
+                    ProviderOrderBook::new(instrument, descriptor.capabilities.depth.is_none());
                 book.calendar = self.calendar.for_instrument(&book.instrument.instrument_id);
                 book.set_depth_subscribed(depth_subscribed);
                 self.order_books.insert(identity, book);
@@ -3289,9 +3205,7 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: Some(channel),
             },
@@ -3793,16 +3707,16 @@ mod tests {
         let generation = ProviderGeneration(nonzero(1));
         coordinator
             .engine
-            .begin_provider_session("tastytrade", generation)
+            .begin_provider_session("hyperliquid", generation)
             .expect("provider session begins");
         let wake = Box::leak(Box::new(super::super::ProviderCoordinatorWake::for_tests()));
         coordinator.providers.wake = Some(wake);
-        wake.report_failure("tastytrade", 1);
+        wake.report_failure("hyperliquid", 1);
         drain_coordinator_events(&mut coordinator);
         assert_eq!(
             coordinator
                 .engine
-                .provider_status("tastytrade")
+                .provider_status("hyperliquid")
                 .map(|status| status.health),
             Some(ProviderHealth::Failed)
         );
@@ -3813,14 +3727,34 @@ mod tests {
         let mut coordinator = coordinator();
         let wake = Box::leak(Box::new(super::super::ProviderCoordinatorWake::for_tests()));
         coordinator.providers.wake = Some(wake);
-        wake.report_failure("tastytrade", 1);
+        wake.report_failure("hyperliquid", 1);
         drain_coordinator_events(&mut coordinator);
         let status = coordinator
             .engine
-            .provider_status("tastytrade")
+            .provider_status("hyperliquid")
             .expect("failed provider status");
         assert_eq!(status.generation, Some(ProviderGeneration(nonzero(1))));
         assert_eq!(status.health, ProviderHealth::Failed);
+    }
+
+    fn hyperliquid_worker_session(
+        controls: std::sync::mpsc::SyncSender<super::super::HyperliquidRealtimeControl>,
+    ) -> (
+        Box<super::super::provider_session::HyperliquidSession>,
+        std::sync::mpsc::Receiver<super::super::HyperliquidDisplayDepthControl>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+    ) {
+        let (display_controls, display) = std::sync::mpsc::sync_channel(4);
+        let (history, history_receiver) = std::sync::mpsc::sync_channel(1);
+        (
+            Box::new(super::super::provider_session::HyperliquidSession {
+                controls,
+                display_controls,
+                history,
+            }),
+            display,
+            history_receiver,
+        )
     }
 
     #[test]
@@ -3830,22 +3764,22 @@ mod tests {
         let mut coordinator = coordinator();
         coordinator.clock = clock.clone();
         let (controls, receiver) = std::sync::mpsc::sync_channel(1);
-        let (history, _history_receiver) = std::sync::mpsc::sync_channel(1);
+        let (session, _display, _history) = hyperliquid_worker_session(controls);
         coordinator.provider_registry.register(
-            "ctrader",
-            Box::new(super::super::provider_session::CtraderSession { controls, history }),
-            super::super::reconnect::ReconnectPolicy::ctrader(),
+            "hyperliquid",
+            session,
+            super::super::reconnect::ReconnectPolicy::hyperliquid(),
             clock.as_ref(),
         );
         let first = coordinator
             .provider_registry
-            .connect("ctrader", clock.monotonic())
+            .connect("hyperliquid", clock.monotonic())
             .unwrap()
             .unwrap();
-        coordinator.begin_reserved_provider_epoch("ctrader", first);
+        coordinator.begin_reserved_provider_epoch("hyperliquid", first);
         coordinator
             .provider_registry
-            .disconnected("ctrader", first, clock.monotonic());
+            .disconnected("hyperliquid", first, clock.monotonic());
         drop(receiver);
         let due = coordinator.provider_registry.next_retry().unwrap();
         clock.advance(due.duration_since(clock.monotonic()));
@@ -3855,7 +3789,7 @@ mod tests {
         assert_eq!(
             coordinator
                 .engine
-                .provider_status("ctrader")
+                .provider_status("hyperliquid")
                 .map(|status| status.health),
             Some(ProviderHealth::Failed)
         );
@@ -3865,135 +3799,6 @@ mod tests {
                 .deadlines
                 .keys()
                 .all(|at| *at > clock.monotonic())
-        );
-    }
-
-    #[test]
-    fn full_provider_worker_bounds_coordinator_retry_turns() {
-        use super::super::clock::Clock;
-        let clock = Arc::new(super::super::clock::ScriptedClock::new(54));
-        let mut coordinator = coordinator();
-        coordinator.clock = clock.clone();
-        let (controls, _receiver) = std::sync::mpsc::sync_channel(1);
-        let (history, _history_receiver) = std::sync::mpsc::sync_channel(1);
-        coordinator.provider_registry.register(
-            "ctrader",
-            Box::new(super::super::provider_session::CtraderSession { controls, history }),
-            super::super::reconnect::ReconnectPolicy::ctrader(),
-            clock.as_ref(),
-        );
-        let first = coordinator
-            .provider_registry
-            .connect("ctrader", clock.monotonic())
-            .unwrap()
-            .unwrap();
-        coordinator.begin_reserved_provider_epoch("ctrader", first);
-        coordinator
-            .provider_registry
-            .disconnected("ctrader", first, clock.monotonic());
-        let end = clock.monotonic() + Duration::from_secs(60);
-        let mut turns = 0;
-        while clock.monotonic() < end {
-            coordinator.refresh_deadlines();
-            let Some(wait) = coordinator.next_wait() else {
-                break;
-            };
-            assert!(
-                wait > Duration::ZERO,
-                "coordinator may not schedule an immediate turn"
-            );
-            turns += 1;
-            assert!(turns <= 10, "retry budget must bound coordinator turns");
-            clock.advance(wait.min(end.duration_since(clock.monotonic())));
-            if clock.monotonic() < end {
-                coordinator.connect_due_providers();
-                coordinator.publish_failed_provider_controls();
-            }
-        }
-        assert_eq!(
-            coordinator
-                .engine
-                .provider_status("ctrader")
-                .map(|status| status.health),
-            Some(ProviderHealth::Failed)
-        );
-        assert_eq!(coordinator.provider_registry.next_retry(), None);
-    }
-
-    #[test]
-    fn tastytrade_logout_rejects_late_events_after_reauthorization() {
-        let mut coordinator = coordinator();
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connecting(1),
-        ));
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connected(1),
-        ));
-        let (reply, result) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::BrokerAuthorizationChanged(
-            "tastytrade",
-            false,
-            reply,
-        ));
-        result.recv().unwrap().unwrap();
-        assert!(coordinator.session("tastytrade").suspended);
-        let (reply, result) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::BrokerAuthorizationChanged(
-            "tastytrade",
-            true,
-            reply,
-        ));
-        result.recv().unwrap().unwrap();
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connected(1),
-        ));
-        assert_ne!(
-            coordinator
-                .engine
-                .provider_status("tastytrade")
-                .unwrap()
-                .health,
-            ProviderHealth::Online
-        );
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connecting(2),
-        ));
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connected(2),
-        ));
-        assert_eq!(
-            coordinator
-                .engine
-                .provider_status("tastytrade")
-                .unwrap()
-                .generation,
-            Some(ProviderGeneration(std::num::NonZeroU64::new(2).unwrap()))
-        );
-    }
-
-    #[test]
-    fn tastytrade_series_recovery_does_not_downgrade_provider_health() {
-        let mut coordinator = coordinator();
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connecting(1),
-        ));
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::Connected(1),
-        ));
-        let mut selected = instrument();
-        selected.provider = "tastytrade".into();
-        selected.instrument_id = "tastytrade:Future:/ESZ6".into();
-        selected.entitlement_id = super::super::tastytrade::ENTITLEMENT.into();
-        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
-            super::super::tastytrade::RealtimeEvent::TradeRecovery(1, selected),
-        ));
-        assert_eq!(
-            coordinator
-                .engine
-                .provider_status("tastytrade")
-                .expect("tastytrade status")
-                .health,
-            ProviderHealth::Online
         );
     }
 
@@ -4100,11 +3905,7 @@ mod tests {
         selected: &InstallProviderInstrument,
         selected_series: &BarSeriesKey,
     ) -> ProviderOrderBook {
-        let mut order_book = ProviderOrderBook::new(
-            selected.clone(),
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut order_book = ProviderOrderBook::new(selected.clone(), false);
         let quote = TopOfBookQuote {
             metadata: EventMetadata {
                 provider_id: selected.provider.clone(),
@@ -4186,7 +3987,6 @@ mod tests {
             &selected_series,
             ProviderGeneration(nonzero(1)),
             &selected.venue_id,
-            None,
         )
         .expect("live handoff");
         live_handoff.connected = true;
@@ -4418,8 +4218,8 @@ mod tests {
             .last()
             .map(|bar| bar.exchange_timestamp_unix_nanos)
             .expect("history boundary");
-        let mut live = TradeModel::new(&series, provider_generation, "CME", None)
-            .expect("Rithmic live handoff");
+        let mut live =
+            TradeModel::new(&series, provider_generation, "CME").expect("Rithmic live handoff");
         live.seed(2, 0, &bars, None, Some(boundary))
             .expect("live handoff seeds from current history");
         live.connected = true;
@@ -4564,9 +4364,7 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_tx,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -5747,8 +5545,8 @@ mod tests {
             )
             .expect("demand installs");
         let provider_generation = ProviderGeneration(nonzero(1));
-        let live = TradeModel::new(&selected_series, provider_generation, "CME", None)
-            .expect("live handoff");
+        let live =
+            TradeModel::new(&selected_series, provider_generation, "CME").expect("live handoff");
         coordinator
             .series
             .insert_trade(selected_series.clone(), live);
@@ -5796,13 +5594,8 @@ mod tests {
             )
             .expect("demand installs");
         let provider_generation = ProviderGeneration(nonzero(1));
-        let mut live = SeriesLifecycle::new(
-            selected_series.clone(),
-            provider_generation,
-            "BTC",
-            "1m",
-            super::super::CandleGapPolicy::Contiguous,
-        );
+        let mut live =
+            SeriesLifecycle::new(selected_series.clone(), provider_generation, "BTC", "1m");
         live.state = SeriesState::Live {
             last_progress: live.clock.monotonic(),
             observed_live: false,
@@ -5861,7 +5654,6 @@ mod tests {
                 provider_generation,
                 "BTC",
                 "1m",
-                super::super::CandleGapPolicy::Contiguous,
                 clock.clone(),
             ),
         );
@@ -5902,7 +5694,7 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_ctrader_candles_recover_only_while_contract_hours_are_open() {
+    fn watchdog_candles_recover_only_while_contract_hours_are_open() {
         use super::super::clock::{Clock, ScriptedClock};
         use chrono::{DateTime, Utc};
         for (at, expect_recovery) in [
@@ -5917,7 +5709,7 @@ mod tests {
             let clock = Arc::new(ScriptedClock::new(at_nanos));
             let mut coordinator = coordinator();
             coordinator.clock = Arc::clone(&clock) as Arc<dyn Clock>;
-            let installed = ctrader_watchdog_fixture();
+            let installed = contract_hours_watchdog_fixture();
             let selected = BarSeriesKey {
                 provider_id: installed.provider.clone(),
                 instrument_id: installed.instrument_id.clone(),
@@ -5928,11 +5720,11 @@ mod tests {
             let provider_generation = ProviderGeneration(nonzero(1));
             coordinator
                 .engine
-                .begin_provider_session("ctrader", provider_generation)
+                .begin_provider_session("hyperliquid", provider_generation)
                 .expect("provider begins");
             coordinator
                 .engine
-                .set_provider_health("ctrader", provider_generation, ProviderHealth::Online)
+                .set_provider_health("hyperliquid", provider_generation, ProviderHealth::Online)
                 .expect("provider online");
             let consumer = consumer(1);
             register(&mut coordinator, consumer);
@@ -5947,14 +5739,12 @@ mod tests {
                 .expect("series demanded");
             let (history_tx, history_rx) = std::sync::mpsc::sync_channel(2);
             coordinator.providers.records.insert(
-                "ctrader",
+                "hyperliquid",
                 super::super::ProviderDispatchRecord {
-                    descriptor: super::super::ctrader::DESCRIPTOR,
+                    descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                     history: Box::leak(Box::new(history_tx)),
                     lifecycle: None,
-                    ctrader: None,
                     hyperliquid: None,
-                    tastytrade: None,
                     rithmic: None,
                     catalog: None,
                 },
@@ -5963,13 +5753,12 @@ mod tests {
                 (installed.provider.clone(), installed.instrument_id.clone()),
                 installed.clone(),
             );
-            coordinator.calendar.resolve(&installed, None);
+            coordinator.calendar.resolve(&installed);
             let mut live = SeriesLifecycle::with_clock(
                 selected.clone(),
                 provider_generation,
                 "EURUSD",
                 "1m",
-                super::super::CandleGapPolicy::SessionGapsAllowed,
                 Arc::clone(&clock) as Arc<dyn Clock>,
             );
             live.connected = true;
@@ -5998,10 +5787,9 @@ mod tests {
         }
     }
 
-    fn ctrader_watchdog_fixture() -> InstallProviderInstrument {
+    fn contract_hours_watchdog_fixture() -> InstallProviderInstrument {
         let mut installed = hyperliquid_instrument();
-        installed.provider = "ctrader".into();
-        installed.instrument_id = "instrument:ctrader:FX:EURUSD".into();
+        installed.instrument_id = "instrument:hyperliquid:FX:EURUSD".into();
         installed.provider_symbol = "EURUSD".into();
         installed.venue_id = String::new();
         installed.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
@@ -6250,9 +6038,7 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_tx,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -6433,9 +6219,7 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -6469,9 +6253,7 @@ mod tests {
                     descriptor: super::super::RITHMIC_DESCRIPTOR,
                     history: Box::leak(Box::new(history_sender)),
                     lifecycle: None,
-                    ctrader: None,
                     hyperliquid: None,
-                    tastytrade: None,
                     rithmic: Some(Box::leak(Box::new(super::super::RithmicChannels {
                         controls,
                         events: event_receiver,
@@ -6509,9 +6291,7 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -6578,9 +6358,7 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -6704,7 +6482,6 @@ mod tests {
 
     #[test]
     fn retired_provider_and_history_epochs_are_dropped_once_each() {
-        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
         let (mut coordinator, _) = connected_rithmic_coordinator();
         let previous = coordinator
             .provider_epochs
@@ -6720,31 +6497,21 @@ mod tests {
             .provider_epochs
             .stamp("rithmic", 2, &mut coordinator.provider_registry)
             .expect("new session minted by registry");
-        let phase = coordinator
-            .calendar
-            .phase(&instrument().instrument_id, 1_800_000_000_000);
+        let health = coordinator
+            .engine
+            .provider_status("rithmic")
+            .map(|status| status.health);
         coordinator.handle_provider_event(super::super::WireProviderEvent {
             provider: "rithmic",
             generation: 1,
-            kind: super::super::ProviderEventKind::Calendar {
-                instrument_id: instrument().instrument_id.clone(),
-                status: MarketSessionStatus {
-                    instrument_id: instrument().instrument_id,
-                    phase: MarketSessionPhase::Closed,
-                    source: MarketSessionSource::ProviderCalendar,
-                    session_start_unix_nanos: None,
-                    session_end_unix_nanos: None,
-                    next_open_unix_nanos: None,
-                },
-                valid_from_utc_ms: 1_799_999_999_000,
-                valid_until_utc_ms: 1_800_000_001_000,
-            },
+            kind: super::super::ProviderEventKind::Failed("retired session failed".into()),
         });
         assert_eq!(
             coordinator
-                .calendar
-                .phase(&instrument().instrument_id, 1_800_000_000_000),
-            phase
+                .engine
+                .provider_status("rithmic")
+                .map(|status| status.health),
+            health
         );
         assert_eq!(coordinator.provider_epochs.stale_counts(), (1, 0));
         let mut retired_ticket = super::super::fixture_history_ticket(&series);
@@ -6761,53 +6528,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_holiday_event_is_generation_fenced_and_closes_watchdog_calendar() {
-        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
-        use chrono::{DateTime, Utc};
-        let midday = "2026-08-17T18:00:00Z"
-            .parse::<DateTime<Utc>>()
-            .expect("fixture")
-            .timestamp_millis();
-        let (mut coordinator, _) = connected_rithmic_coordinator();
-        let instrument_id = instrument().instrument_id;
-        assert_eq!(
-            coordinator.calendar.phase(&instrument_id, midday),
-            aeris_instruments::SessionPhase::Open
-        );
-        let event = |generation| super::super::WireProviderEvent {
-            provider: "rithmic",
-            generation,
-            kind: super::super::ProviderEventKind::Calendar {
-                instrument_id: instrument_id.clone(),
-                status: MarketSessionStatus {
-                    instrument_id: instrument_id.clone(),
-                    phase: MarketSessionPhase::Closed,
-                    source: MarketSessionSource::ProviderCalendar,
-                    session_start_unix_nanos: None,
-                    session_end_unix_nanos: None,
-                    next_open_unix_nanos: None,
-                },
-                valid_from_utc_ms: midday - 60_000,
-                valid_until_utc_ms: midday + 60_000,
-            },
-        };
-        coordinator.handle_provider_event(event(0));
-        assert_eq!(
-            coordinator.calendar.phase(&instrument_id, midday),
-            aeris_instruments::SessionPhase::Open
-        );
-        coordinator.handle_provider_event(event(1));
-        assert_eq!(
-            coordinator.calendar.phase(&instrument_id, midday),
-            aeris_instruments::SessionPhase::Closed
-        );
-        assert_eq!(
-            coordinator.calendar.phase(&instrument_id, midday + 120_000),
-            aeris_instruments::SessionPhase::Open
-        );
-    }
-
-    #[test]
     fn calendar_unknown_week_and_month_publish_explicit_market_demand_error() {
         let (mut coordinator, _) = connected_rithmic_coordinator();
         let consumer = consumer(1);
@@ -6815,7 +6535,7 @@ mod tests {
         coordinator.events.entry(consumer).or_default();
         let mut installed = instrument();
         installed.venue_id = "UNKNOWN".into();
-        coordinator.calendar.resolve(&installed, None);
+        coordinator.calendar.resolve(&installed);
         coordinator.catalog.insert(
             (installed.provider.clone(), installed.instrument_id.clone()),
             installed,
@@ -6855,77 +6575,6 @@ mod tests {
     }
 
     #[test]
-    fn calendar_tastytrade_equity_week_demand_returns_explicit_error() {
-        let mut coordinator = coordinator();
-        let consumer = consumer(1);
-        register(&mut coordinator, consumer);
-        coordinator.events.entry(consumer).or_default();
-        coordinator
-            .engine
-            .begin_provider_session("tastytrade", ProviderGeneration(nonzero(1)))
-            .expect("provider session");
-        let (history_sender, _) = std::sync::mpsc::sync_channel(1);
-        coordinator.providers.records.insert(
-            "tastytrade",
-            super::super::ProviderDispatchRecord {
-                descriptor: super::super::tastytrade::DESCRIPTOR,
-                history: Box::leak(Box::new(history_sender)),
-                lifecycle: None,
-                ctrader: None,
-                hyperliquid: None,
-                tastytrade: None,
-                rithmic: None,
-                catalog: None,
-            },
-        );
-        let instrument = InstallProviderInstrument {
-            provider: "tastytrade".into(),
-            instrument_id: "tastytrade:Equity:TEST".into(),
-            provider_symbol: "TEST".into(),
-            venue_id: "NYSE".into(),
-            entitlement_id: super::super::tastytrade::ENTITLEMENT.into(),
-            ..Default::default()
-        };
-        let selected = BarSeriesKey {
-            provider_id: instrument.provider.clone(),
-            instrument_id: instrument.instrument_id.clone(),
-            entitlement_id: instrument.entitlement_id.clone(),
-            period: BarPeriod::week(1).expect("week"),
-            definition_version: 1,
-        };
-        coordinator.catalog.insert(
-            (
-                instrument.provider.clone(),
-                instrument.instrument_id.clone(),
-            ),
-            instrument,
-        );
-        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_demand(
-            client(1),
-            &selected,
-            StreamRequirements::BARS,
-            DemandWaiter {
-                consumer_id: consumer,
-                generation: generation(1),
-                started_at: Instant::now(),
-            },
-            &reply,
-        );
-        assert!(receiver.recv().expect("demand reply").is_err());
-        assert!(matches!(
-            coordinator
-                .events
-                .get_mut(&consumer)
-                .and_then(|events| events.demand_error.take()),
-            Some(MarketRuntimeEvent::DemandError(crate::MarketDemandError {
-                code: aeris_contracts::EngineFaultCode::Permanent,
-                ..
-            }))
-        ));
-    }
-
-    #[test]
     fn watchdog_rithmic_cme_trade_series_recovers_without_recent_trades() {
         use super::super::clock::{Clock, ScriptedClock};
         use chrono::{DateTime, Utc};
@@ -6958,7 +6607,6 @@ mod tests {
             &selected,
             provider_generation,
             "CME",
-            None,
             Arc::clone(&clock) as Arc<dyn Clock>,
         )
         .expect("trade handoff");
@@ -7039,9 +6687,7 @@ mod tests {
                 descriptor: *descriptor,
                 history: Box::leak(Box::new(history_tx)),
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -7050,7 +6696,7 @@ mod tests {
             (installed.provider.clone(), installed.instrument_id.clone()),
             installed.clone(),
         );
-        coordinator.calendar.resolve(&installed, None);
+        coordinator.calendar.resolve(&installed);
         install_scripted_watchdog_handoff(
             &mut coordinator,
             provider,
@@ -7094,7 +6740,6 @@ mod tests {
                 provider_generation,
                 "BTC",
                 "1m",
-                super::super::CandleGapPolicy::Contiguous,
                 Arc::clone(clock) as Arc<dyn Clock>,
             );
             live.connected = true;
@@ -7108,7 +6753,6 @@ mod tests {
                 selected,
                 provider_generation,
                 &installed.venue_id,
-                None,
                 Arc::clone(clock) as Arc<dyn Clock>,
             )
             .expect("trade handoff");
@@ -7119,8 +6763,8 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_tastytrade_open_trade_series_requests_one_recovery() {
-        scripted_watchdog_recovery("tastytrade", false);
+    fn watchdog_open_trade_series_requests_one_recovery() {
+        scripted_watchdog_recovery("rithmic", false);
     }
 
     #[test]
@@ -7130,7 +6774,7 @@ mod tests {
 
     #[test]
     fn watchdog_unknown_series_waits_for_long_threshold_before_one_recovery() {
-        scripted_watchdog_recovery("tastytrade", true);
+        scripted_watchdog_recovery("rithmic", true);
     }
 
     /// Rithmic Test answers a closed-market current replay with zero bars. That
@@ -7342,8 +6986,8 @@ mod tests {
     fn empty_current_completion_with_live_handoff_drains_deferred_backfill() {
         let (mut coordinator, history_receiver, current, selected) =
             current_request_with_deferred_viewport_backfill();
-        let live = TradeModel::new(&selected, current.provider_generation, "CME", None)
-            .expect("trade handoff");
+        let live =
+            TradeModel::new(&selected, current.provider_generation, "CME").expect("trade handoff");
         coordinator.series.insert_trade(selected.clone(), live);
         set_trade_history_ready(&mut coordinator, &selected);
 
@@ -8067,13 +7711,13 @@ mod tests {
         other.instrument_id = "instrument:hyperliquid:BTC".into();
         coordinator.order_books.insert(
             (other.provider.clone(), other.instrument_id.clone()),
-            ProviderOrderBook::new(other.clone(), super::super::TradeContinuity::Indexed, false),
+            ProviderOrderBook::new(other.clone(), false),
         );
         assert!(coordinator.has_provider_live_demand("hyperliquid"));
         assert!(!coordinator.has_provider_live_demand("rithmic"));
         coordinator.order_books.insert(
             ("rithmic".into(), "instrument:rithmic:CME:MNQU6".into()),
-            ProviderOrderBook::new(instrument(), super::super::TradeContinuity::Sequence, false),
+            ProviderOrderBook::new(instrument(), false),
         );
         assert!(coordinator.has_provider_live_demand("rithmic"));
     }
@@ -8280,9 +7924,7 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_sender,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
@@ -8696,42 +8338,6 @@ mod tests {
     }
 
     #[test]
-    fn preliminary_catalog_result_keeps_the_remote_completion_fenced() {
-        let mut coordinator = coordinator();
-        let consumer = consumer(1);
-        register(&mut coordinator, consumer);
-        coordinator
-            .events
-            .insert(consumer, ConsumerEvents::default());
-        coordinator.command_fences.record(
-            consumer,
-            "tastytrade".into(),
-            super::super::CommandKind::Search,
-            8,
-        );
-        let result = ProviderInstrumentSearchResult {
-            consumer_id: consumer.0.get(),
-            provider: "tastytrade".into(),
-            provider_generation: 1,
-            search_generation: 8,
-            instruments: Vec::new(),
-        };
-        coordinator.handle_catalog_search_preview(result.clone());
-        assert!(coordinator.command_fences.accepts(
-            consumer,
-            "tastytrade",
-            super::super::CommandKind::Search,
-            8
-        ));
-        assert!(matches!(
-            coordinator.events.get(&consumer).unwrap().catalog_search,
-            Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(_))
-        ));
-        coordinator.handle_catalog_search(result);
-        assert_eq!(coordinator.command_fences.count_for(consumer), 1);
-    }
-
-    #[test]
     fn startup_and_user_searches_have_independent_fences() {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
@@ -8741,40 +8347,40 @@ mod tests {
             .insert(consumer, ConsumerEvents::default());
         coordinator.command_fences.record(
             consumer,
-            "tastytrade".into(),
+            "hyperliquid".into(),
             super::super::CommandKind::StartupResolve,
             17,
         );
         coordinator.command_fences.record(
             consumer,
-            "tastytrade".into(),
+            "hyperliquid".into(),
             super::super::CommandKind::Search,
             1,
         );
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
-            provider: "tastytrade".into(),
+            provider: "hyperliquid".into(),
             provider_generation: 1,
             search_generation: 17,
             instruments: Vec::new(),
         });
         assert!(!coordinator.command_fences.accepts(
             consumer,
-            "tastytrade",
+            "hyperliquid",
             super::super::CommandKind::StartupResolve,
             17
         ));
         assert!(coordinator.command_fences.accepts(
             consumer,
-            "tastytrade",
+            "hyperliquid",
             super::super::CommandKind::Search,
             1
         ));
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
-            provider: "tastytrade".into(),
+            provider: "hyperliquid".into(),
             provider_generation: 1,
             search_generation: 1,
             instruments: Vec::new(),
@@ -8801,12 +8407,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_search_result_selection_preserves_search_identity_for_broker_providers() {
+    fn catalog_search_result_selection_preserves_search_identity() {
         use super::super::descriptors::{InstrumentRequest, SelectionRequest};
-        for descriptor in [
-            super::super::ctrader::DESCRIPTOR,
-            super::super::tastytrade::DESCRIPTOR,
-        ] {
+        for descriptor in super::super::BUILT_IN_PROVIDER_DESCRIPTORS.iter().copied() {
             let mut coordinator = coordinator();
             let owner = consumer(1);
             register(&mut coordinator, owner);
@@ -8827,9 +8430,7 @@ mod tests {
                     descriptor,
                     history: &history,
                     lifecycle: None,
-                    ctrader: None,
                     hyperliquid: None,
-                    tastytrade: None,
                     rithmic: None,
                     catalog: Some(&catalog),
                 },
@@ -8925,9 +8526,7 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history: &history,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: Some(&catalog),
             },
@@ -9009,29 +8608,27 @@ mod tests {
         coordinator.events.insert(owner, ConsumerEvents::default());
         let (history, _requests) = std::sync::mpsc::sync_channel(1);
         coordinator.providers.records.insert(
-            "ctrader",
+            "hyperliquid",
             super::super::ProviderDispatchRecord {
-                descriptor: super::super::ctrader::DESCRIPTOR,
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history: &history,
                 lifecycle: None,
-                ctrader: None,
                 hyperliquid: None,
-                tastytrade: None,
                 rithmic: None,
                 catalog: None,
             },
         );
         assert!(
-            super::super::ctrader::DESCRIPTOR
+            super::super::HYPERLIQUID_DESCRIPTOR
                 .presentation
                 .catalog_refresh_on_startup
         );
         let mut epochs = EpochSequence::<ProviderTag>::default();
         let retired = epochs.next();
         let current = epochs.next();
-        coordinator.provider_epochs.bind("ctrader", current);
+        coordinator.provider_epochs.bind("hyperliquid", current);
         let connected = |epoch| super::super::ProviderEvent {
-            provider: "ctrader",
+            provider: "hyperliquid",
             generation: epoch,
             wire_generation: epoch.get().get(),
             kind: super::super::ProviderEventKind::Connected,
@@ -9045,7 +8642,7 @@ mod tests {
         coordinator.handle_bound_provider_event(connected(current));
         assert!(matches!(
             coordinator.events.get_mut(&owner).unwrap().pop(),
-            Some(MarketRuntimeEvent::CatalogReady { provider }) if provider == "ctrader"
+            Some(MarketRuntimeEvent::CatalogReady { provider }) if provider == "hyperliquid"
         ));
     }
 
@@ -9058,7 +8655,7 @@ mod tests {
         for generation in [17, 18] {
             coordinator.command_fences.record(
                 owner,
-                "tastytrade".into(),
+                "hyperliquid".into(),
                 super::super::CommandKind::StartupResolve,
                 generation,
             );
@@ -9066,7 +8663,7 @@ mod tests {
         for generation in [17, 18] {
             coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
                 consumer_id: owner.0.get(),
-                provider: "tastytrade".into(),
+                provider: "hyperliquid".into(),
                 provider_generation: 1,
                 search_generation: generation,
                 instruments: Vec::new(),

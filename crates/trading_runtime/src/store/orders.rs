@@ -455,7 +455,7 @@ impl TradingStore {
         for row in rows {
             let (id, price_scale, quantity_scale, contract) = row.map_err(database_error)?;
             let instrument_id = InstrumentId::try_new(id).map_err(|error| error.to_string())?;
-            let contract = decode_contract(&contract, &instrument_id)?;
+            let contract = decode_contract(&contract)?;
             output.insert(
                 instrument_id.clone(),
                 TradingInstrument {
@@ -718,10 +718,7 @@ pub(super) fn instrument_class_parse(text: Option<&str>) -> Result<InstrumentCla
     })
 }
 
-pub(super) fn decode_contract(
-    raw: &str,
-    instrument_id: &InstrumentId,
-) -> Result<ContractMetadata, String> {
+pub(super) fn decode_contract(raw: &str) -> Result<ContractMetadata, String> {
     let value: Value =
         serde_json::from_str(raw).map_err(|_| "stored contract metadata is invalid".to_string())?;
     let provenance = value
@@ -790,7 +787,6 @@ pub(super) fn decode_contract(
             display_symbol: provenance
                 .get("display_symbol")
                 .and_then(Value::as_str)
-                .or_else(|| instrument_id.as_str().strip_prefix("tastytrade:Future:/"))
                 .or_else(|| provenance.get("provider_symbol").and_then(Value::as_str))
                 .unwrap_or_default()
                 .to_string(),

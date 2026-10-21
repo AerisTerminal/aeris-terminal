@@ -55,7 +55,7 @@ Run 1 (clean tree). The full log is at `C:\Users\devraj\AppData\Local\Temp\aeris
 | aeris_context_runtime (lib) | 13 | 12 | 0 | 1 | 0.02 |
 | aeris_contracts (lib) | 0 | 0 | 0 | 0 | 0.00 |
 | aeris_contracts (tests/contracts.rs) | 6 | 6 | 0 | 0 | 0.00 |
-| aeris_ctrader_open_api_adapter (lib) | 89 | 89 | 0 | 0 | **66.78** |
+| removed broker adapter A (lib) | 89 | 89 | 0 | 0 | **66.78** |
 | aeris_design_system (lib) | 16 | 16 | 0 | 0 | 0.00 |
 | aeris_desktop (lib) | 83 | 83 | 0 | 0 | 0.29 |
 | aeris_desktop (bin main.rs) | 438 | 437 | 0 | 1 | 1.07 |
@@ -76,7 +76,7 @@ Run 1 (clean tree). The full log is at `C:\Users\devraj\AppData\Local\Temp\aeris
 | aeris_rithmic_protocol_adapter (bin rithmic_test_smoke) | 11 | 11 | 0 | 0 | 1.43 |
 | aeris_study_sdk (lib) | 22 | 21 | 0 | 1 | 0.00 |
 | aeris_study_sdk (tests/native_sdk_surface) | 3 | 3 | 0 | 0 | 0.00 |
-| aeris_tastytrade_market_adapter (lib) | 24 | 24 | 0 | 0 | 3.60 |
+| removed broker adapter B (lib) | 24 | 24 | 0 | 0 | 3.60 |
 | aeris_terminal_ui (lib) | 37 | 36 | 0 | 1 | 0.06 |
 | aeris_trading (lib) | 8 | 8 | 0 | 0 | 0.00 |
 | aeris_trading_runtime (lib) | 88 | 87 | 0 | 1 | 3.49 |
@@ -84,11 +84,11 @@ Run 1 (clean tree). The full log is at `C:\Users\devraj\AppData\Local\Temp\aeris
 | **Total** | **1892** | **1878** | **0** | **14** | 94.7 s of test runtime in 100.4 s wall time |
 
 Slowest test binaries:
-1. `aeris_ctrader_open_api_adapter` lib, 66.8 s. This is dominated by `session_tests::general_and_historical_buckets_limit_200_requests_each` (`crates/adapters/ctrader_open_api/src/session_tests.rs:679`). The test drives the real-time rate-limit buckets over a local TLS socket, so it is inherently wall-clock bound; it triggered the "running for over 60 seconds" notice. It took 66.74 s in run 2, so its timing is stable.
+1. Removed broker adapter A lib, 66.8 s. This is dominated by its rate-limit bucket session test (the adapter has since been removed). The test drives the real-time rate-limit buckets over a local TLS socket, so it is inherently wall-clock bound; it triggered the "running for over 60 seconds" notice. It took 66.74 s in run 2, so its timing is stable.
 2. `aeris_platform_runtime` lib, 10.1 s.
-3. `aeris_tastytrade_market_adapter` lib (3.6 s), `aeris_trading_runtime` lib (3.5 s), `aeris_rithmic_protocol_adapter` lib (3.1 s).
+3. Removed broker adapter B lib (3.6 s), `aeris_trading_runtime` lib (3.5 s), `aeris_rithmic_protocol_adapter` lib (3.1 s).
 
-Cargo runs test binaries one after another, so the ctrader binary alone accounts for about two thirds of the test gate's wall time.
+Cargo runs test binaries one after another, so the adapter A binary alone accounts for about two thirds of the test gate's wall time.
 
 Ignored tests (14). All are intentionally manual, live-network, or release-soak tests:
 - Live public network: `sources::tests::official_public_sources_publish_current_validated_shapes` (BEA/Fed/NOAA/CFTC); `desktop::engine_market_worker::tests::native_market_runtime_hyperliquid_startup_resolves_stale_default_generation`; Hyperliquid `http::tests::live_catalog_includes_volume_ranked_markets`, `live_month_candle_snapshot_decodes`, `live_three_day_candle_snapshot_decodes`; `ws::tests::live_public_socket_connects_and_receives_aggregated_book`; `hyperliquid_realtime::tests::live_worker_cancellation_is_prompt`.
@@ -97,7 +97,7 @@ Ignored tests (14). All are intentionally manual, live-network, or release-soak 
 ## Failures and flaky tests
 
 - No test failures in either full run (run 1: 1878/0/14; run 2: 1881/0/14), so no flaky-test rerun was needed.
-- Timing-sensitive test: the ctrader rate-limit test above (about 66.8 s, stable across both runs). It is the only test that runs longer than 60 s. Under heavy CPU contention it is the most likely candidate for timing variance, but no failure was observed.
+- Timing-sensitive test: the adapter A rate-limit test above (about 66.8 s, stable across both runs). It is the only test that runs longer than 60 s. Under heavy CPU contention it is the most likely candidate for timing variance, but no failure was observed.
 - One stderr line during the desktop tests, `Aeris chart older history is unavailable: provider history failed (retryable): ...`, is expected output from a test that injects a failure. It is not a failure.
 - Format gate failure: the only failing gate is `cargo fmt --check` against the two files that another actor edited, uncommitted, during this run (`apps/desktop/src/native_ui/input.rs:287` and `third_party/gpui_base/src/input/base/element.rs:1992`). The committed tree is format-clean.
 
@@ -133,13 +133,13 @@ Per milestone, the full documented gates, which are feasible every milestone (ab
 ```
 cargo fmt --all -- --check                                                         # ~3 s
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings      # ~1-60 s depending on edits
-cargo test --workspace --all-features --locked                                     # ~100-110 s warm; ~67 s is one ctrader test
+cargo test --workspace --all-features --locked                                     # ~100-110 s warm; ~67 s was one since-removed adapter test
 cargo run -p aeris_naming_check --locked                                           # run from repo root; tests already covered by cargo test
 ```
 
 Parallelism:
 - `--jobs`: keep cargo's default (24). The measured peak of about 7.5 GB toolchain memory leaves headroom on 32 GB. If several agents or editors share the machine, or a cold build is expected, use `--jobs 16` to cap linker and rustc memory. Do not run two cargo invocations against the same `target/` at once; they serialize on the build-directory lock anyway, and rust-analyzer (Zed) also takes that lock.
-- `--test-threads`: keep the default (number of cores). Each test binary already runs its tests in parallel, and the gate's wall time is bound by one sequential rate-limit test, so more threads would not help. To shorten milestone loops while working outside the ctrader adapter, run `cargo test --workspace --all-features --locked --exclude aeris_ctrader_open_api_adapter` (about 35 s), then run the full gate once before delivery.
+- `--test-threads`: keep the default (number of cores). Each test binary already runs its tests in parallel, and the gate's wall time is bound by one sequential rate-limit test, so more threads would not help. At the time, excluding adapter A shortened milestone loops to about 35 s; that adapter has since been removed.
 - Do not lower test threads to 1. That would serialize roughly 1800 fast tests without any observed flakiness to justify it.
 - Doc-tests: all 25 crates have 0 doc-tests. Their overhead is small (about 5 s total), so no `--lib --bins --tests` restriction is needed.
 

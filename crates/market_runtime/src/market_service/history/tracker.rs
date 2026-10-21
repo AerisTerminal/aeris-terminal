@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use aeris_market_data::BarSeriesKey;
@@ -15,7 +15,7 @@ use aeris_provider_history::HistoryRange;
 
 use crate::market_service::{
     clock::Clock,
-    reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
+    reconnect::{Backoff, ReconnectPolicy},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,10 +85,7 @@ impl Lane {
         } else if capacity {
             super::super::HISTORY_RETRY_DELAY
         } else {
-            match self.backoff.failure(RetryClass::Transient) {
-                RetryDecision::Wait(delay) => delay,
-                RetryDecision::Failed { .. } | RetryDecision::Fatal => Duration::from_secs(30),
-            }
+            self.backoff.transient_delay()
         };
         self.state = LaneState::RetryAt(now + delay, range);
         self.attempts <= super::super::MAXIMUM_HISTORY_RETRIES

@@ -249,24 +249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aeris_ctrader_open_api_adapter"
-version = "0.2.3"
-dependencies = [
- "aeris_market_data",
- "aeris_platform_runtime",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "socket2",
- "webpki-roots 1.0.9",
- "zeroize",
-]
-
-[[package]]
 name = "aeris_design_system"
 version = "0.2.3"
 
@@ -345,7 +327,6 @@ name = "aeris_market_runtime"
 version = "0.2.3"
 dependencies = [
  "aeris_contracts",
- "aeris_ctrader_open_api_adapter",
  "aeris_hyperliquid_market_adapter",
  "aeris_instruments",
  "aeris_market_data",
@@ -355,7 +336,6 @@ dependencies = [
  "aeris_provider_history",
  "aeris_rithmic_protocol_adapter",
  "aeris_study_sdk",
- "aeris_tastytrade_market_adapter",
  "aeris_trading",
  "chrono",
  "chrono-tz",
@@ -467,22 +447,6 @@ dependencies = [
  "aeris_market_data",
  "aeris_market_runtime",
  "num-traits",
-]
-
-[[package]]
-name = "aeris_tastytrade_market_adapter"
-version = "0.2.3"
-dependencies = [
- "aeris_market_data",
- "aeris_observability",
- "aeris_platform_runtime",
- "chrono",
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "tungstenite",
- "ureq",
- "zeroize",
 ]
 
 [[package]]

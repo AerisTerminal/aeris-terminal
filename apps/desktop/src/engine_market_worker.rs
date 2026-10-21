@@ -108,8 +108,8 @@ struct EndpointRecord {
     /// The initial runtime selection has one reply, even when a replacement
     /// request arrives before that reply or the runtime repeats an outcome.
     initial_selection_pending: bool,
-    /// Instrument and calendar revision of the last session status sent to the chart.
-    session_status_sent: Option<(String, u64)>,
+    /// Instrument of the last session status sent to the chart.
+    session_status_sent: Option<String>,
     endpoint: WorkerEndpoint,
 }
 
@@ -3102,129 +3102,6 @@ mod tests {
             five.period,
             BarPeriod::time(5).expect("five-second period validates")
         );
-    }
-
-    #[test]
-    fn tastytrade_daily_charts_key_session_days() {
-        let product = InstallProviderInstrument {
-            provider: "tastytrade".to_string(),
-            instrument_id: "tastytrade:future:/ESZ26".to_string(),
-            provider_symbol: "/ESZ26:XCME".to_string(),
-            display_symbol: "/ESZ26".to_string(),
-            venue_id: "XCME".to_string(),
-            price_scale: 2,
-            entitlement_id: "tastytrade-authorized".to_string(),
-            ..Default::default()
-        };
-        // Watchlist closes and 1D charts both read this series; a fixed 24-hour
-        // period is never answered by tastytrade.
-        assert_eq!(
-            series_key(&product, ChartInterval::Day1)
-                .expect("daily series")
-                .period,
-            BarPeriod::session(1).expect("session day")
-        );
-        assert_eq!(
-            series_key(&product, ChartInterval::Hour12)
-                .expect("twelve-hour series")
-                .period,
-            BarPeriod::time(43_200).expect("twelve-hour period")
-        );
-    }
-
-    #[test]
-    fn ctrader_charts_key_session_days_and_take_currency_from_contract_terms() {
-        let product = InstallProviderInstrument {
-            provider: "ctrader".to_string(),
-            session_generation: 1,
-            selection_generation: 1,
-            instrument_id: "ctrader:demo:1001:1".to_string(),
-            provider_symbol: "EURUSD".to_string(),
-            display_symbol: "EURUSD".to_string(),
-            venue_id: "ctrader".to_string(),
-            price_scale: 5,
-            quantity_scale: 2,
-            entitlement_id: "ctrader-authorized".to_string(),
-            price_increment: Some(1),
-            contract_metadata: Some(Box::new(aeris_contracts::ProviderContractMetadata {
-                currency: Some("USD".to_string()),
-                ..aeris_contracts::ProviderContractMetadata::default()
-            })),
-        };
-        let minute = series_key(&product, ChartInterval::Minute1).expect("minute series");
-        assert_eq!(minute.period, BarPeriod::time(60).expect("minute period"));
-        // Daily bars open at 17:00 New York, so they are session days, not 24-hour buckets.
-        assert_eq!(
-            series_key(&product, ChartInterval::Day1)
-                .expect("daily series")
-                .period,
-            BarPeriod::session(1).expect("session day")
-        );
-        for bad in [
-            InstallProviderInstrument {
-                entitlement_id: "hyperliquid-public".to_string(),
-                ..product.clone()
-            },
-            InstallProviderInstrument {
-                instrument_id: "hyperliquid:perp:BTC".to_string(),
-                ..product.clone()
-            },
-        ] {
-            assert!(series_key(&bad, ChartInterval::Minute1).is_err());
-        }
-
-        assert_eq!(
-            snapshot_instrument(&minute).expect("demo id parses"),
-            (
-                "cTrader Demo".to_string(),
-                "1".to_string(),
-                AssetClass::ForeignExchange,
-                String::new()
-            )
-        );
-        for bad in [
-            "ctrader:demo:1001",
-            "ctrader:demo:1001:1:2",
-            "ctrader:paper:1001:1",
-            "ctrader:live::1",
-            "ctrader:live:1001:EURUSD",
-        ] {
-            let series = BarSeriesKey {
-                instrument_id: bad.to_string(),
-                ..minute.clone()
-            };
-            assert!(
-                snapshot_instrument(&series).is_err(),
-                "{bad} must not parse"
-            );
-        }
-
-        let publication = runtime_snapshot(
-            1,
-            1,
-            minute,
-            1,
-            5,
-            2,
-            vec![MarketBar {
-                source_sequence: 1,
-                exchange_timestamp_seconds: 1_700_000_040,
-                exchange_timestamp_unix_nanos: 1_700_000_040_000_000_000,
-                open: 108_000,
-                high: 108_010,
-                low: 107_990,
-                close: 108_005,
-                volume: 12,
-            }],
-            1,
-            false,
-        );
-        let snapshot = replay_runtime_snapshot(&publication, Some(&product), 1_000_000_000)
-            .expect("cTrader converts");
-        assert_eq!(snapshot.instrument().trading_currency, "USD");
-        assert_eq!(snapshot.instrument().symbol, "EURUSD");
-        assert_eq!(snapshot.instrument().venue_id, "cTrader Demo");
-        assert_eq!(snapshot.instrument().price_increment, Some(1));
     }
 
     #[test]

@@ -6004,12 +6004,6 @@ impl WorkspaceSurface {
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.apply_search_completed(result, cx);
             }
-            ProviderCatalogEvent::SearchPreview(result) => {
-                if let Some(generation) = usize_generation(result.search_generation) {
-                    self.symbol_browser
-                        .apply_preview_results(generation, result.instruments);
-                }
-            }
             ProviderCatalogEvent::SelectionInstalled {
                 command_generation,
                 instrument,

@@ -35,14 +35,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watchdog_all_four_providers_recover_while_trading_open() {
+    fn watchdog_open_and_always_open_sessions_recover_while_trading_open() {
         let now = Instant::now();
         let old = now
             .checked_sub(OPEN_STALL_THRESHOLD + Duration::from_secs(1))
             .expect("test clock");
         for (provider, phase) in [
-            ("ctrader", SessionPhase::Open),
-            ("tastytrade", SessionPhase::Open),
             ("rithmic", SessionPhase::Open),
             ("hyperliquid", SessionPhase::AlwaysOpen),
         ] {

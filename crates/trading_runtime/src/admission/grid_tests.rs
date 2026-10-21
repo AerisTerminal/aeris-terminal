@@ -31,7 +31,7 @@ fn practice_currency_is_checked_in_shared_admission_broker_is_exempt() {
         Err(RejectReason::CurrencyMismatch)
     );
     assert_eq!(
-        validate_currency(&instrument, "EUR", VenueRoute::CtraderDemo),
+        validate_currency(&instrument, "EUR", VenueRoute::BrokerDemo),
         Ok(())
     );
     assert_eq!(
@@ -76,7 +76,7 @@ fn resting_at_resolves_on_touch_for_every_side() {
 #[test]
 fn venue_capabilities_resolve_day_and_protection_policy() {
     let simulated = VenueCapabilities::for_route(VenueRoute::Simulated);
-    let broker = VenueCapabilities::for_route(VenueRoute::CtraderDemo);
+    let broker = VenueCapabilities::for_route(VenueRoute::BrokerDemo);
     assert_eq!(
         simulated.effective_tif(OrderType::Limit, TimeInForce::Day),
         TimeInForce::Day
@@ -181,7 +181,7 @@ fn fixed_and_significant_figure_grids_reject_off_grid_prices() {
 fn shared_admission_rejects_quantity_capacity_and_broker_client_length() {
     let mut instrument = crate::tests::instrument();
     let mut order = crate::tests::market_order("capacity", OrderSide::Buy, 1, 1_000);
-    for route in [VenueRoute::Simulated, VenueRoute::CtraderDemo] {
+    for route in [VenueRoute::Simulated, VenueRoute::BrokerDemo] {
         assert_eq!(
             validate_common_order(&instrument, &order, route, MAXIMUM_OPEN_ORDERS, 0),
             Err(RejectReason::CapacityExceeded)
@@ -199,7 +199,7 @@ fn shared_admission_rejects_quantity_capacity_and_broker_client_length() {
     }
     order.client_order_id = aeris_trading::ClientOrderId::try_new("x".repeat(51)).expect("id");
     assert_eq!(
-        validate_common_order(&instrument, &order, VenueRoute::CtraderDemo, 0, 0),
+        validate_common_order(&instrument, &order, VenueRoute::BrokerDemo, 0, 0),
         Err(RejectReason::ClientIdTooLong)
     );
     assert_eq!(
@@ -209,14 +209,14 @@ fn shared_admission_rejects_quantity_capacity_and_broker_client_length() {
     instrument.contract.order_quantity_increment =
         Some(InstrumentDecimal::try_new(2, 0).expect("increment"));
     order.client_order_id = aeris_trading::ClientOrderId::try_new("increment").expect("id");
-    for route in [VenueRoute::Simulated, VenueRoute::CtraderDemo] {
+    for route in [VenueRoute::Simulated, VenueRoute::BrokerDemo] {
         assert_eq!(
             validate_common_order(&instrument, &order, route, 0, 0),
             Err(RejectReason::InvalidQuantity)
         );
     }
     order.quantity = FixedPoint::try_new(1, 1).expect("wrong quantity scale");
-    for route in [VenueRoute::Simulated, VenueRoute::CtraderDemo] {
+    for route in [VenueRoute::Simulated, VenueRoute::BrokerDemo] {
         assert_eq!(
             validate_common_order(&instrument, &order, route, 0, 0),
             Err(RejectReason::ScaleMismatch)

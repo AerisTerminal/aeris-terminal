@@ -1,13 +1,12 @@
 use super::coordinator::StudyChange;
 use super::lifecycle::{RecoveryReason, SeriesInput, SeriesLifecycle, SeriesState};
 use super::{
-    AggressorSide, BTreeMap, BTreeSet, BarSeriesKey, CandleGapPolicy, CanonicalOrderBookState,
-    ConsumerId, Coordinator, DepthSnapshot, FailureStage, FormingBar, HyperliquidInstrumentDemand,
-    IndexedTradeMutation, InstallProviderInstrument, LIVE_BUFFER_CAPACITY,
-    LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication, MAXIMUM_RECENT_LADDER_TRADES, MarketBar,
-    MarketStream, MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering,
-    ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent, ProviderEvent,
-    ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
+    AggressorSide, BTreeMap, BTreeSet, BarSeriesKey, CanonicalOrderBookState, ConsumerId,
+    Coordinator, DepthSnapshot, FailureStage, FormingBar, HyperliquidInstrumentDemand,
+    InstallProviderInstrument, LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS,
+    MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
+    OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
+    ProviderEvent, ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
     ProviderOrderBook, ProviderTradeBatch, SeriesLoadState, TopOfBookQuote, TradeModel, VecDeque,
     id, merge_live_candle, series_state_payload, series_update_message,
 };
@@ -51,18 +50,13 @@ pub(in crate::market_service) fn enqueue_bar_transition(
 }
 
 impl ProviderOrderBook {
-    pub(super) fn new(
-        instrument: InstallProviderInstrument,
-        trade_continuity: super::TradeContinuity,
-        top_of_book_only: bool,
-    ) -> Self {
+    pub(super) fn new(instrument: InstallProviderInstrument, top_of_book_only: bool) -> Self {
         let trade_session_generation = instrument.session_generation;
         let mut calendar = super::calendar::MarketCalendarService::default();
-        calendar.resolve(&instrument, None);
+        calendar.resolve(&instrument);
         Self {
             instrument,
             calendar,
-            trade_continuity,
             top_of_book_only,
             depth_unsubscribed: false,
             book: OrderBook::new(
@@ -76,7 +70,6 @@ impl ProviderOrderBook {
             next_trade_ingestion_ordinal: 1,
             trade_tape_revision: 0,
             trade_tape_rewrite_generation: 0,
-            indexed_trade_ordinals: BTreeMap::new(),
             trade_tape_dirty: true,
             trade_tape_published_at: None,
             retention_clock_unix_nanos: 0,
@@ -100,7 +93,7 @@ impl ProviderOrderBook {
             self.invalidate_live_market(instrument.session_generation);
         }
         self.instrument = instrument;
-        self.calendar.resolve(&self.instrument, None);
+        self.calendar.resolve(&self.instrument);
     }
 
     fn invalidate_live_market(&mut self, session_generation: u64) -> bool {
@@ -114,7 +107,6 @@ impl ProviderOrderBook {
 
     fn reset_recent_trades_for_session(&mut self, session_generation: u64) {
         self.recent_trades.clear();
-        self.indexed_trade_ordinals.clear();
         self.trade_tape_rewrite_generation = self.trade_tape_rewrite_generation.saturating_add(1);
         self.traded_volumes.clear();
         self.trade_session_generation = session_generation;
@@ -127,7 +119,6 @@ impl ProviderOrderBook {
 
     fn remove_recent_trade(&mut self, retained: crate::RetainedMarketTrade) {
         let trade = retained.trade;
-        self.indexed_trade_ordinals.remove(&trade.trade_id);
         let Some(volumes) = self.traded_volumes.get_mut(&trade.price) else {
             return;
         };
@@ -182,9 +173,7 @@ impl ProviderOrderBook {
         if trade.metadata.session_generation > self.trade_session_generation {
             self.reset_recent_trades_for_session(trade.metadata.session_generation);
         }
-        if self.trade_continuity == super::TradeContinuity::Sequence
-            && trade.metadata.source_sequence <= self.last_trade_source_sequence
-        {
+        if trade.metadata.source_sequence <= self.last_trade_source_sequence {
             return false;
         }
         self.last_trade_source_sequence = self
@@ -222,10 +211,6 @@ impl ProviderOrderBook {
             trading_day,
             trade: std::sync::Arc::new(trade.clone()),
         };
-        if self.trade_continuity == super::TradeContinuity::Indexed {
-            self.indexed_trade_ordinals
-                .insert(trade.trade_id.clone(), ingestion_ordinal);
-        }
         self.recent_trades.push_back(retained.clone());
         self.trade_tape_revision = self.trade_tape_revision.saturating_add(1);
         self.trade_tape_dirty = true;
@@ -234,70 +219,6 @@ impl ProviderOrderBook {
             changed |= self.prune_recent_trades(observed_unix_nanos);
         }
         changed
-    }
-
-    pub(super) fn replace_indexed_trade(
-        &mut self,
-        index: &str,
-        trade: Option<&MarketTrade>,
-        historical: bool,
-    ) -> Result<(), String> {
-        if let Some(trade) = trade
-            && (trade.validate().is_err()
-                || trade.metadata.provider_id != self.instrument.provider
-                || trade.metadata.instrument_id != self.instrument.instrument_id
-                || trade.metadata.entitlement_id != self.instrument.entitlement_id
-                || trade.metadata.session_generation != self.trade_session_generation)
-        {
-            return Err("Indexed trade identity is stale or invalid".into());
-        }
-        let previous = self.indexed_trade_ordinals.get(index).copied();
-        // A history reply cannot overwrite a newer live correction or resurrect a cancellation.
-        if historical && previous.is_some() {
-            return Ok(());
-        }
-        if let Some(ordinal) = previous
-            && ordinal > 0
-            && let Ok(position) = self
-                .recent_trades
-                .binary_search_by_key(&ordinal, |retained| retained.ingestion_ordinal)
-        {
-            if let Some(trade) = trade
-                && self.recent_trades.get(position).is_some_and(|retained| {
-                    retained.trade.price == trade.price
-                        && retained.trade.quantity == trade.quantity
-                        && retained.trade.aggressor == trade.aggressor
-                        && retained.trade.metadata.timestamps.exchange_unix_nanos
-                            == trade.metadata.timestamps.exchange_unix_nanos
-                })
-            {
-                return Ok(());
-            }
-            if let Some(retained) = self.recent_trades.remove(position) {
-                self.remove_recent_trade(retained);
-            }
-            self.trade_tape_rewrite_generation =
-                self.trade_tape_rewrite_generation.saturating_add(1);
-            self.trade_tape_revision = self.trade_tape_revision.saturating_add(1);
-            self.trade_tape_dirty = true;
-        }
-        if self.indexed_trade_ordinals.len() >= MAXIMUM_RECENT_LADDER_TRADES * 2
-            && !self.indexed_trade_ordinals.contains_key(index)
-        {
-            return Err(
-                "Indexed trade identity window exhausted; history recovery is required".into(),
-            );
-        }
-        if let Some(trade) = trade {
-            if historical {
-                self.trade_tape_rewrite_generation =
-                    self.trade_tape_rewrite_generation.saturating_add(1);
-            }
-            self.accept_recent_trade(trade);
-        } else {
-            self.indexed_trade_ordinals.insert(index.into(), 0);
-        }
-        Ok(())
     }
 
     pub(super) fn install_top_of_book(&mut self, quote: &TopOfBookQuote) -> bool {
@@ -374,14 +295,12 @@ impl SeriesLifecycle {
         generation: ProviderGeneration,
         wire_coin: &str,
         interval: &str,
-        gap_policy: CandleGapPolicy,
     ) -> Self {
         Self::with_clock(
             series,
             generation,
             wire_coin,
             interval,
-            gap_policy,
             std::sync::Arc::new(super::clock::SystemClock),
         )
     }
@@ -520,13 +439,13 @@ impl SeriesLifecycle {
         Ok(())
     }
 
-    pub(super) fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
+    pub(super) fn take_publication(&mut self) -> Option<Vec<MarketBar>> {
         if !self.connected || !self.history_ready() || !self.dirty {
             return None;
         }
         let tails = self.pending_publications.drain(..).collect::<Vec<_>>();
         self.dirty = false;
-        (!tails.is_empty()).then_some(LiveSeriesPublication::Tails(tails))
+        (!tails.is_empty()).then_some(tails)
     }
 
     pub(super) fn accept_bar(&mut self, bar: MarketBar) -> Result<(), String> {
@@ -552,8 +471,7 @@ impl SeriesLifecycle {
             .forming
             .map(|forming| forming.bar)
             .or_else(|| self.bars.last().copied());
-        if self.gap_policy == CandleGapPolicy::Contiguous
-            && let (Some(active), Some(duration)) = (active, self.series.period.duration_nanos())
+        if let (Some(active), Some(duration)) = (active, self.series.period.duration_nanos())
             && candle.exchange_timestamp_unix_nanos > active.exchange_timestamp_unix_nanos
             && active.exchange_timestamp_unix_nanos.checked_add(duration)
                 != Some(candle.exchange_timestamp_unix_nanos)
@@ -857,60 +775,6 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn install_completed_live_correction(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        price_scale: u8,
-        quantity_scale: u8,
-        bar: MarketBar,
-    ) -> Result<(), String> {
-        if self
-            .provider_epochs
-            .current(&series.provider_id, generation.0.get())
-            .is_some_and(|epoch| self.history.is_detached(series, epoch))
-        {
-            return Ok(());
-        }
-        if self.engine.series_segments(series).is_some_and(|segments| {
-            segments.forming
-                && segments.last().is_some_and(|tail| {
-                    tail.source_sequence == bar.source_sequence
-                        && tail.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
-                })
-        }) {
-            return self.install_live_tails(
-                series,
-                generation,
-                price_scale,
-                quantity_scale,
-                vec![bar],
-            );
-        }
-        let exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
-        let publications = self
-            .engine
-            .replace_realtime_completed_bar(generation, series, price_scale, quantity_scale, bar)
-            .map_err(|error| {
-                let canonical = self.engine.series_segments(series).and_then(aeris_market_engine::SeriesSegments::last);
-                format!(
-                    "{error}; completed correction sequence={} time={} canonical_tail={canonical:?}",
-                    bar.source_sequence, bar.exchange_timestamp_unix_nanos
-                )
-            })?;
-        self.publish_installed_history(&publications);
-        match self.execute_study_change(StudyChange::Bar(series, exchange_timestamp_unix_nanos)) {
-            Ok(batch) => {
-                self.publish_study_outputs(&batch.executed);
-                for error in batch.errors {
-                    diagnostic!("Aeris live study execution failed: {error}");
-                }
-            }
-            Err(error) => diagnostic!("Aeris live study execution failed: {error}"),
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(super) fn rithmic_realtime_demand(&self) -> Result<RithmicRealtimeDemand, String> {
         self.provider_demand(super::RITHMIC_DESCRIPTOR.id)
@@ -1110,22 +974,9 @@ impl Coordinator<'_> {
                                 .to_string()
                         })?
                         .clone();
-                    let candle = descriptor
-                        .capabilities
-                        .candle_wire_interval
-                        .map(|wire_interval| {
-                            wire_interval(series.period).map(|interval| {
-                                (
-                                    descriptor.capabilities.gap_policy,
-                                    format!("{}{{={interval}}}", instrument.provider_symbol),
-                                )
-                            })
-                        })
-                        .transpose()?;
                     if let Some(mut handoff) = TradeModel::with_calendar(
                         series,
                         generation,
-                        candle,
                         std::sync::Arc::clone(&self.clock),
                         self.calendar.for_instrument(&instrument.instrument_id),
                         descriptor.capabilities.calendar_bar_stamp,
@@ -1163,7 +1014,6 @@ impl Coordinator<'_> {
                         generation,
                         &instrument.provider_symbol,
                         &interval,
-                        descriptor.capabilities.gap_policy,
                         std::sync::Arc::clone(&self.clock),
                     );
                     handoff.connected = connected;
@@ -1187,7 +1037,6 @@ impl Coordinator<'_> {
             .and_then(|status| status.generation)
             .map(|generation| generation.0.get());
         if wire.generation == 0
-            || wire.generation < self.session(wire.provider).generation_floor
             || engine_generation.is_some_and(|current| wire.generation < current)
         {
             self.provider_epochs.drop_event();
@@ -1360,39 +1209,11 @@ impl Coordinator<'_> {
                     &batch,
                 );
             }
-            ProviderEventKind::IndexedTrades {
-                instrument,
-                changes,
-            } => self.accept_indexed_trades(provider, generation, &instrument, &changes),
-            ProviderEventKind::TapeBackfill {
-                instrument,
-                trades,
-                truncated,
-            } => self.accept_tape_backfill(provider, generation, &instrument, &trades, truncated),
             ProviderEventKind::Quote(quote) => self.provider_quote(provider, generation, &quote),
             ProviderEventKind::Depth(depth) => self.provider_depth(provider, generation, &depth),
-            ProviderEventKind::Candle { symbol, candle } => {
-                self.accept_provider_candle(provider, generation, &symbol, candle, descriptor);
+            ProviderEventKind::Candle { symbol, bar } => {
+                self.accept_provider_candle(provider, generation, &symbol, bar, descriptor);
             }
-            ProviderEventKind::CandleRecovery(symbol) => {
-                self.recover_provider_candle(provider, generation, &symbol);
-            }
-            ProviderEventKind::TradeRecovery(instrument) => {
-                self.request_provider_trade_recovery(provider, generation, &instrument);
-            }
-            ProviderEventKind::Calendar {
-                instrument_id,
-                status,
-                valid_from_utc_ms,
-                valid_until_utc_ms,
-            } => self.accept_provider_calendar(
-                provider,
-                generation,
-                &instrument_id,
-                status,
-                valid_from_utc_ms,
-                valid_until_utc_ms,
-            ),
         }
         if let Some(state) = feed_state {
             self.publish_provider_feed(provider, generation, state);
@@ -1412,20 +1233,6 @@ impl Coordinator<'_> {
         // The trading owner clears per-instrument state on a generation bump; restore its
         // session contract before the trailing Feed::Live resumes quote flow.
         self.republish_trading_sessions(provider);
-    }
-
-    fn request_provider_trade_recovery(
-        &mut self,
-        provider: &str,
-        generation: u64,
-        instrument: &InstallProviderInstrument,
-    ) {
-        self.request_indexed_trade_recovery(
-            provider,
-            generation,
-            &instrument.instrument_id,
-            "the provider requested trade recovery",
-        );
     }
 
     fn handle_provider_recovering_event(
@@ -1451,10 +1258,8 @@ impl Coordinator<'_> {
     fn accepts_provider_event(&self, event: &ProviderEvent) -> bool {
         self.provider_registry.has_control(event.provider) && {
             let session = self.session(event.provider);
-            !session.suspended
-                && self
-                    .provider_epochs
-                    .accepts(event.provider, event.generation)
+            self.provider_epochs
+                .accepts(event.provider, event.generation)
                 && (session
                     .stop_pending
                     .is_none_or(|pending| pending.0.get() != event.wire_generation)
@@ -1462,74 +1267,8 @@ impl Coordinator<'_> {
         }
     }
 
-    fn accept_provider_calendar(
-        &mut self,
-        provider: &str,
-        generation: u64,
-        instrument_id: &str,
-        status: aeris_contracts::MarketSessionStatus,
-        valid_from_utc_ms: i64,
-        valid_until_utc_ms: i64,
-    ) {
-        // A retired session's holiday must never close the new session.
-        if self
-            .engine
-            .provider_status(provider)
-            .and_then(|status| status.generation)
-            .is_none_or(|current| current.0.get() != generation)
-            || !self
-                .catalog
-                .contains_key(&(provider.into(), instrument_id.into()))
-        {
-            return;
-        }
-        self.calendar.publish_provider_calendar(
-            instrument_id,
-            status,
-            valid_from_utc_ms,
-            valid_until_utc_ms,
-        );
-        let calendar = self.calendar.for_instrument(instrument_id);
-        for (series, live) in self.series.trade_iter_mut() {
-            if series.provider_id == provider && series.instrument_id == instrument_id {
-                live.calendar = calendar.clone();
-            }
-        }
-        if let Some(book) = self
-            .order_books
-            .get_mut(&(provider.into(), instrument_id.into()))
-        {
-            book.calendar = calendar;
-        }
-    }
-
     pub(super) fn flush_session_managed_demand(&mut self, provider: &'static str) {
         if !self.provider_registry.has_control(provider) {
-            return;
-        }
-        if let Some(ready) = self.session(provider).authorization {
-            let sent = self
-                .provider_registry
-                .authorization_changed(provider, ready)
-                .is_ok_and(|sent| sent);
-            if sent {
-                if self.provider_registry.contains(provider)
-                    && !self
-                        .provider_registry
-                        .release_idle(provider)
-                        .is_ok_and(|sent| sent)
-                {
-                    self.control_retry = true;
-                    return;
-                }
-                self.session_mut(provider).authorization = None;
-                self.session_mut(provider).accepted = None;
-            } else {
-                self.control_retry = true;
-            }
-            return;
-        }
-        if self.session(provider).suspended {
             return;
         }
         let demand = self.provider_demand(provider);
@@ -1568,269 +1307,6 @@ impl Coordinator<'_> {
             self.session_mut(provider).accepted = Some(demand);
         } else {
             self.control_retry = true;
-        }
-    }
-
-    fn accept_tape_backfill(
-        &mut self,
-        provider: &str,
-        generation: u64,
-        instrument: &InstallProviderInstrument,
-        trades: &[MarketTrade],
-        truncated: bool,
-    ) {
-        if self
-            .engine
-            .provider_status(provider)
-            .and_then(|status| status.generation)
-            .map(|current| current.0.get())
-            != Some(generation)
-        {
-            return;
-        }
-        if let Some(book) = self
-            .order_books
-            .get_mut(&(provider.to_string(), instrument.instrument_id.clone()))
-        {
-            for trade in trades {
-                if let Err(error) = book.replace_indexed_trade(&trade.trade_id, Some(trade), true) {
-                    self.request_indexed_trade_recovery(
-                        provider,
-                        generation,
-                        &instrument.instrument_id,
-                        &error,
-                    );
-                    return;
-                }
-            }
-        }
-        if let Some(observed) = trades
-            .iter()
-            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
-            .max()
-        {
-            self.publish_non_bar_study_change(
-                provider,
-                &instrument.instrument_id,
-                &instrument.entitlement_id,
-                MarketStream::Trades,
-                observed,
-            );
-        }
-        self.broadcast_order_book(provider, &instrument.instrument_id);
-        if truncated {
-            self.broadcast_provider_for(provider, Some("Available tick history is partial"));
-        }
-    }
-
-    fn recover_provider_candle(&mut self, provider: &str, generation: u64, symbol: &str) {
-        let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        let series = self
-            .series
-            .candle_iter()
-            .filter(|(series, live)| {
-                series.provider_id == provider
-                    && live.generation == generation
-                    && live.wire_symbol == symbol
-            })
-            .map(|(series, _)| series.clone())
-            .chain(
-                self.series
-                    .trade_keys()
-                    .filter(|series| series.provider_id == provider)
-                    .filter_map(|series| {
-                        let live = self.series.trade(series)?;
-                        (live.generation == generation
-                            && live.candle_symbol.as_deref() == Some(symbol))
-                        .then(|| series.clone())
-                    }),
-            )
-            .collect::<Vec<_>>();
-        for series in series {
-            self.recover_lifecycle_series(
-                &series,
-                generation,
-                FailureStage::Aggregation,
-                "Candle correction is reloading the available history",
-            );
-        }
-    }
-
-    fn accept_indexed_trades(
-        &mut self,
-        provider: &str,
-        generation: u64,
-        instrument: &InstallProviderInstrument,
-        changes: &[IndexedTradeMutation],
-    ) {
-        if self
-            .engine
-            .provider_status(provider)
-            .and_then(|status| status.generation)
-            .map(|current| current.0.get())
-            != Some(generation)
-        {
-            return;
-        }
-        let applied = self
-            .order_books
-            .get_mut(&(provider.to_string(), instrument.instrument_id.clone()))
-            .map_or(Ok(()), |book| {
-                changes.iter().try_for_each(|change| {
-                    book.replace_indexed_trade(&change.index, change.trade.as_ref(), false)
-                })
-            });
-        if let Err(error) = applied {
-            self.request_indexed_trade_recovery(
-                provider,
-                generation,
-                &instrument.instrument_id,
-                &error,
-            );
-            return;
-        }
-        let Ok(provider_generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        let failed_series = self
-            .series
-            .trade_lifecycle_iter_mut()
-            .filter(|(series, live)| {
-                series.provider_id == provider
-                    && live.generation == provider_generation
-                    && live.connected
-                    && series.instrument_id == instrument.instrument_id
-                    && series.entitlement_id == instrument.entitlement_id
-            })
-            .filter_map(|(series, live)| {
-                match changes
-                    .iter()
-                    .try_for_each(|change| live.accept_indexed_trade(change))
-                {
-                    Ok(()) => None,
-                    Err(error) => {
-                        if !live.awaiting_history() {
-                            diagnostic!(
-                                "Aeris market indexed trade rejected for {}: {error}",
-                                super::LoggedInstrument(&series.instrument_id)
-                            );
-                        }
-                        Some(series.clone())
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        if !failed_series.is_empty() {
-            for series in failed_series {
-                self.recover_lifecycle_series(
-                    &series,
-                    provider_generation,
-                    FailureStage::Aggregation,
-                    "Indexed trade aggregation requires covering history",
-                );
-            }
-            self.request_indexed_trade_recovery(
-                provider,
-                generation,
-                &instrument.instrument_id,
-                "a trade-built candle series rejected an indexed trade",
-            );
-            return;
-        }
-        for change in changes {
-            if let Some(trade) = &change.trade {
-                self.evaluate_price_alert_trade(trade);
-            }
-        }
-        self.request_history_after_indexed_trades(
-            provider,
-            provider_generation,
-            instrument,
-            changes,
-        );
-        if let Some(observed) = changes
-            .iter()
-            .filter_map(|change| change.trade.as_ref())
-            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
-            .max()
-        {
-            self.publish_non_bar_study_change(
-                provider,
-                &instrument.instrument_id,
-                &instrument.entitlement_id,
-                MarketStream::Trades,
-                observed,
-            );
-        }
-        self.broadcast_order_book(provider, &instrument.instrument_id);
-    }
-
-    fn request_history_after_indexed_trades(
-        &mut self,
-        provider: &str,
-        generation: ProviderGeneration,
-        instrument: &InstallProviderInstrument,
-        changes: &[IndexedTradeMutation],
-    ) {
-        if let Some(newest) = changes
-            .iter()
-            .filter(|change| change.kind == super::IndexedTradeKind::New)
-            .filter_map(|change| change.trade.as_ref())
-            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
-            .max()
-        {
-            self.request_current_history_after_live_trade(
-                provider,
-                generation,
-                &instrument.instrument_id,
-                &instrument.entitlement_id,
-                newest,
-            );
-        }
-    }
-
-    fn request_indexed_trade_recovery(
-        &mut self,
-        provider: &str,
-        generation: u64,
-        instrument_id: &str,
-        reason: &str,
-    ) {
-        diagnostic!(
-            "Aeris live trade tape reset for {} generation={generation}: {reason}",
-            super::LoggedInstrument(instrument_id)
-        );
-        if let Some(book) = self
-            .order_books
-            .get_mut(&(provider.to_string(), instrument_id.to_string()))
-        {
-            book.invalidate_live_market(generation);
-            self.broadcast_order_book(provider, instrument_id);
-        }
-        let Ok(provider_generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        let candidates = self.series.trade_keys().cloned().collect::<Vec<_>>();
-        let affected = candidates
-            .into_iter()
-            .filter(|series| {
-                series.provider_id == provider
-                    && series.instrument_id == instrument_id
-                    && self
-                        .series
-                        .trade(series)
-                        .is_some_and(|live| live.generation == provider_generation)
-            })
-            .collect::<Vec<_>>();
-        for series in affected {
-            self.recover_lifecycle_series(
-                &series,
-                provider_generation,
-                FailureStage::Aggregation,
-                "Indexed trade state requires covering history",
-            );
         }
     }
 
@@ -1905,7 +1381,7 @@ impl Coordinator<'_> {
         provider: &str,
         generation: u64,
         symbol: &super::provider_event::ProviderCandleSymbol,
-        candle: super::ProviderCandle,
+        bar: MarketBar,
         descriptor: super::ProviderDescriptor,
     ) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
@@ -1919,79 +1395,49 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let failed = match descriptor.capabilities.live_model {
-            super::LiveModel::TradeBuilt => {
-                let Some(wire) = symbol.wire() else {
-                    return;
-                };
-                self.series
-                    .trade_lifecycle_iter_mut()
-                    .filter(|(series, live)| {
-                        series.provider_id == provider
-                            && live.generation == generation
-                            && (!descriptor.capabilities.candle_requires_connected
-                                || live.connected)
-                            && live.matches_candle_symbol(symbol)
-                    })
-                    .filter_map(
-                        |(series, live)| match live.accept_trade_candle(wire, candle) {
-                            Ok(()) => None,
-                            Err(error) => {
-                                diagnostic!(
-                                    "Aeris market provider candle rejected for {}: {error}",
-                                    super::LoggedInstrument(&series.instrument_id)
-                                );
-                                Some(series.clone())
-                            }
-                        },
-                    )
-                    .collect::<Vec<_>>()
+        if descriptor.capabilities.live_model != super::LiveModel::ProviderCandles {
+            return;
+        }
+        let matched = self
+            .series
+            .candle_iter()
+            .filter(|(series, live)| {
+                series.provider_id == provider
+                    && live.generation == generation
+                    && (!descriptor.capabilities.candle_requires_connected || live.connected)
+                    && live.matches_candle_symbol(symbol)
+            })
+            .map(|(series, _)| series.clone())
+            .collect::<Vec<_>>();
+        let mut failed = Vec::new();
+        for series in &matched {
+            self.transition_candle_series(series, SeriesInput::Candle);
+            if self
+                .series
+                .candle_mut(series)
+                .is_some_and(|live| live.accept_bar(bar).is_err())
+            {
+                failed.push(series.clone());
             }
-            super::LiveModel::ProviderCandles => {
-                let matched = self
-                    .series
-                    .candle_iter()
-                    .filter(|(series, live)| {
-                        series.provider_id == provider
-                            && live.generation == generation
-                            && (!descriptor.capabilities.candle_requires_connected
-                                || live.connected)
-                            && live.matches_candle_symbol(symbol)
-                    })
-                    .map(|(series, _)| series.clone())
-                    .collect::<Vec<_>>();
-                let mut failed = Vec::new();
-                for series in &matched {
-                    self.transition_candle_series(series, SeriesInput::Candle);
-                    if self
-                        .series
-                        .candle_mut(series)
-                        .is_some_and(|live| live.accept_bar(candle.bar).is_err())
-                    {
-                        failed.push(series.clone());
-                    }
-                }
-                // Without a trade stream the first live candle is the only
-                // evidence that a series answered empty now has data.
-                if !descriptor
-                    .capabilities
-                    .engine
-                    .streams
-                    .contains(MarketStream::Trades)
-                {
-                    for series in matched {
-                        self.request_current_history_after_live_trade(
-                            provider,
-                            generation,
-                            &series.instrument_id,
-                            &series.entitlement_id,
-                            candle.bar.exchange_timestamp_unix_nanos,
-                        );
-                    }
-                }
-                failed
+        }
+        // Without a trade stream the first live candle is the only
+        // evidence that a series answered empty now has data.
+        if !descriptor
+            .capabilities
+            .engine
+            .streams
+            .contains(MarketStream::Trades)
+        {
+            for series in matched {
+                self.request_current_history_after_live_trade(
+                    provider,
+                    generation,
+                    &series.instrument_id,
+                    &series.entitlement_id,
+                    bar.exchange_timestamp_unix_nanos,
+                );
             }
-        };
+        }
         for series in failed {
             self.recover_lifecycle_series(
                 &series,
@@ -2009,10 +1455,6 @@ impl Coordinator<'_> {
         descriptor: super::ProviderDescriptor,
         reason: &ProviderDisconnect,
     ) {
-        if matches!(reason, ProviderDisconnect::End) {
-            self.end_provider_live_session(provider, generation);
-            return;
-        }
         if let ProviderDisconnect::Recover {
             provider_detail: Some(detail),
             ..
@@ -2049,7 +1491,6 @@ impl Coordinator<'_> {
                         detail,
                         auto_recover,
                     } => (*detail, *auto_recover, true),
-                    ProviderDisconnect::End => return,
                 };
                 if failed {
                     self.mark_lifecycle_failed(provider, generation, detail);
@@ -2079,7 +1520,6 @@ impl Coordinator<'_> {
                     ProviderDisconnect::Recover { detail, .. }
                     | ProviderDisconnect::Fail { detail, .. }
                     | ProviderDisconnect::SequenceGap { detail, .. } => *detail,
-                    ProviderDisconnect::End => return,
                 };
                 self.mark_lifecycle_recovering(
                     provider,
@@ -2858,7 +2298,6 @@ impl Coordinator<'_> {
                 super::AlertDemandUpdate::MarkDirty => {
                     self.session_mut(provider).demand_dirty = true;
                 }
-                super::AlertDemandUpdate::WorkerManaged => {}
             }
         }
     }
@@ -2880,9 +2319,6 @@ impl Coordinator<'_> {
             .map(|record| record.descriptor)
             .collect::<Vec<_>>();
         for descriptor in descriptors {
-            if descriptor.capabilities.idle_stop_policy != super::IdleStopPolicy::Coordinator {
-                continue;
-            }
             let provider = descriptor.id;
             // Ask for this provider's full demand, including depth and quote-only
             // subscriptions. Another provider's active book must not keep it alive.
@@ -3000,7 +2436,7 @@ mod tests {
     fn nonadjacent_rithmic_ingestion_ordinals_are_not_sequence_gaps() {
         let mut series = rithmic_tick_series();
         series.period = BarPeriod::time(60).expect("minute");
-        let mut live = TradeModel::new(&series, generation(), "CME", None).expect("handoff");
+        let mut live = TradeModel::new(&series, generation(), "CME").expect("handoff");
         live.seed(
             2,
             0,
@@ -3042,8 +2478,7 @@ mod tests {
         ] {
             let mut series = rithmic_tick_series();
             series.period = BarPeriod::session(1).expect("daily");
-            let mut live =
-                TradeModel::new(&series, generation(), "CME", None).expect("daily handoff");
+            let mut live = TradeModel::new(&series, generation(), "CME").expect("daily handoff");
             live.seed(2, 0, &[bar(10, at(old_open), 10_000)], None, Some(0))
                 .expect("provider daily bar");
             live.connected = true;
@@ -3072,7 +2507,7 @@ mod tests {
         };
         let mut series = rithmic_tick_series();
         series.period = BarPeriod::session(3).expect("three sessions");
-        let mut live = TradeModel::new(&series, generation(), "CME", None).expect("handoff");
+        let mut live = TradeModel::new(&series, generation(), "CME").expect("handoff");
         live.seed(
             2,
             0,
@@ -3131,7 +2566,6 @@ mod tests {
             let mut live = TradeModel::with_calendar(
                 &series,
                 generation(),
-                None,
                 std::sync::Arc::new(super::super::clock::SystemClock),
                 calendar,
                 CalendarBarStamp::TradingDateMidnightUtc,
@@ -3162,7 +2596,7 @@ mod tests {
         use aeris_contracts::ProviderSessionHours;
         for (label, source, weekly_before, weekly_after, monthly_before, monthly_after) in [
             (
-                "ctrader-fx",
+                "contract-hours-fx",
                 CalendarSource::ContractHours(
                     (1..=7)
                         .map(|weekday| ProviderSessionHours {
@@ -3179,7 +2613,7 @@ mod tests {
                 "2026-09-01T18:00:00Z",
             ),
             (
-                "tastytrade-equity",
+                "us-equity",
                 CalendarSource::ExchangeRule(ExchangeRule::UsEquity),
                 "2026-08-28T15:00:00Z",
                 "2026-08-31T15:00:00Z",
@@ -3220,7 +2654,6 @@ mod tests {
         after: &str,
     ) {
         use super::super::calendar::MarketCalendarService;
-        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
         use chrono::{DateTime, Utc};
         let at = |text: &str| {
             text.parse::<DateTime<Utc>>()
@@ -3230,29 +2663,12 @@ mod tests {
         };
         let mut calendar = MarketCalendarService::default();
         calendar.insert(label.into(), source);
-        if label == "tastytrade-equity" {
-            let first = at(before).div_euclid(1_000_000);
-            calendar.publish_provider_calendar(
-                label,
-                MarketSessionStatus {
-                    instrument_id: label.into(),
-                    phase: MarketSessionPhase::Regular,
-                    source: MarketSessionSource::ProviderCalendar,
-                    session_start_unix_nanos: Some(at(before) - 3_600_000_000_000),
-                    session_end_unix_nanos: Some(at(before) + 3_600_000_000_000),
-                    next_open_unix_nanos: None,
-                },
-                first - 3_600_000,
-                first + 3_600_000,
-            );
-        }
         let mut series = rithmic_tick_series();
         series.instrument_id = label.into();
         series.period = period;
         let mut live = TradeModel::with_calendar(
             &series,
             generation(),
-            None,
             std::sync::Arc::new(super::super::clock::SystemClock),
             calendar,
             super::super::calendar::CalendarBarStamp::SessionOpen,
@@ -3283,7 +2699,6 @@ mod tests {
                 session_generation: 1,
                 ..Default::default()
             },
-            super::super::TradeContinuity::Sequence,
             true,
         );
         book.calendar = live.calendar.for_instrument(label);
@@ -3318,76 +2733,6 @@ mod tests {
         }
     }
 
-    fn tastytrade_minute_series() -> BarSeriesKey {
-        BarSeriesKey {
-            provider_id: "tastytrade".to_string(),
-            instrument_id: "tastytrade:Future:/ESZ26".to_string(),
-            entitlement_id: "tastytrade-authorized".to_string(),
-            period: BarPeriod::time(60).expect("minute period"),
-            definition_version: 1,
-        }
-    }
-
-    #[test]
-    fn tastytrade_trade_handoff_errors_do_not_name_another_provider() {
-        let series = tastytrade_minute_series();
-        let mut live = TradeModel::new(&series, generation(), "CME", None).expect("handoff");
-        let error = live.seed(2, 0, &[], None, None).expect_err("empty seed");
-        assert!(!error.contains("Rithmic"), "{error}");
-        let base = bar(1, 60_000_000_000, 10_000);
-        live.seed(2, 0, &[base], None, None).expect("seed");
-        live.accept_trade(&tastytrade_trade("1", 1, 120_000_000_000, 10_100, 1))
-            .expect("initial trade");
-        let mut trade = tastytrade_trade("2", 2, 120_000_000_001, 10_100, 1);
-        trade.metadata.session_generation = 2;
-        let error = live.accept_trade(&trade).expect_err("mismatched session");
-        assert!(!error.contains("Rithmic"), "{error}");
-    }
-
-    fn tastytrade_trade(
-        identity: &str,
-        sequence: u64,
-        timestamp: i64,
-        price: i64,
-        quantity: i64,
-    ) -> MarketTrade {
-        MarketTrade {
-            metadata: EventMetadata {
-                provider_id: "tastytrade".to_string(),
-                instrument_id: "tastytrade:Future:/ESZ26".to_string(),
-                entitlement_id: "tastytrade-authorized".to_string(),
-                source_sequence: sequence,
-                session_generation: 1,
-                timestamps: QualifiedTimestamp {
-                    exchange_unix_nanos: Some(timestamp),
-                    provider_unix_nanos: None,
-                    received_unix_nanos: timestamp,
-                },
-            },
-            trade_id: identity.to_string(),
-            price,
-            quantity,
-            aggressor: AggressorSide::Unknown,
-        }
-    }
-
-    fn indexed_trade(
-        identity: &str,
-        kind: super::super::IndexedTradeKind,
-        sequence: u64,
-        timestamp: i64,
-        price: i64,
-        quantity: i64,
-    ) -> IndexedTradeMutation {
-        IndexedTradeMutation {
-            index: identity.to_string(),
-            kind,
-            source_sequence: sequence,
-            trade: (kind != super::super::IndexedTradeKind::Cancel)
-                .then(|| tastytrade_trade(identity, sequence, timestamp, price, quantity)),
-        }
-    }
-
     fn ladder_instrument(session_generation: u64) -> InstallProviderInstrument {
         InstallProviderInstrument {
             provider: "rithmic".to_string(),
@@ -3406,19 +2751,14 @@ mod tests {
     }
 
     #[test]
-    fn indexed_recent_trades_expire_by_time_and_release_ladder_volume() {
-        let mut instrument = ladder_instrument(1);
-        instrument.provider = "tastytrade".into();
-        let mut book =
-            ProviderOrderBook::new(instrument, super::super::TradeContinuity::Indexed, true);
-        let mut trade = ladder_trade(1, 1, 1_000_000_000_000, 20_000, 4, AggressorSide::Buy);
-        trade.metadata.provider_id = "tastytrade".into();
+    fn recent_trades_expire_by_time_and_release_ladder_volume() {
+        let mut book = ProviderOrderBook::new(ladder_instrument(1), true);
+        let trade = ladder_trade(1, 1, 1_000_000_000_000, 20_000, 4, AggressorSide::Buy);
         assert!(book.accept_recent_trade(&trade));
         assert_eq!(book.recent_trades.len(), 1);
         assert!(book.prune_recent_trades(1_000_000_000_000 + RECENT_TRADE_RETENTION_NANOS + 1));
         assert!(book.recent_trades.is_empty());
         assert!(book.traded_volumes.is_empty());
-        assert!(book.indexed_trade_ordinals.is_empty());
     }
 
     fn ladder_trade(
@@ -3523,11 +2863,7 @@ mod tests {
 
     #[test]
     fn study_live_market_views_are_generation_fenced_and_invalidated_for_recovery() {
-        let mut book = ProviderOrderBook::new(
-            ladder_instrument(1),
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut book = ProviderOrderBook::new(ladder_instrument(1), false);
         assert!(book.install_top_of_book(&ladder_quote(1, 1)));
         assert!(book.accept_recent_trade(&ladder_trade(1, 2, 2, 20_000, 3, AggressorSide::Buy,)));
         assert!(matches!(
@@ -3584,63 +2920,8 @@ mod tests {
     }
 
     #[test]
-    fn indexed_trade_correction_cancellation_and_delayed_history_are_fenced() {
-        let mut instrument = ladder_instrument(1);
-        instrument.provider = "tastytrade".into();
-        let mut book =
-            ProviderOrderBook::new(instrument, super::super::TradeContinuity::Indexed, true);
-        let mut trade = ladder_trade(1, 20, 1_000_000_000, 20_000, 4, AggressorSide::Buy);
-        trade.metadata.provider_id = "tastytrade".into();
-        trade.trade_id = "9007199254740993".into();
-        book.replace_indexed_trade(&trade.trade_id, Some(&trade), false)
-            .unwrap();
-        let revision = book.trade_tape_revision;
-        book.replace_indexed_trade(&trade.trade_id, Some(&trade), true)
-            .unwrap();
-        assert_eq!(book.trade_tape_revision, revision);
-        let mut corrected = trade.clone();
-        corrected.quantity = 7;
-        corrected.aggressor = AggressorSide::Sell;
-        corrected.metadata.source_sequence = 21;
-        book.replace_indexed_trade(&trade.trade_id, Some(&corrected), false)
-            .unwrap();
-        assert_eq!(book.recent_trades.len(), 1);
-        assert_eq!(
-            book.traded_volumes[&20_000],
-            AggressorTradeVolumes { buy: 0, sell: 7 }
-        );
-        assert!(book.trade_tape_rewrite_generation > 0);
-        book.replace_indexed_trade(&trade.trade_id, Some(&trade), true)
-            .unwrap();
-        assert_eq!(book.recent_trades[0].trade.quantity, 7);
-        book.replace_indexed_trade(&trade.trade_id, None, false)
-            .unwrap();
-        book.replace_indexed_trade(&trade.trade_id, Some(&trade), true)
-            .unwrap();
-        assert!(book.recent_trades.is_empty());
-        assert!(book.traded_volumes.is_empty());
-        let mut older = trade.clone();
-        older.trade_id = "10".into();
-        older.metadata.source_sequence = 1;
-        book.replace_indexed_trade(&older.trade_id, Some(&older), true)
-            .unwrap();
-        assert_eq!(book.recent_trades[0].trade.metadata.source_sequence, 1);
-        assert_eq!(book.last_trade_source_sequence, 21);
-        let mut retired = older.clone();
-        retired.metadata.session_generation = 2;
-        assert!(
-            book.replace_indexed_trade(&retired.trade_id, Some(&retired), true)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn recent_ladder_trades_are_side_aware_deduped_retained_and_session_fenced() {
-        let mut book = ProviderOrderBook::new(
-            ladder_instrument(1),
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut book = ProviderOrderBook::new(ladder_instrument(1), false);
         let start = 1_000_000_000_i64;
         assert!(book.accept_recent_trade(&ladder_trade(
             1,
@@ -3745,11 +3026,7 @@ mod tests {
     fn retained_trades_carry_the_venue_trading_day() {
         // Sunday 2026-08-16 (Unix day 20,681) 17:00 CDT opens Monday's CME trading date.
         let session_open = (20_681 * 86_400 + 22 * 3_600) * 1_000_000_000;
-        let mut book = ProviderOrderBook::new(
-            ladder_instrument(1),
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut book = ProviderOrderBook::new(ladder_instrument(1), false);
         for (sequence, received) in [(1, session_open - 1), (2, session_open)] {
             assert!(book.accept_recent_trade(&ladder_trade(
                 1,
@@ -3769,11 +3046,7 @@ mod tests {
 
         let mut unknown_venue = ladder_instrument(1);
         unknown_venue.venue_id = "UNKNOWN".to_string();
-        let mut book = ProviderOrderBook::new(
-            unknown_venue,
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut book = ProviderOrderBook::new(unknown_venue, false);
         assert!(book.accept_recent_trade(&ladder_trade(
             1,
             1,
@@ -3787,11 +3060,7 @@ mod tests {
 
     #[test]
     fn retained_trade_tape_enforces_its_hard_item_bound() {
-        let mut book = ProviderOrderBook::new(
-            ladder_instrument(1),
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut book = ProviderOrderBook::new(ladder_instrument(1), false);
         for sequence in
             1..=u64::try_from(MAXIMUM_RECENT_LADDER_TRADES + 2).expect("tape capacity fits u64")
         {
@@ -3826,7 +3095,7 @@ mod tests {
     #[test]
     fn rithmic_tick_burst_keeps_completed_revision_before_next_forming_bar() {
         let series = rithmic_tick_series();
-        let mut live = TradeModel::new(&series, generation(), "CME", None).expect("handoff");
+        let mut live = TradeModel::new(&series, generation(), "CME").expect("handoff");
         live.seed(2, 0, &[bar(10, 1_000_000_000, 10_000)], None, None)
             .expect("seed");
         live.connected = true;
@@ -3838,9 +3107,7 @@ mod tests {
         live.accept_trade(&tick_trade(3, 4_000_000_000, 10_300))
             .expect("third");
 
-        let LiveSeriesPublication::Tails(bars) = live.take_publication().expect("burst") else {
-            panic!("tails")
-        };
+        let bars = live.take_publication().expect("burst");
         assert_eq!(
             bars.iter()
                 .map(|bar| bar.source_sequence)
@@ -3854,7 +3121,7 @@ mod tests {
     fn rithmic_reseed_buffers_and_replays_live_trades_without_losing_the_seam() {
         let series = rithmic_tick_series();
         let mut live = SeriesLifecycle::from_trade(
-            TradeModel::new(&series, generation(), "CME", None).expect("handoff"),
+            TradeModel::new(&series, generation(), "CME").expect("handoff"),
         );
         let seed = bar(10, 1_000_000_000, 10_000);
         let seed_input = TradeHandoffSeed {
@@ -3897,429 +3164,6 @@ mod tests {
         assert!(live.history_ready());
         assert_eq!(model.bars.last().map(|bar| bar.source_sequence), Some(11));
         assert_eq!(model.bars.last().map(|bar| bar.close), Some(10_200));
-    }
-
-    #[test]
-    fn indexed_lifecycle_buffers_until_seed_and_fences_reseed_publication() {
-        let series = tastytrade_minute_series();
-        let mut live = SeriesLifecycle::from_trade(
-            TradeModel::new(&series, generation(), "CME", None).expect("handoff"),
-        );
-        let minute = 60_000_000_000;
-        live.accept_indexed_trade(&indexed_trade(
-            "first",
-            super::super::IndexedTradeKind::New,
-            1,
-            minute + 1,
-            10_100,
-            1,
-        ))
-        .expect("pre-seed mutation buffers");
-        assert!(!live.history_ready());
-        assert_eq!(live.trade_model().expect("model").buffered.len(), 1);
-        assert!(live.take_trade_publication().is_none());
-
-        live.seed_trade(TradeHandoffSeed {
-            price_scale: 2,
-            quantity_scale: 0,
-            bars: &[bar(1, 0, 10_000)],
-            forming: None,
-            handoff_boundary_unix_nanos: Some(0),
-        })
-        .expect("seed replays indexed mutation");
-        assert!(live.mark_trade_online());
-        assert!(live.history_ready());
-        assert!(live.trade_model().expect("model").buffered.is_empty());
-        assert!(live.take_trade_publication().is_some());
-
-        live.begin_trade_history_reseed();
-        live.accept_indexed_trade(&indexed_trade(
-            "second",
-            super::super::IndexedTradeKind::New,
-            2,
-            minute + 2,
-            10_200,
-            1,
-        ))
-        .expect("mutation buffers while reseeding");
-        assert!(!live.history_ready());
-        assert_eq!(live.trade_model().expect("model").buffered.len(), 1);
-        assert!(live.take_trade_publication().is_none());
-        live.cancel_trade_history_reseed()
-            .expect("cancel replays buffered mutation");
-        assert!(live.history_ready());
-        assert!(live.trade_model().expect("model").buffered.is_empty());
-    }
-
-    #[test]
-    fn tastytrade_indexed_trades_drive_forming_bar_and_apply_correction_and_cancel() {
-        let minute = 60_000_000_000;
-        let series = tastytrade_minute_series();
-        let mut live = TradeModel::new(
-            &series,
-            generation(),
-            "CME",
-            Some((
-                CandleGapPolicy::SessionGapsAllowed,
-                "/ESZ26:XCME{=m}".to_string(),
-            )),
-        )
-        .expect("handoff");
-        let forming = MarketBar {
-            source_sequence: 2,
-            exchange_timestamp_seconds: 60,
-            exchange_timestamp_unix_nanos: minute,
-            open: 10_000,
-            high: 10_000,
-            low: 10_000,
-            close: 10_000,
-            volume: 10,
-        };
-        live.seed(
-            2,
-            0,
-            &[bar(1, 0, 10_000)],
-            Some(FormingBar {
-                bar: forming,
-                trades: Some(10),
-            }),
-            Some(minute),
-        )
-        .expect("seed");
-        live.connected = true;
-        let _ = live.take_publication().expect("seed tail");
-
-        live.accept_indexed_trade(&indexed_trade(
-            "trade-1",
-            super::super::IndexedTradeKind::New,
-            1,
-            minute + 1,
-            10_100,
-            2,
-        ))
-        .expect("new trade");
-        let LiveSeriesPublication::Tails(updated) =
-            live.take_publication().expect("trade publication")
-        else {
-            panic!("tails")
-        };
-        assert_eq!((updated[0].close, updated[0].volume), (10_100, 12));
-
-        live.accept_indexed_trade(&indexed_trade(
-            "trade-1",
-            super::super::IndexedTradeKind::Correction,
-            2,
-            minute + 2,
-            10_200,
-            3,
-        ))
-        .expect("correction");
-        let LiveSeriesPublication::Tails(corrected) =
-            live.take_publication().expect("correction publication")
-        else {
-            panic!("tails")
-        };
-        assert_eq!((corrected[0].close, corrected[0].volume), (10_200, 13));
-
-        live.accept_indexed_trade(&indexed_trade(
-            "trade-1",
-            super::super::IndexedTradeKind::Cancel,
-            3,
-            minute + 2,
-            0,
-            0,
-        ))
-        .expect("cancel");
-        let LiveSeriesPublication::Tails(cancelled) =
-            live.take_publication().expect("cancel publication")
-        else {
-            panic!("tails")
-        };
-        assert_eq!(cancelled, vec![forming]);
-    }
-
-    #[test]
-    fn tastytrade_candle_reconciliation_ignores_lag_then_replaces_completed_bar() {
-        let minute = 60_000_000_000;
-        let symbol = "/ESZ26:XCME{=m}";
-        let series = tastytrade_minute_series();
-        let mut live = TradeModel::new(
-            &series,
-            generation(),
-            "CME",
-            Some((CandleGapPolicy::SessionGapsAllowed, symbol.to_string())),
-        )
-        .expect("handoff");
-        let forming = MarketBar {
-            source_sequence: 2,
-            exchange_timestamp_seconds: 60,
-            exchange_timestamp_unix_nanos: minute,
-            open: 10_000,
-            high: 10_000,
-            low: 10_000,
-            close: 10_000,
-            volume: 10,
-        };
-        live.seed(
-            2,
-            0,
-            &[bar(1, 0, 10_000)],
-            Some(FormingBar {
-                bar: forming,
-                trades: Some(10),
-            }),
-            Some(minute),
-        )
-        .expect("seed");
-        live.connected = true;
-        let _ = live.take_publication().expect("seed tail");
-        for mutation in [
-            indexed_trade(
-                "trade-1",
-                super::super::IndexedTradeKind::New,
-                1,
-                minute + 1,
-                10_100,
-                2,
-            ),
-            indexed_trade(
-                "trade-2",
-                super::super::IndexedTradeKind::New,
-                2,
-                minute + 2,
-                10_200,
-                3,
-            ),
-        ] {
-            live.accept_indexed_trade(&mutation).expect("trade");
-        }
-        let _ = live.take_publication().expect("trade publication");
-
-        live.accept_provider_candle(
-            symbol,
-            super::super::ProviderCandle {
-                bar: candle(minute, 10_000, 10_100, 10_000, 10_100, 12),
-                trade_count: Some(11),
-                trade_watermark: Some(2),
-            },
-        )
-        .expect("lagging candle is ignored");
-        assert!(live.take_publication().is_none());
-        assert_eq!(live.bars.last().map(|bar| bar.close), Some(10_200));
-
-        live.accept_indexed_trade(&indexed_trade(
-            "trade-3",
-            super::super::IndexedTradeKind::New,
-            4,
-            2 * minute + 1,
-            10_300,
-            1,
-        ))
-        .expect("rollover trade");
-        let _ = live.take_publication().expect("rollover publication");
-        live.accept_provider_candle(
-            symbol,
-            super::super::ProviderCandle {
-                bar: candle(minute, 10_000, 10_250, 9_950, 10_200, 20),
-                trade_count: Some(12),
-                trade_watermark: Some(2),
-            },
-        )
-        .expect("authoritative candle");
-        let LiveSeriesPublication::CompletedCorrection(reconciled) =
-            live.take_publication().expect("completed correction")
-        else {
-            panic!("completed correction")
-        };
-        assert_eq!(reconciled.source_sequence, 2);
-        assert_eq!(
-            (reconciled.high, reconciled.low, reconciled.volume),
-            (10_250, 9_950, 20)
-        );
-        assert_eq!(live.bars.last().map(|bar| bar.close), Some(10_300));
-    }
-
-    #[test]
-    fn newer_provider_candle_waits_for_older_trade_bucket_without_recovery() {
-        let minute = 60_000_000_000;
-        let symbol = "/ESZ26:XCME{=m}";
-        let series = tastytrade_minute_series();
-        let mut live = TradeModel::new(
-            &series,
-            generation(),
-            "CME",
-            Some((CandleGapPolicy::SessionGapsAllowed, symbol.into())),
-        )
-        .expect("handoff");
-        live.seed(
-            2,
-            0,
-            &[bar(1, 0, 10_000)],
-            Some(FormingBar {
-                bar: candle(minute, 10_000, 10_000, 10_000, 10_000, 10),
-                trades: Some(10),
-            }),
-            Some(minute),
-        )
-        .expect("seed");
-        live.connected = true;
-        let _ = live.take_publication();
-        for (id, sequence, time) in [("older", 1, minute + 1), ("newer", 2, 2 * minute + 1)] {
-            live.accept_indexed_trade(&indexed_trade(
-                id,
-                super::super::IndexedTradeKind::New,
-                sequence,
-                time,
-                10_100,
-                1,
-            ))
-            .expect("trade");
-        }
-        let _ = live.take_publication();
-        live.accept_provider_candle(
-            symbol,
-            super::super::ProviderCandle {
-                bar: candle(2 * minute, 10_100, 10_100, 10_100, 10_100, 1),
-                trade_count: Some(1),
-                trade_watermark: Some(2),
-            },
-        )
-        .expect("out-of-order candle waits for older bucket");
-        assert!(live.take_publication().is_none());
-    }
-
-    /// The live candle subscription replays the candle already forming at
-    /// subscription time. Its revisions update that one forming bar in place,
-    /// and the completed candle before it replays as an unchanged bar.
-    #[test]
-    fn subscribed_forming_candle_revisions_update_the_single_forming_bar() {
-        let minute = 60_000_000_000;
-        let symbol = "/ESZ26:XCME{=m}";
-        let mut live = TradeModel::new(
-            &tastytrade_minute_series(),
-            generation(),
-            "CME",
-            Some((CandleGapPolicy::SessionGapsAllowed, symbol.into())),
-        )
-        .expect("handoff");
-        let completed = bar(1, 0, 10_000);
-        live.seed(
-            2,
-            0,
-            &[completed],
-            Some(FormingBar {
-                bar: candle(minute, 10_000, 10_000, 10_000, 10_000, 10),
-                trades: Some(10),
-            }),
-            Some(minute + 1),
-        )
-        .expect("seed");
-        live.connected = true;
-        let _ = live.take_publication();
-
-        live.accept_provider_candle(
-            symbol,
-            super::super::ProviderCandle {
-                bar: candle(0, 10_000, 10_000, 10_000, 10_000, 1),
-                trade_count: Some(1),
-                trade_watermark: Some(0),
-            },
-        )
-        .expect("replayed completed candle is retained history");
-        assert!(live.take_publication().is_none());
-
-        for (count, close) in [(11, 10_050), (13, 10_125)] {
-            live.accept_provider_candle(
-                symbol,
-                super::super::ProviderCandle {
-                    bar: candle(minute, 10_000, close, 10_000, close, 12),
-                    trade_count: Some(count),
-                    trade_watermark: Some(0),
-                },
-            )
-            .expect("forming revision");
-            let LiveSeriesPublication::Tails(tails) =
-                live.take_publication().expect("forming revision publishes")
-            else {
-                panic!("a forming revision is a tail update");
-            };
-            assert_eq!(tails.len(), 1);
-            assert_eq!(
-                (tails[0].exchange_timestamp_unix_nanos, tails[0].close),
-                (minute, close)
-            );
-        }
-        assert_eq!(live.bars.len(), 2, "one completed bar and one forming bar");
-        assert_eq!(live.bars[0], completed);
-    }
-
-    #[test]
-    fn pending_append_precedes_correction_for_the_same_bucket() {
-        let mut live = TradeModel::new(
-            &tastytrade_minute_series(),
-            generation(),
-            "CME",
-            Some((
-                CandleGapPolicy::SessionGapsAllowed,
-                "/ESZ26:XCME{=m}".into(),
-            )),
-        )
-        .expect("handoff");
-        live.connected = true;
-        live.dirty = true;
-        let appended = bar(2, 60, 10_000);
-        let corrected = MarketBar {
-            close: 10_100,
-            ..appended
-        };
-        live.pending_publications.push_back(appended);
-        live.pending_corrections.push_back(corrected);
-        let LiveSeriesPublication::Tails(tails) = live.take_publication().expect("append") else {
-            panic!("append must precede its correction");
-        };
-        assert_eq!(tails, vec![appended]);
-        let LiveSeriesPublication::CompletedCorrection(correction) =
-            live.take_publication().expect("correction")
-        else {
-            panic!("correction follows accepted append");
-        };
-        assert_eq!(correction, corrected);
-    }
-
-    #[test]
-    fn provider_candle_replay_does_not_restart_an_awaiting_history_repair() {
-        let symbol = "/ESZ26:XCME{=m}";
-        let series = tastytrade_minute_series();
-        let mut live = SeriesLifecycle::from_trade(
-            TradeModel::new(
-                &series,
-                generation(),
-                "CME",
-                Some((CandleGapPolicy::SessionGapsAllowed, symbol.to_string())),
-            )
-            .expect("handoff"),
-        );
-        live.seed_trade(TradeHandoffSeed {
-            price_scale: 2,
-            quantity_scale: 0,
-            bars: &[bar(1, 0, 10_000)],
-            forming: None,
-            handoff_boundary_unix_nanos: Some(0),
-        })
-        .expect("seed");
-        live.recover_trade(RecoveryReason::ProviderReconnected);
-        let previous = live.trade_model().expect("model").bars.clone();
-        live.accept_trade_candle(
-            symbol,
-            super::super::ProviderCandle {
-                bar: candle(-60_000_000_000, 10_000, 10_000, 10_000, 10_000, 1),
-                trade_count: Some(1),
-                trade_watermark: Some(1),
-            },
-        )
-        .expect("the covering request owns this replay");
-        assert_eq!(live.trade_model().expect("model").bars, previous);
-        assert!(!live.history_ready());
     }
 
     #[test]
@@ -4400,44 +3244,6 @@ mod tests {
     }
 
     #[test]
-    fn tastytrade_late_new_trade_after_history_boundary_is_ignored() {
-        let minute = 60_000_000_000;
-        let mut live = TradeModel::new(
-            &tastytrade_minute_series(),
-            generation(),
-            "CME",
-            Some((
-                CandleGapPolicy::SessionGapsAllowed,
-                "/ESZ26:XCME{=m}".into(),
-            )),
-        )
-        .expect("handoff");
-        live.seed(
-            2,
-            0,
-            &[bar(1, 0, 10_000)],
-            Some(FormingBar {
-                bar: candle(minute, 10_000, 10_100, 10_000, 10_100, 10),
-                trades: Some(10),
-            }),
-            Some(minute),
-        )
-        .expect("seed");
-        live.connected = true;
-        let _ = live.take_publication();
-        live.accept_indexed_trade(&indexed_trade(
-            "late-trade",
-            super::super::IndexedTradeKind::New,
-            1,
-            minute - 1,
-            10_050,
-            1,
-        ))
-        .expect("late print is explicitly rejected by the history boundary");
-        assert!(live.take_publication().is_none());
-    }
-
-    #[test]
     fn hyperliquid_rollover_keeps_final_prior_revision_before_append() {
         let series = BarSeriesKey {
             provider_id: "hyperliquid".to_string(),
@@ -4446,13 +3252,7 @@ mod tests {
             period: BarPeriod::time(60).expect("time period"),
             definition_version: 1,
         };
-        let mut live = SeriesLifecycle::new(
-            series,
-            generation(),
-            "BTC",
-            "1m",
-            CandleGapPolicy::Contiguous,
-        );
+        let mut live = SeriesLifecycle::new(series, generation(), "BTC", "1m");
         live.seed(
             2,
             2,
@@ -4471,10 +3271,7 @@ mod tests {
         live.accept_bar(candle(180_000_000_000, 10_250, 10_500, 10_200, 10_300, 1))
             .expect("rollover");
 
-        let LiveSeriesPublication::Tails(bars) = live.take_publication().expect("rollover tails")
-        else {
-            panic!("tails")
-        };
+        let bars = live.take_publication().expect("rollover tails");
         assert_eq!(
             bars.iter()
                 .map(|bar| bar.source_sequence)
@@ -4485,7 +3282,7 @@ mod tests {
     }
 
     #[test]
-    fn candle_gap_policy_allows_session_gaps_but_rejects_missing_contiguous_bars() {
+    fn candle_series_rejects_missing_contiguous_bars() {
         let series = BarSeriesKey {
             provider_id: "provider".to_string(),
             instrument_id: "instrument:provider:TEST".to_string(),
@@ -4495,14 +3292,9 @@ mod tests {
         };
         let previous = bar(10, 60_000_000_000, 10_000);
         let next = bar(11, 180_000_000_000, 10_100);
-        for (policy, accepted) in [
-            (CandleGapPolicy::Contiguous, false),
-            (CandleGapPolicy::SessionGapsAllowed, true),
-        ] {
-            let mut live = SeriesLifecycle::new(series.clone(), generation(), "TEST", "1m", policy);
-            live.seed(2, 2, &[previous], None).expect("history seeds");
-            assert_eq!(live.ingest(next).is_ok(), accepted);
-        }
+        let mut live = SeriesLifecycle::new(series, generation(), "TEST", "1m");
+        live.seed(2, 2, &[previous], None).expect("history seeds");
+        assert!(live.ingest(next).is_err());
     }
 
     #[test]
@@ -4514,13 +3306,7 @@ mod tests {
             period: BarPeriod::time(60).expect("time period"),
             definition_version: 1,
         };
-        let mut live = SeriesLifecycle::new(
-            series,
-            generation(),
-            "BTC",
-            "1m",
-            CandleGapPolicy::Contiguous,
-        );
+        let mut live = SeriesLifecycle::new(series, generation(), "BTC", "1m");
         let closed = bar(10, 60_000_000_000, 10_000);
         let forming_bar = bar(11, 120_000_000_000, 10_100);
         live.seed(

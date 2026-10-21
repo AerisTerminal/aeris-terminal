@@ -9,7 +9,7 @@ Scope of the code census: `apps/`, `crates/`, `tools/` (305 `.rs` files). `third
 
 - The history is 1,188 non-merge commits over 75 days (2026-07-31 to 2026-10-13, 68 active days), with a median of 15 minutes between consecutive commits. `fix` is the largest commit type: 402 commits (34%), almost twice the 208 `feat` commits. Refactor is 61 (5%) and test is 33 (3%).
 - The fix:feat ratio peaked at 2.75 in September and is 1.57 for 1 to 13 October. The last 500 commits have a ratio of 1.77 and the last 200 have 1.66. Ten days produced 15 or more fix commits each, and 17 days produced 10 or more; the maximum was 28 on 2026-09-12.
-- Repeat fixes are measurable. **164 of 402 fix commits (41%) modify a non-trivial function that another fix commit modified in the previous six commits** (284 such pairs, after excluding constructors, `render`, and the pinned-revision test in `naming_check`). In several functions nearly every change is a fix: `history.rs::accept_history_completion` (7 of 8 commits), `tastytrade.rs::accept` (8 of 10), `realtime.rs::accept_indexed_trades` (6 of 7), and `view.rs::chart_legend_row` (15 of 21).
+- Repeat fixes are measurable. **164 of 402 fix commits (41%) modify a non-trivial function that another fix commit modified in the previous six commits** (284 such pairs, after excluding constructors, `render`, and the pinned-revision test in `naming_check`). In several functions nearly every change is a fix: `history.rs::accept_history_completion` (7 of 8 commits), `accept` in the removed Level 1 broker module (8 of 10), `realtime.rs::accept_indexed_trades` (6 of 7), and `view.rs::chart_legend_row` (15 of 21).
 - Fixes are often feature-sized or bundled. The median fix touches 119 lines and 4 files. 65 fix commits exceed 500 changed lines and 30 exceed 1,000. 93 fix commits span three or more top-level directories, and 118 fix subjects bundle unrelated outcomes ("X, Y and Z"). Only 238 of 402 fix commits (59%) add or change a `#[test]`.
 - Generation fencing is everywhere and has no shared type. The code has 4,693 occurrences of `generation` across 117 files and 228 distinct generation-related identifiers. 136 non-test fields and parameters store a raw `u64`/`u32`/`usize` generation, and there are 208 non-test generation comparisons. The shared `aeris_application::MarketGeneration<T>` (412 lines) is used in only 3 desktop files, and its `require_resnapshot` method has no callers.
 - State is concentrated in a few very large types: `WorkspaceSurface` (96 fields, about 262 methods), `TerminalApp` (63 fields, about 260 methods across 13 files), `AerisChartView` (49 fields, about 227 methods), and market_runtime `Coordinator` (29 fields, about 300 methods across 9 files and about 11,000 lines of impl). These four types sit in the files with the most fix commits.
@@ -71,7 +71,7 @@ desktop 96, ui 50, chart 30 + charts 16, market 30, trading 16, auth 10, (empty)
 |---|---|
 | Lines changed per fix (median / p75 / p90) | 119 / 307 / 743 |
 | Fix commits > 500 lines / > 1,000 lines | 65 / 30 |
-| Largest "fixes" | `ef4b9789c` fix(market): bound provider stalls (24 files, +1802/-373); `86492bea4` fix(market_runtime): drive tastytrade candles from trades (11 files, +1392/-197); `7bf8f1c02` fix(market): close out cTrader market-data defects (+690/-206, 9 numbered defects) |
+| Largest "fixes" | `ef4b9789c` fix(market): bound provider stalls (24 files, +1802/-373); `86492bea4` fix(market_runtime): drive Level 1 broker candles from trades (11 files, +1392/-197); `7bf8f1c02` fix(market): close out FX/CFD broker market-data defects (+690/-206, 9 numbered defects) |
 | Files per fix (median / p90) | 4 / 11 |
 | Fix commits spanning 3 or more top-level dirs | 93 |
 | Fix subjects bundling several outcomes (", " or " and ") | 118 |
@@ -118,7 +118,7 @@ desktop 96, ui 50, chart 30 + charts 16, market 30, trading 16, auth 10, (empty)
 | 15 | crates/ui/design_system/src/lib.rs | 24 | 67 | 36% |
 | 16 | plan/plan.md | 23 | 106 | |
 | 17 | crates/market_runtime/src/market_service/coordinator.rs | 20 | 42 | 48% |
-| 18 | crates/market_runtime/src/market_service/tastytrade.rs | 20 | 38 | **53%** |
+| 18 | the removed Level 1 broker module (market_service) | 20 | 38 | **53%** |
 | 19 | apps/desktop/src/components/chart_surface.rs | 19 | 47 | 40% |
 | 20 | crates/market_runtime/src/market_service/realtime.rs | 18 | 34 | **53%** |
 | 21 | apps/desktop/src/account.rs | 18 | 32 | 56% |
@@ -137,7 +137,7 @@ desktop 96, ui 50, chart 30 + charts 16, market 30, trading 16, auth 10, (empty)
 | 34 | CSS.md | 13 | 23 | 57% |
 | 35 | apps/desktop/src/components/drawing_toolbar.rs | 13 | 29 | 45% |
 | 36 | apps/desktop/src/engine_market_worker/publications.rs | 12 | 23 | 52% |
-| 37 | crates/market_runtime/src/market_service/tastytrade_tests.rs | 12 | 18 | 67% |
+| 37 | the removed Level 1 broker module tests (market_service) | 12 | 18 | 67% |
 | 38 | crates/contracts/src/messages.rs | 11 | 35 | 31% |
 | 39 | crates/market_runtime/src/market_service/tests.rs | 11 | 27 | 41% |
 | 40 | crates/trading_runtime/src/tests.rs | 11 | 34 | 32% |
@@ -154,7 +154,7 @@ Attribution uses the function named in the hunk header, so a hunk is credited to
 | `terminal_view.rs::render`, `workspace_tab` | 15/39, 10/15 | Tab and workspace chrome |
 | `native_ui/menu.rs::render`, `terminal_chrome.rs::header_controls` | 12/21, 11/32 | Menu and button interaction states |
 | `workspace_surface.rs::apply_publication` | 9/21 | Market publication into the surface |
-| `tastytrade.rs::accept` | **8/10** | DXLink event intake |
+| `accept` (the removed Level 1 broker module) | **8/10** | Streaming event intake |
 | `history.rs::accept_history_completion` | **7/8** | History completion semantics |
 | `view.rs::apply_pending_data`, `install_replay_recovery` | 7/23, 6/21 | Chart data bridge recovery |
 | `realtime.rs::accept_indexed_trades`, `publish_rithmic_live` | **6/7**, 6/10 | Live-tail and forming-bar seam |
@@ -201,7 +201,7 @@ Each chain lists the topic, the commits in order, what each step added, and the 
 | `c08f3e27c` | 09-23 | submit quick timeframe changes once |
 | `5d07263cb` | 10-10 | keep keyboard focus when a series switch replaces the chart |
 | `daffe4fcd` | 10-10 | keep restored charts auto-scaled after timeframe changes |
-| `79a65bc7f` | 10-10 | only demand chart streams the provider publishes (recovery asked cTrader for trade prints and showed "Chart unavailable") |
+| `79a65bc7f` | 10-10 | only demand chart streams the provider publishes (recovery asked the removed FX/CFD broker for trade prints and showed "Chart unavailable") |
 | `0a230a8a0` | 10-11 | keep drawings per instrument |
 | `771a8d732` | 10-12 | open unoffered intervals at the nearest offered one; retire superseded recoveries quietly (adds `MarketRecoveryFailure::{Superseded, Failed(String)}`) |
 | `f504ab868` | 10-12 | keep order flow off the superseded chart during interval and symbol switches (+206 test lines) |
@@ -220,15 +220,15 @@ Root cause: there is no explicit chart-subscription lifecycle type. Its states w
 | `f935462a` | 08-31 | reconcile Coinbase candles after live rollovers |
 | (provider replaced) | 09-06 | Coinbase replaced by Hyperliquid |
 | `13c697edd` | 09-09 | align history depth (touches `publish_rithmic_live`) |
-| `86492bea4` | 10-02 | drive tastytrade candles from trades (+1392 lines, labeled fix) |
+| `86492bea4` | 10-02 | drive Level 1 broker candles from trades (+1392 lines, labeled fix) |
 | `b006b38f3` | 10-02 | recover conflicting live tails |
 | `a1f5a2919` | 10-02 | reconcile covered live tails (same day, 10 lines) |
 | `4f885153e` | 10-02 | recover stalled live series: "series recovery discarded the result of its history request, so a failed or unanswered reload left the series in AwaitingHistory forever". Adds a bounded retry ticket and a **30 s liveness watchdog** |
-| `dfe6c2877` | 10-12 | keep tastytrade charts live when older history runs out and cover the forming candle |
+| `dfe6c2877` | 10-12 | keep Level 1 broker charts live when older history runs out and cover the forming candle |
 
 What was layered: `LiveHistoryState {AwaitingHistory, Ready, Reseeding}` (`crates/market_runtime/src/market_service/mod.rs:729`) exists, but its transitions are driven from many call sites. One transition (history failure while `AwaitingHistory`) was missing, so a series could stay there indefinitely. The fix added a timer-based watchdog on top instead of making the state machine total. Per-provider handoff types (`TradeLiveHandoff` with 24 fields, `CandleHandoffSeed`, `TradeHandoffSeed`) and provider-named paths inside the shared `realtime.rs` (`rithmic_connecting`, `rithmic_online`, `rithmic_recovering`, `publish_rithmic_live`, `flush_hyperliquid_demand`) mean the seam is implemented twice: once for trade-built series and once for provider-candle series.
 
-Root cause: history/live seam rules are not expressed as one total state machine with exhaustive transition tests. Rules were discovered provider by provider (Coinbase, then Hyperliquid, Rithmic, and tastytrade) during live use.
+Root cause: history/live seam rules are not expressed as one total state machine with exhaustive transition tests. Rules were discovered provider by provider (Coinbase, then Hyperliquid, Rithmic, and the removed Level 1 broker) during live use.
 
 ### C. On-demand history loading and completion semantics
 
@@ -239,9 +239,9 @@ Root cause: history/live seam rules are not expressed as one total state machine
 | `2d59ee16e` | 09-06 04:23 | retain recovery under history pressure |
 | `0a64dd290` … `7fabf699a` | 09-06 06:04 to 07:43 | 7 fixes (provisional Coinbase history, shared demand, readiness, union viewport demand, beyond-edge demand, complete lazy snapshots, cross-workspace sync, cached loading) |
 | `3e690ff8e` | 09-06 07:45 | **revert of all 7** (-1150 lines) |
-| `7071595b6` | 10-01 | exhaust unavailable older DXLink history |
-| `70cfb3a01` | 10-08 | load tastytrade weekly candles with out-of-range closes (one bad row failed the whole page) |
-| `9e01ce99e` | 10-12 | keep the delivered range when a candle snapshot stops short (DXLink never sends SNAPSHOT_END; history retried the same cut-off snapshot forever) |
+| `7071595b6` | 10-01 | exhaust unavailable older Level 1 broker history |
+| `70cfb3a01` | 10-08 | load Level 1 broker weekly candles with out-of-range closes (one bad row failed the whole page) |
+| `9e01ce99e` | 10-12 | keep the delivered range when a candle snapshot stops short (the Level 1 broker's stream never sends SNAPSHOT_END; history retried the same cut-off snapshot forever) |
 | `dfe6c2877` | 10-12 | older-history page failure no longer moves a healthy live chart into recovery ("Demand errors carry a scope") |
 
 Function evidence: `history.rs::accept_history_completion` has 7 fix commits out of 8 total; `schedule_history_retry` and `enqueue_history_request` have 6 of 11 each.
@@ -299,9 +299,9 @@ Root cause: the generation values are raw integers with ad-hoc sentinel values a
 
 Root cause: interaction states are special-cased per control variant in code instead of being one data-driven table of (variant, state) to token. Similar runs: 08-22 (menu width, 3 commits), 08-24 (icon rasterization, 5 commits), 09-12 (typography, 5 commits), 09-28 (order-book fills, 4 commits).
 
-### H. tastytrade recovery scoping (fix of a fix within hours)
+### H. Level 1 broker recovery scoping (fix of a fix within hours)
 
-`5e868c13c` "scope tastytrade recovery and publish level one books" (15 files), then the same day `03dbd7132` "keep tastytrade recovery scoped and typed" (9 files, +210/-103), then `4f885153e`, then `dfe6c2877` "Demand errors carry a scope". The second commit re-typed what the first one had just introduced as a string.
+`5e868c13c` "scope Level 1 broker recovery and publish level one books" (15 files), then the same day `03dbd7132` "keep Level 1 broker recovery scoped and typed" (9 files, +210/-103), then `4f885153e`, then `dfe6c2877` "Demand errors carry a scope". The second commit re-typed what the first one had just introduced as a string.
 
 ## Code smell census (tables)
 
@@ -323,7 +323,7 @@ Functions over 150 lines (the entire list), plus the next band:
 |---:|---|---|
 | 265 | crates/adapters/rithmic_protocol/src/provider_session/canonical_market.rs:594 | convert (allow too_many_lines) |
 | 186 | crates/market_runtime/src/rithmic_realtime.rs:1209 | run_demand (allow) |
-| 175 | crates/market_runtime/examples/ctrader_trading_capture.rs:339 | scenario (example, allow) |
+| 175 | the removed FX/CFD broker trading capture example:339 | scenario (example, allow) |
 | 161 | crates/adapters/rithmic_protocol/src/provider_session/session_worker.rs:358 | handle_session_message (allow) |
 | 158 | crates/market_runtime/src/rithmic_realtime.rs:297 | run_catalog_session (allow) |
 | 149 | crates/adapters/rithmic_protocol/src/protocol.rs:1229 | every_outbound_request (allow) |
@@ -334,7 +334,7 @@ Functions over 150 lines (the entire list), plus the next band:
 | 111 | apps/desktop/src/desktop/local_state.rs:328 | sanitize_workspace |
 | 109 | crates/market_runtime/src/study.rs:3912 / 2945 | reconcile_market_leases / execute_ready_range_with_live |
 | 109 | apps/desktop/src/account.rs:867 | apply_account_response |
-| 108 | crates/market_runtime/src/market_service/tastytrade.rs:700 | run_catalog |
+| 108 | the removed Level 1 broker module:700 | run_catalog |
 | 108 | crates/market_runtime/src/market_service/realtime.rs:2275 | accept_indexed_trades |
 | 107 | crates/market_runtime/src/market_service/history.rs:1126 | history_completed |
 | 107 | apps/desktop/src/desktop/workspace_tabs.rs:2994 | on_key_down |
@@ -358,7 +358,7 @@ Largest non-test files: `workspace_surface.rs` 6,330; `desktop.rs` 5,733; `tradi
 | market_runtime `Coordinator` (coordinator.rs:308) | 29 | about 300 | about 11,000 | 9 |
 | `WorkspaceSurfaceInitialization` | 30 | | | |
 | `TradingSnapshot` (trading_runtime) | 29 | | | |
-| tastytrade `Worker` | 26 | 82 (with the cTrader `Worker`) | | |
+| Level 1 broker `Worker` | 26 | 82 (with the FX/CFD broker `Worker`) | | |
 | `StoredState` (trading store) | 26 | | | |
 | `WorkspaceChartAppearanceState` (contracts, `allow(struct_excessive_bools)`) | 25 | | | |
 | `TradeLiveHandoff` (market_service/mod.rs:759) | 24 (8 `Option`, `dirty`) | | | |
@@ -377,7 +377,7 @@ Clippy `struct_excessive_bools` pushes this state into `Option<…>` fields, so 
 | `force_*`, `skip_*`, `suppress_*`, `awaiting_*` | 7 / 2 / 1 / 2 |
 | `Option<bool>` tri-states | 18 (10 in contracts) |
 | Raw-integer generation fields and parameters (`u64`/`u32`/`usize`) | 136 (market_runtime 71, account_runtime 35, desktop 20) |
-| `AtomicU64` generation counters | 8 sites (tastytrade, ctrader, runtime `ws_generation`, mod.rs, desktop account, workspace persistence) |
+| `AtomicU64` generation counters | 8 sites (the two removed broker modules, runtime `ws_generation`, mod.rs, desktop account, workspace persistence) |
 
 Most flag-like fields per file: desktop.rs 17 shadow fields + 10 `pending_*`; chart_integration view.rs 16 + 3; workspace_surface.rs 13; `feed_diagnostics.rs` 10; `hyperliquid_realtime.rs` 9 + 24 `pending_` references; `market_service/mod.rs` 9.
 
@@ -393,13 +393,13 @@ Example of state held in flags: `ProviderSessionSlot` (`crates/market_runtime/sr
 | apps/desktop/market_worker.rs | 3,311 | 200 | 0 | 16 | 35 | 44 | 3 |
 | market_runtime/market_service/history.rs | 2,379 | 185 | 0 | 1 | 2 | 19 | 0 |
 | apps/desktop/engine_market_worker.rs | 2,874 | 137 | 2 | 3 | 6 | 61 | 42 |
-| market_runtime/market_service/tastytrade.rs | 2,692 | 103 | 59 | 0 | 8 | 22 | 9 |
+| market_runtime/market_service (removed Level 1 broker) | 2,692 | 103 | 59 | 0 | 8 | 22 | 9 |
 | market_runtime/hyperliquid_realtime.rs | 2,036 | 89 | 7 | 1 | 10 | 4 | 24 |
 | apps/desktop/desktop/workspace_surface.rs | 6,330 | 73 | 2 | 7 | 8 | 28 | 55 |
 | chart_integration/bridge.rs | 676 | 67 | 0 | 8 | 1 | **102** | 18 |
-| market_runtime/market_service/ctrader.rs | 2,320 | 62 | 51 | 2 | 10 | 16 | 0 |
+| market_runtime/market_service (removed FX/CFD broker) | 2,320 | 62 | 51 | 2 | 10 | 16 | 0 |
 
-The repository has 228 distinct generation identifiers. The most common are `session_generation` 451, `provider_generation` 416, `ProviderGeneration` 215, `selection_generation` 166, `publication_generation` 164, `search_generation` 157, `install_generation` 153, `SessionGeneration` 113, `command_generation` 106, `request_generation` 63, `GenerationId` 60, `display_generation` 36, and `layout_generation` 36. Newtypes exist (`GenerationId`, `ProviderGeneration`, `SessionGeneration`, `MarketGeneration<T>`, `MarketPublicationGeneration`), but most comparisons are on raw `u64`. Every provider defines its own event enum with a leading raw `u64` generation in each variant (`RithmicRealtimeEvent`, `HyperliquidRealtimeEvent`, cTrader `RealtimeEvent`, tastytrade `RealtimeEvent`), and each provider has its own `Recovering(u64, …)` payload shape.
+The repository has 228 distinct generation identifiers. The most common are `session_generation` 451, `provider_generation` 416, `ProviderGeneration` 215, `selection_generation` 166, `publication_generation` 164, `search_generation` 157, `install_generation` 153, `SessionGeneration` 113, `command_generation` 106, `request_generation` 63, `GenerationId` 60, `display_generation` 36, and `layout_generation` 36. Newtypes exist (`GenerationId`, `ProviderGeneration`, `SessionGeneration`, `MarketGeneration<T>`, `MarketPublicationGeneration`), but most comparisons are on raw `u64`. Every provider defines its own event enum with a leading raw `u64` generation in each variant (`RithmicRealtimeEvent`, `HyperliquidRealtimeEvent` and the two removed brokers' `RealtimeEvent`), and each provider has its own `Recovering(u64, …)` payload shape.
 
 Chart and series lifecycle has at least 8 separate representations: `SeriesLoadState` (contracts), `ChartState {Loading, Ready, Stale, Recovering, AwaitingData, Error}` (desktop market_worker), `RithmicSwitchState` (desktop), `MarketRecoveryFailure` (desktop, added 10-12), `LiveHistoryState` (market_runtime), `ProviderSessionSlot` flags (market_runtime), `ChartDataBridge::pending_resnapshot` (chart_integration), and the per-provider `Recovering` events.
 
@@ -416,7 +416,7 @@ Non-test counts per crate:
 | crates/adapters/rithmic_protocol | 16 | 0 | 0 | 50 | 68 | 9 |
 | crates/trading_runtime | 14 | 2 | 6 | 144 | 308 | 0 |
 | crates/account_runtime | 13 | 3 | 6 | 0 | 27 | 2 |
-| crates/adapters/ctrader_open_api | 10 | 0 | 11 | 6 | 12 | 1 |
+| removed FX/CFD broker adapter | 10 | 0 | 11 | 6 | 12 | 1 |
 | others | 8 | 2 | 11 | 25 | | 12 |
 | **Total** | **322** | 13 | 98 | 254 | | 40 |
 
@@ -433,11 +433,11 @@ Non-test counts per crate:
 - `apps/desktop/src/engine_market_worker/runtime.rs:34, 426`: `let _ = market.remove_consumer(…)`.
 - `crates/account_runtime/src/account_service/mod.rs`: `let _ = self.retire_unusable_vault_material(vault)` (5 sites).
 
-`unwrap_or_default` on wire data: `crates/adapters/ctrader_open_api` has `frame.payload.as_deref().unwrap_or_default()` at 10 sites. These are low risk, because `decode_typed` validates first and an empty payload then fails `require_nested_fields`. `crates/trading_runtime/src/store.rs:2292-2296` writes CSV export columns from JSON `as_str().unwrap_or_default()`, so missing ids export as empty strings. `crates/ui/chart_integration/src/view/drawings.rs:79-89` uses `serde_json::from_value(…).unwrap_or_default()` for persisted drawing fields, so corrupt data silently resets.
+`unwrap_or_default` on wire data: The removed FX/CFD broker adapter had `frame.payload.as_deref().unwrap_or_default()` at 10 sites. These are low risk, because `decode_typed` validates first and an empty payload then fails `require_nested_fields`. `crates/trading_runtime/src/store.rs:2292-2296` writes CSV export columns from JSON `as_str().unwrap_or_default()`, so missing ids export as empty strings. `crates/ui/chart_integration/src/view/drawings.rs:79-89` uses `serde_json::from_value(…).unwrap_or_default()` for persisted drawing fields, so corrupt data silently resets.
 
 Errors as strings: 1,196 non-test `Result<…, String>` occurrences (trading_runtime 323, market_runtime 324, desktop 197, platform_runtime 97). Control flow on message text: `apps/desktop/src/desktop.rs:3242` (`message.contains(RITHMIC_CATALOG_READY_MESSAGE)`), `crates/account_runtime/src/account_service/mod.rs:1840` (`detail.contains("timed out") || detail.contains("cancelled")`), and `crates/market_runtime/src/hyperliquid_realtime.rs:1209` (`reason.starts_with("hyperliquid channel is unsupported:")`).
 
-`#[allow(...)]` inventory (non-test, 40 total): `clippy::too_many_lines` 10, `unsafe_code` 8, all in `crates/platform_runtime` Windows FFI (`session_shutdown.rs:361`, `power_notifications.rs:135, 252`, `network_notifications.rs:191, 505`, `io_cancellation.rs:10`, `display_timing.rs:407`, `atomic_file.rs:17`). This is possible because `crates/platform_runtime/Cargo.toml:61-62` overrides the workspace `forbid` with `unsafe_code = "deny"`, which conflicts with the AGENTS.md invariant "Workspace-wide `unsafe_code` remains forbidden", `clippy::too_many_arguments` 7, `non_snake_case` 7 (Hyperliquid JSON wire structs in `hyperliquid_market/src/meta.rs`, `context.rs` and `candles.rs`, where `#[serde(rename)]` would avoid the allow), `clippy::struct_excessive_bools` 4 (`TerminalApp`, `WorkspaceChartAppearanceState`, `ProviderPresentationDescriptor`, `ChartLegendOptions`), `dead_code, clippy::all, clippy::pedantic` 2 (generated protobuf modules in `rithmic_protocol/src/lib.rs:10` and `ctrader_open_api/src/lib.rs:3`).
+`#[allow(...)]` inventory (non-test, 40 total): `clippy::too_many_lines` 10, `unsafe_code` 8, all in `crates/platform_runtime` Windows FFI (`session_shutdown.rs:361`, `power_notifications.rs:135, 252`, `network_notifications.rs:191, 505`, `io_cancellation.rs:10`, `display_timing.rs:407`, `atomic_file.rs:17`). This is possible because `crates/platform_runtime/Cargo.toml:61-62` overrides the workspace `forbid` with `unsafe_code = "deny"`, which conflicts with the AGENTS.md invariant "Workspace-wide `unsafe_code` remains forbidden", `clippy::too_many_arguments` 7, `non_snake_case` 7 (Hyperliquid JSON wire structs in `hyperliquid_market/src/meta.rs`, `context.rs` and `candles.rs`, where `#[serde(rename)]` would avoid the allow), `clippy::struct_excessive_bools` 4 (`TerminalApp`, `WorkspaceChartAppearanceState`, `ProviderPresentationDescriptor`, `ChartLegendOptions`), `dead_code, clippy::all, clippy::pedantic` 2 (generated protobuf modules in `rithmic_protocol/src/lib.rs:10` and the removed FX/CFD broker adapter's `lib.rs:3`).
 
 TODO, FIXME, HACK, XXX, "workaround" and "for now" comments: **0**. Deferred work is not marked in code.
 
@@ -467,7 +467,7 @@ All 1,873 `#[test]` functions. The workspace has no property-testing, model-chec
 | crates/trading_runtime | 12,886 | 4,129 | 0.32 |
 | crates/platform_runtime | 9,815 | 4,176 | 0.43 |
 | crates/ui/chart_integration | 6,982 | 5,564 | 0.80 |
-| crates/adapters/ctrader_open_api | 4,852 | 3,566 | 0.73 |
+| removed FX/CFD broker adapter | 4,852 | 3,566 | 0.73 |
 | crates/account_runtime | 3,870 | 3,255 | 0.84 |
 | crates/market_engine | 3,063 | 1,173 | 0.38 |
 | crates/study_sdk | 2,621 | 1,436 | 0.55 |
@@ -475,7 +475,7 @@ All 1,873 `#[test]` functions. The workspace has no property-testing, model-chec
 | crates/adapters/hyperliquid_market | 2,430 | 1,492 | 0.61 |
 | **crates/context_runtime** | 2,166 | 313 | **0.14** |
 | crates/provider_history | 1,900 | 1,032 | 0.54 |
-| crates/adapters/tastytrade_market | 1,804 | 915 | 0.51 |
+| removed Level 1 broker adapter | 1,804 | 915 | 0.51 |
 | **crates/application** (shared generation and replay model) | 1,692 | 187 | **0.11** |
 | crates/domain/market_data | 1,583 | 862 | 0.54 |
 | crates/observability | 1,313 | 461 | 0.35 |
@@ -514,11 +514,11 @@ Detection: exact matching over whitespace-normalized significant lines (6-line w
 | rithmic `order_plant.rs` | 83 | 125 | `1257-1281` ≈ `1351-1375` (25 lines) |
 | rithmic `market.rs` | 80 | | `895-917` ≈ `1346-1368` (23 lines) |
 | chart_integration `view.rs` | 78 (7) | | `1183-1200` ≈ `1288-1305` (the two `AerisChartView` constructors) |
-| **cross-file:** market_runtime `ctrader.rs` ↔ `tastytrade.rs` | 70 (8) | | `ctrader.rs:2103-2129` ≈ `tastytrade.rs:2506-2532`; `queue_completion` and `flush_completions` are identical in both |
+| **cross-file:** market_runtime FX/CFD broker module ↔ Level 1 broker module | 70 (8) | | FX/CFD `2103-2129` ≈ Level 1 `2506-2532`; `queue_completion` and `flush_completions` are identical in both |
 | cross-file: desktop `big_trades_dialog.rs` ↔ `volume_dialog.rs` | | 133 (8) | settings dialog scaffolding |
 | cross-file: rithmic `order_session.rs` ↔ `session.rs` | | 98 (7) | login/handshake |
 
-**Parallel implementations, not textual copies.** The four provider realtime workers (`hyperliquid_realtime.rs` 2,036 lines, `rithmic_realtime.rs` 2,071, `market_service/ctrader.rs` 2,320, `market_service/tastytrade.rs` 2,692) share only 18 function names. Same-named functions are mostly dissimilar: `run` has a body similarity of 0.35 across all four, `recover` 0.35 (cTrader and tastytrade), `reconcile` 0.18, `start_record` 0.10, and `run_catalog` 0.08. All four implement the same lifecycle (connect, generation, recover, reconcile, demand diff, publish) independently, each with its own event enum and its own `Recovering` payload shape. The shared "provider-neutral" coordinator still contains provider-specific paths: `realtime.rs` has `rithmic_connecting`, `rithmic_online`, `rithmic_trade`, `rithmic_series_recovering`, `rithmic_recovering`, `rithmic_failed`, `publish_rithmic_live`, `flush_rithmic_demand`, `hyperliquid_demand`, and `flush_hyperliquid_demand`. There are 167 non-test provider-name string literals outside the adapters (market_runtime 104, desktop 36). Examples include `apps/desktop/src/engine_market_worker/replay_conversion.rs:209-327` (`if series.provider_id == "rithmic"`, `"tastytrade"`, `"ctrader"`) and `engine_market_worker.rs:696` (`if provider == "hyperliquid"`), even though AGENTS.md requires a provider-neutral desktop.
+**Parallel implementations, not textual copies.** The four provider realtime workers (`hyperliquid_realtime.rs` 2,036 lines, `rithmic_realtime.rs` 2,071, the removed FX/CFD broker module 2,320, the removed Level 1 broker module 2,692) share only 18 function names. Same-named functions are mostly dissimilar: `run` has a body similarity of 0.35 across all four, `recover` 0.35 (the two removed broker modules), `reconcile` 0.18, `start_record` 0.10, and `run_catalog` 0.08. All four implement the same lifecycle (connect, generation, recover, reconcile, demand diff, publish) independently, each with its own event enum and its own `Recovering` payload shape. The shared "provider-neutral" coordinator still contains provider-specific paths: `realtime.rs` has `rithmic_connecting`, `rithmic_online`, `rithmic_trade`, `rithmic_series_recovering`, `rithmic_recovering`, `rithmic_failed`, `publish_rithmic_live`, `flush_rithmic_demand`, `hyperliquid_demand`, and `flush_hyperliquid_demand`. There are 167 non-test provider-name string literals outside the adapters (market_runtime 104, desktop 36). Examples include `apps/desktop/src/engine_market_worker/replay_conversion.rs:209-327` (`if series.provider_id == "rithmic"` and the two removed brokers' ids) and `engine_market_worker.rs:696` (`if provider == "hyperliquid"`), even though AGENTS.md requires a provider-neutral desktop.
 
 Desktop `market_worker.rs` (3,311 lines) and `engine_market_worker.rs` (2,874 lines plus 2,101 in submodules) share no function names, so they are not duplicates. They are two stacked adaptation layers between `market_runtime` and the GPUI surface, and each has its own generation and recovery vocabulary (200 and 137 `generation` mentions). The name `engine_market_worker` dates from the retired `apps/engine` process (retired 09-08/09).
 
@@ -530,7 +530,7 @@ Evidence: a chart's data passes through the provider adapter, then a provider wo
 
 ### 2. Generation fencing is reimplemented ad hoc with no shared typed abstraction
 
-Evidence: 4,693 `generation` occurrences, 228 distinct identifiers, 136 raw-integer generation fields and parameters, 208 non-test comparisons, 8 `AtomicU64` counters, and 26 hand-written increments. There are also an `epoch` vocabulary (321 occurrences; cTrader and tastytrade use both) and a `STARTUP_CATALOG_COMMAND_GENERATION` sentinel (39 references). The shared `MarketGeneration<T>` is used in 3 files, and its `require_resnapshot` method has no callers. There are 18 "supersede, stale, generation, fence, retire" fix commits, and 41 commits introduced `superseded` and 82 introduced `stale_` through pickaxe search. Each new consumer (order flow, alerts, tabs, watchlist, screener, studies) adds its own generation and later a fix for when it goes stale (for example `f504ab868`, `6f9b25f54`, `94c090baf`).
+Evidence: 4,693 `generation` occurrences, 228 distinct identifiers, 136 raw-integer generation fields and parameters, 208 non-test comparisons, 8 `AtomicU64` counters, and 26 hand-written increments. There are also an `epoch` vocabulary (321 occurrences; the two removed broker modules use both) and a `STARTUP_CATALOG_COMMAND_GENERATION` sentinel (39 references). The shared `MarketGeneration<T>` is used in 3 files, and its `require_resnapshot` method has no callers. There are 18 "supersede, stale, generation, fence, retire" fix commits, and 41 commits introduced `superseded` and 82 introduced `stale_` through pickaxe search. Each new consumer (order flow, alerts, tabs, watchlist, screener, studies) adds its own generation and later a fix for when it goes stale (for example `f504ab868`, `6f9b25f54`, `94c090baf`).
 
 ### 3. God objects make every change touch the same few files
 
@@ -538,11 +538,11 @@ Evidence: `WorkspaceSurface` has 96 fields and 262 methods, `TerminalApp` 63 fie
 
 ### 4. Errors are strings, so fixes add distinctions one at a time
 
-Evidence: 1,196 non-test `Result<…, String>` occurrences. Several fixes exist only to add a distinction a typed error would have carried from the start: `771a8d732` (Superseded versus Failed surfaced as "Chart unavailable"), `03dbd7132` (make tastytrade recovery "typed" hours after `5e868c13c`), `dfe6c2877` ("Demand errors carry a scope"), and `79a65bc7f` ("Chart unavailable" from a capability mismatch). Control flow also branches on message text in three places. There are 322 non-test `let _ =` discards, including demand re-issue (`send_rithmic_demand` ×4), reseed cancellation (×5), catalog publication (×4), and chart data installation (×3).
+Evidence: 1,196 non-test `Result<…, String>` occurrences. Several fixes exist only to add a distinction a typed error would have carried from the start: `771a8d732` (Superseded versus Failed surfaced as "Chart unavailable"), `03dbd7132` (make Level 1 broker recovery "typed" hours after `5e868c13c`), `dfe6c2877` ("Demand errors carry a scope"), and `79a65bc7f` ("Chart unavailable" from a capability mismatch). Control flow also branches on message text in three places. There are 322 non-test `let _ =` discards, including demand re-issue (`send_rithmic_demand` ×4), reseed cancellation (×5), catalog publication (×4), and chart data installation (×3).
 
 ### 5. Provider semantics are discovered in production, without recorded fixtures or replay
 
-Evidence: Coinbase was replaced by Hyperliquid on 09-06, the same morning a 7-commit history fix series was reverted (-1,150 lines). tastytrade DXLink behaviour was learned one fix at a time: SNAPSHOT_END missing (`9e01ce99e`), out-of-range weekly closes (`70cfb3a01`), newest-first snapshots, and `fromTime` excluding the open candle (`dfe6c2877`). cTrader's "close out market-data defects" commit fixed 9 numbered defects (`7bf8f1c02`), and Hyperliquid trade replays on resubscribe were fixed in `32a167dc0`. The workspace has no property-based, model-checking or snapshot test dependencies, only 4 integration-test files, and a test/code ratio of 0.11 for `application` (the shared replay and generation model) and 0.31 for desktop. 41% of fix commits add or change no `#[test]`.
+Evidence: Coinbase was replaced by Hyperliquid on 09-06, the same morning a 7-commit history fix series was reverted (-1,150 lines). The Level 1 broker's streaming behaviour was learned one fix at a time: SNAPSHOT_END missing (`9e01ce99e`), out-of-range weekly closes (`70cfb3a01`), newest-first snapshots, and `fromTime` excluding the open candle (`dfe6c2877`). The FX/CFD broker's "close out market-data defects" commit fixed 9 numbered defects (`7bf8f1c02`), and Hyperliquid trade replays on resubscribe were fixed in `32a167dc0`. The workspace has no property-based, model-checking or snapshot test dependencies, only 4 integration-test files, and a test/code ratio of 0.11 for `application` (the shared replay and generation model) and 0.31 for desktop. 41% of fix commits add or change no `#[test]`.
 
 ### 6. Provider differences leak into shared layers instead of sitting behind one provider contract
 

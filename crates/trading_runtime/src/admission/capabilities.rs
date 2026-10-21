@@ -29,7 +29,7 @@ impl VenueCapabilities {
                 protection: ProtectionSupport::Managed,
                 tif_policy: TifPolicy::Simulated,
             },
-            VenueRoute::CtraderDemo => Self {
+            VenueRoute::BrokerDemo => Self {
                 client_id_limit: Some(50),
                 protection: ProtectionSupport::Native,
                 tif_policy: TifPolicy::Broker,

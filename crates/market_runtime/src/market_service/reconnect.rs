@@ -1,6 +1,6 @@
 //! Bounded provider reconnect scheduling; the owner supplies the time source.
 
-use std::{num::NonZeroU32, time::Duration};
+use std::time::Duration;
 
 use super::clock::Clock;
 
@@ -16,7 +16,6 @@ pub(crate) struct ReconnectPolicy {
     multiplier: u32,
     cap: Duration,
     jitter: Jitter,
-    budget: Option<NonZeroU32>,
     healthy_reset_after: Duration,
 }
 
@@ -32,7 +31,6 @@ impl ReconnectPolicy {
         multiplier: u32,
         cap: Duration,
         jitter: Jitter,
-        budget: Option<NonZeroU32>,
         healthy_reset_after: Duration,
     ) -> Self {
         Self {
@@ -40,31 +38,8 @@ impl ReconnectPolicy {
             multiplier,
             cap,
             jitter,
-            budget,
             healthy_reset_after,
         }
-    }
-
-    pub(crate) const fn ctrader() -> Self {
-        Self::new(
-            Duration::from_secs(3),
-            2,
-            Duration::from_secs(48),
-            Jitter::Equal,
-            NonZeroU32::new(5),
-            Duration::from_mins(1),
-        )
-    }
-
-    pub(crate) const fn tastytrade() -> Self {
-        Self::new(
-            Duration::from_secs(6),
-            2,
-            Duration::from_secs(48),
-            Jitter::Equal,
-            None,
-            Duration::from_mins(1),
-        )
     }
 
     pub(crate) const fn hyperliquid() -> Self {
@@ -73,7 +48,6 @@ impl ReconnectPolicy {
             2,
             Duration::from_secs(30),
             Jitter::Full,
-            None,
             Duration::from_mins(1),
         )
     }
@@ -84,18 +58,6 @@ impl ReconnectPolicy {
             2,
             Duration::from_secs(30),
             Jitter::Equal,
-            None,
-            Duration::from_mins(1),
-        )
-    }
-
-    pub(crate) const fn venue() -> Self {
-        Self::new(
-            Duration::from_secs(5),
-            2,
-            Duration::from_secs(300),
-            Jitter::Equal,
-            None,
             Duration::from_mins(1),
         )
     }
@@ -111,7 +73,6 @@ pub(crate) enum RetryClass {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RetryDecision {
     Wait(Duration),
-    Failed { attempts: u32 },
     Fatal,
 }
 
@@ -136,6 +97,7 @@ impl Backoff {
         }
     }
 
+    #[cfg(any(test, feature = "probe"))]
     pub(crate) fn attempts(&self) -> u32 {
         self.attempts
     }
@@ -151,22 +113,16 @@ impl Backoff {
     }
 
     pub(crate) fn failure(&mut self, class: RetryClass) -> RetryDecision {
-        if matches!(class, RetryClass::Fatal) {
-            return RetryDecision::Fatal;
+        match class {
+            RetryClass::Fatal => RetryDecision::Fatal,
+            RetryClass::RateLimited { retry_after } => RetryDecision::Wait(retry_after),
+            RetryClass::Transient => RetryDecision::Wait(self.transient_delay()),
         }
-        if let RetryClass::RateLimited { retry_after } = class {
-            return RetryDecision::Wait(retry_after);
-        }
+    }
+
+    /// Next jittered delay after a transient failure; transient failures never exhaust.
+    pub(crate) fn transient_delay(&mut self) -> Duration {
         self.attempts = self.attempts.saturating_add(1);
-        if self
-            .policy
-            .budget
-            .is_some_and(|budget| self.attempts >= budget.get())
-        {
-            return RetryDecision::Failed {
-                attempts: self.attempts,
-            };
-        }
         let mut ceiling = self.policy.initial;
         for _ in 1..self.attempts.min(32) {
             ceiling = ceiling
@@ -188,7 +144,7 @@ impl Backoff {
             Jitter::Equal => upper / 2,
         };
         let span = upper - lower;
-        RetryDecision::Wait(Duration::from_nanos(lower + value % (span + 1)))
+        Duration::from_nanos(lower + value % (span + 1))
     }
 }
 
@@ -202,14 +158,13 @@ mod tests {
         let clock = ScriptedClock::new(42);
         for (policy, initial, cap, equal) in [
             (ReconnectPolicy::hyperliquid(), 500_u64, 30_000_u64, false),
-            (ReconnectPolicy::ctrader(), 3_000, 48_000, true),
-            (ReconnectPolicy::tastytrade(), 6_000, 48_000, true),
+            (ReconnectPolicy::rithmic_recovery(), 1_000, 30_000, true),
         ] {
             let mut first = Backoff::new(policy, &clock, 7);
             let mut replay = Backoff::new(policy, &clock, 7);
             let mut different = Backoff::new(policy, &clock, 8);
             let mut changed = false;
-            for attempt in 1..=if equal && initial == 3_000 { 4 } else { 20 } {
+            for attempt in 1..=20 {
                 let upper = initial.saturating_mul(1_u64 << (attempt - 1)).min(cap);
                 let RetryDecision::Wait(delay) = first.failure(RetryClass::Transient) else {
                     panic!("attempt should be scheduled");
@@ -227,9 +182,9 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_budget_rate_limit_fatal_and_healthy_reset() {
+    fn reconnect_rate_limit_fatal_and_healthy_reset() {
         let clock = ScriptedClock::new(1);
-        let mut backoff = Backoff::new(ReconnectPolicy::ctrader(), &clock, 2);
+        let mut backoff = Backoff::new(ReconnectPolicy::rithmic_recovery(), &clock, 2);
         assert_eq!(
             backoff.failure(RetryClass::RateLimited {
                 retry_after: Duration::from_secs(123)
@@ -240,16 +195,13 @@ mod tests {
         clock.advance(Duration::from_mins(1));
         backoff.healthy_for(healthy_since, &clock);
         assert_eq!(backoff.attempts(), 0);
-        for _ in 0..4 {
+        for _ in 0..40 {
             assert!(matches!(
                 backoff.failure(RetryClass::Transient),
                 RetryDecision::Wait(_)
             ));
         }
-        assert_eq!(
-            backoff.failure(RetryClass::Transient),
-            RetryDecision::Failed { attempts: 5 }
-        );
+        assert_eq!(backoff.attempts(), 40);
         assert_eq!(backoff.failure(RetryClass::Fatal), RetryDecision::Fatal);
     }
 

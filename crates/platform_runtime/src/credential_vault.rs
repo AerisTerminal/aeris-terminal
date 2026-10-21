@@ -1,27 +1,12 @@
 //! Protected credential storage boundary and native operating-system adapter.
 
-use std::{
-    error::Error,
-    fmt,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{error::Error, fmt, sync::Mutex};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use keyring::{Entry, Error as KeyringError};
 
 static NATIVE_CREDENTIAL_ACCESS: Mutex<()> = Mutex::new(());
-static BORROWED_CTRADER_LOGGED: AtomicBool = AtomicBool::new(false);
-const BORROWED_CTRADER_NOTICE: &str = "vault: borrowing stored cTrader connection";
-
-fn log_borrowed_ctrader_once(logged: &AtomicBool, emit: impl FnOnce(&str)) {
-    if !logged.swap(true, Ordering::AcqRel) {
-        emit(BORROWED_CTRADER_NOTICE);
-    }
-}
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 trait NativeCredentialBackend: fmt::Debug + Send + Sync {
@@ -127,10 +112,7 @@ pub struct NativeCredentialVault {
 #[derive(Clone)]
 enum VaultRouting {
     Production,
-    Validation {
-        namespace: String,
-        borrow_stored_ctrader: bool,
-    },
+    Validation { namespace: String },
 }
 
 impl fmt::Debug for NativeCredentialVault {
@@ -142,7 +124,7 @@ impl fmt::Debug for NativeCredentialVault {
                 "namespace",
                 &match &self.routing {
                     VaultRouting::Production => "production",
-                    VaultRouting::Validation { namespace, .. } => namespace,
+                    VaultRouting::Validation { namespace } => namespace,
                 },
             )
             .finish_non_exhaustive()
@@ -163,7 +145,6 @@ impl NativeCredentialVault {
                 if root.is_validation() {
                     VaultRouting::Validation {
                         namespace: root.vault_namespace().to_string(),
-                        borrow_stored_ctrader: root.borrow_stored_ctrader(),
                     }
                 } else {
                     VaultRouting::Production
@@ -201,7 +182,6 @@ impl NativeCredentialVault {
     fn with_validation_backend(
         service: impl Into<String>,
         namespace: &str,
-        borrow_stored_ctrader: bool,
         backend: impl NativeCredentialBackend + 'static,
     ) -> Result<Self, NativeCredentialVaultError> {
         let service = service.into();
@@ -210,7 +190,6 @@ impl NativeCredentialVault {
             service,
             routing: VaultRouting::Validation {
                 namespace: namespace.to_string(),
-                borrow_stored_ctrader,
             },
             backend: Box::new(backend),
         })
@@ -231,23 +210,12 @@ impl NativeCredentialVault {
         let _guard = NATIVE_CREDENTIAL_ACCESS
             .lock()
             .map_err(|_| NativeCredentialVaultError::AccessSerialized)?;
-        let production_access = match &self.routing {
-            VaultRouting::Production => true,
-            VaultRouting::Validation {
-                borrow_stored_ctrader,
-                ..
-            } => {
-                *borrow_stored_ctrader
-                    && self.service == "aeris.provider.ctrader"
-                    && key == "broker_connection"
-            }
+        let (production_access, namespace) = match &self.routing {
+            VaultRouting::Production => (true, "aeris"),
+            VaultRouting::Validation { namespace } => (false, namespace.as_str()),
         };
-        let namespace = match &self.routing {
-            VaultRouting::Validation { namespace, .. } if !production_access => namespace.clone(),
-            VaultRouting::Production | VaultRouting::Validation { .. } => "aeris".to_string(),
-        };
-        let service = previous_backend_identifier(&namespace, "service", &self.service);
-        let canonical_key = previous_backend_identifier(&namespace, "key", key);
+        let service = previous_backend_identifier(namespace, "service", &self.service);
+        let canonical_key = previous_backend_identifier(namespace, "key", key);
         let legacy = if production_access {
             legacy_services(&self.service)
                 .iter()
@@ -263,12 +231,6 @@ impl NativeCredentialVault {
         };
         operation(self.backend.as_ref(), &service, &canonical_key, &legacy)
     }
-}
-
-pub(crate) fn log_validation_borrow_once() {
-    log_borrowed_ctrader_once(&BORROWED_CTRADER_LOGGED, |notice| {
-        aeris_observability::diagnostic!("{notice}");
-    });
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -393,14 +355,13 @@ fn legacy_services(service: &str) -> &'static [(&'static str, &'static str)] {
 #[cfg(test)]
 mod tests {
     use super::{
-        BORROWED_CTRADER_NOTICE, CredentialVault, KeyringError, NativeCredentialBackend,
-        NativeCredentialVault, NativeCredentialVaultError, backend_identifier,
-        legacy_backend_identifier, log_borrowed_ctrader_once, previous_backend_identifier,
+        CredentialVault, KeyringError, NativeCredentialBackend, NativeCredentialVault,
+        NativeCredentialVaultError, backend_identifier, legacy_backend_identifier,
         validate_identifier,
     };
     use std::{
         collections::BTreeMap,
-        sync::{Arc, Mutex, atomic::AtomicBool},
+        sync::{Arc, Mutex},
     };
 
     type MemorySecrets = Arc<Mutex<BTreeMap<(String, String), Vec<u8>>>>;
@@ -609,145 +570,29 @@ mod tests {
     }
 
     #[test]
-    fn validation_vault_never_probes_production_without_opt_in() {
+    fn validation_vault_never_probes_production() {
         let backend = MemoryCredentialBackend::default();
-        let production_service = backend_identifier("service", "aeris.provider.ctrader");
-        let production_key = backend_identifier("key", "broker_connection");
+        let production_service = backend_identifier("service", "aeris.provider.rithmic");
+        let production_key = backend_identifier("key", "credentials");
         backend
             .store(&production_service, &production_key, b"production")
             .expect("production fixture");
         let isolated = NativeCredentialVault::with_validation_backend(
-            "aeris.provider.ctrader",
+            "aeris.provider.rithmic",
             "0123456789ab",
-            false,
             backend.clone(),
         )
         .expect("validation vault");
 
-        assert_eq!(
-            isolated.load("broker_connection").expect("isolated load"),
-            None
-        );
+        assert_eq!(isolated.load("credentials").expect("isolated load"), None);
         isolated
-            .store("broker_connection", b"validation")
+            .store("credentials", b"validation")
             .expect("isolated store");
         assert_eq!(
             backend
                 .load(&production_service, &production_key)
                 .expect("production remains"),
             b"production"
-        );
-    }
-
-    #[test]
-    fn validation_ctrader_opt_in_is_scoped_to_the_exact_connection_key() {
-        let backend = MemoryCredentialBackend::default();
-        let borrowed = NativeCredentialVault::with_validation_backend(
-            "aeris.provider.ctrader",
-            "0123456789ab",
-            true,
-            backend.clone(),
-        )
-        .expect("validation vault");
-        backend
-            .store(
-                &backend_identifier("service", "aeris.provider.ctrader"),
-                &backend_identifier("key", "broker_connection"),
-                b"production",
-            )
-            .expect("production fixture");
-
-        assert_eq!(
-            borrowed.load("broker_connection").expect("borrowed load"),
-            Some(b"production".to_vec())
-        );
-        assert_eq!(borrowed.load("other").expect("scoped load"), None);
-        borrowed
-            .store("broker_connection", b"rotated")
-            .expect("borrowed write-through");
-        borrowed.store("other", b"isolated").expect("other write");
-        let other_service = NativeCredentialVault::with_validation_backend(
-            "aeris.provider.tastytrade",
-            "0123456789ab",
-            true,
-            backend.clone(),
-        )
-        .expect("other validation vault");
-        assert_eq!(
-            other_service
-                .load("broker_connection")
-                .expect("other service load"),
-            None
-        );
-        other_service
-            .store("broker_connection", b"isolated service")
-            .expect("other service write");
-        let production_service = backend_identifier("service", "aeris.provider.ctrader");
-        assert_eq!(
-            backend
-                .load(
-                    &production_service,
-                    &backend_identifier("key", "broker_connection")
-                )
-                .expect("production write-through"),
-            b"rotated"
-        );
-        assert!(matches!(
-            backend.load(&production_service, &backend_identifier("key", "other")),
-            Err(KeyringError::NoEntry)
-        ));
-        let validation_service =
-            previous_backend_identifier("0123456789ab", "service", "aeris.provider.ctrader");
-        assert_eq!(
-            backend
-                .load(
-                    &validation_service,
-                    &previous_backend_identifier("0123456789ab", "key", "other")
-                )
-                .expect("other key isolated"),
-            b"isolated"
-        );
-        assert!(matches!(
-            backend.load(
-                &validation_service,
-                &previous_backend_identifier("0123456789ab", "key", "broker_connection")
-            ),
-            Err(KeyringError::NoEntry)
-        ));
-        assert_eq!(
-            backend
-                .load(
-                    &previous_backend_identifier(
-                        "0123456789ab",
-                        "service",
-                        "aeris.provider.tastytrade"
-                    ),
-                    &previous_backend_identifier("0123456789ab", "key", "broker_connection")
-                )
-                .expect("other service isolated"),
-            b"isolated service"
-        );
-        assert!(matches!(
-            backend.load(
-                &backend_identifier("service", "aeris.provider.tastytrade"),
-                &backend_identifier("key", "broker_connection")
-            ),
-            Err(KeyringError::NoEntry)
-        ));
-    }
-
-    #[test]
-    fn validation_ctrader_borrow_notice_is_exact_and_emitted_once() {
-        let logged = AtomicBool::new(false);
-        let notices = Mutex::new(Vec::new());
-        for _ in 0..3 {
-            log_borrowed_ctrader_once(&logged, |notice| {
-                notices.lock().expect("notices").push(notice.to_string());
-            });
-        }
-        assert_eq!(
-            notices.into_inner().expect("notices"),
-            [BORROWED_CTRADER_NOTICE.to_string()]
         );
     }
 }

@@ -25,11 +25,10 @@ unit test alone passes. Status as of 2026-10-08.
 | [T6](#t6--record-replay-and-review) Record, replay and review | D2, PF8, M4.1–M4.4 | **Open** | D2; data licensing checklist |
 | [T7](#t7--institutional-depth) Institutional depth | M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | **Open** | T6; Aeris Charts B4–B7; licensing checklist |
 | [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8 | **Open** | Aeris Charts B9; a release path for M7.8 |
-| T9 cTrader forex and CFD | PF10, PF11, D7–D9 | **Partial**; status and checklist in [`ctrader_implementation.md`](../ctrader_implementation.md) | D7 Spotware confirmation; D8; D9 |
 
 **Order:** T1 unblocked T2, T5, T6 and part of T7. T5 starts when Rithmic onboarding clears and
-reuses T2 unchanged against the live venue. T9 runs in parallel with T5 (D5); PF11, the live-venue
-contract, is built once in T9 and reused by T5's PF1. T6 needs T1's store and T2's execution log.
+reuses T2 unchanged against the live venue; PF11, the live-venue contract, is built once and
+carries T5's PF1. T6 needs T1's store and T2's execution log.
 
 **Batch delivery:** build the whole batch with deterministic tests, run the gates in `AGENTS.md`,
 commit once per batch listing the delivered IDs, and update this file in the same commit. Deliver
@@ -216,8 +215,7 @@ and release time; missing keys or outages show "unavailable", never invented val
 | PF7 | Local store for user-owned records | T1 | Delivered |
 | PF8 | Session recording store | T6 | Absent |
 | PF9 | Local simulated venue | T1 | Delivered |
-| PF10 | cTrader Open API, the first additional trading provider | T9 | Partial (adapter and market messages committed; runtime market data uncommitted; no order messages) |
-| PF11 | Provider-neutral live venue in `trading_runtime` | T9 | Partial (routing, schema-v18 broker tables and demo venue inbox; defects T-1 to T-6 open) |
+| PF11 | Provider-neutral live venue in `trading_runtime` | T5 | Partial (routing, schema-v18 broker tables and demo venue inbox; defects T-1 to T-6 open) |
 
 **PF1 — Rithmic order routing.** Submit, modify and cancel market, limit, stop and stop-limit
 orders; server-side brackets, OCO and trailing stops where Rithmic supports them; status, fill and
@@ -241,15 +239,11 @@ only; never a history cache for live charts. Gate: D2 and the licensing checklis
 **PF9 — Local simulated venue.** Touch fills now; queue-aware fills later (M4.5). Simulated
 accounts are always visually distinct.
 
-**PF10 — cTrader Open API.** Market data and trading for every cTrader broker behind the same
-provider-neutral market and trading contracts. Later routes from
-[Broker coverage](#broker-coverage) follow the same pattern; CQG and dxFeed remain candidates for
-futures data.
-
 **PF11 — Live venue.** The provider-neutral boundary in `trading_runtime` through which a live
 broker receives orders and reports executions, positions and balances, beside PF9. Idempotent
 client order IDs, generation fencing, reconcile after reconnect, and the M3.2 checks on every
-command. cTrader is its first consumer; Rithmic PF1 reuses it unchanged.
+command. Rithmic PF1 is its first consumer; later routes from [Broker coverage](#broker-coverage)
+reuse it unchanged.
 
 ## Trading decisions
 
@@ -259,11 +253,7 @@ command. cTrader is its first consumer; Rithmic PF1 reuses it unchanged.
 | D2 | Session recording versus the ban on market-history persistence | PF8, M4, M6.4 | **Open.** Recommendation: allow an explicit opt-in, user-owned recording store that never feeds the history cache; amend `AGENTS.md` and `tools/naming_check` in the same change |
 | D3 | Local storage engine for user-owned records | PF7 | **Decided:** SQLite through the pinned bundled `rusqlite`; do not add another store |
 | D4 | Order-level data leaving the Rithmic adapter | PF4, M1.6 | **Open.** Recommendation: a bounded canonical view in `domain/market_data`, keeping provider identity, local order and sequence evidence separate |
-| D5 | First additional trading provider | PF10 | **Decided 2026-10-05:** cTrader Open API (T9), built in parallel with Rithmic onboarding because Rithmic onboarding is slow and cTrader reaches many brokers through one application |
 | D6 | Calendar distribution without a backend | M5.1 | **Decided:** fetch official BLS, BEA, Federal Reserve and EIA schedules directly through `context_runtime` |
-| D7 | Handling of the cTrader client secret, which every desktop connection must send | T9 | **Implemented, awaiting Spotware confirmation:** the AWS broker returns the secret only to a desktop holding a `ready` connection and its proof (`app_credentials`); the desktop keeps it in zeroizing memory, never on disk or in logs. Rotation: rerun `configure:ctrader`; desktops refetch on `CH_CLIENT_AUTH_FAILURE`. Never in source, builds, logs or fixtures |
-| D8 | Owner of the cTrader trading session | T9 | **Open.** Recommendation: the `market_runtime` cTrader supervisor keeps the single connection per host and serves trading through the bounded `VenueRequest`/`VenueInbox` boundary; trading state stays in `trading_runtime` |
-| D9 | Hedging versus netting cTrader accounts | T9 | **Open.** Decide how `trading_runtime` presents each (positions per id versus net) and which account types the first release allows |
 
 ## Broker coverage
 
@@ -274,10 +264,8 @@ broker approves Aeris.
 | Route | Reaches | Market data | Accounts and trading | Gate |
 | --- | --- | --- | --- | --- |
 | Rithmic | Futures prop firms (Bulenox, Tradeify, Alpha Futures, Take Profit Trader, Phidias, TradeDay) and brokers (Discount Trading, AMP Futures, Stage 5) | Present, full depth; Rithmic Test only | Adapter sessions only | Onboarding, production systems, conformance |
-| tastytrade | tastytrade customers: futures and equities | Present, Level 1 | Absent | `read` scope approved; `trade` scope only after traction |
 | Hyperliquid | Crypto perps and spot; US users blocked | Present, public | Absent | Builder code (100 USDC) and agent-wallet approval |
 | Crypto exchanges | OKX, Bybit, KuCoin, Binance, Kraken, Coinbase, Bitget, Gate, Deribit, Delta Exchange India, CoinDCX | Absent; public WebSocket, no login | Absent | Broker program per exchange; Indian legal check on rebates; geo-blocking |
-| cTrader Open API | IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and other cTrader brokers; no US brokers | Partial: quotes, bars and depth verified on one demo account in `market_runtime` (uncommitted), no trade tape; not exposed in the desktop | Skeleton only: account routing and demo venue inbox, no order messages; live refused | D7 Spotware confirmation; D8; D9 |
 | Other forex/CFD | TradeLocker, DXtrade, Match-Trader, OANDA, IBKR TWS, Capital.com, IG | Absent | Absent | Per route |
 | Excluded | MT4/MT5 brokers, Topstep, NinjaTrader/Tradovate | — | — | Not pursued |
 
@@ -297,15 +285,6 @@ Every route reuses T2 unchanged, so the remaining T2 gaps close before broker pi
 6. Pass conformance, then qualify T2 on live accounts, including the copier.
 7. D4, PF4 and M1.6.
 8. Get listed on rithmic.com/platforms and by a broker before prop-firm outreach.
-
-**tastytrade**
-
-1. Finish the US cash-hours timing probe and visual check
-   ([`provider_integration_plan.md`](provider_integration_plan.md), Phase 1).
-2. Define the provider-neutral, read-only account observation contract in `trading_runtime`
-   (positions, PnL, journal, balances) under the existing `read` scope, with contract and restart
-   tests; then wire tastytrade to it.
-3. Order execution only after traction: `trade` scope, sandbox testing and legal review.
 
 **Hyperliquid and crypto exchanges**
 

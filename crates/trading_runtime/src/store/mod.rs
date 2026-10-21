@@ -1927,36 +1927,26 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tastytrade_future_contract_uses_exact_instrument_display_symbol() {
+    fn legacy_contract_without_display_symbol_falls_back_to_provider_symbol() {
         let legacy = r#"{
             "tick_size":null,"point_value":null,"currency":"USD", "expiry":null,
             "first_notice":null,"last_trade":null,"session_hours":[],
-            "provenance":{"provider_id":"tastytrade",
+            "provenance":{"provider_id":"retired-provider",
                 "provider_symbol":"/ESZ26:XCME","session_generation":1}
         }"#;
-        let id = InstrumentId::try_new("tastytrade:Future:/ESZ6").expect("instrument id");
-        let contract = decode_contract(legacy, &id).expect("legacy contract decodes");
-        assert_eq!(contract.provenance.display_symbol, "ESZ6");
+        let contract = decode_contract(legacy).expect("legacy contract decodes");
+        assert_eq!(contract.provenance.display_symbol, "/ESZ26:XCME");
         assert_eq!(contract.provenance.provider_symbol, "/ESZ26:XCME");
         assert_eq!(contract.order_quantity_increment, None);
         assert_eq!(contract.price_grid, PriceGrid::Unknown);
         assert_eq!(contract.instrument_class, InstrumentClass::Other);
-
-        let equity = InstrumentId::try_new("tastytrade:Equity:AAPL").expect("equity id");
-        assert_eq!(
-            decode_contract(legacy, &equity)
-                .expect("other identity retains legacy fallback")
-                .provenance
-                .display_symbol,
-            "/ESZ26:XCME"
-        );
     }
 
     #[test]
     fn contract_grid_and_class_survive_durable_round_trip() {
         let instrument = crate::tests::instrument();
         let encoded = encode_contract(&instrument.contract).expect("encode terms");
-        let restored = decode_contract(&encoded, &instrument.instrument_id).expect("decode terms");
+        let restored = decode_contract(&encoded).expect("decode terms");
         assert_eq!(restored.price_grid, instrument.contract.price_grid);
         assert_eq!(restored.instrument_class, InstrumentClass::Future);
     }
@@ -2181,7 +2171,7 @@ mod tests {
             .connection
             .execute_batch(
                 "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,
-                venue_id,broker_ref) VALUES ('broker','Demo','demo','USD',2,'ctrader','ref');
+                venue_id,broker_ref) VALUES ('broker','Demo','demo','USD',2,'broker','ref');
              INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
                 VALUES ('symbol',2,0,'{}');
              INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,

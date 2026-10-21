@@ -279,8 +279,8 @@ mod tests {
     fn unknown_calendar_rejects_week_and_month_without_silent_live_handoff() {
         let presentation = built_in_provider_presentations()
             .iter()
-            .find(|presentation| presentation.id == "tastytrade")
-            .expect("tastytrade presentation");
+            .find(|presentation| presentation.id == "rithmic")
+            .expect("Rithmic presentation");
         for interval in [ChartInterval::Week1, ChartInterval::Month1] {
             assert!(resolve_cadence(interval, presentation, CalendarSourceKind::Unknown).is_err());
         }

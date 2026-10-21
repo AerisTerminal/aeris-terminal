@@ -23,7 +23,7 @@ fn broker() -> TradingAccount {
         id: TradingAccountId::try_new("scripted-demo").expect("account"),
         display_name: "scripted demo".into(),
         environment: AccountEnvironment::Demo,
-        venue_id: "ctrader".into(),
+        venue_id: aeris_trading::venue::BROKER_VENUE_ID.into(),
         broker_ref: Some(BROKER_ACCOUNT.into()),
         currency: "USD".into(),
         currency_scale: 2,
@@ -231,7 +231,7 @@ fn full_outbound_queue_rejects_synchronously_without_pending_order() {
     let error = service
         .place_order(request("over-capacity"))
         .expect_err("full");
-    assert_eq!(error, "cTrader venue outbound queue is full");
+    assert_eq!(error, "broker venue outbound queue is full");
     assert_eq!(
         service.snapshot().expect("snapshot").orders.len(),
         OUTBOUND_CAPACITY
@@ -281,13 +281,13 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
     };
     assert_eq!(
         service.modify_order(modify).expect_err("queue full"),
-        "cTrader venue outbound queue is full"
+        "broker venue outbound queue is full"
     );
     assert_eq!(
         service
             .cancel_order(placed.client_order_id.clone())
             .expect_err("queue full"),
-        "cTrader venue outbound queue is full"
+        "broker venue outbound queue is full"
     );
     assert_eq!(
         order_status(&service, &placed.client_order_id),
@@ -438,9 +438,9 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
     let order = service
         .place_order(limit_request("generation-order", 9_000))
         .expect("place");
-    assert_eq!(order.id.as_str(), "ct-order-1");
+    assert_eq!(order.id.as_str(), "broker-order-1");
     assert_eq!(
-        VenueRoute::CtraderDemo,
+        VenueRoute::BrokerDemo,
         VenueRoute::from_account(&broker()).expect("route")
     );
     let VenueRequest::Place(sent) = receiver.recv().expect("request") else {
@@ -475,7 +475,10 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
         .find(|event| event.order_id == order.id)
         .expect("event");
     assert_eq!(accepted.provenance.session_generation, 2);
-    assert_eq!(accepted.provenance.venue_id, "ctrader");
+    assert_eq!(
+        accepted.provenance.venue_id,
+        aeris_trading::venue::BROKER_VENUE_ID
+    );
     assert_eq!(
         order_status(&service, &order.client_order_id),
         OrderStatus::Working
@@ -1029,7 +1032,7 @@ fn broker_positions_close_and_amend_through_the_venue() {
 
 #[test]
 fn a_broker_flatten_requests_closes_for_every_instrument() {
-    // VAL-TRD-062: a scripted cTrader account with positions on two symbols receives
+    // VAL-TRD-062: a scripted broker account with positions on two symbols receives
     // close requests for both from one flatten; an instrument scope closes only its own.
     let (_directory, service, receiver) = setup("venue-flatten-all");
     let mut second_instrument = instrument();
@@ -1486,7 +1489,7 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
     inbox
         .push(VenueEvent {
             broker_account: "2002".into(),
-            ..venue(1, observed("cTrader Demo · Example 2002"))
+            ..venue(1, observed("Broker Demo · Example 2002"))
         })
         .expect("observed");
     let accounts = service.snapshot().expect("snapshot").accounts;
@@ -1494,7 +1497,7 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
         .iter()
         .find(|account| account.broker_ref.as_deref() == Some("2002"))
         .expect("registered");
-    assert_eq!(registered.id.as_str(), "ctrader-demo-2002");
+    assert_eq!(registered.id.as_str(), "broker-demo-2002");
     assert_eq!(
         (registered.environment, registered.currency.as_str()),
         (AccountEnvironment::Demo, "EUR")
@@ -1527,7 +1530,7 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
         .snapshot()
         .expect("snapshot")
         .connected_broker_accounts;
-    assert!(connected.contains(&TradingAccountId::try_new("ctrader-demo-2002").expect("id")));
+    assert!(connected.contains(&TradingAccountId::try_new("broker-demo-2002").expect("id")));
     assert!(!connected.contains(&broker().id));
     let _next = service.attach_demo_venue().expect("reattach");
     assert_eq!(

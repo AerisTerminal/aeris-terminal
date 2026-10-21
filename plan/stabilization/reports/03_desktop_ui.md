@@ -8,7 +8,7 @@ History window covered by churn data: 2026-07-31 to 2026-10-13 (about 2.5 months
 ## Summary
 
 - The desktop layer is not provider-neutral. Provider id formats, entitlement strings, default contracts and venue
-  wording for Rithmic, tastytrade, cTrader and Hyperliquid are parsed and hard-coded in desktop code
+  wording for Rithmic, Hyperliquid and two since-removed broker providers are parsed and hard-coded in desktop code
   (`engine_market_worker/replay_conversion.rs`, `desktop/workspace_surface.rs`, `desktop.rs`, `trading.rs`). This violates
   the "desktop must stay provider-neutral" invariant directly.
 - The practice (simulated) venue receives market observations only through a UI-side relay
@@ -136,13 +136,13 @@ in `5391ce2d` by inferring legacy state from a missing field.
 - **Severity:** High
 - **Category:** Architecture (provider neutrality)
 - **Evidence:**
-  - `engine_market_worker/replay_conversion.rs` `snapshot_instrument` parses Rithmic, tastytrade, cTrader and Hyperliquid id formats;
-    `validate_product_identity` hard-codes entitlement strings (`rithmic-test:`, `tastytrade-authorized`, `hyperliquid-public`,
-    `ctrader-authorized`).
+  - `engine_market_worker/replay_conversion.rs` `snapshot_instrument` parses Rithmic, Hyperliquid and removed-provider id formats;
+    `validate_product_identity` hard-codes entitlement strings (`rithmic-test:`, `hyperliquid-public` and the
+    removed providers' `-authorized` strings).
   - `desktop/workspace_surface.rs:4882-4890` builds `rithmic-test:{exchange}:{symbol}` entitlements and `provider: "rithmic"`.
   - `worker_identity` branches on Hyperliquid; `default_product` hard-codes Rithmic MNQ/ES; `default_rithmic_contract_index` matches
     `"MNQ"` (`desktop.rs:737`).
-  - `TerminalProvider` enum enumerates four providers; `trading.rs` flatten feedback says "cTrader close request(s)";
+  - `TerminalProvider` enum enumerates four providers; `trading.rs` flatten feedback names a removed broker in its close-request text;
     `local_state` default workspace is Hyperliquid; `rithmic_shell`/`rithmic_login` components live in the desktop.
   - `terminal_instrument_label`'s `provider_presentation` check is effectively always true.
 - **Root cause:** The runtime does not publish presentation metadata or entitlements, so the desktop reconstructs them from id strings.
@@ -150,7 +150,7 @@ in `5391ce2d` by inferring legacy state from a missing field.
   entitlement token, default-contract policy) and a provider registry descriptor (display name, login form schema). The desktop
   renders descriptors only. Default product comes from the runtime's catalog. Provider-specific login UI becomes a
   descriptor-driven form.
-- **Verification:** Extend `tools/naming_check` to reject provider names (`rithmic`, `tastytrade`, `ctrader`, `hyperliquid`) and
+- **Verification:** Extend `tools/naming_check` to reject provider names (`rithmic`, `hyperliquid` and every other registered provider) and
   entitlement literals in `apps/desktop/src` outside an explicit allow-list (for example, vault/login glue pending migration).
 
 ### UI-04: Symbol selection takes two round trips and startup catalog resolution lives in the desktop

@@ -12,6 +12,9 @@ use crate::{
 };
 use aeris_instruments::InstrumentId;
 
+/// The venue id of accounts registered by the attached broker venue relay.
+pub const BROKER_VENUE_ID: &str = "broker";
+
 /// A stop-loss or take-profit level: an absolute price, or a distance from the entry
 /// price, both at the instrument's price scale.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -366,7 +369,7 @@ mod tests {
         VenueOrder {
             client_order_id: ClientOrderId::try_new("client-1").expect("id"),
             broker_account: "1001".into(),
-            instrument_id: InstrumentId::try_new("ctrader:demo:1001:1").expect("instrument"),
+            instrument_id: InstrumentId::try_new("broker:demo:1001:1").expect("instrument"),
             side: OrderSide::Buy,
             order_type: OrderType::Market,
             time_in_force: TimeInForce::ImmediateOrCancel,

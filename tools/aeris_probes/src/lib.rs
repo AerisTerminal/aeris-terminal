@@ -188,7 +188,6 @@ pub struct Envelope {
     probe: &'static str,
     root: PathBuf,
     out: PathBuf,
-    borrowed_stored_ctrader: bool,
     gate_source_clean: bool,
     git_revision: String,
     source_clean: bool,
@@ -200,13 +199,8 @@ impl Envelope {
     ///
     /// # Errors
     /// Returns an error when the git revision or worktree state cannot be verified.
-    pub fn collect(
-        probe: &'static str,
-        root: PathBuf,
-        out: PathBuf,
-        borrowed_stored_ctrader: bool,
-    ) -> ProbeResult<Self> {
-        Self::collect_with_policy(probe, root, out, borrowed_stored_ctrader, true)
+    pub fn collect(probe: &'static str, root: PathBuf, out: PathBuf) -> ProbeResult<Self> {
+        Self::collect_with_policy(probe, root, out, true)
     }
 
     /// Captures repository provenance with an explicit cleanliness policy. Probes under
@@ -219,7 +213,6 @@ impl Envelope {
         probe: &'static str,
         root: PathBuf,
         out: PathBuf,
-        borrowed_stored_ctrader: bool,
         gate_source_clean: bool,
     ) -> ProbeResult<Self> {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -233,7 +226,6 @@ impl Envelope {
             probe,
             root,
             out,
-            borrowed_stored_ctrader,
             gate_source_clean,
             git_revision,
             source_clean,
@@ -288,7 +280,6 @@ impl Envelope {
             "finished_at":utc_now().to_rfc3339(),
             "validation_root":self.root,
             "vault_namespace":"validation",
-            "borrowed_stored_ctrader":self.borrowed_stored_ctrader,
             "outcome":if passed { "passed" } else { "failed" },
             "checks":evidence.checks,
             "metrics":evidence.metrics,

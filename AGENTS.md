@@ -108,9 +108,6 @@ violations and missing verification explicitly, and never describe them as satis
   or disconnected queue rejects without a database write or compensating undo.
 - Trading owner timestamps come from the injected `trading_runtime::clock::Clock`, with wall time clamped
   monotonically per process. Direct system time in trading production code belongs only in `SystemClock`.
-- cTrader trading travels over the `market_runtime`-owned cTrader session for that host through the
-  bounded venue boundary. `market_runtime` relays venue requests and events but never holds order,
-  fill, position or account state; never open a second cTrader connection for trading.
 - Symbol, timeframe, viewport, tab, and layout changes must not tear down a healthy provider session.
 - `market_runtime` is the single owner that merges on-demand history and live state. Preserve one
   canonical forming candle, contiguous completed history, exact generation fencing, and explicit recovery.
@@ -189,8 +186,7 @@ violations and missing verification explicitly, and never describe them as satis
   stored-order count; retention bounds the live set.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
-  legacy state, write installed-app identity, promote launchers, or run updates. Only the explicit
-  cTrader borrowing flag may route the exact cTrader broker-connection vault key to production.
+  legacy state, write installed-app identity, promote launchers, or run updates.
 
 Architecture assertions in `tools/naming_check` are authoritative when they are stricter than prose.
 Its source scans strip only balanced `#[cfg(test)]` module bodies, so production code after a test
@@ -207,9 +203,7 @@ the check.
 - Live market probes run only from `tools/aeris_probes` on an isolated validation root with an
   exclusive instance lock. The optional `probe` feature's bounded Hyperliquid fault control
   interrupts only its WebSocket; never use a process-wide proxy that blocks catalog HTTP.
-  `paper_trading_probe` exercises the practice trading lifecycle on the public Hyperliquid feed;
-  `ctrader_demo_probe` is demo-only, requires `--validation-allow-stored-ctrader`, masks account
-  numbers, refuses live accounts, and runs only with explicit maintainer approval.
+  `paper_trading_probe` exercises the practice trading lifecycle on the public Hyperliquid feed.
 - The trading owner's quote-interest revision is durable store metadata: the market coordinator
   fences stale revisions for its whole lifetime, so a trading-owner restart must resume above the
   fence, and a provider reconnect republishes trading sessions before its `Feed::Live`.
@@ -269,9 +263,7 @@ The licensed Rithmic Provider Kit remains outside Git. The canonical local copy 
 ## Operating constraints
 
 1. **Local-first, no server in the market-data path.** No Aeris server receives, stores, processes
-   or relays market data, and no feature may depend on one. The only Aeris server is the AWS broker
-   for hosted-broker OAuth and application credentials (tastytrade, cTrader); it never sees market
-   data, orders or account state.
+   or relays market data, orders or account state, and no feature may depend on one.
 2. **Exchange data stays on the user's machine.** Broker data is processed only in the desktop
    process. Aeris must not redistribute exchange data or its derivatives.
 3. **Public non-exchange data is fetched directly from its official source**, with the user's own
@@ -436,9 +428,9 @@ maintainer's machine. Twenty is the source of truth for outreach status, not thi
   revise `fit` and `fitReason` when the reply changes them. Create the Company (with `companyType`),
   Person and Opportunity (with `aerisRole`, `fit` and `fitReason`) first for a firm that is not in
   the CRM yet.
-- Supported in Aeris is only for connections that are approved and working (Rithmic, cTrader,
-  tastytrade). A firm that has closed gets `outreachStatus` out of business and `fit` not a fit, with
-  the closure date and source in `fitReason`. Saved Opportunity views split the list into Supported
+- Supported in Aeris is only for connections that are approved and working (Rithmic). A firm that
+  has closed gets `outreachStatus` out of business and `fit` not a fit, with the closure date and
+  source in `fitReason`. Saved Opportunity views split the list into Supported
   in Aeris, Active pipeline, Later (needs new work) and Dead ends; keep a deal's role and fit accurate
   so it lands in the right view.
 - Tradovate/NinjaTrader-only firms are not out of reach: Tradovate gives no API access for prop or

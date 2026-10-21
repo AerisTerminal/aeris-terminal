@@ -123,7 +123,7 @@ impl TradingCore {
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
         match self.route(&order.account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return self.cancel_broker_order(order),
+            VenueRoute::BrokerDemo => return self.cancel_broker_order(order),
         }
         if !order.status.is_open() {
             return Ok(order);
@@ -487,7 +487,7 @@ impl TradingCore {
             .ok_or_else(|| "trading account is not registered".to_string())?;
         match VenueRoute::from_account(account)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return self.modify_broker_order(order, &command),
+            VenueRoute::BrokerDemo => return self.modify_broker_order(order, &command),
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         if !matches!(
@@ -628,7 +628,7 @@ impl TradingCore {
             }
         }
         let failure = last_error
-            .map(|error| format!("{failed} cTrader order(s) could not be cancelled: {error}"));
+            .map(|error| format!("{failed} broker order(s) could not be cancelled: {error}"));
         Ok((cancelled, failure))
     }
 

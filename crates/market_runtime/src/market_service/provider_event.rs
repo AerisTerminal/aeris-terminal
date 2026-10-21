@@ -1,10 +1,6 @@
-use super::{
-    DepthSnapshot, IndexedTradeMutation, InstallProviderInstrument, MarketBar, MarketTrade,
-    TopOfBookQuote, lifecycle::RecoveryReason,
-};
+use super::{DepthSnapshot, MarketBar, MarketTrade, TopOfBookQuote, lifecycle::RecoveryReason};
 use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
 use crate::rithmic_realtime::RithmicRealtimeEvent;
-use aeris_contracts::MarketSessionStatus;
 use aeris_market_engine::fence::{Epoch, ProviderTag};
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 use std::collections::BTreeMap;
@@ -147,13 +143,6 @@ pub(super) enum ProviderTradeBatch {
     Many(Vec<MarketTrade>),
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ProviderCandle {
-    pub(super) bar: MarketBar,
-    pub(super) trade_count: Option<u64>,
-    pub(super) trade_watermark: Option<u64>,
-}
-
 #[derive(Clone)]
 pub(super) enum ProviderDisconnect {
     SequenceGap {
@@ -170,7 +159,6 @@ pub(super) enum ProviderDisconnect {
         detail: &'static str,
         auto_recover: bool,
     },
-    End,
 }
 
 pub(super) enum ProviderEventKind {
@@ -187,52 +175,22 @@ pub(super) enum ProviderEventKind {
     Failed(String),
     Disconnected(ProviderDisconnect),
     Trades(ProviderTradeBatch),
-    IndexedTrades {
-        instrument: InstallProviderInstrument,
-        changes: Vec<IndexedTradeMutation>,
-    },
-    TapeBackfill {
-        instrument: InstallProviderInstrument,
-        trades: Vec<MarketTrade>,
-        truncated: bool,
-    },
     Quote(TopOfBookQuote),
     Depth(DepthSnapshot),
     Candle {
         symbol: ProviderCandleSymbol,
-        candle: ProviderCandle,
-    },
-    CandleRecovery(String),
-    TradeRecovery(InstallProviderInstrument),
-    Calendar {
-        instrument_id: String,
-        status: MarketSessionStatus,
-        valid_from_utc_ms: i64,
-        valid_until_utc_ms: i64,
+        bar: MarketBar,
     },
 }
 
-pub(super) enum ProviderCandleSymbol {
-    Wire(String),
-    CoinInterval { coin: String, interval: String },
+pub(super) struct ProviderCandleSymbol {
+    pub(super) coin: String,
+    pub(super) interval: String,
 }
 
 impl ProviderCandleSymbol {
-    pub(super) fn matches(&self, wire: &str, coin: Option<&str>, interval: Option<&str>) -> bool {
-        match self {
-            Self::Wire(symbol) => symbol == wire,
-            Self::CoinInterval {
-                coin: candidate,
-                interval: candidate_interval,
-            } => coin == Some(candidate) && interval == Some(candidate_interval),
-        }
-    }
-
-    pub(super) fn wire(&self) -> Option<&str> {
-        match self {
-            Self::Wire(symbol) => Some(symbol),
-            Self::CoinInterval { .. } => None,
-        }
+    pub(super) fn matches(&self, coin: &str, interval: &str) -> bool {
+        self.coin == coin && self.interval == interval
     }
 }
 
@@ -316,20 +274,16 @@ impl ProviderEvent {
                 provider_detail: None,
             }),
             Wire::Candle(_, coin, interval, candle) => ProviderEventKind::Candle {
-                symbol: ProviderCandleSymbol::CoinInterval { coin, interval },
-                candle: ProviderCandle {
-                    bar: MarketBar {
-                        source_sequence: 1,
-                        exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
-                        exchange_timestamp_unix_nanos: candle.open_nanos,
-                        open: candle.open,
-                        high: candle.high,
-                        low: candle.low,
-                        close: candle.close,
-                        volume: candle.volume,
-                    },
-                    trade_count: None,
-                    trade_watermark: None,
+                symbol: ProviderCandleSymbol { coin, interval },
+                bar: MarketBar {
+                    source_sequence: 1,
+                    exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
+                    exchange_timestamp_unix_nanos: candle.open_nanos,
+                    open: candle.open,
+                    high: candle.high,
+                    low: candle.low,
+                    close: candle.close,
+                    volume: candle.volume,
                 },
             },
             Wire::Trades(_, trades) => ProviderEventKind::Trades(ProviderTradeBatch::Many(trades)),
@@ -338,83 +292,6 @@ impl ProviderEvent {
         };
         WireProviderEvent {
             provider: "hyperliquid",
-            generation,
-            kind,
-        }
-    }
-
-    pub(super) fn ctrader(event: super::ctrader::RealtimeEvent) -> WireProviderEvent {
-        use super::ctrader::RealtimeEvent as Wire;
-        let generation = event.generation();
-        let kind = match event {
-            Wire::Connecting(_) => ProviderEventKind::Connecting,
-            Wire::Connected(_) => ProviderEventKind::Connected,
-            Wire::Failed(_, detail) => ProviderEventKind::Failed(detail),
-            Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
-            Wire::Retry(_, detail, retry_after) => {
-                ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
-                    detail: "cTrader live session is recovering",
-                    auto_recover: false,
-                    retry_after,
-                    provider_detail: Some(detail),
-                })
-            }
-            Wire::Candle(_, symbol, bar) => ProviderEventKind::Candle {
-                symbol: ProviderCandleSymbol::Wire(symbol),
-                candle: ProviderCandle {
-                    bar,
-                    trade_count: None,
-                    trade_watermark: None,
-                },
-            },
-            Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
-            Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
-        };
-        WireProviderEvent {
-            provider: "ctrader",
-            generation,
-            kind,
-        }
-    }
-
-    pub(super) fn tastytrade(event: super::tastytrade::RealtimeEvent) -> WireProviderEvent {
-        use super::tastytrade::RealtimeEvent as Wire;
-        let generation = event.generation();
-        let kind = match event {
-            Wire::Connecting(_) => ProviderEventKind::Connecting,
-            Wire::Connected(_) => ProviderEventKind::Connected,
-            Wire::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(Some(rtt)),
-            Wire::Retry(_, detail, retry_after) => {
-                ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
-                    detail: "Tastytrade live session is recovering",
-                    auto_recover: false,
-                    retry_after,
-                    provider_detail: Some(detail),
-                })
-            }
-            Wire::Candle(_, symbol, bar, count, trade_watermark) => ProviderEventKind::Candle {
-                symbol: ProviderCandleSymbol::Wire(symbol),
-                candle: ProviderCandle {
-                    bar,
-                    trade_count: Some(count),
-                    trade_watermark: Some(trade_watermark),
-                },
-            },
-            Wire::CandleRecovery(_, symbol) => ProviderEventKind::CandleRecovery(symbol),
-            Wire::TradeRecovery(_, instrument) => ProviderEventKind::TradeRecovery(instrument),
-            Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
-            Wire::Trades(_, instrument, changes) => ProviderEventKind::IndexedTrades {
-                instrument,
-                changes,
-            },
-            Wire::Tape(_, instrument, trades, truncated) => ProviderEventKind::TapeBackfill {
-                instrument,
-                trades,
-                truncated,
-            },
-        };
-        WireProviderEvent {
-            provider: "tastytrade",
             generation,
             kind,
         }

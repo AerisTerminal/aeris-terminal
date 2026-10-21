@@ -8,16 +8,16 @@ command was run. Every "current" reference below was read in the code during thi
 "to verify".
 
 Fixes required by the brief: MD-01 (Day3/Day1 cadence writer/reader mismatch), MD-02 (stall watchdog
-is tastytrade-only), MD-03 (session cadences approximated by fixed seconds), MD-04 (no calendar
-outside CME group venues, two tastytrade classifiers), MD-12 (reconnect policy).
+works for one broker provider only), MD-03 (session cadences approximated by fixed seconds), MD-04 (no calendar
+outside CME group venues, two broker-module classifiers), MD-12 (reconnect policy).
 
 ## 0. Audit corrections carried into this design
 
 | Finding | Audit claim | Code reality | Design consequence |
 |---|---|---|---|
-| MD-12 | "No backoff; retry limit message is misleading" | cTrader: 3 s x 2^n capped at 48 s, `MAXIMUM_FAILURES = 5`, reset after 1 min healthy. tastytrade `recovery_delay`: same scheme. `ctrader_venue`: 5 s to 300 s. Rithmic adapter `RithmicRetryScheduler`: `RETRY_DELAYS` 250 ms to 8 s, reset on established. | Real gaps: no jitter anywhere; four independent policies; Hyperliquid reconnects every fixed 250 ms forever; Rithmic `serve_demand` uses `Duration::ZERO` for non-transport recovery on top of the adapter scheduler (two stacked policies). |
-| MD-02 | "Watchdog only works for tastytrade" | Watchdog `recover_stalled_live_series` (`realtime.rs:3497`) iterates only `SeriesLive::TradeBuilt` and asks `broker_api.market_session_status` (tastytrade-only). Candle providers (cTrader, Hyperliquid) are never candidates; Rithmic always reads `Unknown`. | Broader than stated: stall detection must cover all live models, and the session answer must come from one provider-neutral calendar service. A neutral resolver already exists (`MarketService::market_session_status`, `runtime.rs:1146`) but branches on provider literals. |
-| MD-03/04 | Confirmed | `TradeLiveCadence::Calendar{RithmicExchangeCalendar}` exists, but `Session{days}` maps to `Fixed{days*86400}` (`realtime.rs:456`); `RithmicExchangeCalendar::for_venue` is `None` outside CME/CBOT/COMEX/NYMEX; tastytrade has `market_collection` (CME names) and `tastytrade_market_collection` (XCME names). | One calendar service, venue-keyed, provider-independent. |
+| MD-12 | "No backoff; retry limit message is misleading" | FX/CFD broker: 3 s x 2^n capped at 48 s, `MAXIMUM_FAILURES = 5`, reset after 1 min healthy. Level 1 broker `recovery_delay`: same scheme. FX/CFD broker venue: 5 s to 300 s. Rithmic adapter `RithmicRetryScheduler`: `RETRY_DELAYS` 250 ms to 8 s, reset on established. | Real gaps: no jitter anywhere; four independent policies; Hyperliquid reconnects every fixed 250 ms forever; Rithmic `serve_demand` uses `Duration::ZERO` for non-transport recovery on top of the adapter scheduler (two stacked policies). |
+| MD-02 | "Watchdog only works for one broker provider" | Watchdog `recover_stalled_live_series` (`realtime.rs:3497`) iterates only `SeriesLive::TradeBuilt` and asks `broker_api.market_session_status` (one broker provider only). Candle providers (FX/CFD broker, Hyperliquid) are never candidates; Rithmic always reads `Unknown`. | Broader than stated: stall detection must cover all live models, and the session answer must come from one provider-neutral calendar service. A neutral resolver already exists (`MarketService::market_session_status`, `runtime.rs:1146`) but branches on provider literals. |
+| MD-03/04 | Confirmed | `TradeLiveCadence::Calendar{RithmicExchangeCalendar}` exists, but `Session{days}` maps to `Fixed{days*86400}` (`realtime.rs:456`); `RithmicExchangeCalendar::for_venue` is `None` outside CME/CBOT/COMEX/NYMEX; the Level 1 broker module has one classifier with CME names and one with XCME names. | One calendar service, venue-keyed, provider-independent. |
 | MD-01 | Confirmed | Writer `workspace_series` (`desktop.rs:5053`) emits Day3 as `FixedSeconds/259200` via `ChartInterval::aggregation`; reader `pane_interval` (`engine_market_worker.rs:449`) accepts Day3 only as `SessionDays/3`; `series_key` (`replay_conversion.rs:354`) maps Day3 to `session(3)` and Day1 to session or time depending on `daily_bars`. | One mapping owned by the runtime, published with the instrument descriptor. |
 | MD-05 | Confirmed | `StoredSeries::snapshot` clones all bars whenever a realtime tail exists; there is no tail accessor. The CI benchmark (`market_engine/examples/market_data_performance.rs`) does not exercise snapshot-per-tick. | Tail accessor plus extended benchmark. |
 | MD-15 | Confirmed | `MarketStudyOutputSnapshot`, `StudyRemoved`, `StudyOutputsInvalidated`, `PriceAlertTriggered` carry no demand generation. | Typed `Fenced<T>` envelope on every consumer event. |
@@ -44,10 +44,10 @@ market_service/
   calendar/
     mod.rs             MarketCalendarService: resolve(instrument) -> CalendarSource; phase(), session_bounds()
     cme.rs             CME-group rules moved from adapters/rithmic_protocol/src/calendar.rs
-    weekly_hours.rs    today's session_hours.rs (cTrader contract hours), provider-neutral input
+    weekly_hours.rs    today's session_hours.rs (broker contract hours), provider-neutral input
   provider/
     mod.rs             ProviderSession trait, ProviderCapabilities, ProviderRegistry
-    tastytrade.rs | ctrader.rs | rithmic.rs | hyperliquid.rs   impls wrapping existing realtime modules
+    rithmic.rs | hyperliquid.rs (plus one per broker)   impls wrapping existing realtime modules
   reconnect.rs         ReconnectPolicy + Backoff (jittered, capped, budgeted)
   quotes.rs            QuoteBook (top of book per instrument) + QuoteSubscription fan-out
   outbox.rs            ConsumerEvents (moved out of mod.rs) + waitable OutboxWake
@@ -81,7 +81,7 @@ key, and `GenerationId`/`ProviderGeneration` reused as the payload of `Epoch<Tag
 | `ProviderSessionSlot` (9 flag fields) | `ProviderConnection { state: ConnectionState, epoch: Epoch<ProviderTag>, backoff: Backoff }`. |
 | Coordinator `history_inflight`, `history_deferred`, `history_confirmed_empty`, `history_backwards_exhausted`, `history_current_empty`, `detached_history`, `history_cancellations`, `history_retries` (`coordinator.rs:316-335`) | One `HistoryTracker` field. |
 | `catalog_searches`, `startup_catalog_searches`, `catalog_selections`, `startup_catalog_selections`, `catalog_screens` (raw `u64`) | `CommandFences: BTreeMap<(ConsumerId, ProviderId, CommandKind), Epoch<CommandTag>>`; the `startup_*` twins and the desktop `STARTUP_CATALOG_COMMAND_GENERATION = u32::MAX` sentinel disappear (startup becomes `CommandKind::StartupResolve`). |
-| `broker_api.market_session_status` (watchdog), `require_practice_market_session` (non-tastytrade returns `Ok(false)`) | Both call `MarketCalendarService::phase`. |
+| `broker_api.market_session_status` (watchdog), `require_practice_market_session` (other providers return `Ok(false)`) | Both call `MarketCalendarService::phase`. |
 | `MarketService::market_session_status` (`runtime.rs:1146`, provider literals) | Becomes a thin wrapper over `MarketCalendarService`. |
 | `ChartInterval::rithmic_aggregation` in the domain crate | Moves to the Rithmic provider module (provider vocabulary must not live in the domain crate). |
 | `provider_history` `HistoryScheduler`, `CoverageSnapshot`, `HandoffCoordinator` | Open question Q1 (adopt inside `HistoryTracker` or delete the unused parts). |
@@ -181,9 +181,9 @@ executes effects. This makes every transition unit-testable and replayable (sect
 
 ```rust
 pub(super) enum LiveModel {
-    /// tastytrade (Indexed continuity, FromTimeOnly history) and Rithmic (Sequence continuity).
+    /// Indexed-continuity providers (FromTimeOnly history) and Rithmic (Sequence continuity).
     TradeHandoff { continuity: TradeContinuity, cadence: LiveCadence },
-    /// cTrader and Hyperliquid provider-built candles overlaid on history.
+    /// Hyperliquid and other provider-built candles overlaid on history.
     CandleOverlay { cadence: LiveCadence },
 }
 pub(super) enum TradeContinuity { Sequence { last: Option<u64> }, Indexed { last_index: Option<TradeIndex> } }
@@ -270,8 +270,8 @@ registry).
 ```rust
 pub struct MarketCalendarService { sources: BTreeMap<InstrumentKey, CalendarSource>, rules: CalendarRules }
 pub enum CalendarSource {
-    ProviderCalendar(ProviderCalendar),      // provider-published sessions/holidays (tastytrade today)
-    ContractHours(WeeklyHours),              // cTrader contract trading hours (session_hours.rs)
+    ProviderCalendar(ProviderCalendar),      // provider-published sessions/holidays
+    ContractHours(WeeklyHours),              // broker contract trading hours (session_hours.rs)
     ExchangeRule(ExchangeRuleId),            // static venue rules, e.g. CME Globex 17:00 CT roll with DST
     AlwaysOpen,                              // 24/7 venues (Hyperliquid)
     Unknown,
@@ -286,9 +286,9 @@ impl MarketCalendarService {
 ### 4.2 Resolution order (per instrument, resolved at catalog install time)
 
 1. Provider-published calendar, if `ProviderCapabilities::calendar` says the provider has one.
-2. Provider contract hours (cTrader `weekly_hours_status` input).
+2. Provider contract hours (`weekly_hours_status` input).
 3. Exchange rule keyed by normalized venue MIC/exchange code (one normalization table; replaces the
-   two tastytrade classifiers `market_collection` and `tastytrade_market_collection`, and Rithmic
+   the two broker-module venue classifiers, and Rithmic
    `for_venue`). The CME rule is moved, not rewritten, from `adapters/rithmic_protocol/src/calendar.rs`
    with its tests.
 4. `AlwaysOpen` when the provider declares a 24/7 venue.
@@ -368,9 +368,9 @@ Per-provider defaults (preserve current behavior, add jitter, close gaps):
 
 | Provider | Today | Proposed |
 |---|---|---|
-| cTrader | 3 s x 2^n, cap 48 s, 5 failures, reset after 1 min | same values, equal jitter, budget 5, "retry limit reached" message kept (accurate). |
-| tastytrade | `recovery_delay`, same scheme | same values, equal jitter. |
-| cTrader venue (trading) | 5 s to 300 s | unchanged ownership; reuse `Backoff` type only. |
+| FX/CFD broker | 3 s x 2^n, cap 48 s, 5 failures, reset after 1 min | same values, equal jitter, budget 5, "retry limit reached" message kept (accurate). |
+| Level 1 broker | `recovery_delay`, same scheme | same values, equal jitter. |
+| FX/CFD broker venue (trading) | 5 s to 300 s | unchanged ownership; reuse `Backoff` type only. |
 | Rithmic | adapter `RithmicRetryScheduler` 250 ms to 8 s, reset on established, plus `serve_demand` `Duration::ZERO` non-transport recovery | one policy: adapter scheduler remains the only transport retry; `serve_demand` non-transport recovery goes through `Backoff` (min 1 s) so policies no longer stack. Login concurrency limit from `ConcurrencyLimits` is respected (Q2). |
 | Hyperliquid | fixed 250 ms forever | 500 ms x 2^n, cap 30 s, full jitter, no budget (public feed), reset after 1 min healthy. |
 
@@ -506,7 +506,7 @@ pub enum ReplayStep {
   reproducible.
 - The scripted registry implements `ProviderSession` and records demand diffs, so "symbol/timeframe
   change does not reconnect" becomes an assertion.
-- Required scenarios (first wave): MD-01 Day3 round trip through persistence; MD-02 stall on cTrader
+- Required scenarios (first wave): MD-01 Day3 round trip through persistence; MD-02 stall on a broker
   candle series while open, no stall while closed; MD-03 Day1 bar closes at CME 17:00 CT roll across
   a DST change; MD-04 non-CME venue resolves to contract hours/AlwaysOpen/Unknown; MD-12 Hyperliquid
   backoff schedule and Rithmic single-policy; stale-epoch history completion ignored; overflow
@@ -527,13 +527,13 @@ changes required in the same commit.
 | 3 | MD-01 fix: runtime-owned `resolve_cadence`; persistence stores `ChartInterval`; legacy Day3 reader; delete desktop-side mapping in `workspace_series`/`pane_interval`/`series_key`. | 1 | MD-01 | assert desktop has no `SeriesCadence::` construction |
 | 4 | `ReconnectPolicy` + `Backoff` with jitter; apply to Hyperliquid; route Rithmic `serve_demand` non-transport recovery through `Backoff`. | - | MD-12 | - |
 | 5 | `clock.rs` (`Clock`, `SystemClock`, `ScriptedClock`); replace direct `Instant::now()` in `TradeLiveHandoff` and the watchdog. | - | (replay prerequisite) | assert no `Instant::now()` in `lifecycle/` (applies once item 9 lands) |
-| 6 | `calendar/` module: move CME rules from `rithmic_protocol/src/calendar.rs`, move `session_hours.rs`, venue normalization table replacing both tastytrade classifiers and `for_venue`; `MarketService::market_session_status` delegates. | - | MD-04 | assert no provider literal in `calendar/mod.rs` |
+| 6 | `calendar/` module: move CME rules from `rithmic_protocol/src/calendar.rs`, move `session_hours.rs`, venue normalization table replacing both broker-module classifiers and `for_venue`; `MarketService::market_session_status` delegates. | - | MD-04 | assert no provider literal in `calendar/mod.rs` |
 | 7 | Watchdog uses calendar for all live models (trade and candle); practice gate uses calendar. | 5, 6 | MD-02 | - |
 | 8 | `LiveCadence::Session` uses calendar session windows; delete `Session -> Fixed` mapping. | 6 | MD-03 | - |
 | 9 | `fence.rs`: `Epoch<Tag>`, `Fenced<T>`; `ProviderEvent.generation` typed; catalog maps collapse into `CommandFences`; remove `u32::MAX` sentinel. | 1 | MD-15 (partially), UI startup sentinel | update `StartupResolution` assertions; forbid `generation: u64` in public events |
 | 10 | `HistoryTracker` replaces the eight coordinator maps; worker blocking send. | 9 | history map sprawl, 1 ms spin | update `ProviderRuntimeRegistry`/coordinator field assertions |
 | 11 | `lifecycle/` with `SeriesState` + pure `step`; port the candle path first (`candle_*` handlers deleted). | 5, 9, 10 | duplicate handlers (candle half) | replace `series_live: super::SeriesLiveMap::default()` assertion with `series: super::lifecycle::SeriesLifecycles::default()` |
-| 12 | Port trade-built path (tastytrade Indexed, Rithmic Sequence); delete `rithmic_*` handlers, `SeriesLive`, `SeriesLiveMap`, `LiveHistoryState`. | 11 | duplicate handlers (trade half) | assert `SeriesLiveMap` absent |
+| 12 | Port trade-built path (Indexed, Rithmic Sequence); delete `rithmic_*` handlers, `SeriesLive`, `SeriesLiveMap`, `LiveHistoryState`. | 11 | duplicate handlers (trade half) | assert `SeriesLiveMap` absent |
 | 13 | Dirty-set publication and deadline timers in the coordinator loop; `series_tail` engine accessor. | 12, 2 | MD-05, idle CPU | - |
 | 14 | `ProviderCapabilities` + `ProviderSession` + `ProviderRegistry`; delete four-arm channel enums and descriptor flags; fix Rithmic presentation values. | 12 | provider coupling | update registry field assertions; extend provider-literal ban |
 | 15 | `MarketDemandKey::Instrument`, `QuoteBook`, `QuoteSubscription`; price alerts migrate to instrument demand. | 14, 6 | TR-01/TR-02 data side | - |

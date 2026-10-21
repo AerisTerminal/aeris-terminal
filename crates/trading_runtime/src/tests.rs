@@ -114,7 +114,7 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
             id: broker_id.clone(),
             display_name: "test demo".into(),
             environment: AccountEnvironment::Demo,
-            venue_id: "ctrader".into(),
+            venue_id: aeris_trading::venue::BROKER_VENUE_ID.into(),
             broker_ref: Some("fixture-demo".into()),
             currency: "USD".into(),
             currency_scale: 2,
@@ -919,7 +919,7 @@ fn future_and_equity_practice_round_trips_use_their_point_values() {
         .register_instrument(future.clone())
         .expect("ES registers");
     let mut equity = future.clone();
-    equity.instrument_id = InstrumentId::try_new("tastytrade:Equity:AAPL").expect("equity id");
+    equity.instrument_id = InstrumentId::try_new("fixture:Equity:AAPL").expect("equity id");
     equity.contract.point_value = Some(InstrumentDecimal::try_new(1, 0).expect("one per share"));
     equity.contract.tick_size = Some(InstrumentDecimal::try_new(1, 2).expect("cent"));
     equity.contract.provenance.display_symbol = "AAPL".into();
@@ -1827,7 +1827,7 @@ fn fee_schedule_rejects_unknown_accounts_instruments_and_invalid_models() {
             id: TradingAccountId::try_new("demo-1").expect("account"),
             display_name: "test demo".into(),
             environment: AccountEnvironment::Demo,
-            venue_id: "ctrader".into(),
+            venue_id: aeris_trading::venue::BROKER_VENUE_ID.into(),
             broker_ref: Some("fixture-demo".into()),
             currency: "USD".into(),
             currency_scale: 2,

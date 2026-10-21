@@ -237,8 +237,7 @@ suffix `e` is the Aeris Charts half, `t` is the Terminal half.
 
 - **Requirement:** a footprint chart never shows candlesticks. Bars without real trade data are
   blank. Footprint bars appear only where the canonical trade tape has trades: live trades as they
-  arrive, plus the trades a provider already returns in the current session (today only the bounded
-  tastytrade TimeAndSale backfill). Prior-session footprint is out of scope: no connected provider
+  arrive, plus the trades a provider already returns in the current session. Prior-session footprint is out of scope: no connected provider
   supplies it without paid historical tick data. Nothing is synthesized and nothing falls back to
   another series kind.
 - **Evidence:**

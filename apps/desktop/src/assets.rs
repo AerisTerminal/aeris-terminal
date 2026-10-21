@@ -388,16 +388,10 @@ pub enum ExchangeLogo {
     #[default]
     Rithmic,
     Hyperliquid,
-    Tastytrade,
 }
 
 impl ExchangeLogo {
-    pub const ALL: [Self; 4] = [
-        Self::Rithmic,
-        Self::Hyperliquid,
-        Self::Tastytrade,
-        Self::Binance,
-    ];
+    pub const ALL: [Self; 3] = [Self::Rithmic, Self::Hyperliquid, Self::Binance];
 
     /// The logo a provider presentation descriptor names through its `logo_key`.
     #[must_use]
@@ -405,7 +399,6 @@ impl ExchangeLogo {
         match logo_key {
             "rithmic" => Some(Self::Rithmic),
             "hyperliquid" => Some(Self::Hyperliquid),
-            "tastytrade" => Some(Self::Tastytrade),
             _ => None,
         }
     }
@@ -416,36 +409,8 @@ impl ExchangeLogo {
             Self::Binance => "binance.svg",
             Self::Rithmic => "rithmic.svg",
             Self::Hyperliquid => "hyperliquid.svg",
-            Self::Tastytrade => "tastytrade.svg",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderLogo {
-    TastytradeLight,
-    TastytradeDark,
-}
-
-impl ProviderLogo {
-    pub const ALL: [Self; 2] = [Self::TastytradeLight, Self::TastytradeDark];
-
-    #[must_use]
-    pub fn for_theme(mode: aeris_design_system::ThemeMode) -> Self {
-        match mode {
-            aeris_design_system::ThemeMode::Light => Self::TastytradeDark,
-            aeris_design_system::ThemeMode::Dark => Self::TastytradeLight,
-        }
-    }
-
-    #[must_use]
-    pub fn path(self) -> SharedString {
-        let name = match self {
-            Self::TastytradeLight => "tastytrades_light.png",
-            Self::TastytradeDark => "tastytrades_dark.png",
-        };
-        format!("{PROVIDER_ASSET_PREFIX}{name}").into()
     }
 }
 
@@ -559,7 +524,6 @@ impl AssetSource for AerisAssets {
             .chain(SeriesIcon::ALL.into_iter().map(SeriesIcon::path))
             .chain(BrandAsset::ALL.into_iter().map(BrandAsset::path))
             .chain(ExchangeLogo::ALL.into_iter().map(ExchangeLogo::path))
-            .chain(ProviderLogo::ALL.into_iter().map(ProviderLogo::path))
             .chain(AttributionMark::all_paths())
             .filter(|asset| path.is_empty() || asset.starts_with(path))
             .collect())
@@ -661,21 +625,12 @@ fn exchange_asset(path: &str) -> Option<&'static [u8]> {
         "hyperliquid.svg" => {
             include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.svg")
         }
-        "tastytrade.svg" => {
-            include_bytes!("../assets/exchange_assets/exchange_logo/tastytrade.svg")
-        }
         _ => return None,
     })
 }
 
 fn provider_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(PROVIDER_ASSET_PREFIX)? {
-        "tastytrades_light.png" => {
-            include_bytes!("../assets/exchange_assets/provider_logo/tastytrades_light.png")
-        }
-        "tastytrades_dark.png" => {
-            include_bytes!("../assets/exchange_assets/provider_logo/tastytrades_dark.png")
-        }
         "market_data_by_rithmic_light_1x.png" => {
             include_bytes!(
                 "../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_1x.png"
@@ -867,7 +822,6 @@ mod tests {
                 + SeriesIcon::ALL.len()
                 + BrandAsset::ALL.len()
                 + ExchangeLogo::ALL.len()
-                + ProviderLogo::ALL.len()
                 + AttributionMark::all_paths().count()
         );
         assert_eq!(
@@ -908,18 +862,6 @@ mod tests {
             );
             assert!(svg.contains("currentColor"));
             assert!(!svg.contains('#'));
-        }
-    }
-
-    #[test]
-    fn provider_wordmarks_are_embedded_as_png_assets() {
-        let assets = AerisAssets;
-        for logo in ProviderLogo::ALL {
-            let bytes = assets
-                .load(logo.path().as_ref())
-                .unwrap()
-                .expect("provider wordmark");
-            assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{}", logo.path());
         }
     }
 
@@ -1064,7 +1006,6 @@ mod tests {
         };
         assert_eq!(logo_for("hyperliquid"), Some(ExchangeLogo::Hyperliquid));
         assert_eq!(logo_for("rithmic"), Some(ExchangeLogo::Rithmic));
-        assert_eq!(logo_for("tastytrade"), Some(ExchangeLogo::Tastytrade));
         assert_eq!(ExchangeLogo::for_logo_key("unknown"), None);
     }
 }

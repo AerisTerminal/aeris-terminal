@@ -576,10 +576,6 @@ actions!(
         TradingFlattenAccount,
         TradingKillSwitch,
         OpenCommandPalette,
-        ConnectTastytrade,
-        DisconnectTastytrade,
-        ConnectCtrader,
-        DisconnectCtrader,
         ConnectRithmic,
         DisconnectRithmic,
         RefreshBrokerConnections,
@@ -1189,99 +1185,16 @@ struct PracticeAccountDialogState {
     equity: Entity<InputState>,
 }
 
-/// A broker whose connection is authorized through the hosted broker service.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostedBroker {
-    Tastytrade,
-    Ctrader,
-}
-
-impl HostedBroker {
-    const ALL: [Self; 2] = [Self::Tastytrade, Self::Ctrader];
-
-    const fn provider(self) -> TerminalProvider {
-        match self {
-            Self::Tastytrade => TerminalProvider::Tastytrade,
-            Self::Ctrader => TerminalProvider::Ctrader,
-        }
-    }
-
-    fn for_provider(provider: TerminalProvider) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|broker| broker.provider() == provider)
-    }
-
-    const fn id(self) -> &'static str {
-        terminal_provider_id(self.provider())
-    }
-
-    fn display_name(self) -> &'static str {
-        terminal_provider_display(self.provider())
-    }
-}
-
-/// Presentation mirror of one runtime-owned hosted-broker connection for the Accounts
-/// panel. The market runtime owns the connection and its credentials; this holds only the
-/// last result the desktop observed.
-#[derive(Clone, Default)]
-struct HostedBrokerConnectionView {
-    /// `None` until the runtime has been asked; refreshed whenever the Accounts panel opens.
-    connected: Option<bool>,
-    operation: Option<HostedBrokerOperation>,
-    message: Option<String>,
-    failed: bool,
-}
-
-#[derive(Clone, Default)]
-struct HostedBrokerConnections {
-    tastytrade: HostedBrokerConnectionView,
-    ctrader: HostedBrokerConnectionView,
-}
-
-impl HostedBrokerConnections {
-    const fn get(&self, broker: HostedBroker) -> &HostedBrokerConnectionView {
-        match broker {
-            HostedBroker::Tastytrade => &self.tastytrade,
-            HostedBroker::Ctrader => &self.ctrader,
-        }
-    }
-
-    const fn get_mut(&mut self, broker: HostedBroker) -> &mut HostedBrokerConnectionView {
-        match broker {
-            HostedBroker::Tastytrade => &mut self.tastytrade,
-            HostedBroker::Ctrader => &mut self.ctrader,
-        }
-    }
-
-    /// Whether the runtime reported no stored connection for a hosted-broker provider.
-    fn disconnected(&self, provider: TerminalProvider) -> bool {
-        HostedBroker::for_provider(provider)
-            .is_some_and(|broker| self.get(broker).connected == Some(false))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostedBrokerOperation {
-    Checking,
-    Connecting,
-    Disconnecting,
-}
-
 /// Every market-data connection the Accounts panel presents.
 #[derive(Clone, Default)]
 struct DataConnections {
-    brokers: HostedBrokerConnections,
     rithmic: rithmic_login::RithmicLoginView,
 }
 
 impl DataConnections {
     /// Whether the runtime reported no stored connection for a provider that needs one.
     fn disconnected(&self, provider: TerminalProvider) -> bool {
-        match provider {
-            TerminalProvider::Rithmic => self.rithmic.missing(),
-            provider => self.brokers.disconnected(provider),
-        }
+        provider == TerminalProvider::Rithmic && self.rithmic.missing()
     }
 }
 
@@ -1689,19 +1602,12 @@ struct WorkspaceScrollHandles {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalProvider {
-    Tastytrade,
-    Ctrader,
     Rithmic,
     Hyperliquid,
 }
 
 impl TerminalProvider {
-    const ALL: [Self; 4] = [
-        Self::Tastytrade,
-        Self::Ctrader,
-        Self::Rithmic,
-        Self::Hyperliquid,
-    ];
+    const ALL: [Self; 2] = [Self::Rithmic, Self::Hyperliquid];
 }
 
 /// The always-available public provider, presented when a stored chart names
@@ -1712,8 +1618,6 @@ const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
     match provider {
         TerminalProvider::Rithmic => "rithmic",
         TerminalProvider::Hyperliquid => "hyperliquid",
-        TerminalProvider::Tastytrade => "tastytrade",
-        TerminalProvider::Ctrader => "ctrader",
     }
 }
 
@@ -3992,8 +3896,7 @@ fn catalog_rejection_message(
 fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
     match event {
         ProviderCatalogEvent::CatalogReady { provider } => provider,
-        ProviderCatalogEvent::SearchCompleted(result)
-        | ProviderCatalogEvent::SearchPreview(result) => &result.provider,
+        ProviderCatalogEvent::SearchCompleted(result) => &result.provider,
         ProviderCatalogEvent::SelectionInstalled { instrument, .. } => &instrument.provider,
         ProviderCatalogEvent::CommandRejected { rejection, .. }
         | ProviderCatalogEvent::ScreenRejected(rejection) => &rejection.provider,
@@ -4204,10 +4107,9 @@ fn run_desktop_readiness_command(
         if trading_status.schema_version == 0 {
             return Err("candidate trading service did not reach readiness".to_string());
         }
-        let (validation_mode, log_path, vault_namespace, borrowed_stored_ctrader) =
-            readiness_data_root_fields()?;
+        let (validation_mode, log_path, vault_namespace) = readiness_data_root_fields()?;
         let report = LifecycleReadinessReport {
-            schema_version: 5,
+            schema_version: 6,
             release_identity: release.release_identity,
             install_generation: release.install_generation,
             desktop_process_id: std::process::id(),
@@ -4218,7 +4120,6 @@ fn run_desktop_readiness_command(
             instance_lock: ReadinessFlag(true),
             log_path,
             vault_namespace,
-            borrowed_stored_ctrader,
             services: LifecycleServiceReadiness {
                 market: ServiceReady(true),
                 account: ServiceReady(true),
@@ -4248,8 +4149,7 @@ fn run_desktop_readiness_command(
     }
 }
 
-fn readiness_data_root_fields()
--> Result<(ReadinessFlag, String, &'static str, ReadinessFlag), String> {
+fn readiness_data_root_fields() -> Result<(ReadinessFlag, String, &'static str), String> {
     let root = aeris_platform_runtime::active_data_root()
         .map_err(|_| "candidate data root policy is unavailable".to_string())?;
     let log_path = root
@@ -4266,7 +4166,6 @@ fn readiness_data_root_fields()
         } else {
             "production"
         },
-        ReadinessFlag(root.borrow_stored_ctrader()),
     ))
 }
 
@@ -4285,7 +4184,6 @@ struct LifecycleReadinessReport {
     instance_lock: ReadinessFlag,
     log_path: String,
     vault_namespace: &'static str,
-    borrowed_stored_ctrader: ReadinessFlag,
     services: LifecycleServiceReadiness,
 }
 
@@ -4304,23 +4202,6 @@ struct ServiceReady(bool);
 #[derive(serde::Serialize)]
 #[serde(transparent)]
 struct ReadinessFlag(bool);
-
-/// Carries the trading owner's broker venue over the market runtime's shared cTrader
-/// session (D8). The desktop only hands the bounded channel ends across; neither runtime
-/// depends on the other, and the trading owner keeps every order, fill and position.
-fn attach_ctrader_venue(
-    trading: &aeris_trading_runtime::TradingService,
-    market: &aeris_market_runtime::MarketService,
-) -> Result<(), String> {
-    let (generation, requests) = trading.attach_demo_venue()?;
-    let inbox = trading.demo_venue_inbox();
-    market.attach_ctrader_venue(aeris_market_runtime::CtraderVenueLink {
-        generation,
-        requests,
-        events: Box::new(move |event| inbox.push(event)),
-    });
-    Ok(())
-}
 
 fn start_trading_service()
 -> Result<aeris_trading_runtime::TradingService, aeris_trading_runtime::StoreError> {
@@ -5385,7 +5266,6 @@ struct TerminalApp {
     command_palette_message: Option<String>,
     keyboard_trading: trading_hotkeys::KeyboardTrading,
     keyboard_shortcuts_open: bool,
-    broker_connection_task: Option<gpui::Task<()>>,
     data_connections: DataConnections,
     rithmic_login: rithmic_login::RithmicLoginFlow,
     linked_sync_revisions: BTreeMap<String, u64>,
@@ -5968,11 +5848,6 @@ pub(super) fn run(
             );
         }
     };
-    // cTrader demo trading is optional: without it the desktop still runs, and broker
-    // orders report the venue as unavailable.
-    if let Err(error) = attach_ctrader_venue(&trading, &services.market) {
-        diagnostic!("Aeris cTrader trading venue could not be attached: {error}");
-    }
     if let Err(error) = attach_trading_market_feed(&trading, &services.market) {
         diagnostic!("Aeris trading market feed could not attach: {error}");
         fatal_startup(

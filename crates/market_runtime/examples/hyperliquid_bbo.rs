@@ -32,10 +32,7 @@ fn run(market: &MarketService, symbol: &str, seconds: u64) -> Result<(), String>
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
             match event.value {
-                MarketRuntimeEvent::ProviderInstrumentSearchPreview(result)
-                | MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
-                    if !selected =>
-                {
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result) if !selected => {
                     if let Some(item) = result.instruments.into_iter().find(|item| {
                         item.symbol == symbol || item.symbol.starts_with(&format!("{symbol}-"))
                     }) {
@@ -122,7 +119,6 @@ fn main() -> Result<(), String> {
             root: std::env::temp_dir()
                 .join("aeris_validation")
                 .join(format!("hyperliquid_bbo-{}", std::process::id())),
-            borrow_stored_ctrader: false,
         },
     )
     .map_err(|error| error.to_string())?;

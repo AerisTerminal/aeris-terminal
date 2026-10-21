@@ -49,7 +49,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Reject unsafe roots before collecting evidence or attempting to write output.
     let root = initialize_data_root(DataRootMode::Validation {
         root: options.root.clone(),
-        borrow_stored_ctrader: false,
     })
     .map_err(|error| ProbeError::Runtime(error.to_string()))?;
     // The probe sources are not committed while the milestone is under development;
@@ -58,7 +57,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         "paper_trading",
         options.root.clone(),
         options.out.clone(),
-        false,
         false,
     )?;
     let started_at = aeris_probes::utc_now().to_rfc3339();

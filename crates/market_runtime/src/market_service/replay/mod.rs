@@ -604,7 +604,7 @@ fn replay_non_cme_calendar_resolution() {
         })),
         ..Default::default()
     };
-    calendar.resolve(&fx, None);
+    calendar.resolve(&fx);
     assert_eq!(
         calendar.source_kind("fx"),
         CalendarSourceKind::ContractHours
@@ -828,7 +828,7 @@ fn replay_history_exhaustion() {
     );
 }
 
-fn replay_ctrader_stall(
+fn replay_series_stall(
     phase: aeris_instruments::SessionPhase,
 ) -> crate::market_service::lifecycle::SeriesState {
     use crate::market_service::{
@@ -844,9 +844,9 @@ fn replay_ctrader_stall(
         utc_ms("2026-10-19T00:30:00Z") * 1_000_000,
     ));
     let series = BarSeriesKey {
-        provider_id: "ctrader".into(),
-        instrument_id: "ctrader:EURUSD".into(),
-        entitlement_id: "ctrader-demo".into(),
+        provider_id: "fixture".into(),
+        instrument_id: "fixture:EURUSD".into(),
+        entitlement_id: "fixture".into(),
         period: aeris_market_data::BarPeriod::time(60).unwrap(),
         definition_version: 1,
     };
@@ -863,7 +863,6 @@ fn replay_ctrader_stall(
         ProviderGeneration(provider.get()),
         "EURUSD",
         "1m",
-        crate::market_service::CandleGapPolicy::Contiguous,
         clock.clone(),
     );
     let mut effects = EffectBuf::default();
@@ -903,7 +902,7 @@ fn replay_ctrader_stall(
 #[test]
 fn replay_stall_while_open() {
     assert!(matches!(
-        replay_ctrader_stall(aeris_instruments::SessionPhase::Open),
+        replay_series_stall(aeris_instruments::SessionPhase::Open),
         crate::market_service::lifecycle::SeriesState::Recovering { .. }
     ));
 }
@@ -911,7 +910,7 @@ fn replay_stall_while_open() {
 #[test]
 fn replay_stall_while_closed() {
     assert!(matches!(
-        replay_ctrader_stall(aeris_instruments::SessionPhase::Closed),
+        replay_series_stall(aeris_instruments::SessionPhase::Closed),
         crate::market_service::lifecycle::SeriesState::Live { .. }
     ));
 }

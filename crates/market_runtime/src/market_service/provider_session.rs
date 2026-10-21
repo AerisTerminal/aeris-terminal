@@ -38,9 +38,6 @@ pub(super) trait ProviderSession: Send {
     fn adapter_retries_transport(&self) -> bool {
         false
     }
-    fn catalog_uses_session(&self) -> bool {
-        false
-    }
     fn connect(
         &self,
         epoch: Epoch<ProviderTag>,
@@ -57,9 +54,6 @@ pub(super) trait ProviderSession: Send {
     fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError>;
     fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError>;
     fn release_idle(&self) -> Result<bool, ProviderSessionError>;
-    fn authorization_changed(&self, _ready: bool) -> Result<bool, ProviderSessionError> {
-        Err(ProviderSessionError::Unavailable)
-    }
     fn shutdown(&self);
 }
 
@@ -86,8 +80,6 @@ pub(super) struct ProviderConnection {
 }
 
 const WORKER_DISCONNECTED: &str = "provider control worker disconnected";
-const RETRY_BUDGET_EXHAUSTED: &str =
-    "provider control queue remained full until retry budget exhausted";
 
 impl ProviderConnection {
     fn failed(&mut self, reason: &'static str) {
@@ -97,16 +89,10 @@ impl ProviderConnection {
     }
 
     fn control_full(&mut self, now: Instant) {
-        match self.backoff.failure(RetryClass::Transient) {
-            RetryDecision::Wait(delay) => {
-                // Full jitter can return zero. An elapsed deadline would make
-                // the coordinator immediately re-enter the same retry turn.
-                self.state = ConnectionState::RetryAt(now + delay.max(Duration::from_millis(1)));
-            }
-            RetryDecision::Failed { .. } | RetryDecision::Fatal => {
-                self.failed(RETRY_BUDGET_EXHAUSTED);
-            }
-        }
+        // Full jitter can return zero. An elapsed deadline would make the
+        // coordinator immediately re-enter the same retry turn.
+        let delay = self.backoff.transient_delay();
+        self.state = ConnectionState::RetryAt(now + delay.max(Duration::from_millis(1)));
     }
 }
 
@@ -197,59 +183,6 @@ impl ProviderSession for HyperliquidSession {
     fn shutdown(&self) {
         let _ = self.release_idle();
     }
-}
-
-pub(super) struct CtraderSession {
-    pub(super) controls: SyncSender<super::ctrader::RealtimeControl>,
-    pub(super) history: SyncSender<HistoryRequest>,
-}
-
-impl ProviderSession for CtraderSession {
-    fn catalog_uses_session(&self) -> bool {
-        true
-    }
-    fn connect(
-        &self,
-        epoch: Epoch<ProviderTag>,
-        sink: ProviderEventSink,
-    ) -> Result<bool, ProviderSessionError> {
-        debug_assert_eq!(sink.epoch, epoch);
-        try_control(
-            &self.controls,
-            super::ctrader::RealtimeControl::Connect(sink),
-        )
-    }
-
-    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
-        try_control(
-            &self.controls,
-            super::ctrader::RealtimeControl::Subscribe(demand.ctrader_wire()),
-        )
-    }
-
-    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
-        try_control(&self.history, request)
-    }
-
-    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
-        try_control(&self.controls, super::ctrader::RealtimeControl::Stop)
-    }
-
-    fn authorization_changed(&self, ready: bool) -> Result<bool, ProviderSessionError> {
-        try_control(
-            &self.controls,
-            super::ctrader::RealtimeControl::AuthorizationChanged(ready),
-        )
-    }
-
-    fn shutdown(&self) {
-        let _ = self.release_idle();
-    }
-}
-
-pub(super) struct TastytradeSession {
-    pub(super) controls: SyncSender<super::tastytrade::RealtimeControl>,
-    pub(super) history: SyncSender<HistoryRequest>,
 }
 
 pub(super) struct RithmicSession {
@@ -359,46 +292,6 @@ impl RithmicBinding {
     }
 }
 
-impl ProviderSession for TastytradeSession {
-    fn connect(
-        &self,
-        epoch: Epoch<ProviderTag>,
-        sink: ProviderEventSink,
-    ) -> Result<bool, ProviderSessionError> {
-        debug_assert_eq!(sink.epoch, epoch);
-        try_control(
-            &self.controls,
-            super::tastytrade::RealtimeControl::Connect(sink),
-        )
-    }
-
-    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
-        try_control(
-            &self.controls,
-            super::tastytrade::RealtimeControl::Subscribe(demand.tastytrade_wire()),
-        )
-    }
-
-    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
-        try_control(&self.history, request)
-    }
-
-    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
-        try_control(&self.controls, super::tastytrade::RealtimeControl::Stop)
-    }
-
-    fn authorization_changed(&self, ready: bool) -> Result<bool, ProviderSessionError> {
-        try_control(
-            &self.controls,
-            super::tastytrade::RealtimeControl::AuthorizationChanged(ready),
-        )
-    }
-
-    fn shutdown(&self) {
-        let _ = self.release_idle();
-    }
-}
-
 impl ProviderRegistry {
     #[cfg(feature = "probe")]
     pub(super) fn probe_fail_websocket(
@@ -412,19 +305,6 @@ impl ProviderRegistry {
             .session
             .probe_fail_websocket(count)
     }
-    pub(super) fn catalog_connect_ids(&self) -> Vec<&'static str> {
-        self.connections
-            .iter()
-            .filter_map(|(id, connection)| connection.session.catalog_uses_session().then_some(*id))
-            .collect()
-    }
-
-    pub(super) fn catalog_uses_session(&self, id: &str) -> bool {
-        self.connections
-            .get(id)
-            .is_some_and(|connection| connection.session.catalog_uses_session())
-    }
-
     pub(super) fn catalog_ready(&self, id: &str) -> bool {
         self.connections.get(id).is_some_and(|connection| {
             connection.epoch.is_some()
@@ -548,13 +428,9 @@ impl ProviderRegistry {
                 Ok(Some(epoch))
             }
             Ok(false) => {
-                // The reserved epoch never left this registry; retain the
-                // preceding epoch for consumer failure publication.
+                // The reserved epoch never left this registry, so the
+                // preceding epoch stays current until the retry connects.
                 connection.control_full(now);
-                if connection.epoch.is_none() && matches!(connection.state, ConnectionState::Failed)
-                {
-                    connection.epoch = Some(epoch);
-                }
                 Ok(None)
             }
             Err(error) => {
@@ -652,7 +528,7 @@ impl ProviderRegistry {
                 RetryDecision::Wait(delay) => {
                     ConnectionState::RetryAt(now + delay.max(Duration::from_millis(1)))
                 }
-                RetryDecision::Failed { .. } | RetryDecision::Fatal => ConnectionState::Failed,
+                RetryDecision::Fatal => ConnectionState::Failed,
             };
             #[cfg(feature = "probe")]
             if let ConnectionState::RetryAt(at) = connection.state {
@@ -787,27 +663,6 @@ impl ProviderRegistry {
             return Err(ProviderSessionError::Unavailable);
         }
         match connection.session.request_history(request) {
-            Err(error) => {
-                connection.failed(WORKER_DISCONNECTED);
-                Err(error)
-            }
-            result => result,
-        }
-    }
-
-    pub(super) fn authorization_changed(
-        &mut self,
-        id: &str,
-        ready: bool,
-    ) -> Result<bool, ProviderSessionError> {
-        let connection = self
-            .connections
-            .get_mut(id)
-            .ok_or(ProviderSessionError::Unavailable)?;
-        if matches!(connection.state, ConnectionState::Failed) {
-            return Err(ProviderSessionError::Unavailable);
-        }
-        match connection.session.authorization_changed(ready) {
             Err(error) => {
                 connection.failed(WORKER_DISCONNECTED);
                 Err(error)
@@ -1017,8 +872,6 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         let providers = [
             ("hyperliquid", ReconnectPolicy::hyperliquid()),
-            ("ctrader", ReconnectPolicy::ctrader()),
-            ("tastytrade", ReconnectPolicy::tastytrade()),
             ("rithmic", ReconnectPolicy::rithmic_recovery()),
         ];
         let records = providers
@@ -1152,23 +1005,45 @@ mod tests {
         assert_eq!(calls.lock().unwrap().0, 2);
     }
 
+    struct HyperliquidChannels {
+        session: Box<HyperliquidSession>,
+        controls: Receiver<HyperliquidRealtimeControl>,
+        _display: Receiver<HyperliquidDisplayDepthControl>,
+        _history: Receiver<HistoryRequest>,
+    }
+
+    fn hyperliquid_channels(capacity: usize) -> HyperliquidChannels {
+        let (controls, queued) = std::sync::mpsc::sync_channel(capacity);
+        let (display_controls, display) = std::sync::mpsc::sync_channel(4);
+        let (history, history_rx) = std::sync::mpsc::sync_channel(1);
+        HyperliquidChannels {
+            session: Box::new(HyperliquidSession {
+                controls,
+                display_controls,
+                history,
+            }),
+            controls: queued,
+            _display: display,
+            _history: history_rx,
+        }
+    }
+
     #[test]
     fn full_retry_control_channel_schedules_future_bounded_attempt_without_spinning() {
         let clock = ScriptedClock::new(49);
-        let (controls, queued) = std::sync::mpsc::sync_channel(1);
-        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let channels = hyperliquid_channels(1);
         let mut registry = ProviderRegistry::new();
         registry.register(
-            "ctrader",
-            Box::new(CtraderSession { controls, history }),
-            ReconnectPolicy::ctrader(),
+            "hyperliquid",
+            channels.session,
+            ReconnectPolicy::rithmic_recovery(),
             &clock,
         );
         let first = registry
-            .connect("ctrader", clock.monotonic())
+            .connect("hyperliquid", clock.monotonic())
             .unwrap()
             .unwrap();
-        registry.disconnected("ctrader", first, clock.monotonic());
+        registry.disconnected("hyperliquid", first, clock.monotonic());
         let due = registry.next_retry().unwrap();
         clock.advance(due.duration_since(clock.monotonic()));
         // The original Connect remains queued, so the bounded control channel is full.
@@ -1178,329 +1053,156 @@ mod tests {
             .expect("full channel must retain a retry");
         assert!(next > clock.monotonic(), "no elapsed deadline may remain");
         assert!(next.duration_since(clock.monotonic()) <= Duration::from_secs(6));
-        assert_eq!(registry.epoch("ctrader"), Some(first));
-        assert_eq!(registry.connections["ctrader"].backoff.attempts(), 2);
+        assert_eq!(registry.epoch("hyperliquid"), Some(first));
+        assert_eq!(registry.connections["hyperliquid"].backoff.attempts(), 2);
 
         let mut turns = 0;
         let interval_end = clock.monotonic() + Duration::from_secs(30);
         while clock.monotonic() < interval_end {
             turns += 1;
             assert!(turns <= 20, "coordinator must not spin on an elapsed retry");
-            if let Some(at) = registry.next_retry() {
-                assert!(at > clock.monotonic());
-                clock.advance(at.min(interval_end).duration_since(clock.monotonic()));
-                if at <= clock.monotonic() {
-                    registry.retry_due(clock.monotonic());
-                }
-            } else {
-                break;
+            let at = registry
+                .next_retry()
+                .expect("a full channel keeps a scheduled retry");
+            assert!(at > clock.monotonic());
+            clock.advance(at.min(interval_end).duration_since(clock.monotonic()));
+            if at <= clock.monotonic() {
+                registry.retry_due(clock.monotonic());
             }
         }
-        assert_eq!(
-            registry.connections["ctrader"].state,
-            ConnectionState::Failed
-        );
-        assert_eq!(registry.next_retry(), None);
-        drop(queued);
+        assert!(matches!(
+            registry.connections["hyperliquid"].state,
+            ConnectionState::RetryAt(_)
+        ));
+        assert_eq!(registry.epoch("hyperliquid"), Some(first));
+        drop(channels.controls);
     }
 
     #[test]
     fn disconnected_retry_worker_fails_with_cause_and_no_deadline() {
         let clock = ScriptedClock::new(50);
-        let (controls, queued) = std::sync::mpsc::sync_channel(1);
-        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let channels = hyperliquid_channels(1);
         let mut registry = ProviderRegistry::new();
         registry.register(
-            "ctrader",
-            Box::new(CtraderSession { controls, history }),
-            ReconnectPolicy::ctrader(),
+            "hyperliquid",
+            channels.session,
+            ReconnectPolicy::hyperliquid(),
             &clock,
         );
         let first = registry
-            .connect("ctrader", clock.monotonic())
+            .connect("hyperliquid", clock.monotonic())
             .unwrap()
             .unwrap();
-        registry.disconnected("ctrader", first, clock.monotonic());
-        drop(queued);
+        registry.disconnected("hyperliquid", first, clock.monotonic());
+        drop(channels.controls);
         let due = registry.next_retry().unwrap();
         clock.advance(due.duration_since(clock.monotonic()));
         assert_eq!(registry.retry_due(clock.monotonic()).len(), 0);
         assert_eq!(
-            registry.connections["ctrader"].state,
+            registry.connections["hyperliquid"].state,
             ConnectionState::Failed
         );
         assert_eq!(
-            registry.connections["ctrader"].failure_reason,
+            registry.connections["hyperliquid"].failure_reason,
             Some(WORKER_DISCONNECTED)
         );
         assert_eq!(
             registry.take_failures(),
-            vec![("ctrader", first, WORKER_DISCONNECTED)]
+            vec![("hyperliquid", first, WORKER_DISCONNECTED)]
         );
         assert!(
             registry.take_failures().is_empty(),
             "failure publishes once"
         );
         assert_eq!(registry.next_retry(), None);
-        assert_eq!(registry.epoch("ctrader"), Some(first));
+        assert_eq!(registry.epoch("hyperliquid"), Some(first));
         assert_eq!(registry.retry_due(clock.monotonic()).len(), 0);
     }
 
     #[test]
     fn full_demand_and_idle_controls_retain_work_until_channel_drains() {
         let clock = ScriptedClock::new(52);
-        let (controls, queued) = std::sync::mpsc::sync_channel(1);
-        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let channels = hyperliquid_channels(1);
         let mut registry = ProviderRegistry::new();
         registry.register(
-            "ctrader",
-            Box::new(CtraderSession { controls, history }),
-            ReconnectPolicy::ctrader(),
+            "hyperliquid",
+            channels.session,
+            ReconnectPolicy::hyperliquid(),
             &clock,
         );
         let epoch = registry
-            .connect("ctrader", clock.monotonic())
+            .connect("hyperliquid", clock.monotonic())
             .unwrap()
             .unwrap();
         let mut demand = ProviderDemand::default();
-        demand.explicit_trade_ids.insert("EURUSD".into());
-        assert!(!registry.apply_demand("ctrader", &demand).unwrap());
-        assert!(!registry.release_idle("ctrader").unwrap());
-        assert_eq!(registry.epoch("ctrader"), Some(epoch));
-        queued.try_recv().unwrap();
-        assert!(registry.apply_demand("ctrader", &demand).unwrap());
+        demand.explicit_trade_ids.insert("BTC".into());
+        assert!(!registry.apply_demand("hyperliquid", &demand).unwrap());
+        assert!(!registry.release_idle("hyperliquid").unwrap());
+        assert_eq!(registry.epoch("hyperliquid"), Some(epoch));
+        channels.controls.try_recv().unwrap();
+        assert!(registry.apply_demand("hyperliquid", &demand).unwrap());
         assert_eq!(
-            registry.connections["ctrader"].last_demand.as_ref(),
+            registry.connections["hyperliquid"].last_demand.as_ref(),
             Some(&demand)
         );
-        queued.try_recv().unwrap();
-        assert!(registry.release_idle("ctrader").unwrap());
-        assert_eq!(registry.epoch("ctrader"), None);
+        channels.controls.try_recv().unwrap();
+        assert!(registry.release_idle("hyperliquid").unwrap());
+        assert_eq!(registry.epoch("hyperliquid"), None);
     }
 
     #[test]
     fn disconnected_demand_control_is_terminal_not_silently_retried() {
         let clock = ScriptedClock::new(53);
-        let (controls, queued) = std::sync::mpsc::sync_channel(1);
-        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let channels = hyperliquid_channels(1);
         let mut registry = ProviderRegistry::new();
         registry.register(
-            "ctrader",
-            Box::new(CtraderSession { controls, history }),
-            ReconnectPolicy::ctrader(),
+            "hyperliquid",
+            channels.session,
+            ReconnectPolicy::hyperliquid(),
             &clock,
         );
         let epoch = registry
-            .connect("ctrader", clock.monotonic())
+            .connect("hyperliquid", clock.monotonic())
             .unwrap()
             .unwrap();
-        drop(queued);
+        drop(channels.controls);
         assert_eq!(
-            registry.apply_demand("ctrader", &ProviderDemand::default()),
+            registry.apply_demand("hyperliquid", &ProviderDemand::default()),
             Err(ProviderSessionError::Unavailable)
         );
         assert_eq!(
-            registry.connections["ctrader"].state,
+            registry.connections["hyperliquid"].state,
             ConnectionState::Failed
         );
         assert_eq!(
             registry.take_failures(),
-            vec![("ctrader", epoch, WORKER_DISCONNECTED)]
+            vec![("hyperliquid", epoch, WORKER_DISCONNECTED)]
         );
         assert_eq!(registry.next_retry(), None);
     }
 
     #[test]
-    fn scripted_ctrader_registry_applies_five_diffs_without_a_second_connection() {
-        let clock = ScriptedClock::new(42);
-        let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
-        let mut registry = ProviderRegistry::new();
-        registry.register(
-            "ctrader",
-            Box::new(ScriptedSession(Arc::clone(&calls))),
-            ReconnectPolicy::ctrader(),
-            &clock,
-        );
-        let epoch = registry
-            .connect("ctrader", clock.monotonic())
-            .unwrap()
-            .unwrap();
-        registry.connected("ctrader", epoch, clock.monotonic());
-        for revision in 0..5 {
-            let mut demand = ProviderDemand::default();
-            demand
-                .explicit_trade_ids
-                .insert(format!("symbol-or-interval-{revision}"));
-            assert!(registry.apply_demand("ctrader", &demand).unwrap());
-            assert!(registry.apply_demand("ctrader", &demand).unwrap());
-            assert_eq!(
-                registry.connect("ctrader", clock.monotonic()).unwrap(),
-                None
-            );
-        }
-        assert_eq!(calls.lock().unwrap().0, 1);
-        assert_eq!(calls.lock().unwrap().1.len(), 5);
-        assert_eq!(registry.epoch("ctrader"), Some(epoch));
-    }
-
-    #[test]
-    fn scripted_ctrader_registry_honors_server_wait_and_retry_budget() {
-        let clock = ScriptedClock::new(43);
-        let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
-        let mut registry = ProviderRegistry::new();
-        registry.register(
-            "ctrader",
-            Box::new(ScriptedSession(Arc::clone(&calls))),
-            ReconnectPolicy::ctrader(),
-            &clock,
-        );
-        let mut epoch = registry
-            .connect("ctrader", clock.monotonic())
-            .unwrap()
-            .unwrap();
-        registry.connected("ctrader", epoch, clock.monotonic());
-        let now = clock.monotonic();
-        registry.disconnected_with_class(
-            "ctrader",
-            epoch,
-            now,
-            RetryClass::RateLimited {
-                retry_after: std::time::Duration::from_secs(120),
-            },
-        );
-        assert_eq!(
-            registry.next_retry(),
-            Some(now + std::time::Duration::from_secs(120))
-        );
-        assert_eq!(
-            registry
-                .retry_due(now + std::time::Duration::from_secs(119))
-                .len(),
-            0
-        );
-        epoch = registry.retry_due(now + std::time::Duration::from_secs(120))[0].1;
-        for attempt in 1..=5 {
-            registry.connected("ctrader", epoch, now);
-            registry.disconnected("ctrader", epoch, now);
-            if attempt < 5 {
-                let due = registry.next_retry().expect("remaining retry");
-                epoch = registry.retry_due(due)[0].1;
-            }
-        }
-        assert_eq!(registry.next_retry(), None);
-        assert_eq!(
-            registry.connections["ctrader"].state,
-            ConnectionState::Failed
-        );
-        assert_eq!(calls.lock().unwrap().0, 6);
-    }
-
-    #[test]
-    fn ctrader_catalog_and_market_controls_share_the_reserved_epoch() {
-        let clock = ScriptedClock::new(44);
-        let (controls, queued) = std::sync::mpsc::sync_channel(4);
-        let (history, _) = std::sync::mpsc::sync_channel(4);
-        let mut registry = ProviderRegistry::new();
-        registry.register(
-            "ctrader",
-            Box::new(CtraderSession { controls, history }),
-            ReconnectPolicy::ctrader(),
-            &clock,
-        );
-        assert_eq!(registry.catalog_connect_ids(), ["ctrader"]);
-        assert!(!registry.catalog_ready("ctrader"));
-        let epoch = registry
-            .connect("ctrader", clock.monotonic())
-            .unwrap()
-            .unwrap();
-        assert!(registry.catalog_ready("ctrader"));
-        let super::super::ctrader::RealtimeControl::Connect(sink) = queued.try_recv().unwrap()
-        else {
-            panic!("catalog must reserve the provider epoch before connecting");
-        };
-        assert_eq!(sink.epoch, epoch);
-        registry
-            .apply_demand("ctrader", &ProviderDemand::default())
-            .unwrap();
-        assert!(matches!(
-            queued.try_recv().unwrap(),
-            super::super::ctrader::RealtimeControl::Subscribe(_)
-        ));
-        assert_eq!(
-            registry.connect("ctrader", clock.monotonic()).unwrap(),
-            None
-        );
-        assert!(registry.release_idle("ctrader").unwrap());
-        assert!(!registry.catalog_ready("ctrader"));
-        assert!(matches!(
-            queued.try_recv().unwrap(),
-            super::super::ctrader::RealtimeControl::Stop
-        ));
-    }
-
-    #[test]
-    fn tastytrade_registry_binds_connect_before_demand_and_never_reconnects_for_diffs() {
-        let clock = ScriptedClock::new(45);
-        let (controls, queued) = std::sync::mpsc::sync_channel(8);
-        let (history, _) = std::sync::mpsc::sync_channel(1);
-        let mut registry = ProviderRegistry::new();
-        registry.register(
-            "tastytrade",
-            Box::new(TastytradeSession { controls, history }),
-            ReconnectPolicy::tastytrade(),
-            &clock,
-        );
-        let epoch = registry
-            .connect("tastytrade", clock.monotonic())
-            .unwrap()
-            .unwrap();
-        let super::super::tastytrade::RealtimeControl::Connect(sink) = queued.try_recv().unwrap()
-        else {
-            panic!("first control must bind the reserved epoch");
-        };
-        assert_eq!(sink.epoch, epoch);
-        for revision in 0..5 {
-            let mut demand = ProviderDemand::default();
-            demand
-                .explicit_trade_ids
-                .insert(format!("switch-{revision}"));
-            assert!(registry.apply_demand("tastytrade", &demand).unwrap());
-            assert!(matches!(
-                queued.try_recv().unwrap(),
-                super::super::tastytrade::RealtimeControl::Subscribe(_)
-            ));
-            assert_eq!(
-                registry.connect("tastytrade", clock.monotonic()).unwrap(),
-                None
-            );
-        }
-        assert_eq!(registry.epoch("tastytrade"), Some(epoch));
-    }
-
-    #[test]
-    fn tastytrade_registry_owns_rate_limit_deadline_and_retires_old_epoch() {
+    fn registry_owns_rate_limit_deadline_and_retires_old_epoch() {
         let clock = ScriptedClock::new(46);
-        let (controls, queued) = std::sync::mpsc::sync_channel(4);
-        let (history, _) = std::sync::mpsc::sync_channel(1);
+        let channels = hyperliquid_channels(4);
         let mut registry = ProviderRegistry::new();
         registry.register(
-            "tastytrade",
-            Box::new(TastytradeSession { controls, history }),
-            ReconnectPolicy::tastytrade(),
+            "hyperliquid",
+            channels.session,
+            ReconnectPolicy::hyperliquid(),
             &clock,
         );
         let first = registry
-            .connect("tastytrade", clock.monotonic())
+            .connect("hyperliquid", clock.monotonic())
             .unwrap()
             .unwrap();
-        let super::super::tastytrade::RealtimeControl::Connect(first_sink) =
-            queued.try_recv().unwrap()
+        let HyperliquidRealtimeControl::Connect(first_sink) = channels.controls.try_recv().unwrap()
         else {
             panic!("first connect");
         };
         let now = clock.monotonic();
         registry.disconnected_with_class(
-            "tastytrade",
+            "hyperliquid",
             first,
             now,
             RetryClass::RateLimited {
@@ -1521,11 +1223,11 @@ mod tests {
         assert_ne!(second, first);
         assert_eq!(first_sink.stamp(()).epoch, first);
         assert!(matches!(
-            queued.try_recv().unwrap(),
-            super::super::tastytrade::RealtimeControl::Connect(sink) if sink.epoch == second
+            channels.controls.try_recv().unwrap(),
+            HyperliquidRealtimeControl::Connect(sink) if sink.epoch == second
         ));
-        registry.disconnected("tastytrade", first, now);
-        assert_eq!(registry.epoch("tastytrade"), Some(second));
+        registry.disconnected("hyperliquid", first, now);
+        assert_eq!(registry.epoch("hyperliquid"), Some(second));
         assert_eq!(registry.next_retry(), None);
     }
 

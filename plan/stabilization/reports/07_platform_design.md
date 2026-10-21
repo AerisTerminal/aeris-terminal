@@ -40,7 +40,7 @@ NORMAL LAUNCH  (Start menu -> aeris_launcher.exe, no args)
      -> --desktop-readiness branch (launcher health probe)              [:5424]
      -> migrate_legacy_native_data_root() every start                   [:5431]
      -> schedule_versioned_launcher_promotion() on no-arg start         [:5434, :5509-5532]
-     -> trading -> context -> market -> cTrader venue -> GPUI
+     -> trading -> context -> market -> broker venue -> GPUI
 
 UPDATE  (dormant: UPDATE_BACKEND_CONFIGURED=false, update.rs:40)
   desktop update.rs: check channel -> trust check launcher_is_trusted [update.rs:415]

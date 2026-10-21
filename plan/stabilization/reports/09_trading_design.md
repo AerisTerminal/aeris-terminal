@@ -31,7 +31,7 @@ These were verified while writing this document and are referenced below.
    standalone trailing-stop order type.
 7. Session gating is `PracticeMarketSession` (`lib.rs:248`), installed by the desktop (`desktop.rs:5487`) and backed by
    `MarketService::require_practice_market_session` (`market_service/runtime.rs:1196`), which only answers for
-   tastytrade. A provider-neutral `MarketService::market_session_status` already exists (`runtime.rs:1146`) and
+   one (since-removed) broker provider. A provider-neutral `MarketService::market_session_status` already exists (`runtime.rs:1146`) and
    returns `MarketSessionStatus { phase, source, session_start, session_end, next_open }`
    (`crates/contracts/src/messages.rs:812-844`).
 8. `MarketEngine` already has runtime-owned, non-presentation demand: data leases (`market_engine/src/lib.rs:548`),
@@ -41,7 +41,7 @@ These were verified while writing this document and are referenced below.
    `aeris_trading_runtime` in `market_runtime/Cargo.toml`, asserts string contracts in `trading_runtime/src/lib.rs`
    (`MAXIMUM_SNAPSHOT_ITEMS`, `mpsc::sync_channel(COMMAND_CAPACITY)`, ...) and in `store.rs`, and allows `rusqlite`
    only under `crates/trading_runtime/src/`. `market_runtime` already depends on `aeris_trading` (domain) for the
-   cTrader venue relay.
+   broker venue relay.
 10. Hyperliquid instruments report `point_value = 1`, currency `USD`, no session hours, and a `price_increment` that is
     only "the valid increment near the catalog mark price at selection" because Hyperliquid ticks follow
     significant figures (`market_runtime/src/hyperliquid_realtime.rs:486-497`). A fixed tick check would be wrong for
@@ -137,7 +137,7 @@ crates/trading_runtime/src/
   emergency.rs        MOVE   Kill switch, flatten (account, instrument, all), atomic reverse, economic-event flatten.
   copier.rs           KEEP
   venue/mod.rs        KEEP   VenueInbox (unchanged).
-  venue/broker.rs     MOVE   cTrader route (from venue/owner.rs); uses admission/ and book/ instead of copies.
+  venue/broker.rs     MOVE   broker route (from venue/owner.rs); uses admission/ and book/ instead of copies.
   venue/scripted.rs   KEEP   Scripted broker venue for tests (unchanged API, tests keep passing).
   store/mod.rs        MOVE   TradingStore open, pragmas, StepTx (one transaction per core step).
   store/schema.rs     MOVE   Migrations V1..V19 unchanged, new V20..V24 (section 5).
@@ -365,7 +365,7 @@ Semantics:
 - **Stop management.** Trailing and break-even rules ratchet the stop through `Modified{Management}` only when the
   stop moves by at least one tick (persisted as a fact, never per quote). Managed trailing is refused on broker routes
   (today's rule, `lib.rs:2198-2203`).
-- **Broker brackets.** Unchanged: a cTrader bracket is one entry with server-side SL/TP (`place_broker_bracket`,
+- **Broker brackets.** Unchanged: a broker bracket is one entry with server-side SL/TP (`place_broker_bracket`,
   `venue/owner.rs:140`); no local group is created because the broker owns that protection.
 - **Restart.** Groups and legs are rows (`order_groups`, `order_group_legs`) written in the same transaction as the
   order transitions that change them. Startup runs `core/recovery.rs`: it verifies every active group (legs exist, are
@@ -390,11 +390,11 @@ Semantics:
 ### 2.6 One admission validator
 
 `admission::admit(ctx: &AdmissionContext, request: &OrderRequest, route: VenueRoute) -> Result<Admitted, RejectReason>`
-is the only place that checks: account registered and route valid (live cTrader stays data-only); account lock and
+is the only place that checks: account registered and route valid (live broker routes stay data-only); account lock and
 risk (calls `risk::evaluate`, unchanged rules); instrument registered and scales; price grid (tick or significant
 figures); quantity increment (`check_quantity_increment`, `lib.rs:5085`); price relations (buy stop above ask, sell stop
 below bid, stop-limit limit relation, bracket legs on correct sides); TIF supported by the route
-(`VenueCapabilities`; cTrader keeps Day mapped to GTC, `venue/owner.rs:1252`); client id length (cTrader 50); open-order
+(`VenueCapabilities`; the broker route keeps Day mapped to GTC, `venue/owner.rs:1252`); client id length (per venue); open-order
 capacity (`MAXIMUM_OPEN_ORDERS`); quote-interest capacity; for the simulated route only: currency match, session phase
 and quote freshness (section 3.3). Brackets, OCO and protection requests validate every member through the same function.
 Hook for later work: an `admission::BuyingPower` step (no-op now) is where margin checks would attach.
@@ -483,7 +483,7 @@ marks but fill nothing.
 - **Closed phase**: resting orders are accepted and become eligible at the open; marketable orders are rejected with
   `RejectReason::MarketClosed` (Q3). **Unknown phase** (no calendar): fills are allowed while the feed is Live (quotes
   flowing is the evidence), and DAY is rejected because its expiry cannot be computed (Q2).
-- This replaces `PracticeMarketSession` and the tastytrade-only path. `MarketService::require_practice_market_session`
+- This replaces `PracticeMarketSession` and the single-provider path. `MarketService::require_practice_market_session`
   and `BrokerApi::require_practice_market_session` are deleted once nothing calls them (TR-02).
 
 ### 3.4 How quotes reach the engine
@@ -491,7 +491,7 @@ marks but fill nothing.
 Ownership: `MarketEngine` remains the single owner of market demand; `market_runtime` owns provider sessions and
 canonical books; `trading_runtime` owns trading. Neither runtime depends on the other (naming_check). The contract is
 the domain module `aeris_trading::market`; the desktop composition root wires the two ends, exactly like
-`attach_ctrader_venue` (`apps/desktop/src/desktop.rs:4134`).
+the broker venue attachment (`apps/desktop/src/desktop.rs:4134`).
 
 **Trading side (interest).** After every step, `TradingCore` recomputes its quote interest: the instruments of simulated
 accounts that have an open order (including Inactive legs), a non-flat position, or an active group. If the set changed,
@@ -510,7 +510,7 @@ market side can subscribe instruments that no chart shows.
    `instrument_subscriptions()`. This keeps trading demand inside `MarketEngine` instead of copying the price-alert
    pattern that lives outside it.
 2. `crates/market_runtime/src/market_service/trading_feed.rs` (new): holds the attached `TradingFeedLink { events:
-   Box<dyn Fn(MarketFeedEvent) -> Result<(), String> + Send> }` (same slot pattern as `ctrader_venue::VenueSlot`) and
+   Box<dyn Fn(MarketFeedEvent) -> Result<(), String> + Send> }` (same slot pattern as the broker venue `VenueSlot`) and
    the current interest. On a `QuoteInterest` command the coordinator resolves each route in its catalog, installing it
    from the route if absent (through the existing `install_provider_instrument` path), and replaces the engine's
    instrument leases.
@@ -824,10 +824,10 @@ and list the golden files they replace. "Closes" lists audit findings.
 | 7 | MarketEngine instrument leases | 6 | `instrument_lease.rs`, bounded; tests for share and release with consumers and data leases. | groundwork (MD ownership) |
 | 8 | market_runtime trading feed | 7 | `trading_feed.rs`; interest command; demand and book reconciliation; Quote/Feed/Session/Terms emission; terms conversion moved from the desktop; Hyperliquid significant-figure `PriceGrid`; fixture-provider tests; per-provider Quotes-only demand verification. | UI-01 (market side) |
 | 9 | Runtime-owned quotes | 3, 5, 8 | `market/` QuoteBook and inbox; interest publication; instruments registered from Terms; desktop wiring; delete `publish_simulated_market_observation`, desktop `register_provider_instrument` calls, `PendingObservations`. Fill rules unchanged (adapter from `TradingQuote`). naming_check: desktop must not reference `SimulatedMarketObservation`. | TR-01, UI-01, MD-11 (trading part) |
-| 10 | Provider-neutral gating | 9 | Session and freshness rules (section 3.3); `eligible_after` replaces `restored_orders` and provenance comparison; delete `PracticeMarketSession` and `require_practice_market_session` (trading and market sides). Behavior change for non-tastytrade providers (now gated). | TR-02, MD-02 (trading part) |
+| 10 | Provider-neutral gating | 9 | Session and freshness rules (section 3.3); `eligible_after` replaces `restored_orders` and provenance comparison; delete `PracticeMarketSession` and `require_practice_market_session` (trading and market sides). Behavior change for the previously ungated providers (now gated). | TR-02, MD-02 (trading part) |
 | 11 | Fill accounting consolidation | 5 | V20; one `apply_fill`; delete the four trackers; round trips from `fill_accounting`. Same math; goldens unchanged except row layout. | TR-11 (part) |
 | 12 | Facts-only persistence | 11 | `StepTx` per step with commit-then-apply; unrealized in memory only; revision in the step transaction; retention moved to a timer. Benchmark quotes per second with an open position before and after. | TR-06 (writes) |
-| 13 | Lifecycle state machine and typed events | 12 | V21; `book/lifecycle.rs`; `Inactive`, `Expired`, `Triggered`; `Order.revision` and timestamps; `OrderEventReason` and `RejectReason`; broker route uses the transition functions; cTrader scripted tests unchanged. | UI-10 (risk warning), TR-08 (part) |
+| 13 | Lifecycle state machine and typed events | 12 | V21; `book/lifecycle.rs`; `Inactive`, `Expired`, `Triggered`; `Order.revision` and timestamps; `OrderEventReason` and `RejectReason`; broker route uses the transition functions; broker scripted tests unchanged. | UI-10 (risk warning), TR-08 (part) |
 | 14 | One admission validator | 13 | `admission/` with `VenueCapabilities` and price grid; broker path uses it; parity tests; `RestingAt` resolution. Behavior change: off-grid prices and wrong-side stops rejected. | TR-07 (validator), TR-08 (tick) |
 | 15 | Execution engine v2 | 10, 14 | Placement-time evaluation (Market, IOC, FOK, marketable limit), resting limit at limit price, stop-limit trigger, DAY expiry timers and recovery, trigger index, market-order quote wait. New goldens (Q1, Q7). | TR-08 |
 | 16 | Order groups and migration | 15 | V22 with Rust data migration; `groups/` (bracket, OCO, protection, coverage, management); bracket legs as Inactive orders; restart restoration via rows and recovery checks. Old types kept as views for the desktop until item 21. | TR-07 (model) |
@@ -876,7 +876,7 @@ working after every item because old command forms delegate to new ones until it
 - **Q10. Instruments without a stored route after migration.** Old instrument rows lack `entitlement_id` and venue.
   Until the instrument is selected again (or market_runtime can resolve it from provider id and symbol), its working
   orders show "feed unavailable" and cannot fill. Proposal: show this per order in the UI; attempt automatic resolution
-  for providers that can resolve by symbol without login (Hyperliquid, cTrader public catalog).
+  for providers that can resolve by symbol without login (Hyperliquid public catalog).
 - **Q11. Bracket leg activation price.** Today legs activate at offsets from the actual entry fill price, even if the
   user dragged them to an absolute price while pending. Proposal: keep offsets (consistent with today). Alternative:
   keep absolute prices once dragged.
@@ -888,13 +888,13 @@ working after every item because old command forms delegate to new ones until it
 
 - **R1. Scope of the bracket migration (item 16).** The Rust data migration touches live user data. Mitigation: the
   pre-migration `VACUUM INTO` backup, V19 fixture tests covering every bracket status, and the recovery verifier.
-- **R2. Behavior changes visible to users** (resting limit price, gating for non-tastytrade providers, DAY expiry,
+- **R2. Behavior changes visible to users** (resting limit price, gating for previously ungated providers, DAY expiry,
   wrong-side stop rejection, fees). These need release notes and in-app notices.
 - **R3. Provider Quotes-only demand.** Each provider worker must subscribe top of book for an instrument with no series
   demand. Price alerts prove trade-only demand works; top-of-book needs verification per provider (Rithmic TOB plant
-  limits, tastytrade Quote events, cTrader spots on the shared session, Hyperliquid `bbo` or `l2Book`). Rithmic
+  limits, Hyperliquid `bbo` or `l2Book`). Rithmic
   subscription counts must stay within provider limits (AGENTS.md).
-- **R4. Restart routes for providers that need login.** Rithmic and tastytrade instruments cannot be subscribed until
+- **R4. Restart routes for providers that need login.** Rithmic and other login-gated instruments cannot be subscribed until
   the user logs in; their working orders stay unfillable and visibly so. This is correct but must be explained in the UI.
 - **R5. Exact cost basis** changes realized PnL by sub-tick amounts compared with the rounded average in some scale-in
   sequences. Migration preserves open positions exactly; only future fills use the exact basis.
@@ -903,6 +903,6 @@ working after every item because old command forms delegate to new ones until it
   `SimulatedMarketObservation`), not weaker.
 - **R7. Performance claims.** The design removes per-quote fsync and full polling, but no benefit is claimed until the
   benchmarks in items 12, 21 and 22 are measured.
-- **R8. cTrader parity.** The broker route moves to shared admission and lifecycle code. The scripted venue tests in
-  `venue/scripted.rs` and `market_service/ctrader_tests.rs` must stay green unchanged at every step; any change to them
+- **R8. Broker route parity.** The broker route moves to shared admission and lifecycle code. The scripted venue tests in
+  `venue/scripted.rs` and the broker scripted session tests must stay green unchanged at every step; any change to them
   is a red flag.

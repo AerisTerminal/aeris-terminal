@@ -1197,12 +1197,6 @@ mod tests {
                 "BTC",
                 "hyperliquid-public",
             ),
-            (
-                "tastytrade",
-                "tastytrade:Future:/ESZ6",
-                "/ESZ26:XCME",
-                "tastytrade-authorized",
-            ),
         ] {
             let mut workspace = default_workspace();
             workspace.provider = provider.to_string();

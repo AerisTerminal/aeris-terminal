@@ -68,7 +68,7 @@ impl TradingCore {
             Ok(staged)
         })?;
         for account in &tradable {
-            if !matches!(self.route(account), Ok(VenueRoute::CtraderDemo)) {
+            if !matches!(self.route(account), Ok(VenueRoute::BrokerDemo)) {
                 continue;
             }
             match self.flatten_broker_account(account, None) {
@@ -85,7 +85,7 @@ impl TradingCore {
                 }
                 Err(error) => append_incomplete(
                     &mut outcome.incomplete,
-                    format!("accounts are locked; cTrader positions were not closed: {error}"),
+                    format!("accounts are locked; broker positions were not closed: {error}"),
                 ),
             }
         }
@@ -118,7 +118,7 @@ impl TradingCore {
             core.stage_scope_cancellations(&scope, CancellationCause::KillSwitch)?;
             Ok(())
         })?;
-        if matches!(self.route(account_id), Ok(VenueRoute::CtraderDemo)) {
+        if matches!(self.route(account_id), Ok(VenueRoute::BrokerDemo)) {
             let (_, failure) = self.cancel_open_orders(Some(account_id), None)?;
             if let Some(failure) = failure {
                 return Err(format!("accounts are locked; {failure}"));
@@ -197,7 +197,7 @@ impl TradingCore {
             .keys()
             .filter(|account| {
                 scope.account.as_ref().is_none_or(|scope| scope == *account)
-                    && matches!(self.route(account), Ok(VenueRoute::CtraderDemo))
+                    && matches!(self.route(account), Ok(VenueRoute::BrokerDemo))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -213,7 +213,7 @@ impl TradingCore {
                 }
                 Err(error) => append_incomplete(
                     &mut outcome.incomplete,
-                    format!("cTrader positions were not closed: {error}"),
+                    format!("broker positions were not closed: {error}"),
                 ),
             }
         }
@@ -233,7 +233,7 @@ impl TradingCore {
         }
         match self.route(account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => {
+            VenueRoute::BrokerDemo => {
                 let observation = self.market_observation(instrument_id)?;
                 return self.reverse_broker_position(
                     account_id,

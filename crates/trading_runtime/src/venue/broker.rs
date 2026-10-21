@@ -11,13 +11,14 @@ use aeris_trading::{
     OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
     TradingAccount, TradingAccountId,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount, PositionUnrealizedPnl,
-        Protection, RealizedClose, VenueAmendment, VenueOrder, VenuePosition, VenueSnapshot,
+        BROKER_VENUE_ID, BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount,
+        PositionUnrealizedPnl, Protection, RealizedClose, VenueAmendment, VenueOrder,
+        VenuePosition, VenueSnapshot,
     },
 };
 use std::{collections::BTreeSet, sync::mpsc::TrySendError};
 
-const NOT_ACKNOWLEDGED: &str = "cTrader has not acknowledged this order yet; try again shortly";
+const NOT_ACKNOWLEDGED: &str = "the broker has not acknowledged this order yet; try again shortly";
 
 impl TradingCore {
     /// The broker account behind a registered broker-routed trading account.
@@ -35,7 +36,7 @@ impl TradingCore {
             .accounts
             .values()
             .find(|account| {
-                account.venue_id == "ctrader"
+                account.venue_id == BROKER_VENUE_ID
                     && account.broker_ref.as_deref() == Some(broker_account)
             })
             .map(|account| account.id.clone())
@@ -101,13 +102,13 @@ impl TradingCore {
         }
         let account = TradingAccount {
             id: TradingAccountId::try_new(format!(
-                "ctrader-{}-{broker_account}",
+                "broker-{}-{broker_account}",
                 observed.environment.as_str()
             ))
             .map_err(|error| error.to_string())?,
             display_name: observed.display_name.clone(),
             environment: observed.environment,
-            venue_id: "ctrader".into(),
+            venue_id: BROKER_VENUE_ID.into(),
             broker_ref: Some(broker_account.to_string()),
             currency: observed.currency.clone(),
             currency_scale: observed.currency_scale,
@@ -137,13 +138,13 @@ impl TradingCore {
 
     /// A bracket on a broker account is one entry order carrying server-side protection:
     /// the stop at the template's stop distance and the take-profit at its single target.
-    /// cTrader holds one take-profit per order, so scale-out targets are refused.
+    /// The broker venue holds one take-profit per order, so scale-out targets are refused.
     pub(crate) fn place_broker_bracket(
         &mut self,
         command: &PlaceOrder,
         template: &BracketStrategyTemplate,
     ) -> Result<Order, String> {
-        if !crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
+        if !crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::BrokerDemo)
             .native_sltp()
         {
             return Err("broker route does not support native protection".into());
@@ -153,8 +154,8 @@ impl TradingCore {
             [target] if target.quantity_percent == 100 => Some(target.offset_ticks),
             _ => {
                 return Err(
-                    "cTrader holds one take-profit per order; scale-out targets are unavailable \
-                     for broker accounts"
+                    "the broker holds one take-profit per order; scale-out targets are \
+                     unavailable for broker accounts"
                         .into(),
                 );
             }
@@ -206,7 +207,7 @@ impl TradingCore {
             self,
             &instrument,
             command,
-            crate::VenueRoute::CtraderDemo,
+            crate::VenueRoute::BrokerDemo,
             0,
             &[],
             crate::core::admission::AdmissionRisk::Enforced {
@@ -217,7 +218,7 @@ impl TradingCore {
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
         let time_in_force =
-            crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
+            crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::BrokerDemo)
                 .effective_tif(command.order_type, command.time_in_force);
         let request = VenueRequest::Place(VenueOrder {
             client_order_id: command.client_order_id.clone(),
@@ -238,7 +239,7 @@ impl TradingCore {
         let sequence = self.state.next_sequence;
         let provenance = self.broker_provenance(self.command_now, sequence);
         let order = Order {
-            id: OrderId::try_new(format!("ct-order-{sequence}"))
+            id: OrderId::try_new(format!("broker-order-{sequence}"))
                 .map_err(|error| error.to_string())?,
             client_order_id: command.client_order_id.clone(),
             account_id: command.account_id.clone(),
@@ -269,13 +270,13 @@ impl TradingCore {
             &order,
             sequence,
             OrderEventKind::Accepted,
-            "submitted to cTrader",
+            "submitted to the broker",
             provenance,
         )?;
         if !warnings.is_empty() {
             event.reason = Some(aeris_trading::OrderEventReason::RiskWarning);
             event.detail = Some(format!(
-                "submitted to cTrader · {}",
+                "submitted to the broker · {}",
                 warnings
                     .iter()
                     .map(ToString::to_string)
@@ -313,11 +314,11 @@ impl TradingCore {
         if command.modified_unix_nanos <= 0 {
             return Err("order modification timestamp must be positive".into());
         }
-        if crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
+        if crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::BrokerDemo)
             .effective_tif(order.order_type, command.time_in_force)
             != order.time_in_force
         {
-            return Err("cTrader cannot change an order's time in force".into());
+            return Err("the broker cannot change an order's time in force".into());
         }
         let instrument = self
             .state
@@ -750,7 +751,7 @@ impl TradingCore {
             &updated,
             sequence,
             OrderEventKind::Filled,
-            "filled at cTrader",
+            "filled at the broker",
             updated.provenance.clone(),
         )?;
         let realized_pnl = report
@@ -820,7 +821,7 @@ impl TradingCore {
         provenance: &TradingProvenance,
     ) -> Result<Order, String> {
         let order = Order {
-            id: OrderId::try_new(format!("ct-order-{sequence}"))
+            id: OrderId::try_new(format!("broker-order-{sequence}"))
                 .map_err(|error| error.to_string())?,
             client_order_id: ClientOrderId::try_new(format!("ct-{}", report.broker_order_id))
                 .map_err(|error| error.to_string())?,
@@ -1106,8 +1107,8 @@ impl TradingCore {
 
     fn venue_provenance(&self) -> TradingProvenance {
         TradingProvenance {
-            venue_id: "ctrader".into(),
-            provider_id: "ctrader".into(),
+            venue_id: BROKER_VENUE_ID.into(),
+            provider_id: BROKER_VENUE_ID.into(),
             session_generation: self.state.venue_generation,
             source_sequence: self.venue_ingestion,
             observed_unix_nanos: self.command_now,
@@ -1147,8 +1148,8 @@ impl TradingCore {
 
     fn broker_provenance(&self, observed_unix_nanos: i64, sequence: u64) -> TradingProvenance {
         TradingProvenance {
-            venue_id: "ctrader".into(),
-            provider_id: "ctrader".into(),
+            venue_id: BROKER_VENUE_ID.into(),
+            provider_id: BROKER_VENUE_ID.into(),
             session_generation: self.state.venue_generation,
             source_sequence: sequence,
             observed_unix_nanos,
@@ -1217,7 +1218,7 @@ fn broker_report_detail(state: BrokerOrderState) -> &'static str {
 
 fn outbound_error<T>(error: &TrySendError<T>) -> String {
     match error {
-        TrySendError::Full(_) => "cTrader venue outbound queue is full".into(),
+        TrySendError::Full(_) => "broker venue outbound queue is full".into(),
         TrySendError::Disconnected(_) => DEMO_VENUE_UNAVAILABLE.into(),
     }
 }

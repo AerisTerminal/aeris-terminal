@@ -110,12 +110,12 @@ fn reconnect_status_is_plain_language_and_clears_after_streaming_resumes() {
 }
 
 #[test]
-fn tastytrade_heartbeat_carries_measured_transport_rtt() {
-    let event = ProviderRuntimeEvent::Realtime(ProviderEvent::tastytrade(
-        tastytrade::RealtimeEvent::Heartbeat(3, 18_000_000),
+fn heartbeat_carries_measured_transport_rtt() {
+    let event = ProviderRuntimeEvent::Realtime(ProviderEvent::hyperliquid(
+        crate::hyperliquid_realtime::HyperliquidRealtimeEvent::Heartbeat(3, Some(18_000_000)),
     ));
     let metadata = event.metadata().expect("realtime event metadata");
-    assert_eq!(metadata.provider, "tastytrade");
+    assert_eq!(metadata.provider, "hyperliquid");
     assert_eq!(metadata.generation, 3);
     assert!(!metadata.reconnecting);
     assert_eq!(metadata.transport_rtt_nanos, Some(18_000_000));
@@ -205,35 +205,25 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
                 realtime_bars: false,
                 streams: StreamRequirements::BARS,
             },
-            calendar: CalendarCapability::InstrumentOrVenue,
             depth: None,
             quotes: None,
             reconnect: reconnect::ReconnectPolicy::hyperliquid(),
             history: ProviderHistoryCapabilities {
-                source: HistorySourceKind::ProviderSession,
-                range: HistoryRangePolicy::Bounded,
+                worker: "aeris-fourth-history",
                 supported_period: rithmic_supported_period,
             },
-            connection_kind: ProviderConnectionKind::Public,
             recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
-            idle_stop_policy: IdleStopPolicy::WorkerManaged,
-            alert_demand_update: AlertDemandUpdate::WorkerManaged,
-            authorization_revoked_detail: "Fourth provider disconnected",
+            alert_demand_update: AlertDemandUpdate::MarkDirty,
             overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
             instrument_missing_detail: "Provider instrument is not installed",
             ..RITHMIC_DESCRIPTOR.capabilities
         },
-        start: ProviderRuntimeRegistry::start_tastytrade_runtime,
+        start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
         flush_demand: |_| {},
-        prepare_search: None,
     };
-    let mut engine = configured_engine_from_descriptors(&[
-        RITHMIC_DESCRIPTOR,
-        HYPERLIQUID_DESCRIPTOR,
-        tastytrade::DESCRIPTOR,
-        fourth,
-    ])
-    .expect("four descriptors register");
+    let mut engine =
+        configured_engine_from_descriptors(&[RITHMIC_DESCRIPTOR, HYPERLIQUID_DESCRIPTOR, fourth])
+            .expect("three descriptors register");
     engine
         .begin_provider_session(fourth.id, ProviderGeneration(NonZeroU64::MIN))
         .expect("fourth provider session begins");
@@ -252,7 +242,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
 #[test]
 fn registered_provider_capabilities_match_presentations_and_streams() {
     let descriptors = BUILT_IN_PROVIDER_DESCRIPTORS;
-    assert_eq!(descriptors.len(), 4);
+    assert_eq!(descriptors.len(), 2);
     for descriptor in descriptors {
         let capabilities = descriptor.capabilities;
         assert_eq!(descriptor.presentation.id, descriptor.id);
@@ -279,26 +269,12 @@ fn registered_provider_capabilities_match_presentations_and_streams() {
         RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID
     );
     assert_eq!(RITHMIC_PRESENTATION.ready_label_suffix, "");
-    assert_eq!(
-        ctrader::DESCRIPTOR
-            .capabilities
-            .concurrency
-            .maximum_sessions,
-        2
-    );
-    assert_eq!(
-        tastytrade::DESCRIPTOR.capabilities.calendar,
-        CalendarCapability::ProviderPublished
-    );
 }
 
 #[test]
 fn provider_wake_is_a_conflated_nonblocking_edge() {
     let (commands, receiver) = mpsc::sync_channel(1);
-    let wake = ProviderCoordinatorWake::new(
-        commands,
-        ["rithmic", "hyperliquid", "tastytrade", "ctrader"],
-    );
+    let wake = ProviderCoordinatorWake::new(commands, ["rithmic", "hyperliquid"]);
     wake.notify();
     wake.notify();
     assert!(matches!(receiver.try_recv(), Ok(Command::ProviderWake)));

@@ -204,8 +204,8 @@ fn backfill_instrument_columns(transaction: &rusqlite::Transaction<'_>) -> Resul
         .map_err(database_error)?;
     drop(statement);
     for (id, contract_json) in rows {
-        let instrument_id = InstrumentId::try_new(id.clone()).map_err(|error| error.to_string())?;
-        let Ok(contract) = decode_contract(&contract_json, &instrument_id) else {
+        InstrumentId::try_new(id.clone()).map_err(|error| error.to_string())?;
+        let Ok(contract) = decode_contract(&contract_json) else {
             continue;
         };
         transaction

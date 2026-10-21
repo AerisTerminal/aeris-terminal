@@ -363,14 +363,9 @@ fn missing_market_replay_tests(source: &str) -> Vec<&'static str> {
 fn violates_calendar_boundary(path: &str, source: &str) -> bool {
     let production = production_source_prefix(source);
     if path.ends_with("/calendar/mod.rs")
-        && [
-            "\"rithmic\"",
-            "\"tastytrade\"",
-            "\"ctrader\"",
-            "\"hyperliquid\"",
-        ]
-        .iter()
-        .any(|literal| production.contains(literal))
+        && ["\"rithmic\"", "\"hyperliquid\""]
+            .iter()
+            .any(|literal| production.contains(literal))
     {
         return true;
     }
@@ -393,7 +388,7 @@ fn violates_generic_market_provider_boundary(path: &str, source: &str) -> bool {
     }
     let production = production_source_prefix(source).to_ascii_lowercase();
     production.split('"').skip(1).step_by(2).any(|literal| {
-        ["rithmic", "hyperliquid", "tastytrade", "ctrader"]
+        ["rithmic", "hyperliquid"]
             .iter()
             .any(|name| literal.contains(name))
     })
@@ -823,7 +818,7 @@ mod tests {
         ));
         assert!(super::violates_calendar_boundary(
             calendar,
-            "#[cfg(test)] mod tests { fn fixture() { let _ = \"rithmic\"; } }\nfn source() { let _ = \"tastytrade\"; }"
+            "#[cfg(test)] mod tests { fn fixture() { let _ = \"rithmic\"; } }\nfn source() { let _ = \"hyperliquid\"; }"
         ));
     }
 
@@ -851,7 +846,7 @@ mod tests {
             "publication.rs",
         ] {
             let path = format!("crates/market_runtime/src/market_service/{path}");
-            for provider in ["rithmic", "hyperliquid", "tastytrade", "ctrader"] {
+            for provider in ["rithmic", "hyperliquid"] {
                 let fixture = format!(
                     "#[cfg(test)] mod tests {{ fn fixture() {{ let _ = \"{provider}\"; }} }}\nfn production() {{ let _ = \"{provider}\"; }}"
                 );
@@ -1395,8 +1390,6 @@ mod tests {
             "crates/domain/market_data/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
-            "crates/adapters/tastytrade_market/Cargo.toml",
-            "crates/adapters/ctrader_open_api/Cargo.toml",
         ] {
             assert_excludes(relative, &ui);
         }
@@ -1405,8 +1398,6 @@ mod tests {
             &[
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
-                "aeris_tastytrade_market_adapter",
-                "aeris_ctrader_open_api_adapter",
             ],
         );
     }
@@ -1600,8 +1591,6 @@ mod tests {
                 "aeris_chart_integration",
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
-                "aeris_tastytrade_market_adapter",
-                "aeris_ctrader_open_api_adapter",
                 "aeris_charts_engine",
                 "aeris_charts_render",
                 "aeris_charts_render_gpui",
@@ -1630,8 +1619,6 @@ mod tests {
                 &[
                     "aeris_rithmic_protocol_adapter",
                     "aeris_hyperliquid_market_adapter",
-                    "aeris_tastytrade_market_adapter",
-                    "aeris_ctrader_open_api_adapter",
                     "aeris_local_history",
                     "aeris_local_storage",
                     "aeris_market_engine",
@@ -1854,7 +1841,6 @@ mod tests {
             "crates/provider_history/tests/handoff_conformance.rs",
             "crates/contracts/tests/contracts.rs",
             "crates/market_runtime/src/market_service/tests.rs",
-            "crates/market_runtime/src/market_service/tastytrade_tests.rs",
             "crates/market_runtime/src/study/tests.rs",
             "crates/account_runtime/src/account_service/tests.rs",
             "apps/desktop/src/desktop/workspace_surface_tests.rs",
@@ -1894,8 +1880,6 @@ mod tests {
                 "aeris_desktop_provider_runtime",
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
-                "aeris_tastytrade_market_adapter",
-                "aeris_ctrader_open_api_adapter",
                 "aeris_provider_history",
                 "aeris_local_storage",
                 "aeris_local_history",
@@ -2302,10 +2286,7 @@ mod tests {
 
     #[test]
     fn dead_code_suppressions_remain_at_external_decode_boundaries() {
-        let allowed = BTreeSet::from([
-            "crates/adapters/rithmic_protocol/src/lib.rs",
-            "crates/adapters/ctrader_open_api/src/lib.rs",
-        ]);
+        let allowed = BTreeSet::from(["crates/adapters/rithmic_protocol/src/lib.rs"]);
 
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path)
@@ -2343,7 +2324,6 @@ mod tests {
             "crates/domain/instruments/src/calendar/weekly_hours.rs::WeeklySegment".to_string(),
             // Trading publishes bounded quote interest without depending on market_runtime.
             "crates/domain/trading/src/market.rs::QuoteInterestSink".to_string(),
-            "crates/market_runtime/src/market_service/ctrader.rs::CtraderMarketLink".to_string(),
             // The market owner and provider workers share one injectable time boundary.
             "crates/market_runtime/src/market_service/clock.rs::Clock".to_string(),
             "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
@@ -2563,8 +2543,6 @@ mod tests {
         for relative in [
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
-            "crates/adapters/tastytrade_market/Cargo.toml",
-            "crates/adapters/ctrader_open_api/Cargo.toml",
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
@@ -2588,7 +2566,6 @@ mod tests {
         for dependency in [
             "aeris_rithmic_protocol_adapter",
             "aeris_hyperliquid_market_adapter",
-            "aeris_tastytrade_market_adapter",
             "aeris_market_engine",
             "aeris_provider_history",
             "aeris_platform_runtime",
@@ -2719,12 +2696,7 @@ mod tests {
             for path in production_sources_under(root) {
                 let contents = fs::read_to_string(&path).expect("source");
                 let production = production_prefix(&contents);
-                for boundary in [
-                    "hyperliquid_market_adapter::",
-                    "rithmic_protocol_adapter::",
-                    "tastytrade_market_adapter::",
-                    "ctrader_open_api_adapter::",
-                ] {
+                for boundary in ["hyperliquid_market_adapter::", "rithmic_protocol_adapter::"] {
                     assert!(
                         !production.contains(boundary),
                         "{} bypasses market_runtime through {boundary}",
@@ -2788,11 +2760,6 @@ mod tests {
                 "parallel provider event handler remains: {superseded}"
             );
         }
-        let tastytrade = manifest(&format!("{root}/tastytrade.rs"));
-        assert!(
-            !production_prefix(&tastytrade).contains("impl Coordinator"),
-            "tastytrade provider module owns coordinator behavior"
-        );
         let coordinator_source = manifest(&format!("{root}/coordinator.rs"));
         let coordinator = production_prefix(&coordinator_source);
         assert!(coordinator.contains("series: lifecycle::SeriesLifecycles::default()"));

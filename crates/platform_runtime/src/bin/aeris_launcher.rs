@@ -2078,7 +2078,6 @@ struct DesktopReadinessReport {
     instance_lock: ReadinessFlag,
     log_path: String,
     vault_namespace: String,
-    borrowed_stored_ctrader: ReadinessFlag,
     services: DesktopServiceReadiness,
 }
 
@@ -2174,7 +2173,7 @@ impl LifecycleHooks for NativeHooks {
                 .map_err(redacted)?;
             Self::wait_for_child(child)?;
             let readiness: DesktopReadinessReport = read_bounded_json(&report)?;
-            if readiness.schema_version != 5
+            if readiness.schema_version != 6
                 || readiness.release_identity != candidate.release_identity
                 || readiness.install_generation != candidate.install_generation
                 || readiness.desktop_process_id == 0
@@ -2184,7 +2183,6 @@ impl LifecycleHooks for NativeHooks {
                 || !readiness.instance_lock.0
                 || readiness.log_path.is_empty()
                 || readiness.vault_namespace != "production"
-                || readiness.borrowed_stored_ctrader.0
                 || !readiness.services.market.0
                 || !readiness.services.account.0
                 || !readiness.services.trading.0

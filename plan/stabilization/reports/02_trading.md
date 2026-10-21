@@ -1,7 +1,7 @@
 # Aeris Terminal audit: trading and paper trading
 
 Scope: `crates/trading_runtime`, `crates/domain/trading`, the trading surfaces of `apps/desktop`, and the
-`market_runtime` pieces the simulated venue depends on (practice session calendar, cTrader venue relay).
+`market_runtime` pieces the simulated venue depends on (practice session calendar, broker venue relay).
 Method: read-only code reading and `git log`/`git show`; no build, no test run, no repository changes.
 Repository: `C:\Users\devraj\Downloads\Softwares\aeris-terminal`, branch `main`.
 All paths below are relative to that root. Line numbers refer to the working tree at audit time.
@@ -11,7 +11,7 @@ All paths below are relative to that root. Line numbers refer to the working tre
 The trading runtime is a single owner thread (`Coordinator`) that holds accounts, orders, order events,
 fills, positions, risk locks and managed brackets, persists every mutation to SQLite, and fills simulated
 orders when a market observation arrives. The ownership boundary required by `AGENTS.md` is respected:
-the desktop holds a handle and polled snapshots, and `market_runtime` only relays cTrader venue traffic.
+the desktop holds a handle and polled snapshots, and `market_runtime` only relays broker venue traffic.
 Persistence and restart recovery are taken seriously (golden-ledger characterization tests, restart tests
 for brackets and flatten, a projection repair path).
 
@@ -20,7 +20,7 @@ paper venue. The most important problems are structural, not cosmetic:
 
 1. The simulated venue has no market-data subscription of its own. Prices only arrive when a chart pane
    publishes its order book. Close the chart and stops, targets, unrealized PnL and live risk freeze.
-2. Closed-market and stale-quote protection exists only for tastytrade. Every other provider fills on
+2. Closed-market and stale-quote protection exists only for one (since-removed) broker provider. Every other provider fills on
    whatever quote last arrived.
 3. The kill switch cancels every working order, including protective stops, and leaves positions open.
    Flatten, flatten-all and economic-event flatten only touch the instrument of the supplied observation.
@@ -56,18 +56,18 @@ Legend: Done = implemented and tested; Partial = implemented with material gaps;
 | Fees and commissions (simulated) | Missing | Not modelled for the simulated venue. |
 | Tick-size validation | Missing | `prepare_single_order` (`lib.rs:2462-2547`) does not check limit/stop prices against tick size. |
 | Brackets / OCO | Done, fragile | Managed brackets plus standalone protective orders plus alignment layer; see TR-07. |
-| Net positions | Done | `Position` for simulated accounts; cTrader uses hedged `BrokerPosition` (dual model, TR-12). |
+| Net positions | Done | `Position` for simulated accounts; the removed FX/CFD broker used hedged `BrokerPosition` (dual model, TR-12). |
 | Realized / unrealized PnL | Partial | Correct for the touch model, but unrealized PnL updates only while a chart publishes quotes (TR-01). Four parallel PnL trackers (TR-11). |
 | Cash ledger, margin, buying power | Missing | Balance is starting equity plus summed realized PnL (`lib.rs:4672-4726`); no cash movements, margin or equity history. |
 | Risk limits | Partial | Loss limits and locks exist, but the risk session never rolls over and no app registers a `RiskProfile` (TR-09). |
 | Kill switch | Partial, unsafe | Locks and cancels all orders including stops; does not flatten (TR-03). |
 | Flatten / flatten all / reverse | Partial, buggy | Only the observed instrument is flattened (TR-04); reverse is non-atomic. |
-| Market session awareness | Partial | tastytrade only (`crates/market_runtime/src/market_service/tastytrade.rs:564-585`); other providers return `Ok(false)` (TR-02). |
+| Market session awareness | Partial | One removed broker provider only (its `market_service` module); other providers return `Ok(false)` (TR-02). |
 | Market data ownership | Missing | Driven by chart panes (TR-01). |
 | Persistence and restart | Done | SQLite store, restart tests for brackets, flatten and restored orders; projection repair at `lib.rs:1136-1215`. |
 | Retention | Partial, risky | Deletes fills that the ledger is rebuilt from; snapshot limit lower than retention limit (TR-05, TR-06). |
 | Deterministic replay | Partial | `observe_market` makes the engine replayable in tests; there is no price-stream harness or UI-to-runtime end-to-end test. |
-| Live broker (cTrader demo) | Partial | Routed through the `market_runtime` session as required. Rithmic order plant (`crates/adapters/rithmic_protocol/src/order_plant.rs`, 1,747 lines) is not used outside its crate. |
+| Live broker (removed FX/CFD broker, demo) | Partial | Routed through the `market_runtime` session as required. Rithmic order plant (`crates/adapters/rithmic_protocol/src/order_plant.rs`, 1,747 lines) is not used outside its crate. |
 
 ## Churn hotspots
 
@@ -112,15 +112,15 @@ order-group model, which is the root cause addressed by TR-07.
   assert the stop fills. Desktop manual check: close the chart with a bracketed position and confirm the
   target fills.
 
-### TR-02: Closed-market and stale-quote protection exists only for tastytrade
+### TR-02: Closed-market and stale-quote protection exists only for one broker provider
 
 - Severity: High. Category: Correctness.
 - Evidence: `require_practice_market_session` (`lib.rs:2434-2449`) delegates to
-  `crates/market_runtime/src/market_service/tastytrade.rs:564-585`, which returns `Ok(false)` for any
-  provider other than tastytrade. Placement (`lib.rs:2491`) only propagates the error and discards the
+  the removed Level 1 broker's `market_service` module, which returns `Ok(false)` for any
+  other provider. Placement (`lib.rs:2491`) only propagates the error and discards the
   result. On observation (`lib.rs:3105-3129`) the "require a new quote" filter applies only when the
-  result is `true`, so it is effectively tastytrade-only.
-- Impact: For Rithmic, cTrader and Hyperliquid instruments, orders can be placed while the market is
+  result is `true`, so it is effectively limited to that one provider.
+- Impact: For Rithmic, Hyperliquid and other-broker instruments, orders can be placed while the market is
   closed and fill on the first quote after placement, even if it is a stale replay or a reconnect
   snapshot. There is no quote age check at all.
 - Root cause: Session gating was implemented inside one provider adapter instead of as a provider-neutral
@@ -294,8 +294,8 @@ order-group model, which is the root cause addressed by TR-07.
   leaves the user flat with an error.
 - `Coordinator` has about 150 methods across `lib.rs`, `venue/owner.rs`, `protection.rs` and
   `planned_leg.rs`.
-- Two position models (`Position` net for simulated, `BrokerPosition` hedged for cTrader) cause branching
-  throughout; `VenueRoute` only has `Simulated` and `CtraderDemo`.
+- Two position models (`Position` net for simulated, `BrokerPosition` hedged for the removed FX/CFD broker) cause branching
+  throughout; `VenueRoute` only has `Simulated` and one broker demo route.
 - The Rithmic order plant (`crates/adapters/rithmic_protocol/src/order_plant.rs`, 1,747 lines) is unused outside its crate (plan item T5).
 - Clean fix: Use the command time for cancel events (with a regression test); make reverse a single
   admitted operation; split `Coordinator` (see restructuring); keep the Rithmic plant out of the build
@@ -307,7 +307,7 @@ Strong: golden ledgers (`crates/trading_runtime/tests/characterization.rs`), res
 brackets, flatten and restored orders, risk lock tests, scripted broker venue tests.
 
 Missing: stop-limit gap-through, Day expiry, IOC/FOK at placement, multi-instrument flatten and kill,
-snapshot above 10,000 orders, stale or closed-market quotes for non-tastytrade providers, partial fills,
+snapshot above 10,000 orders, stale or closed-market quotes for the other providers, partial fills,
 retention followed by projection repair, and any end-to-end test from a desktop intent to a runtime fill.
 
 ## Recommended restructuring

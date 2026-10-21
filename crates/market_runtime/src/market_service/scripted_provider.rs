@@ -168,8 +168,6 @@ fn start_scripted_runtime(
             display_controls,
             display_events,
         }),
-        ctrader: None,
-        tastytrade: None,
         rithmic: None,
         catalog: ProviderCatalogChannels {
             enabled: false,

@@ -308,19 +308,16 @@ impl TradingAccount {
         if let Some(reference) = &self.broker_ref {
             validate_field("broker_ref", reference)?;
         }
-        if !matches!(
-            (
-                self.venue_id.as_str(),
-                self.environment,
-                self.broker_ref.as_ref()
-            ),
-            ("aeris-sim", AccountEnvironment::Simulated, None)
-                | (
-                    "ctrader",
-                    AccountEnvironment::Demo | AccountEnvironment::Live,
-                    Some(_)
-                )
-        ) {
+        // A broker account from any venue id loads, so rows of a venue this build no
+        // longer routes stay readable; the trading owner refuses to route them.
+        let route_matches = match (self.environment, self.broker_ref.as_ref()) {
+            (AccountEnvironment::Simulated, None) => self.venue_id == "aeris-sim",
+            (AccountEnvironment::Demo | AccountEnvironment::Live, Some(_)) => {
+                self.venue_id != "aeris-sim"
+            }
+            _ => false,
+        };
+        if !route_matches {
             return Err(TradingValidationError::InvalidAccountRoute);
         }
         validate_field("currency", &self.currency)?;
@@ -1275,7 +1272,7 @@ mod tests {
             id: TradingAccountId::try_new("broker").expect("id"),
             display_name: "Demo account".to_string(),
             environment: AccountEnvironment::Demo,
-            venue_id: "ctrader".to_string(),
+            venue_id: venue::BROKER_VENUE_ID.to_string(),
             broker_ref: Some("fixture".to_string()),
             currency: "USD".to_string(),
             currency_scale: 2,

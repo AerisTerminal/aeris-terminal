@@ -52,8 +52,6 @@ Platform
 
 Adapters
   rithmic_adapter     -> platform_runtime, market_data, observability, provider_history
-  tastytrade_adapter  -> platform_runtime, market_data, observability
-  ctrader_adapter     -> platform_runtime, market_data
   hyperliquid_adapter -> platform_runtime, market_data
 
 Runtimes
@@ -119,7 +117,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 | `unsafe_code` | 8 | All in `platform_runtime`; crate sets `unsafe_code = "deny"` (`crates/platform/platform_runtime/Cargo.toml:62`) instead of workspace `forbid` |
 | `non_snake_case` | 7 | Win32 FFI names |
 | `clippy::struct_excessive_bools` | 4 | State structs |
-| `clippy::all` / `clippy::pedantic` | 2 each | Generated protobuf: rithmic `lib.rs:10`, ctrader `lib.rs:3` (acceptable) |
+| `clippy::all` / `clippy::pedantic` | 2 each | Generated protobuf: rithmic `lib.rs:10` and a since-removed broker adapter's `lib.rs:3` (acceptable) |
 | `dead_code` | 3 | Hides dormant paths |
 | `unused_imports` | 1 | `crates/platform/platform_runtime/src/lifecycle.rs:7` |
 

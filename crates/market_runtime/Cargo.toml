@@ -19,9 +19,6 @@ aeris_platform_runtime = { path = "../platform_runtime" }
 aeris_provider_history = { path = "../provider_history" }
 aeris_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
-aeris_tastytrade_market_adapter = { path = "../adapters/tastytrade_market" }
-aeris_ctrader_open_api_adapter = { path = "../adapters/ctrader_open_api" }
-# The provider-neutral venue contract the cTrader supervisor relays (D8); no trading state.
 aeris_instruments = { path = "../domain/instruments" }
 aeris_trading = { path = "../domain/trading" }
 chrono.workspace = true
@@ -33,5 +30,4 @@ zeroize.workspace = true
 workspace = true
 
 [dev-dependencies]
-aeris_ctrader_open_api_adapter = { path = "../adapters/ctrader_open_api", features = ["test-support"] }
 aeris_study_sdk = { path = "../study_sdk" }

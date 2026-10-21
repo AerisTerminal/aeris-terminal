@@ -96,7 +96,7 @@ pub fn flatten_feedback(
     }
     if !outcome.pending_close_requests.is_empty() {
         parts.push(format!(
-            "{} cTrader close request(s) sent",
+            "{} broker close request(s) sent",
             outcome.pending_close_requests.len()
         ));
     }
@@ -138,7 +138,7 @@ pub fn kill_feedback(
     }
     if !outcome.pending_close_requests.is_empty() {
         parts.push(format!(
-            "{} cTrader close request(s) sent",
+            "{} broker close request(s) sent",
             outcome.pending_close_requests.len()
         ));
     }
@@ -987,17 +987,17 @@ mod tests {
                     ..FlattenOutcome::default()
                 })
             ),
-            Ok("Flattened · 2 cTrader close request(s) sent".to_string())
+            Ok("Flattened · 2 broker close request(s) sent".to_string())
         );
         assert_eq!(
             super::flatten_feedback(
                 "Flattened all accounts",
                 Ok(FlattenOutcome {
-                    incomplete: Some("1 cTrader order(s) could not be cancelled".into()),
+                    incomplete: Some("1 broker order(s) could not be cancelled".into()),
                     ..FlattenOutcome::default()
                 })
             ),
-            Err("Flattened all accounts · 1 cTrader order(s) could not be cancelled".to_string())
+            Err("Flattened all accounts · 1 broker order(s) could not be cancelled".to_string())
         );
         assert_eq!(
             super::flatten_feedback("Reversed", Err("no position".into())),
@@ -1043,12 +1043,12 @@ mod tests {
                 "Kill switch",
                 Ok(EmergencyOutcome {
                     accounts_locked: 1,
-                    incomplete: Some("accounts are locked; 1 cTrader order(s) could not be cancelled".into()),
+                    incomplete: Some("accounts are locked; 1 broker order(s) could not be cancelled".into()),
                     ..EmergencyOutcome::default()
                 })
             ),
             Err(
-                "Kill switch: locked 1 account(s) · accounts are locked; 1 cTrader order(s) could not be cancelled"
+                "Kill switch: locked 1 account(s) · accounts are locked; 1 broker order(s) could not be cancelled"
                     .to_string()
             )
         );

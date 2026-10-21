@@ -200,46 +200,6 @@ pub(super) fn snapshot_instrument(
             "USD".to_string(),
         ));
     }
-    if series.provider_id == "tastytrade" {
-        let (kind, symbol) = series
-            .instrument_id
-            .strip_prefix("tastytrade:")
-            .and_then(|path| path.split_once(':'))
-            .ok_or_else(|| "Tastytrade chart identity is invalid".to_string())?;
-        let class = match kind {
-            "Future" => AssetClass::Future,
-            "Equity Option" | "Future Option" => AssetClass::Option,
-            "Cryptocurrency" => AssetClass::CryptoAsset,
-            "Index" => AssetClass::Index,
-            "Equity" | "Warrant" => AssetClass::Equity,
-            _ => return Err("Tastytrade asset class is unsupported".into()),
-        };
-        return Ok(("tastytrade".into(), symbol.into(), class, "USD".into()));
-    }
-    if series.provider_id == "ctrader" {
-        let mut parts = series.instrument_id.split(':');
-        let venue = match (parts.next(), parts.next()) {
-            (Some("ctrader"), Some("demo")) => "cTrader Demo",
-            (Some("ctrader"), Some("live")) => "cTrader Live",
-            _ => return Err("cTrader chart identity is invalid".into()),
-        };
-        let (Some(account), Some(symbol), None) = (parts.next(), parts.next(), parts.next()) else {
-            return Err("cTrader chart identity is invalid".into());
-        };
-        if [account, symbol]
-            .iter()
-            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return Err("cTrader chart identity is invalid".into());
-        }
-        // The id names no currency; the installed instrument's contract terms supply it.
-        return Ok((
-            venue.into(),
-            symbol.into(),
-            AssetClass::ForeignExchange,
-            String::new(),
-        ));
-    }
     let path = series
         .instrument_id
         .strip_prefix("hyperliquid:")
@@ -290,10 +250,8 @@ fn validate_product_identity(product: &InstallProviderInstrument) -> Result<(), 
     // The provider field must agree with the installed instrument identity:
     // a Hyperliquid product can never demand a Rithmic series and vice
     // versa, so a mismatch fails here instead of misrouting demand.
-    if !matches!(
-        product.provider.as_str(),
-        "rithmic" | "hyperliquid" | "tastytrade" | "ctrader"
-    ) || product.venue_id.trim().is_empty()
+    if !matches!(product.provider.as_str(), "rithmic" | "hyperliquid")
+        || product.venue_id.trim().is_empty()
         || product.price_scale > 18
         || product.quantity_scale > 18
     {
@@ -306,12 +264,7 @@ fn validate_product_identity(product: &InstallProviderInstrument) -> Result<(), 
         if !product.entitlement_id.starts_with("rithmic-test:") {
             return Err("Rithmic installed instrument identity is invalid".to_string());
         }
-    } else if product.provider == "tastytrade" && product.entitlement_id != "tastytrade-authorized"
-    {
-        return Err("Tastytrade installed instrument identity is invalid".into());
-    } else if product.provider == "hyperliquid" && product.entitlement_id != "hyperliquid-public"
-        || product.provider == "ctrader" && product.entitlement_id != "ctrader-authorized"
-    {
+    } else if product.provider == "hyperliquid" && product.entitlement_id != "hyperliquid-public" {
         return Err(format!(
             "{} installed instrument identity is invalid",
             provider_display_name(product.provider.as_str())
@@ -319,7 +272,6 @@ fn validate_product_identity(product: &InstallProviderInstrument) -> Result<(), 
     }
     if product.provider == "rithmic" && !product.instrument_id.starts_with("instrument:rithmic:")
         || product.provider == "hyperliquid" && !product.instrument_id.starts_with("hyperliquid:")
-        || product.provider == "ctrader" && !product.instrument_id.starts_with("ctrader:")
     {
         return Err(format!(
             "{} installed instrument identity is invalid",

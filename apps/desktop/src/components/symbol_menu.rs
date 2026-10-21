@@ -29,7 +29,7 @@ fn show_connect_prompt(provider: TerminalProvider, connection_missing: bool) -> 
         && super::provider_presentation(provider).is_some_and(|descriptor| {
             matches!(
                 descriptor.connection_kind,
-                ProviderConnectionKind::HostedBroker | ProviderConnectionKind::Credentials
+                ProviderConnectionKind::Credentials
             )
         })
 }
@@ -416,9 +416,6 @@ mod tests {
 
     #[test]
     fn missing_connection_keeps_the_accounts_prompt() {
-        assert!(show_connect_prompt(TerminalProvider::Tastytrade, true));
-        assert!(!show_connect_prompt(TerminalProvider::Tastytrade, false));
-        assert!(show_connect_prompt(TerminalProvider::Ctrader, true));
         assert!(show_connect_prompt(TerminalProvider::Rithmic, true));
         assert!(!show_connect_prompt(TerminalProvider::Rithmic, false));
         assert!(!show_connect_prompt(TerminalProvider::Hyperliquid, true));
@@ -441,15 +438,10 @@ mod tests {
     #[test]
     fn only_the_menu_providers_connection_reports_disconnected() {
         let mut connections = DataConnections::default();
-        connections.brokers.ctrader.connected = Some(false);
-        connections.brokers.tastytrade.connected = Some(true);
-        assert!(connections.disconnected(TerminalProvider::Ctrader));
-        assert!(!connections.disconnected(TerminalProvider::Tastytrade));
         assert!(!connections.disconnected(TerminalProvider::Hyperliquid));
-        // An unchecked connection is not reported as disconnected.
-        assert!(!DataConnections::default().disconnected(TerminalProvider::Ctrader));
         assert!(!connections.disconnected(TerminalProvider::Rithmic));
         connections.rithmic.saved = rithmic_login::SavedRithmicLogin::Missing;
         assert!(connections.disconnected(TerminalProvider::Rithmic));
+        assert!(!connections.disconnected(TerminalProvider::Hyperliquid));
     }
 }

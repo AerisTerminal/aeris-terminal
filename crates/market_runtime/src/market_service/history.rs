@@ -129,55 +129,6 @@ pub(super) fn history_request_bar_limit(
     })
 }
 
-fn bounded_tastytrade_range(
-    range: HistoryRange,
-    period_nanos: Option<i64>,
-    extends_newer: bool,
-) -> HistoryRange {
-    let Some(span) = period_nanos.and_then(|duration| {
-        duration.checked_mul(i64::try_from(MAXIMUM_HISTORY_BARS_PER_REQUEST).ok()?)
-    }) else {
-        return range;
-    };
-    if extends_newer {
-        HistoryRange {
-            start_unix_nanos: range.start_unix_nanos,
-            end_unix_nanos: range
-                .end_unix_nanos
-                .min(range.start_unix_nanos.saturating_add(span)),
-        }
-    } else {
-        HistoryRange {
-            start_unix_nanos: range
-                .start_unix_nanos
-                .max(range.end_unix_nanos.saturating_sub(span)),
-            end_unix_nanos: range.end_unix_nanos,
-        }
-    }
-}
-
-fn split_tastytrade_range(
-    requested: HistoryRange,
-    period_nanos: Option<i64>,
-    extends_newer: bool,
-) -> (HistoryRange, Option<HistoryRange>) {
-    let page = bounded_tastytrade_range(requested, period_nanos, extends_newer);
-    let remainder = if extends_newer && page.end_unix_nanos < requested.end_unix_nanos {
-        Some(HistoryRange {
-            start_unix_nanos: page.end_unix_nanos,
-            end_unix_nanos: requested.end_unix_nanos,
-        })
-    } else if !extends_newer && page.start_unix_nanos > requested.start_unix_nanos {
-        Some(HistoryRange {
-            start_unix_nanos: requested.start_unix_nanos,
-            end_unix_nanos: page.start_unix_nanos,
-        })
-    } else {
-        None
-    };
-    (page, remainder)
-}
-
 fn viewport_history_range(
     series: &BarSeriesKey,
     snapshot: &aeris_market_engine::SeriesSnapshot,
@@ -500,7 +451,7 @@ impl Coordinator<'_> {
         if let Err(error) = self.enqueue_history_recovery(series, generation) {
             diagnostic!(
                 "Aeris market history enqueue failed for {}: {error}",
-                super::LoggedInstrument(&series.instrument_id)
+                series.instrument_id
             );
             self.schedule_history_retry(series, generation, None, error);
             self.broadcast_series_resolution_for(
@@ -521,7 +472,7 @@ impl Coordinator<'_> {
             Err(HISTORY_CAPACITY_EXHAUSTED) => {
                 diagnostic!(
                     "Aeris market history queue full for {}; bounded retry scheduled",
-                    super::LoggedInstrument(&series.instrument_id)
+                    series.instrument_id
                 );
                 self.broadcast_series_resolution_for(
                     series,
@@ -627,7 +578,7 @@ impl Coordinator<'_> {
         diagnostic!(
             "Aeris engine {} history attempt {attempts} failed for {}: {error}",
             series.provider_id,
-            super::LoggedInstrument(&series.instrument_id)
+            series.instrument_id
         );
         let retry = self.history.schedule(
             series.clone(),
@@ -915,7 +866,6 @@ impl Coordinator<'_> {
             self.history.defer_next(series, epoch, kind, range);
             return Ok(());
         }
-        let (range, remainder) = self.page_history_range(series, range);
         if !self.history_retry_ready(series, epoch, kind, range) {
             return Ok(());
         }
@@ -946,13 +896,9 @@ impl Coordinator<'_> {
                 if range.is_none() {
                     diagnostic!(
                         "Aeris market covering history requested for {} generation={}",
-                        super::LoggedInstrument(&series.instrument_id),
+                        series.instrument_id,
                         generation.0.get()
                     );
-                }
-                if let Some(remainder) = remainder {
-                    self.history
-                        .defer_next(series, epoch, kind, Some(remainder));
                 }
                 Ok(())
             }
@@ -1025,35 +971,6 @@ impl Coordinator<'_> {
         self.catalog
             .get(&(series.provider_id.clone(), series.instrument_id.clone()))
             .cloned()
-    }
-
-    fn page_history_range(
-        &self,
-        series: &BarSeriesKey,
-        range: Option<HistoryRange>,
-    ) -> (Option<HistoryRange>, Option<HistoryRange>) {
-        if !self
-            .providers
-            .descriptor(&series.provider_id)
-            .is_some_and(|descriptor| {
-                descriptor.capabilities.history.range == super::HistoryRangePolicy::FromTimeOnly
-            })
-        {
-            return (range, None);
-        }
-        let Some(requested) = range else {
-            return (None, None);
-        };
-        // DXLink time-series subscriptions have a fromTime but no end bound.
-        // Preserve the edge adjacent to retained history and queue the rest.
-        let extends_newer = self.engine.series_segments(series).is_some_and(|segments| {
-            segments.last().is_some_and(|last| {
-                requested.start_unix_nanos >= last.exchange_timestamp_unix_nanos
-            })
-        });
-        let (page, remainder) =
-            split_tastytrade_range(requested, series.period.duration_nanos(), extends_newer);
-        (Some(page), remainder)
     }
 
     fn provider_uses_candles(&self, provider_id: &str) -> bool {
@@ -1143,7 +1060,7 @@ impl Coordinator<'_> {
                 if range.is_none() {
                     diagnostic!(
                         "Aeris market covering history completed for {} generation={} bars={}",
-                        super::LoggedInstrument(&series.instrument_id),
+                        series.instrument_id,
                         generation.0.get(),
                         snapshot.bars.len()
                     );
@@ -1188,14 +1105,6 @@ impl Coordinator<'_> {
         result: Result<HistorySnapshot, String>,
     ) {
         let series = &ticket.series;
-        if self
-            .provider_registry
-            .has_control(series.provider_id.as_str())
-            .then(|| self.session(series.provider_id.as_str()))
-            .is_some_and(|session| session.suspended)
-        {
-            return;
-        }
         let Some(snapshot) = self.accept_history_completion(ticket, generation, range, result)
         else {
             return;
@@ -1270,7 +1179,7 @@ impl Coordinator<'_> {
         if range.is_none() && replacing_existing {
             diagnostic!(
                 "Aeris market series recovery finished for {} generation={}",
-                super::LoggedInstrument(&series.instrument_id),
+                series.instrument_id,
                 generation.0.get()
             );
         }
@@ -1333,7 +1242,7 @@ impl Coordinator<'_> {
         };
         diagnostic!(
             "Aeris market covering history for {} generation={} is empty; {}",
-            super::LoggedInstrument(&series.instrument_id),
+            series.instrument_id,
             generation.0.get(),
             if recorded == EmptyCurrentHistory::Final {
                 "no further requests this session"
@@ -1420,7 +1329,7 @@ impl Coordinator<'_> {
             }
             diagnostic!(
                 "Aeris market live trade arrived for {} generation={}; requesting covering history",
-                super::LoggedInstrument(&series.instrument_id),
+                series.instrument_id,
                 generation.0.get()
             );
             self.request_series_history_recovery(&series, generation);
@@ -1486,7 +1395,7 @@ impl Coordinator<'_> {
         {
             diagnostic!(
                 "Aeris market deferred history enqueue failed for {}: {error}",
-                super::LoggedInstrument(&series.instrument_id)
+                series.instrument_id
             );
             self.schedule_history_retry(series, generation, range, error);
             if range.is_none() {
@@ -1807,34 +1716,6 @@ mod tests {
             close: 100,
             volume: 1,
         }
-    }
-
-    #[test]
-    fn tastytrade_deep_range_pages_from_the_retained_edge() {
-        let period = 60_i64 * 1_000_000_000;
-        let page = i64::try_from(MAXIMUM_HISTORY_BARS_PER_REQUEST).expect("bounded page") * period;
-        let requested = HistoryRange {
-            start_unix_nanos: period,
-            end_unix_nanos: page * 3,
-        };
-        let (older, older_remainder) = split_tastytrade_range(requested, Some(period), false);
-        assert_eq!(older.end_unix_nanos, requested.end_unix_nanos);
-        assert_eq!(older.end_unix_nanos - older.start_unix_nanos, page);
-        let older_remainder = older_remainder.expect("older page remains");
-        assert_eq!(older_remainder.end_unix_nanos, older.start_unix_nanos);
-        let (next, _) = split_tastytrade_range(older_remainder, Some(period), false);
-        assert_eq!(next.end_unix_nanos, older.start_unix_nanos);
-        assert_eq!(next.end_unix_nanos - next.start_unix_nanos, page);
-
-        let (newer, newer_remainder) = split_tastytrade_range(requested, Some(period), true);
-        assert_eq!(newer.start_unix_nanos, requested.start_unix_nanos);
-        assert_eq!(newer.end_unix_nanos - newer.start_unix_nanos, page);
-        assert_eq!(
-            newer_remainder
-                .expect("newer page remains")
-                .start_unix_nanos,
-            newer.end_unix_nanos
-        );
     }
 
     #[test]

@@ -452,9 +452,9 @@ mod tests {
     #[test]
     fn restored_selection_preserves_catalog_identity() {
         let product = InstallProviderInstrument {
-            provider: "tastytrade".into(),
-            provider_symbol: "/ESZ26:XCME".into(),
-            instrument_id: "tastytrade:future:/ESZ26:XCME".into(),
+            provider: "rithmic".into(),
+            provider_symbol: "ESZ6".into(),
+            instrument_id: "rithmic:future:ESZ6:CME".into(),
             display_symbol: "ESZ6".into(),
             entitlement_id: "futures".into(),
             venue_id: "CME".into(),

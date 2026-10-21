@@ -188,7 +188,7 @@ impl TradingCore {
         }
         if self.route(&entry_command.account_id)? != VenueRoute::Simulated {
             if template.trailing_stop.is_some()
-                && !crate::core::admission::VenueCapabilities::for_route(VenueRoute::CtraderDemo)
+                && !crate::core::admission::VenueCapabilities::for_route(VenueRoute::BrokerDemo)
                     .managed_trailing()
             {
                 return Err("managed trailing stops are unavailable for broker accounts".into());

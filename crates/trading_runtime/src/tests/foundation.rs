@@ -3,9 +3,9 @@ use super::*;
 fn broker_account(environment: AccountEnvironment) -> TradingAccount {
     TradingAccount {
         id: TradingAccountId::try_new("broker-fixture").expect("id"),
-        display_name: "cTrader fixture".into(),
+        display_name: "Broker fixture".into(),
         environment,
-        venue_id: "ctrader".into(),
+        venue_id: aeris_trading::venue::BROKER_VENUE_ID.into(),
         broker_ref: Some("fixture-ref".into()),
         currency: "USD".into(),
         currency_scale: 2,
@@ -27,13 +27,13 @@ fn account_routes_and_broker_identity_survive_restart() {
     );
     assert_eq!(
         VenueRoute::from_account(&snapshot.accounts[1]),
-        Ok(VenueRoute::CtraderDemo)
+        Ok(VenueRoute::BrokerDemo)
     );
     let mut request = market_order("demo-route", OrderSide::Buy, 1, 1_000);
     request.account_id = snapshot.accounts[1].id.clone();
     assert_eq!(
         service.place_order(request).unwrap_err(),
-        "cTrader demo venue is not connected"
+        "broker demo venue is not connected"
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
@@ -47,6 +47,47 @@ fn account_routes_and_broker_identity_survive_restart() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("shutdown");
+}
+
+#[test]
+fn broker_account_of_a_retired_venue_loads_but_never_routes() {
+    let directory = TestDirectory::new("retired-venue");
+    start_service(&directory)
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+    let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
+    database
+        .execute(
+            "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,
+                venue_id,broker_ref) VALUES ('retired-demo','Retired demo','demo','USD',2,
+                'retired-venue','retired-ref')",
+            [],
+        )
+        .expect("legacy broker account");
+    drop(database);
+    let service = TradingService::start(config(&directory)).expect("restart");
+    let snapshot = service.snapshot().expect("snapshot");
+    let retired = snapshot
+        .accounts
+        .iter()
+        .find(|account| account.id.as_str() == "retired-demo")
+        .expect("legacy account loads");
+    assert_eq!(
+        VenueRoute::from_account(retired),
+        Err("trading account venue is not supported".into())
+    );
+    let mut request = market_order("retired-order", OrderSide::Buy, 1, 1_000);
+    request.account_id = retired.id.clone();
+    assert_eq!(
+        service.place_order(request).unwrap_err(),
+        "trading account venue is not supported"
+    );
+    let (_generation, requests) = service.attach_demo_venue().expect("venue");
+    assert!(
+        requests.try_recv().is_err(),
+        "a retired venue's account is never reconciled"
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
 
 #[test]
@@ -79,7 +120,7 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
     request.account_id = broker.id;
     assert_eq!(
         service.place_order(request).unwrap_err(),
-        "cTrader ClientOrderId must be at most 50 characters"
+        "broker ClientOrderId must be at most 50 characters"
     );
     assert_eq!(service.snapshot().expect("snapshot").orders.len(), 0);
     let mut valid = market_order(&"x".repeat(50), OrderSide::Buy, 2, 2_000);
@@ -112,7 +153,7 @@ fn live_account_rejects_every_trading_command_without_mutation() {
         .register_account(broker.clone())
         .expect("replace account");
     request.account_id = broker.id.clone();
-    let expected = "cTrader live accounts are data-only; trading is disabled";
+    let expected = "broker live accounts are data-only; trading is disabled";
     assert_eq!(service.place_order(request).unwrap_err(), expected);
     assert_eq!(
         service
@@ -291,7 +332,7 @@ fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
                 "trailing" => "managed trailing stops are unavailable for broker accounts",
                 "break-even" => "managed break-even stops are unavailable for broker accounts",
                 _ => {
-                    "cTrader holds one take-profit per order; scale-out targets are \
+                    "the broker holds one take-profit per order; scale-out targets are \
                      unavailable for broker accounts"
                 }
             }

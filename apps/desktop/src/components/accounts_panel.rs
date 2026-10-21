@@ -1,7 +1,6 @@
 //! Accounts panel: market-data connections and the practice accounts used for trading.
 //!
-//! Presentation only. The market runtime owns broker connections, the saved Rithmic login and
-//! their credentials; `trading_runtime` owns practice accounts. This panel dispatches their
+//! Presentation only. The market runtime owns the saved Rithmic login and its credentials; `trading_runtime` owns practice accounts. This panel dispatches their
 //! commands and shows the last observed state.
 
 use super::*;
@@ -28,17 +27,6 @@ pub(super) fn accounts_panel_content(
         .child(section_label("Data connections", theme))
         .child(rithmic_card(&connections.rithmic, theme))
         .child(rithmic_login::rithmic_marks(theme))
-        .child(broker_card(
-            HostedBroker::Tastytrade,
-            connections.brokers.get(HostedBroker::Tastytrade),
-            theme,
-        ))
-        .child(tastytrade_attribution(theme))
-        .child(broker_card(
-            HostedBroker::Ctrader,
-            connections.brokers.get(HostedBroker::Ctrader),
-            theme,
-        ))
         .child(section_label("Trading accounts", theme))
         .child(practice_accounts(app_state, app, theme))
         .children(broker_accounts(app_state, app, theme))
@@ -47,8 +35,8 @@ pub(super) fn accounts_panel_content(
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
                 .child(
-                    "tastytrade provides market data only. Practice accounts trade simulated \
-                     funds; cTrader demo accounts trade on the broker's demo server.",
+                    "Practice accounts trade simulated funds; broker demo accounts trade on the \
+                     broker's demo server.",
                 ),
         )
 }
@@ -86,7 +74,8 @@ pub(super) fn environment_badge(
 }
 
 /// Broker accounts registered by the trading owner. They are never deleted here, and a
-/// live account cannot be chosen for orders.
+/// live account cannot be chosen for orders. Accounts recorded by a venue this build no
+/// longer routes stay in the store for history but are not offered here.
 fn broker_accounts(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
@@ -98,7 +87,10 @@ fn broker_accounts(
         .accounts
         .iter()
         .enumerate()
-        .filter(|(_, account)| account.environment != aeris_trading::AccountEnvironment::Simulated)
+        .filter(|(_, account)| {
+            account.environment != aeris_trading::AccountEnvironment::Simulated
+                && account.venue_id == aeris_trading::venue::BROKER_VENUE_ID
+        })
         .peekable();
     rows.peek()?;
     let mut list = div()
@@ -109,12 +101,12 @@ fn broker_accounts(
     for (index, account) in rows {
         let detail = match account.environment {
             aeris_trading::AccountEnvironment::Live => {
-                "cTrader live · trading is disabled".to_string()
+                "Broker live · trading is disabled".to_string()
             }
             _ if trading.connected_broker_accounts.contains(&account.id) => {
-                format!("cTrader demo · {}", account.currency)
+                format!("Broker demo · {}", account.currency)
             }
-            _ => "cTrader demo · not connected".to_string(),
+            _ => "Broker demo · not connected".to_string(),
         };
         let selectable = account.environment == aeris_trading::AccountEnvironment::Demo;
         list = list.child(account_row(
@@ -130,22 +122,6 @@ fn broker_accounts(
         ));
     }
     Some(list)
-}
-
-fn tastytrade_attribution(theme: &AerisTheme) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_xs()
-        .text_color(gpui_color(theme.colors.text_muted))
-        .child("Market data provided by")
-        .child(
-            img(assets::ProviderLogo::for_theme(theme.mode).path())
-                .w(px(112.0))
-                .h(px(20.0))
-                .object_fit(ObjectFit::Contain),
-        )
 }
 
 fn section_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
@@ -213,96 +189,6 @@ fn provider_heading(
                 .truncate()
                 .child(detail),
         )
-}
-
-/// What a hosted broker's card says about its market data, connected and not.
-const fn broker_data_detail(broker: HostedBroker, connected: bool) -> &'static str {
-    match (broker, connected) {
-        (HostedBroker::Tastytrade, true) => "Connected · Level 1 market data",
-        (HostedBroker::Tastytrade, false) => "Level 1 quotes, trades and candles",
-        (HostedBroker::Ctrader, true) => "Connected · quotes, depth and candles",
-        (HostedBroker::Ctrader, false) => "Forex and CFD quotes, depth and candles",
-    }
-}
-
-fn broker_card(
-    broker: HostedBroker,
-    connection: &HostedBrokerConnectionView,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let connected = connection.connected == Some(true);
-    // A background check of a known state refreshes silently; only real changes show progress.
-    let busy = match connection.operation {
-        Some(HostedBrokerOperation::Connecting | HostedBrokerOperation::Disconnecting) => true,
-        Some(HostedBrokerOperation::Checking) => connection.connected.is_none(),
-        None => false,
-    };
-    let name = broker.display_name();
-    let detail = match connection.operation {
-        Some(HostedBrokerOperation::Connecting) => {
-            format!("Complete the {name} login in your browser…")
-        }
-        Some(HostedBrokerOperation::Disconnecting) => "Disconnecting…".to_string(),
-        Some(HostedBrokerOperation::Checking) if connection.connected.is_none() => {
-            "Checking connection…".to_string()
-        }
-        _ => broker_data_detail(broker, connected).to_string(),
-    };
-    let (card_id, connect_id, disconnect_id) = match broker {
-        HostedBroker::Tastytrade => (
-            "accounts_tastytrade",
-            "accounts_tastytrade_connect",
-            "accounts_tastytrade_disconnect",
-        ),
-        HostedBroker::Ctrader => (
-            "accounts_ctrader",
-            "accounts_ctrader_connect",
-            "accounts_ctrader_disconnect",
-        ),
-    };
-    let action = if connected {
-        Button::new(disconnect_id, theme)
-            .variant(ButtonVariant::Outline)
-            .label("Disconnect")
-            .on_click(move |_, window, cx| match broker {
-                HostedBroker::Tastytrade => {
-                    window.dispatch_action(Box::new(DisconnectTastytrade), cx);
-                }
-                HostedBroker::Ctrader => window.dispatch_action(Box::new(DisconnectCtrader), cx),
-            })
-    } else {
-        Button::new(connect_id, theme)
-            .variant(ButtonVariant::Default)
-            .label("Connect")
-            .on_click(move |_, window, cx| match broker {
-                HostedBroker::Tastytrade => {
-                    window.dispatch_action(Box::new(ConnectTastytrade), cx);
-                }
-                HostedBroker::Ctrader => window.dispatch_action(Box::new(ConnectCtrader), cx),
-            })
-    }
-    .button_size(ButtonSize::Lg)
-    .loading(busy)
-    .disabled(busy);
-    card(card_id, theme)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(provider_heading(name, detail, connected, theme))
-                .child(div().flex_none().child(action)),
-        )
-        .children(connection.message.as_ref().map(|message| {
-            div()
-                .text_xs()
-                .text_color(gpui_color(if connection.failed {
-                    theme.colors.danger
-                } else {
-                    theme.colors.text_muted
-                }))
-                .child(message.clone())
-        }))
 }
 
 fn rithmic_card(view: &rithmic_login::RithmicLoginView, theme: &AerisTheme) -> impl IntoElement {

@@ -126,7 +126,7 @@ impl EventEmitter<TradingStoreEvent> for TradingStore {}
   bound instrument). Panes subscribe to `Changed` and re-render only when their instrument's projection changed.
 - Fill toasts come from `TradingStoreEvent::Fill` instead of `announce_fills` diffing snapshots in the toaster.
 - Command feedback (T2) is returned per `RequestId` and shown in the order ticket or as a notice. Provider-named
-  text such as "cTrader close request(s)" (`trading.rs`) is built from `ProviderDescriptor::display_name`.
+  text such as the broker close-request notice (`trading.rs`) is built from `ProviderDescriptor::display_name`.
 - Deleted: `keep_trading_pnl_fresh` / `refresh_trading_pnl` (`components/workspace_layout.rs:699-798`) and their
   render-path calls (`workspace_layout.rs:416`, `terminal_view.rs:882`), the 250 ms timer, `latest_feedback()`
   (`trading.rs:14-111`), `TradingPnlState`, the `let _ = terminal.update(...)` discards.
@@ -484,10 +484,10 @@ errors. Add `[lints.clippy] let_underscore_must_use = "deny"` (and `let_undersco
 | `replay_conversion.rs:209-344` id parsing and `validate_product_identity` literals | deleted; runtime descriptors |
 | `engine_market_worker.rs:696,714,733` provider branches (`worker_identity`) | descriptor capabilities |
 | `default_rithmic_contract_index` ("MNQ"), `DEFAULT_RITHMIC_LISTING_QUERY`, `default_product` | `DefaultInstrument` in M2; the catalog's default-contract policy |
-| `ConnectTastytrade` / `ConnectCtrader` / `ConnectRithmic` actions, `HostedBroker` | `ConnectProvider(ProviderId)`; behavior from `ProviderDescriptor.connect` (`HostedBrokerOAuth`, `VaultCredentials { form }`, `Public`) |
+| Per-provider connect actions (`ConnectRithmic` and the removed brokers' actions), `HostedBroker` | `ConnectProvider(ProviderId)`; behavior from `ProviderDescriptor.connect` (`HostedBrokerOAuth`, `VaultCredentials { form }`, `Public`) |
 | `components/rithmic_login.rs` | `components/provider_login.rs`: a form rendered from the descriptor's login schema; it still writes only to the native vault |
 | `rithmic_shell.rs` / `RithmicSymbolBrowser`, `FeedIdentity "rithmic"` | `provider_symbol_browser.rs` driven by the descriptor's symbol-browser capability |
-| "cTrader close request(s)" in `trading.rs` flatten feedback | text built from `ProviderDescriptor::display_name` |
+| Provider-named close-request text in `trading.rs` flatten feedback | text built from `ProviderDescriptor::display_name` |
 | `local_state` default workspace (Hyperliquid BTC) | default workspace with one pane and no instrument; the pane sends `DefaultInstrument` (2.6) |
 | `assets.rs` `logo_for` provider mapping | `LogoKey` from descriptors; `assets.rs` maps keys to embedded files |
 
@@ -500,7 +500,7 @@ helpers (so `#[cfg(test)]` modules are excluded):
 desktop_source_is_provider_neutral
   scan: production_sources_under("apps/desktop/src") and ("crates/ui/chart_integration/src"),
         each cut at production_prefix, with // comments stripped
-  reject (case-insensitive substring): "rithmic", "tastytrade", "ctrader", "hyperliquid"
+  reject (case-insensitive substring): "rithmic", "hyperliquid" (plus any other registered provider name)
   reject (literal): "-authorized\"", "-public\"", "rithmic-test:"
   allow-list: const PROVIDER_NAME_ALLOWLIST: &[(&str, &str)] = &[(path, reason)]
   the test also fails when an allow-list entry no longer matches anything (stale entries are removed)

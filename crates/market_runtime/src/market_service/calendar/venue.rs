@@ -13,16 +13,8 @@ pub fn venue(code: &str) -> Option<Venue> {
 }
 
 /// Resolve the exchange identity supplied by a catalog, including the older
-/// futures-symbol encoding and equity catalogs without a MIC.
+/// futures-symbol encoding.
 pub fn instrument_venue(instrument: &InstallProviderInstrument) -> Option<Venue> {
-    // The underlying listing's MIC does not make an equity option follow
-    // the cash-equity session. Do not guess an option calendar from that MIC.
-    if instrument
-        .instrument_id
-        .starts_with("tastytrade:Equity Option:")
-    {
-        return None;
-    }
     venue(&instrument.venue_id)
         .or_else(|| {
             instrument
@@ -30,17 +22,7 @@ pub fn instrument_venue(instrument: &InstallProviderInstrument) -> Option<Venue>
                 .rsplit_once(':')
                 .and_then(|(_, code)| venue(code))
         })
-        .or_else(|| {
-            if instrument.instrument_id.starts_with("tastytrade:Equity:")
-                || instrument.instrument_id.starts_with("tastytrade:Index:")
-            {
-                Some(Venue::UsEquity)
-            } else if instrument.provider == "hyperliquid" {
-                Some(Venue::Continuous)
-            } else {
-                None
-            }
-        })
+        .or_else(|| (instrument.provider == "hyperliquid").then_some(Venue::Continuous))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

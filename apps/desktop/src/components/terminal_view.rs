@@ -125,111 +125,16 @@ fn due_economic_event_triggers(
         .collect()
 }
 
-fn apply_broker_result(
-    view: &mut HostedBrokerConnectionView,
-    operation: HostedBrokerOperation,
-    result: Result<(bool, Option<String>), String>,
-) {
-    view.operation = None;
-    match result {
-        Ok((connected, message)) => {
-            view.connected = Some(connected);
-            if message.is_some() {
-                view.message = message;
-                view.failed = false;
-            }
-        }
-        Err(error) => {
-            match operation {
-                // A failed login leaves nothing usable; offer Connect again.
-                HostedBrokerOperation::Connecting => view.connected = Some(false),
-                // The stored connection could not be confirmed either way.
-                HostedBrokerOperation::Checking => view.connected = None,
-                // The connection is still stored; keep offering Disconnect.
-                HostedBrokerOperation::Disconnecting => {}
-            }
-            view.message = Some(error);
-            view.failed = true;
-        }
-    }
-}
-
 impl TerminalApp {
-    fn connect_tastytrade(
-        &mut self,
-        _: &ConnectTastytrade,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.change_broker_connection(
-            HostedBroker::Tastytrade,
-            HostedBrokerOperation::Connecting,
-            window,
-            cx,
-        );
-    }
-
-    fn disconnect_tastytrade(
-        &mut self,
-        _: &DisconnectTastytrade,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.change_broker_connection(
-            HostedBroker::Tastytrade,
-            HostedBrokerOperation::Disconnecting,
-            window,
-            cx,
-        );
-    }
-
-    fn connect_ctrader(&mut self, _: &ConnectCtrader, window: &mut Window, cx: &mut Context<Self>) {
-        self.change_broker_connection(
-            HostedBroker::Ctrader,
-            HostedBrokerOperation::Connecting,
-            window,
-            cx,
-        );
-    }
-
-    fn disconnect_ctrader(
-        &mut self,
-        _: &DisconnectCtrader,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.change_broker_connection(
-            HostedBroker::Ctrader,
-            HostedBrokerOperation::Disconnecting,
-            window,
-            cx,
-        );
-    }
-
     fn refresh_broker_connections(
         &mut self,
         _: &RefreshBrokerConnections,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.run_broker_operation(
-            &HostedBroker::ALL,
-            HostedBrokerOperation::Checking,
-            window,
-            cx,
-        );
         self.check_rithmic_login(window, cx);
     }
 
-    fn change_broker_connection(
-        &mut self,
-        broker: HostedBroker,
-        operation: HostedBrokerOperation,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.run_broker_operation(&[broker], operation, window, cx);
-    }
     fn open_command_palette(
         &mut self,
         _: &OpenCommandPalette,
@@ -390,104 +295,6 @@ impl TerminalApp {
         };
         self.execute_registered_command(command, window, cx);
         self.close_command_palette(window, cx);
-    }
-
-    /// Runs one runtime-owned hosted-broker connection operation off the UI thread and
-    /// mirrors its outcome into the Accounts panel. One operation runs at a time; a
-    /// background status check never interrupts a login or disconnect already in flight.
-    fn run_broker_operation(
-        &mut self,
-        brokers: &[HostedBroker],
-        operation: HostedBrokerOperation,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.broker_connection_task.is_some() {
-            if operation != HostedBrokerOperation::Checking {
-                for broker in brokers {
-                    let view = self.data_connections.brokers.get_mut(*broker);
-                    view.message = Some(
-                        "A broker connection change is already running. Finish or close the \
-                         browser login and wait for its result."
-                            .to_string(),
-                    );
-                    view.failed = true;
-                }
-                cx.notify();
-            }
-            return;
-        }
-        for broker in brokers {
-            let view = self.data_connections.brokers.get_mut(*broker);
-            view.operation = Some(operation);
-            if operation != HostedBrokerOperation::Checking {
-                view.message = None;
-                view.failed = false;
-            }
-        }
-        let brokers = brokers.to_vec();
-        let market = self.lifecycle.market().clone();
-        let work = cx.background_executor().spawn({
-            let brokers = brokers.clone();
-            async move {
-                brokers
-                    .into_iter()
-                    .map(|broker| match operation {
-                        HostedBrokerOperation::Checking => market
-                            .provider_connected(broker.id())
-                            .map(|connected| (connected, None)),
-                        HostedBrokerOperation::Connecting => market
-                            .connect_provider(broker.id())
-                            .map(|message| (true, Some(message))),
-                        HostedBrokerOperation::Disconnecting => market
-                            .disconnect_provider(broker.id())
-                            .map(|message| (false, Some(message))),
-                    })
-                    .collect::<Vec<_>>()
-            }
-        });
-        self.broker_connection_task = Some(cx.spawn_in(window, async move |terminal, cx| {
-            let results = work.await;
-            if let Err(error) = cx
-                .update(|window, cx| {
-                    terminal.update(cx, |terminal, cx| {
-                        let mut connected_now = None;
-                        for (broker, result) in brokers.into_iter().zip(results) {
-                            if operation == HostedBrokerOperation::Connecting && result.is_ok() {
-                                connected_now = Some(broker);
-                            }
-                            apply_broker_result(
-                                terminal.data_connections.brokers.get_mut(broker),
-                                operation,
-                                result,
-                            );
-                        }
-                        terminal.broker_connection_task = None;
-                        if let Some(broker) = connected_now {
-                            // A new connection goes straight to choosing one of its markets.
-                            terminal.active_surface().update(cx, |surface, surface_cx| {
-                                surface.choose_symbol_provider(
-                                    broker.provider(),
-                                    window,
-                                    surface_cx,
-                                );
-                                surface.open_chrome_overlay(
-                                    ChromeOverlay::Instrument,
-                                    window,
-                                    surface_cx,
-                                );
-                            });
-                        }
-                        cx.notify();
-                    })
-                })
-                .and_then(|result| result)
-                && terminal.upgrade().is_some()
-            {
-                diagnostic!("Live workspace could not receive broker connection result: {error}");
-            }
-        }));
-        cx.notify();
     }
 
     fn dispatch_due_economic_event_rules(&mut self, cx: &mut Context<Self>) {
@@ -773,10 +580,6 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::trading_flatten_account))
             .on_action(cx.listener(Self::trading_kill_switch))
             .on_action(cx.listener(Self::open_command_palette))
-            .on_action(cx.listener(Self::connect_tastytrade))
-            .on_action(cx.listener(Self::disconnect_tastytrade))
-            .on_action(cx.listener(Self::connect_ctrader))
-            .on_action(cx.listener(Self::disconnect_ctrader))
             .on_action(cx.listener(Self::connect_rithmic))
             .on_action(cx.listener(Self::disconnect_rithmic))
             .on_action(cx.listener(Self::refresh_broker_connections))
@@ -1712,65 +1515,6 @@ mod tests {
         workspace_tab_change_label, workspace_tab_close_drag_enabled, workspace_tab_surface_colors,
         workspace_tab_width_from_measurements,
     };
-
-    #[test]
-    fn broker_results_update_only_what_each_operation_proves() {
-        use super::{HostedBrokerConnectionView, HostedBrokerOperation, apply_broker_result};
-        let connected = || HostedBrokerConnectionView {
-            connected: Some(true),
-            ..HostedBrokerConnectionView::default()
-        };
-
-        // A silent check keeps the previous message.
-        let mut view = HostedBrokerConnectionView {
-            message: Some("cTrader connected".into()),
-            ..connected()
-        };
-        view.operation = Some(HostedBrokerOperation::Checking);
-        apply_broker_result(
-            &mut view,
-            HostedBrokerOperation::Checking,
-            Ok((false, None)),
-        );
-        assert_eq!(view.connected, Some(false));
-        assert_eq!(view.message.as_deref(), Some("cTrader connected"));
-        assert!(view.operation.is_none());
-
-        // A failed login offers Connect again; a failed check is unknown.
-        let mut view = connected();
-        apply_broker_result(
-            &mut view,
-            HostedBrokerOperation::Connecting,
-            Err("denied".into()),
-        );
-        assert_eq!((view.connected, view.failed), (Some(false), true));
-        let mut view = connected();
-        apply_broker_result(
-            &mut view,
-            HostedBrokerOperation::Checking,
-            Err("vault".into()),
-        );
-        assert_eq!(view.connected, None);
-
-        // A failed disconnect keeps the stored connection and its Disconnect button.
-        let mut view = connected();
-        apply_broker_result(
-            &mut view,
-            HostedBrokerOperation::Disconnecting,
-            Err("offline".into()),
-        );
-        assert_eq!(view.connected, Some(true));
-        assert_eq!(view.message.as_deref(), Some("offline"));
-
-        // A completed change replaces an earlier failure.
-        apply_broker_result(
-            &mut view,
-            HostedBrokerOperation::Disconnecting,
-            Ok((false, Some("Disconnected".into()))),
-        );
-        assert_eq!((view.connected, view.failed), (Some(false), false));
-        assert_eq!(view.message.as_deref(), Some("Disconnected"));
-    }
 
     #[test]
     fn workspace_tab_close_and_drag_require_multiple_tabs() {

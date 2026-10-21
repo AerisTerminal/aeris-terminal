@@ -7,8 +7,6 @@ pub enum ProviderConnectionKind {
     Credentials,
     /// The provider is available without account credentials.
     Public,
-    /// The provider is authorized through a hosted broker capability.
-    HostedBroker,
 }
 
 /// Which persisted instrument identity is accepted by a provider catalog.

@@ -38,14 +38,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Reject unsafe roots before collecting evidence or attempting to write output.
     let root = initialize_data_root(DataRootMode::Validation {
         root: options.root.clone(),
-        borrow_stored_ctrader: false,
     })
     .map_err(|error| ProbeError::Runtime(error.to_string()))?;
     let envelope = Envelope::collect(
         "market_lifecycle",
         options.root.clone(),
         options.out.clone(),
-        false,
     )?;
     let started_at = aeris_probes::utc_now().to_rfc3339();
     let mut evidence = Evidence::new();

@@ -149,8 +149,8 @@ mod tests {
 
     #[test]
     fn a_daily_break_closes_the_market_until_it_reopens() {
-        // The shape a cTrader demo broker reports for EURUSD: 17:00:05 to 16:29:55
-        // the next day, Sunday through Friday, split at midnight.
+        // A forex contract-hours shape: 17:00:05 to 16:29:55 the next day,
+        // Sunday through Friday, split at midnight.
         let mut hours = Vec::new();
         for weekday in [7, 1, 2, 3, 4] {
             hours.push(day(weekday, 61_205, 86_400));

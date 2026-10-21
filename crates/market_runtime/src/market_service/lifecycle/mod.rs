@@ -15,8 +15,8 @@ use aeris_market_engine::ProviderGeneration;
 use aeris_market_engine::fence::{Epoch, ProviderTag};
 
 use super::{
-    CandleGapPolicy, Coordinator, IndexedTradeMutation, LIVE_BUFFER_CAPACITY, MarketTrade,
-    SeriesLoadState, TradeHandoffSeed, clock::Clock, history::tracker::HistoryTicket,
+    Coordinator, LIVE_BUFFER_CAPACITY, MarketTrade, SeriesLoadState, TradeHandoffSeed,
+    clock::Clock, history::tracker::HistoryTicket,
 };
 pub(super) use crate::SeriesPresentationStatus as PresentationStatus;
 
@@ -112,13 +112,6 @@ impl SeriesLifecycles {
         &mut self,
     ) -> impl Iterator<Item = (&BarSeriesKey, &mut SeriesLifecycle)> {
         self.0.iter_mut().filter(|(_, live)| live.is_candle())
-    }
-    pub(super) fn trade_iter_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (&BarSeriesKey, &mut TradeModel)> {
-        self.0
-            .iter_mut()
-            .filter_map(|(series, live)| live.trade_model_mut().map(|model| (series, model)))
     }
     pub(super) fn trade_lifecycle_iter_mut(
         &mut self,
@@ -269,8 +262,6 @@ pub(super) struct SeriesLifecycle {
     pub(super) clock: Arc<dyn Clock>,
     pub(super) series: BarSeriesKey,
     pub(super) generation: ProviderGeneration,
-    pub(super) gap_policy: CandleGapPolicy,
-    pub(super) wire_symbol: String,
     wire_coin: String,
     wire_interval: String,
     pub(super) price_scale: u8,
@@ -293,10 +284,8 @@ impl SeriesLifecycle {
             trade.generation,
             "",
             "",
-            trade.gap_policy,
             Arc::clone(&trade.clock),
         );
-        lifecycle.wire_symbol = trade.candle_symbol.clone().unwrap_or_default();
         lifecycle.connected = trade.connected;
         lifecycle.model = LifecycleModel::TradeHandoff(Box::new(trade));
         lifecycle
@@ -310,11 +299,7 @@ impl SeriesLifecycle {
         &self,
         symbol: &super::provider_event::ProviderCandleSymbol,
     ) -> bool {
-        symbol.matches(
-            &self.wire_symbol,
-            self.is_candle().then_some(self.wire_coin.as_str()),
-            self.is_candle().then_some(self.wire_interval.as_str()),
-        )
+        self.is_candle() && symbol.matches(&self.wire_coin, &self.wire_interval)
     }
 
     pub(super) fn trade_model(&self) -> Option<&TradeModel> {
@@ -396,7 +381,6 @@ impl SeriesLifecycle {
         trade.dirty = false;
         trade.buffered.clear();
         trade.pending_publications.clear();
-        trade.pending_corrections.clear();
         self.state = SeriesState::Recovering {
             reason,
             ticket: None,
@@ -448,46 +432,7 @@ impl SeriesLifecycle {
         Ok(())
     }
 
-    pub(super) fn accept_indexed_trade(
-        &mut self,
-        change: &IndexedTradeMutation,
-    ) -> Result<(), String> {
-        if self.dormant_session_rolled(self.clock.as_ref()) {
-            return Err("Indexed trade arrived after dormant session boundary".into());
-        }
-        let ready = self.history_ready();
-        let Some(model) = self.trade_model_mut() else {
-            return Err("Trade-built lifecycle is unavailable".into());
-        };
-        if ready {
-            model.accept_indexed_trade(change)?;
-        } else {
-            model.buffer_indexed_trade(change)?;
-        }
-        self.mark_trade_progress();
-        Ok(())
-    }
-
-    pub(super) fn accept_trade_candle(
-        &mut self,
-        symbol: &str,
-        candle: super::ProviderCandle,
-    ) -> Result<(), String> {
-        if self.dormant_session_rolled(self.clock.as_ref()) {
-            return Err("Trade candle arrived after dormant session boundary".into());
-        }
-        let ready = self.history_ready();
-        let Some(model) = self.trade_model_mut() else {
-            return Err("Trade-built lifecycle is unavailable".into());
-        };
-        if ready {
-            model.accept_provider_candle(symbol, candle)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(super) fn take_trade_publication(&mut self) -> Option<super::LiveSeriesPublication> {
+    pub(super) fn take_trade_publication(&mut self) -> Option<Vec<MarketBar>> {
         if !self.history_ready() {
             return None;
         }
@@ -508,7 +453,6 @@ impl SeriesLifecycle {
         generation: ProviderGeneration,
         wire_coin: &str,
         interval: &str,
-        gap_policy: CandleGapPolicy,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
@@ -516,8 +460,6 @@ impl SeriesLifecycle {
             clock,
             series,
             generation,
-            gap_policy,
-            wire_symbol: format!("{wire_coin}{{={interval}}}"),
             wire_coin: wire_coin.to_owned(),
             wire_interval: interval.to_owned(),
             price_scale: 0,
@@ -954,7 +896,6 @@ mod tests {
             ProviderGeneration(NonZeroU64::new(1).expect("generation")),
             "BTC",
             "1m",
-            CandleGapPolicy::Contiguous,
             clock.clone(),
         );
         let epoch = EpochSequence::<ProviderTag>::default().next();
@@ -1020,20 +961,18 @@ mod tests {
         use super::super::provider_event::ProviderCandleSymbol;
 
         let (live, _, _, _) = fixture();
-        let event = |coin: &str, interval: &str| ProviderCandleSymbol::CoinInterval {
+        let event = |coin: &str, interval: &str| ProviderCandleSymbol {
             coin: coin.into(),
             interval: interval.into(),
         };
         assert!(live.matches_candle_symbol(&event("BTC", "1m")));
         assert!(!live.matches_candle_symbol(&event("ETH", "1m")));
         assert!(!live.matches_candle_symbol(&event("BTC", "5m")));
-        assert!(live.matches_candle_symbol(&ProviderCandleSymbol::Wire("BTC{=1m}".into())));
     }
 
     #[derive(Clone, Copy, Debug)]
     enum LifecycleCase {
         CandleOverlay,
-        Indexed,
         Sequence,
     }
 
@@ -1046,17 +985,12 @@ mod tests {
         HistoryTicket,
     ) {
         let (mut live, clock, epoch, mut ticket) = fixture();
-        if !matches!(case, LifecycleCase::CandleOverlay) {
-            live.series.provider_id = match case {
-                LifecycleCase::Indexed => "tastytrade",
-                LifecycleCase::Sequence => "rithmic",
-                LifecycleCase::CandleOverlay => unreachable!(),
-            }
-            .into();
+        if matches!(case, LifecycleCase::Sequence) {
+            live.series.provider_id = "rithmic".into();
             live.series.instrument_id = format!("{}:BTC", live.series.provider_id);
             ticket.series = live.series.clone();
             live = SeriesLifecycle::from_trade(
-                TradeModel::with_clock(&live.series, live.generation, "CME", None, clock.clone())
+                TradeModel::with_clock(&live.series, live.generation, "CME", clock.clone())
                     .expect("time-series trade model"),
             );
         }
@@ -1092,7 +1026,7 @@ mod tests {
             LifecycleCase::CandleOverlay => {
                 live.seed(2, 0, completed, forming).expect("candle seam");
             }
-            LifecycleCase::Indexed | LifecycleCase::Sequence => {
+            LifecycleCase::Sequence => {
                 live.seed_trade(TradeHandoffSeed {
                     price_scale: 2,
                     quantity_scale: 0,
@@ -1135,18 +1069,7 @@ mod tests {
             return;
         }
         let trade = next_trade(live);
-        match case {
-            LifecycleCase::Indexed => live
-                .accept_indexed_trade(&IndexedTradeMutation {
-                    index: "next".into(),
-                    kind: super::super::IndexedTradeKind::New,
-                    source_sequence: 7,
-                    trade: Some(trade),
-                })
-                .expect("indexed mutation"),
-            LifecycleCase::Sequence => live.accept_trade(&trade).expect("sequence trade"),
-            LifecycleCase::CandleOverlay => unreachable!(),
-        }
+        live.accept_trade(&trade).expect("sequence trade");
     }
 
     fn assert_contiguous_one_forming(case: LifecycleCase, live: &SeriesLifecycle) {
@@ -1155,7 +1078,7 @@ mod tests {
                 live.bars.as_slice(),
                 live.forming.expect("one forming candle").bar,
             ),
-            LifecycleCase::Indexed | LifecycleCase::Sequence => {
+            LifecycleCase::Sequence => {
                 let model = live.trade_model().expect("trade model");
                 let (forming, completed) = model.bars.split_last().expect("forming bar");
                 assert_eq!(model.forming_tail_sequence, Some(forming.source_sequence));
@@ -1180,12 +1103,8 @@ mod tests {
     }
 
     #[test]
-    fn contract_is_shared_by_candle_indexed_and_sequence_models() {
-        for case in [
-            LifecycleCase::CandleOverlay,
-            LifecycleCase::Indexed,
-            LifecycleCase::Sequence,
-        ] {
+    fn contract_is_shared_by_candle_and_sequence_models() {
+        for case in [LifecycleCase::CandleOverlay, LifecycleCase::Sequence] {
             let (mut live, clock, epoch, ticket) = case_fixture(case);
             let online = step(
                 &mut live,
@@ -1791,45 +1710,34 @@ mod tests {
 
     #[test]
     fn lifecycle_rolled_dormant_trade_rejects_mutation_and_recovers_session() {
-        for case in [LifecycleCase::Indexed, LifecycleCase::Sequence] {
-            let (mut lifecycle, clock, _, _) = case_fixture(case);
-            seed_case(
-                case,
-                &mut lifecycle,
-                &[bar_at(0, 1), bar_at(1, 2)],
-                bar_at(2, 3),
-            );
-            lifecycle.state = SeriesState::Dormant {
-                phase: SessionPhase::Closed,
-                until: Some(2_000),
-            };
-            clock.advance(std::time::Duration::from_secs(3));
-            let trade = next_trade(&lifecycle);
-            let before = lifecycle.trade_model().expect("trade model").bars.clone();
-            let result = match case {
-                LifecycleCase::Indexed => lifecycle.accept_indexed_trade(&IndexedTradeMutation {
-                    index: "next".into(),
-                    kind: super::super::IndexedTradeKind::New,
-                    source_sequence: 7,
-                    trade: Some(trade),
-                }),
-                LifecycleCase::Sequence => lifecycle.accept_trade(&trade),
-                LifecycleCase::CandleOverlay => unreachable!(),
-            };
-            assert!(result.is_err(), "{case:?}: rolled trade requires recovery");
-            assert_eq!(lifecycle.trade_model().expect("trade model").bars, before);
-            lifecycle.recover_trade(RecoveryReason::SequenceGap);
-            assert!(
-                matches!(
-                    lifecycle.state(),
-                    SeriesState::Recovering {
-                        reason: RecoveryReason::SessionRolled,
-                        ..
-                    }
-                ),
-                "{case:?}"
-            );
-        }
+        let case = LifecycleCase::Sequence;
+        let (mut lifecycle, clock, _, _) = case_fixture(case);
+        seed_case(
+            case,
+            &mut lifecycle,
+            &[bar_at(0, 1), bar_at(1, 2)],
+            bar_at(2, 3),
+        );
+        lifecycle.state = SeriesState::Dormant {
+            phase: SessionPhase::Closed,
+            until: Some(2_000),
+        };
+        clock.advance(std::time::Duration::from_secs(3));
+        let trade = next_trade(&lifecycle);
+        let before = lifecycle.trade_model().expect("trade model").bars.clone();
+        assert!(
+            lifecycle.accept_trade(&trade).is_err(),
+            "rolled trade requires recovery"
+        );
+        assert_eq!(lifecycle.trade_model().expect("trade model").bars, before);
+        lifecycle.recover_trade(RecoveryReason::SequenceGap);
+        assert!(matches!(
+            lifecycle.state(),
+            SeriesState::Recovering {
+                reason: RecoveryReason::SessionRolled,
+                ..
+            }
+        ));
     }
 
     #[test]

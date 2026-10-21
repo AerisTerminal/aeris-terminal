@@ -258,11 +258,10 @@ Title: One jittered, capped, budgeted reconnect policy
 Milestone: market-foundations   Crates: market_runtime, adapters (rithmic)   Depends on: M2.3
 Scope: `reconnect.rs` adds `ReconnectPolicy` and `Backoff`: exponential, jitter seeded through `Clock`, cap, attempt budget, healthy reset, and a `RateLimited{retry_after}` override.
 Per-provider defaults:
-- cTrader: current values, equal jitter, budget 5.
-- tastytrade: current values plus jitter.
+- Broker sessions (since removed): current values, equal jitter, budget 5.
 - Hyperliquid: 500 ms x 2^n, cap 30 s, full jitter, no budget.
 - Rithmic: the adapter scheduler stays the only transport retry. `serve_demand` non-transport recovery goes through `Backoff` (min 1 s), so the policies no longer stack, and the login limits are respected.
-An exhausted budget gives an explicit provider `Failed` state. "Market data retry limit reached" is replaced with text that states the real cause. `ctrader_venue` reuses `Backoff`.
+An exhausted budget gives an explicit provider `Failed` state. "Market data retry limit reached" is replaced with text that states the real cause. The broker venue reuses `Backoff`.
 Design refs: 10 §6, §11 #4
 Closes findings: MD-12
 Key tests:
@@ -278,7 +277,7 @@ Milestone: market-foundations   Crates: market_runtime, domain/market_data, adap
 Scope: The `calendar/` module provides `MarketCalendarService` (`phase`, `session_window`, `next_transition`) over the sources ProviderCalendar, ContractHours, ExchangeRule, AlwaysOpen and Unknown.
 - Move the CME rules and their tests from `rithmic_protocol/src/calendar.rs`.
 - Move `session_hours.rs` to `weekly_hours.rs`.
-- Add one venue normalization table, replacing `market_collection`, `tastytrade_market_collection` and `for_venue`.
+- Add one venue normalization table, replacing the per-adapter venue classifiers and `for_venue`.
 - Add the domain types `SessionPhase`, `SessionWindow` and `CalendarSourceKind` (no new dependencies).
 - `market_session_status` delegates to the service.
 - An unsupported week or month period without a calendar returns an explicit `MarketDemandError` instead of silence.
@@ -288,7 +287,7 @@ Design refs: 10 §4, §11 #6
 Closes findings: MD-04 (demand part), MD-09
 Key tests:
 - Calendar matrix: CME Globex with DST, CFE, US equities, crypto 24/7, FX contract hours, Unknown.
-- A tastytrade equity 1W demand either goes live or returns an explicit error.
+- A non-CME equity 1W demand either goes live or returns an explicit error.
 User-visible/validatable behavior:
 - Internal; validated by the runtime tests (no silent non-updating weekly charts).
 
@@ -299,7 +298,7 @@ Scope: The watchdog evaluates every live series of every model (trade-built and 
 Design refs: 10 §4.3, §11 #7
 Closes findings: MD-02 (market part)
 Key tests:
-- A cTrader candle series stalled while open triggers recovery.
+- A provider-built candle series stalled while open triggers recovery.
 - No recovery while closed.
 - A scripted Rithmic CME series stalled while open triggers recovery.
 User-visible/validatable behavior:
@@ -376,7 +375,7 @@ Scope: Add `lifecycle/`:
 - a pure `step(input, ctx, &mut EffectBuf)` with fixed-capacity buffers;
 - `FormingBar` as the single owner of the forming candle;
 - a published runtime presentation status (Loading, ConnectingLive, Live, Recovering, AwaitingData).
-Port cTrader and Hyperliquid, and delete the `candle_*` handlers and `publish_candle_live`. naming_check: assert `series: lifecycle::SeriesLifecycles`, and no `Instant::now()` in `lifecycle/`.
+Port the candle providers (Hyperliquid and a since-removed broker), and delete the `candle_*` handlers and `publish_candle_live`. naming_check: assert `series: lifecycle::SeriesLifecycles`, and no `Instant::now()` in `lifecycle/`.
 Design refs: 10 §2.1-2.5, §11 #11
 Closes findings: MD-06 (candle half), MD-15 (presentation-state part)
 Key tests:
@@ -384,12 +383,11 @@ Key tests:
 - The M2.1 characterization tests still pass.
 User-visible/validatable behavior:
 - Hyperliquid charts load, go live and recover after a reconnect (GUI and M3.12 probe).
-- The cTrader demo chart loads.
 
 ### M3.2 series-lifecycle-trade-path
 Title: Port trade-built providers and delete the duplicated lifecycle
 Milestone: market-lifecycle   Crates: market_runtime   Depends on: M3.1
-Scope: Port tastytrade (Indexed continuity) and Rithmic (Sequence continuity) to `LiveModel::TradeHandoff`. Delete:
+Scope: Port the Indexed-continuity provider (since removed) and Rithmic (Sequence continuity) to `LiveModel::TradeHandoff`. Delete:
 - the `rithmic_*` handlers and `publish_rithmic_live`;
 - `SeriesLive`, `SeriesLiveMap`, `LiveHistoryState` and `TradeLiveHandoff`;
 - the `history.rs` `start_*`/`seed_*`/`finish_*` duplicates.
@@ -397,7 +395,7 @@ Also:
 - cache the provider wire symbol in the demand instead of calling `format!` per event;
 - prune recent trades by time for Indexed continuity;
 - fix the double `demand_dirty`;
-- fix the "Rithmic" text on tastytrade paths.
+- fix the "Rithmic" text on Indexed-provider paths.
 naming_check asserts that `SeriesLiveMap` is absent.
 Design refs: 10 §2.5, §11 #12
 Closes findings: MD-06, MD-14, MD-16 (prune, demand_dirty)
@@ -405,7 +403,7 @@ Key tests:
 - The same table-driven lifecycle suite runs against both models.
 - A scripted Rithmic sequence gap leads to Recovering.
 User-visible/validatable behavior:
-- Internal (tastytrade and Rithmic are validated with scripted sessions; Rithmic live is excluded).
+- Internal (both models are validated with scripted sessions; Rithmic live is excluded).
 
 ### M3.3 engine-series-tail
 Title: Series-tail accessor; remove full-series copies from hot and existence paths
@@ -462,7 +460,6 @@ Scope: Add the `ProviderSession` trait (connect with an epoch, diff-based `apply
 - Delete the four-arm `ProviderRealtimeChannelSet`, `ProviderRealtimeDispatch` and catalog enums.
 - Replace `ProviderSessionSlot` with `ProviderConnection {state, epoch, backoff}`.
 - `stop_realtime_if_idle` becomes `release_idle`, and the idle-stop overlap check is per stopping provider.
-- tastytrade `BrokerApi` no longer holds its state mutex across HTTP calls.
 Design refs: 10 §5, §1.2, §11 #14
 Closes findings: MD-08, MD-16 (idle overlap, BrokerApi mutex)
 Key tests:
@@ -494,7 +491,7 @@ Scope: `trading_feed.rs` and the `quotes.rs` QuoteBook form the single trading q
 - Terms conversion moves from the desktop into the runtime.
 - Hyperliquid uses a significant-figure `PriceGrid` (09 Q12), verified against the docs and observed responses.
 - Price alerts move to instrument demand.
-Verify Quotes-only demand per provider: Hyperliquid bbo/l2Book, and cTrader spots on the shared session. tastytrade and Rithmic are scripted only. naming_check: still no `aeris_trading_runtime` in `market_runtime`.
+Verify Quotes-only demand per provider: Hyperliquid bbo/l2Book. Rithmic is scripted only. naming_check: still no `aeris_trading_runtime` in `market_runtime`.
 Design refs: 09 §3.4, §8 #8; 10 §8, §11 #15
 Closes findings: TR-01 and UI-01 (market side), MD-11 (trading-feed part), MD-13 (order-book demand)
 Key tests:
@@ -633,7 +630,7 @@ Scope: A mechanical move of `lib.rs` (5,606 lines) and the Coordinator impl spre
 Design refs: 09 §1.2, §8 #5
 Closes findings: TR-12 (god object)
 Key tests:
-- Goldens and the scripted cTrader venue tests are unchanged.
+- Goldens and the scripted broker venue tests are unchanged.
 User-visible/validatable behavior:
 - Internal only.
 
@@ -683,7 +680,7 @@ Key tests:
 - An 11 s crypto quote and a 61 s futures quote reject marketable orders.
 - After a restart, no fill happens on a pre-restart quote.
 User-visible/validatable behavior:
-- GUI: an order on a closed cTrader demo market (weekend) or an unknown session shows a clear reject reason.
+- GUI: an order on a closed market or an unknown session shows a clear reject reason.
 - Hyperliquid orders are accepted while quotes are fresh.
 
 ### M4.9 fill-accounting-consolidation
@@ -731,7 +728,7 @@ Scope: Add the V21 columns and pure transitions in `book/lifecycle.rs`:
 - typed `OrderEventReason` and `RejectReason`;
 - `ClientIdReused` when a client id is resubmitted with different parameters;
 - a typed `RiskWarning`, with the runtime "RISK WARNING" prefix deleted.
-The broker route uses the transition functions; the scripted cTrader tests stay unchanged. Replace the old goldens with v2 goldens in the harness and list each change (09 Q1).
+The broker route uses the transition functions; the scripted broker venue tests stay unchanged. Replace the old goldens with v2 goldens in the harness and list each change (09 Q1).
 Design refs: 09 §2.1-2.3, §5.2 (V21), §8 #13
 Closes findings: TR-08 (part), UI-10 (runtime part of the risk warning)
 Key tests:
@@ -745,7 +742,7 @@ User-visible/validatable behavior:
 Title: One admission validator for simulated and broker routes
 Milestone: trading-engine   Crates: trading_runtime, domain/instruments   Depends on: M5.1
 Scope: `admission::admit()` checks:
-- `VenueCapabilities`: TIFs, client id length 50 on cTrader, native SL/TP, managed trailing;
+- `VenueCapabilities`: TIFs, client id length per venue, native SL/TP, managed trailing;
 - the price grid (fixed tick or significant figures) and the quantity increment;
 - side relations (for example, a buy stop must be above the ask);
 - open-order and quote-interest capacity.
@@ -918,7 +915,7 @@ User-visible/validatable behavior:
 - Internal until M6.10 (headless test).
 
 ### M5.12 paper-trading-live-probes
-Title: Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
+Title: Live paper-trading probe on Hyperliquid with restart
 Milestone: trading-engine   Crates: new tools/paper_trading_probe, tools/naming_check   Depends on: M5.4, M5.9, M5.11
 Scope: A composition root (allowed by naming_check) runs on Hyperliquid:
 - a practice account with a fee schedule (or `--no-fees`);
@@ -926,14 +923,12 @@ Scope: A composition root (allowed by naming_check) runs on Hyperliquid:
 - a restart on the same file, verifying an identical working set and ledger;
 - flatten-all and the ledger invariant;
 - a JSON summary; it exits non-zero on failure or when no quote arrives within 30 s.
-A cTrader demo mode on the stored connection checks broker-route parity (demo orders allowed).
 Design refs: 09 §7.2, §8 #24
 Closes findings: (end-to-end validation)
 Key tests:
 - Live runs recorded in the tracking doc.
 User-visible/validatable behavior:
 - The probe exits 0 with JSON showing fills, restart equality and a flat account.
-- The cTrader demo mode exits 0.
 
 ---
 
@@ -1070,7 +1065,7 @@ User-visible/validatable behavior:
 Title: Descriptor-driven provider connect, login form and symbol browser
 Milestone: desktop-bridge   Crates: apps/desktop, tools/naming_check   Depends on: M6.8
 Scope:
-- `ConnectProvider(ProviderId)` replaces the Connect{Tastytrade, Ctrader, Rithmic} actions.
+- `ConnectProvider(ProviderId)` replaces the per-provider Connect actions such as `ConnectRithmic`.
 - `provider_login.rs` renders the form from the login schema and writes only to the native vault.
 - `provider_symbol_browser.rs` follows the symbol-browser capability.
 - The allow-list shrinks to `assets.rs`.
@@ -1080,7 +1075,7 @@ Closes findings: UI-03 (remaining)
 Key tests:
 - A vault-only write test for every `VaultCredentials` provider.
 User-visible/validatable behavior:
-- GUI: the connect menu lists providers from descriptors, and the cTrader stored connection still connects.
+- GUI: the connect menu lists providers from descriptors.
 - The Rithmic form renders; no live login is attempted.
 
 ### M6.10 trading-store
@@ -1501,7 +1496,7 @@ User-visible/validatable behavior:
 - An Aeris Charts append operation for order flow (only if measured as the bottleneck in M7.11).
 - An Aeris Charts in-place data reset, if the M6.4 check shows the engine lacks it.
 - Workspace-level trading account selection; the per-pane selection is kept (architecture.md section 3.7.3).
-- Rithmic live qualification, fresh cTrader OAuth (hosted broker 404), production release publication, code-signing certificate and key custody, the AWS release endpoint, and the macOS workflows.
+- Rithmic live qualification, production release publication, code-signing certificate and key custody, the AWS release endpoint, and the macOS workflows.
 - Manual checks only the maintainer can run: logoff flush (M8.3), VM install and uninstall (M8.6), Rithmic login through the native vault (M6.9).
 
 ## Unmapped findings (not closed by any item)
@@ -1510,7 +1505,7 @@ User-visible/validatable behavior:
 |---|---|
 | LC-17 | Deferred. Deleting the legacy data-root migration and vault probes needs maintainer confirmation that migration is complete (07 F19). |
 | PL-16 (legacy migrations part) | Same as LC-17. The tokens and installer residue are closed in M8.6. The never-migrated Asceify brand is left as is. |
-| TR-12 (two position models) | Intentional. The simulated route uses net positions and cTrader uses hedged broker positions; the design keeps both behind one ledger. |
+| TR-12 (two position models) | Intentional. The simulated route uses net positions and the broker route used hedged broker positions; the design keeps both behind one ledger. |
 | PL-01 "delete or feature-gate" fix | Superseded by the user decision to keep the pipeline. It is closed as isolation plus fixes in M8.1-M8.8, not deletion. |
 | PL-07 / UI-12 "cargo feature" fix | Superseded by the keep decision and 11 §1.6. The account code is isolated behind `AccountGate` (M7.2) and fixed (M1.4, M8.4), not feature-gated. |
 | 05 root causes 7 and 8 (commit rhythm, two-repo chart cost) | These are process findings. They are addressed by the one-commit-per-item discipline and the tracking doc, with no code item. |

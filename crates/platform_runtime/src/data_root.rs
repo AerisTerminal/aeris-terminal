@@ -14,10 +14,7 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataRootMode {
     Production,
-    Validation {
-        root: PathBuf,
-        borrow_stored_ctrader: bool,
-    },
+    Validation { root: PathBuf },
 }
 
 /// Fully resolved process data-root policy.
@@ -50,17 +47,6 @@ impl DataRoot {
     #[must_use]
     pub fn is_validation(&self) -> bool {
         matches!(self.mode, DataRootMode::Validation { .. })
-    }
-
-    #[must_use]
-    pub fn borrow_stored_ctrader(&self) -> bool {
-        matches!(
-            self.mode,
-            DataRootMode::Validation {
-                borrow_stored_ctrader: true,
-                ..
-            }
-        )
     }
 
     #[must_use]
@@ -127,14 +113,13 @@ static ACTIVE_DATA_ROOT: OnceLock<DataRoot> = OnceLock::new();
 /// Parses validation flags independently of command ordering.
 ///
 /// # Errors
-/// Returns an error for duplicate, incomplete, or inconsistent validation flags.
+/// Returns an error for duplicate or incomplete validation flags.
 pub fn parse_data_root_arguments(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> Result<ParsedDataRootArguments, DataRootError> {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     let mut command_arguments = Vec::with_capacity(arguments.len());
     let mut validation_root = None;
-    let mut borrow_stored_ctrader = false;
     let mut index = 0;
     while index < arguments.len() {
         if arguments[index] == "--validation-root" {
@@ -153,28 +138,13 @@ pub fn parse_data_root_arguments(
                 ));
             }
             validation_root = Some(PathBuf::from(root));
-        } else if arguments[index] == "--validation-allow-stored-ctrader" {
-            if borrow_stored_ctrader {
-                return Err(DataRootError::InvalidArguments(
-                    "--validation-allow-stored-ctrader may only be supplied once",
-                ));
-            }
-            borrow_stored_ctrader = true;
         } else {
             command_arguments.push(arguments[index].clone());
         }
         index += 1;
     }
     let mode = match validation_root {
-        Some(root) => DataRootMode::Validation {
-            root,
-            borrow_stored_ctrader,
-        },
-        None if borrow_stored_ctrader => {
-            return Err(DataRootError::InvalidArguments(
-                "--validation-allow-stored-ctrader requires --validation-root",
-            ));
-        }
+        Some(root) => DataRootMode::Validation { root },
         None => DataRootMode::Production,
     };
     Ok(ParsedDataRootArguments {
@@ -194,11 +164,7 @@ pub fn initialize_data_root(mode: DataRootMode) -> Result<&'static DataRoot, Dat
     ACTIVE_DATA_ROOT
         .set(resolved)
         .map_err(|_| DataRootError::AlreadyInitialized)?;
-    let active = active_data_root()?;
-    if active.borrow_stored_ctrader() {
-        crate::credential_vault::log_validation_borrow_once();
-    }
-    Ok(active)
+    active_data_root()
 }
 
 /// Returns the initialized process policy.
@@ -218,10 +184,7 @@ fn resolve_data_root(mode: DataRootMode, production: &Path) -> Result<DataRoot, 
             path: production.to_path_buf(),
             vault_namespace: "production".to_string(),
         }),
-        DataRootMode::Validation {
-            root,
-            borrow_stored_ctrader,
-        } => {
+        DataRootMode::Validation { root } => {
             if !root.is_absolute() {
                 return Err(DataRootError::ValidationRootMustBeAbsolute);
             }
@@ -243,7 +206,6 @@ fn resolve_data_root(mode: DataRootMode, production: &Path) -> Result<DataRoot, 
             Ok(DataRoot {
                 mode: DataRootMode::Validation {
                     root: canonical_base,
-                    borrow_stored_ctrader,
                 },
                 path,
                 vault_namespace,
@@ -500,7 +462,6 @@ mod tests {
     #[test]
     fn parser_accepts_validation_flags_around_commands() {
         let parsed = parse_data_root_arguments([
-            "--validation-allow-stored-ctrader".into(),
             "--desktop-readiness".into(),
             "report.json".into(),
             "--validation-root".into(),
@@ -514,13 +475,7 @@ mod tests {
                 OsString::from("report.json")
             ]
         );
-        assert!(matches!(
-            parsed.mode,
-            DataRootMode::Validation {
-                borrow_stored_ctrader: true,
-                ..
-            }
-        ));
+        assert!(matches!(parsed.mode, DataRootMode::Validation { .. }));
     }
 
     #[test]
@@ -530,7 +485,6 @@ mod tests {
             resolve_data_root(
                 DataRootMode::Validation {
                     root: PathBuf::from("relative"),
-                    borrow_stored_ctrader: false,
                 },
                 &production
             ),
@@ -541,7 +495,6 @@ mod tests {
             resolve_data_root(
                 DataRootMode::Validation {
                     root: parent.to_path_buf(),
-                    borrow_stored_ctrader: false,
                 },
                 &production
             ),
@@ -552,7 +505,6 @@ mod tests {
             resolve_data_root(
                 DataRootMode::Validation {
                     root: parent.join("validation"),
-                    borrow_stored_ctrader: false,
                 },
                 &nested_production
             ),
@@ -562,7 +514,6 @@ mod tests {
         let resolved = resolve_data_root(
             DataRootMode::Validation {
                 root: absent.clone(),
-                borrow_stored_ctrader: false,
             },
             &parent.join("production").join("Aeris"),
         )
@@ -581,7 +532,6 @@ mod tests {
         let first = resolve_data_root(
             DataRootMode::Validation {
                 root: first_parent.clone(),
-                borrow_stored_ctrader: false,
             },
             &temp_root("lock-production").join("Aeris"),
         )
@@ -589,7 +539,6 @@ mod tests {
         let second = resolve_data_root(
             DataRootMode::Validation {
                 root: second_parent.clone(),
-                borrow_stored_ctrader: false,
             },
             &temp_root("lock-production-two").join("Aeris"),
         )
@@ -613,7 +562,6 @@ mod tests {
         let validation = resolve_data_root(
             DataRootMode::Validation {
                 root: validation_parent.clone(),
-                borrow_stored_ctrader: false,
             },
             &temp_root("side-effects-production").join("Aeris"),
         )

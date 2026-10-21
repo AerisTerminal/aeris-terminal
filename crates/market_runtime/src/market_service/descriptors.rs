@@ -13,7 +13,6 @@ use crate::{CadenceError, resolve_series_key};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectMethod {
     Public,
-    HostedBrokerOAuth,
     VaultCredentials { form: &'static str },
 }
 
@@ -33,7 +32,6 @@ impl ProviderDescriptor {
     pub(super) fn from_presentation(presentation: &'static ProviderPresentationDescriptor) -> Self {
         let connect = match presentation.connection_kind {
             ProviderConnectionKind::Public => ConnectMethod::Public,
-            ProviderConnectionKind::HostedBroker => ConnectMethod::HostedBrokerOAuth,
             ProviderConnectionKind::Credentials => ConnectMethod::VaultCredentials {
                 form: presentation.id,
             },

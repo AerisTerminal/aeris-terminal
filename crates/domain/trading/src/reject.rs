@@ -105,7 +105,7 @@ impl fmt::Display for RejectReason {
             Self::AccountLocked => f.write_str("AccountLocked: account is risk-locked"),
             Self::InvalidQuantity => f.write_str("order quantity must use whole provider units"),
             Self::ClientIdTooLong => {
-                f.write_str("cTrader ClientOrderId must be at most 50 characters")
+                f.write_str("broker ClientOrderId must be at most 50 characters")
             }
             Self::ScaleMismatch => f.write_str("order scales do not match the instrument"),
             Self::CurrencyMismatch => {

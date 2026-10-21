@@ -1307,7 +1307,7 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
             id: broker_id.clone(),
             display_name: "Scripted demo".into(),
             environment: AccountEnvironment::Demo,
-            venue_id: "ctrader".into(),
+            venue_id: aeris_trading::venue::BROKER_VENUE_ID.into(),
             broker_ref: Some("fixture-demo".into()),
             currency: "USD".into(),
             currency_scale: 2,
@@ -1568,7 +1568,7 @@ fn all_practice_entry_shapes_obey_provider_neutral_session_phases() {
 
 #[test]
 fn provider_families_use_the_same_verified_session_gate() {
-    for provider in ["hyperliquid", "ctrader", "tastytrade", "rithmic"] {
+    for provider in ["hyperliquid", "rithmic", "fixture"] {
         let directory = TestDirectory::new(&format!("session-provider-{provider}"));
         let (service, _clock) = feed_service(&directory);
         let feed = service

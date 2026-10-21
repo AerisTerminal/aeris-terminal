@@ -247,7 +247,6 @@ impl Coordinator<'_> {
             entitlement_id: default.entitlement_id,
         };
         validate_provider_selection(&selection)?;
-        self.ensure_catalog_session(&provider)?;
         self.providers
             .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))?;
         self.command_fences.record_operation(
@@ -319,12 +318,10 @@ impl Coordinator<'_> {
                 exchange: exchange.clone(),
                 entitlement_id: entitlement_id.clone(),
             };
-            let dispatched = validate_provider_selection(&selection)
-                .and_then(|()| self.ensure_catalog_session(&provider))
-                .and_then(|()| {
-                    self.providers
-                        .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))
-                });
+            let dispatched = validate_provider_selection(&selection).and_then(|()| {
+                self.providers
+                    .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))
+            });
             match dispatched {
                 Ok(()) => {
                     self.command_fences.record_operation(
@@ -368,10 +365,9 @@ impl Coordinator<'_> {
             maximum_results: 32,
             categories: aeris_contracts::InstrumentSearchCategories::ALL,
         };
-        let dispatched = self.ensure_catalog_session(&provider).and_then(|()| {
-            self.providers
-                .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search))
-        });
+        let dispatched = self
+            .providers
+            .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search));
         match dispatched {
             Ok(()) => {
                 self.command_fences
@@ -583,19 +579,6 @@ impl Coordinator<'_> {
         self.reconcile_order_books();
     }
 
-    pub(super) fn ensure_catalog_session(&mut self, provider: &str) -> Result<(), String> {
-        if !self.provider_registry.catalog_uses_session(provider) {
-            return Ok(());
-        }
-        if self.ensure_provider_connection(provider)
-            && self.provider_registry.catalog_ready(provider)
-        {
-            Ok(())
-        } else {
-            Err("Provider catalog session is recovering".into())
-        }
-    }
-
     pub(super) fn handle_provider_search(
         &mut self,
         client_id: ClientId,
@@ -613,7 +596,6 @@ impl Coordinator<'_> {
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
-                self.ensure_catalog_session(&provider)?;
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search))
             });
@@ -646,7 +628,6 @@ impl Coordinator<'_> {
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
-                self.ensure_catalog_session(&provider)?;
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))
             });
@@ -674,7 +655,6 @@ impl Coordinator<'_> {
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
-                self.ensure_catalog_session(&provider)?;
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Screen(screen))
             });
@@ -755,7 +735,7 @@ impl Coordinator<'_> {
             .and_modify(|current| *current = (*current).max(instrument.session_generation))
             .or_insert(instrument.session_generation);
         self.catalog.insert(key, instrument.clone());
-        self.calendar.resolve(instrument, None);
+        self.calendar.resolve(instrument);
         // A chart-free instrument lease (for example trading ticket interest) is
         // installed before its route resolves, so a demand flush while the catalog
         // entry was missing cleared the session's dirty flag. This install unblocks
@@ -798,41 +778,7 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn handle_provider_catalog(&mut self, provider: &str, event: ProviderCatalogEvent) {
-        if self
-            .provider_registry
-            .has_control(provider)
-            .then(|| self.session(provider))
-            .is_some_and(|session| session.suspended)
-        {
-            return;
-        }
         match event {
-            ProviderCatalogEvent::Calendar {
-                generation,
-                instrument_id,
-                status,
-                valid_from_utc_ms,
-                valid_until_utc_ms,
-            } => {
-                let Some(epoch) = self.provider_epochs.current(provider, generation) else {
-                    self.provider_epochs.drop_event();
-                    return;
-                };
-                let Some(descriptor) = self.providers.descriptor(provider) else {
-                    return;
-                };
-                self.handle_bound_provider_event(super::ProviderEvent {
-                    provider: descriptor.id,
-                    generation: epoch,
-                    wire_generation: generation,
-                    kind: super::ProviderEventKind::Calendar {
-                        instrument_id,
-                        status,
-                        valid_from_utc_ms,
-                        valid_until_utc_ms,
-                    },
-                });
-            }
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.restore_provider_catalog_health(&result.provider);
                 if result.consumer_id == 0 {
@@ -840,9 +786,6 @@ impl Coordinator<'_> {
                 } else {
                     self.handle_catalog_search(result);
                 }
-            }
-            ProviderCatalogEvent::SearchPreliminary(result) => {
-                self.handle_catalog_search_preview(result);
             }
             ProviderCatalogEvent::SelectionResolved {
                 consumer_id,
@@ -977,30 +920,6 @@ impl Coordinator<'_> {
             return;
         }
         self.session_mut(provider).catalog_degraded = None;
-    }
-
-    pub(super) fn handle_catalog_search_preview(
-        &mut self,
-        result: aeris_contracts::ProviderInstrumentSearchResult,
-    ) {
-        if result.consumer_id == 0 {
-            return;
-        }
-        let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
-            return;
-        };
-        let Some(kind) = self.command_fences.kind_for(
-            consumer_id,
-            &result.provider,
-            result.search_generation,
-            false,
-        ) else {
-            return;
-        };
-        if let Some(events) = self.events.get_mut(&consumer_id) {
-            *events.catalog_search_slot(kind) =
-                Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(result));
-        }
     }
 
     pub(super) fn handle_catalog_search(

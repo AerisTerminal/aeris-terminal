@@ -440,7 +440,7 @@ impl TradingCore {
             .state
             .venue_generation
             .checked_add(1)
-            .ok_or("cTrader venue generation is exhausted")?;
+            .ok_or("broker venue generation is exhausted")?;
         let (outbound, receiver) =
             aeris_trading::venue_outbox::bounded_venue_requests(venue::OUTBOUND_CAPACITY);
         // Every attach starts with a reconcile of each demo broker account, so state left
@@ -449,13 +449,13 @@ impl TradingCore {
             .state
             .accounts
             .values()
-            .filter(|account| account.environment == AccountEnvironment::Demo)
+            .filter(|account| VenueRoute::from_account(account) == Ok(VenueRoute::BrokerDemo))
             .filter_map(|account| self.reconcile_request(account))
             .collect::<Vec<_>>();
         for request in reconciles {
             outbound
                 .try_send(request)
-                .map_err(|_| "cTrader venue reconcile requests exceed the outbound queue")?;
+                .map_err(|_| "broker venue reconcile requests exceed the outbound queue")?;
         }
         self.store.set_venue_generation(generation)?;
         self.venue_outbound = Some(outbound);
@@ -468,8 +468,8 @@ impl TradingCore {
 
     pub(super) fn require_broker_route(&self, account_id: &TradingAccountId) -> Result<(), String> {
         match self.route(account_id)? {
-            VenueRoute::Simulated => Err("broker position requires a cTrader account".into()),
-            VenueRoute::CtraderDemo => Ok(()),
+            VenueRoute::Simulated => Err("broker position requires a broker account".into()),
+            VenueRoute::BrokerDemo => Ok(()),
         }
     }
 
@@ -661,8 +661,8 @@ impl TradingCore {
         let command = &resolved;
         match self.route(&command.account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => {
-                validate_client_id(command, VenueRoute::CtraderDemo)
+            VenueRoute::BrokerDemo => {
+                validate_client_id(command, VenueRoute::BrokerDemo)
                     .map_err(|error| error.to_string())?;
                 if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
                     return existing_client_order(existing, command)
@@ -929,7 +929,7 @@ impl TradingCore {
             .ok_or_else(|| "trading account is not registered".to_string())?;
         match VenueRoute::from_account(account)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+            VenueRoute::BrokerDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         let instrument = self

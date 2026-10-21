@@ -18,10 +18,6 @@ path = "src/main.rs"
 name = "paper_trading_probe"
 path = "src/bin/paper_trading_probe/main.rs"
 
-[[bin]]
-name = "ctrader_demo_probe"
-path = "src/bin/ctrader_demo_probe.rs"
-
 [dependencies]
 aeris_market_runtime = { path = "../../crates/market_runtime", features = ["probe"] }
 aeris_market_engine = { path = "../../crates/market_engine" }

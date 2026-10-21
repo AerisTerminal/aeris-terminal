@@ -133,8 +133,6 @@ fn a_fresh_symbol_browser_accepts_every_provider_default_listing() {
     for provider in [
         super::TerminalProvider::Rithmic,
         super::TerminalProvider::Hyperliquid,
-        super::TerminalProvider::Tastytrade,
-        super::TerminalProvider::Ctrader,
     ] {
         let mut browser = crate::desktop::rithmic_shell::RithmicSymbolBrowser::default();
         assert!(
@@ -334,18 +332,14 @@ fn timeframe_menu_groups_every_catalog_interval() {
 
 #[test]
 fn seconds_timeframes_are_offered_only_by_second_bar_providers() {
-    for provider in [TerminalProvider::Rithmic, TerminalProvider::Tastytrade] {
-        assert!(
-            timeframe_menu_groups(super::provider_intervals(provider))
-                .contains(&TimeframeMenuGroup::Seconds)
-        );
-    }
-    for provider in [TerminalProvider::Hyperliquid, TerminalProvider::Ctrader] {
-        assert!(
-            !timeframe_menu_groups(super::provider_intervals(provider))
-                .contains(&TimeframeMenuGroup::Seconds)
-        );
-    }
+    assert!(
+        timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic))
+            .contains(&TimeframeMenuGroup::Seconds)
+    );
+    assert!(
+        !timeframe_menu_groups(super::provider_intervals(TerminalProvider::Hyperliquid))
+            .contains(&TimeframeMenuGroup::Seconds)
+    );
     assert_eq!(
         timeframe_group_intervals(TimeframeMenuGroup::Seconds, &ChartInterval::ALL),
         [
@@ -609,41 +603,6 @@ mod timeframe_input {
         (surface, requests, publications, cx)
     }
 
-    fn ctrader_product() -> InstallProviderInstrument {
-        InstallProviderInstrument {
-            provider: "ctrader".to_string(),
-            session_generation: 1,
-            selection_generation: 1,
-            instrument_id: "ctrader:demo:1001:1".to_string(),
-            provider_symbol: "EURUSD".to_string(),
-            display_symbol: "EURUSD".to_string(),
-            venue_id: "ctrader".to_string(),
-            price_scale: 5,
-            quantity_scale: 2,
-            entitlement_id: "ctrader-authorized".to_string(),
-            ..Default::default()
-        }
-    }
-
-    #[gpui::test]
-    fn restored_ctrader_chart_loads_without_trade_print_features(cx: &mut TestAppContext) {
-        let (surface, _requests, _publications, cx) = harness_with(cx, ctrader_product());
-        cx.read(|cx| {
-            let surface = surface.read(cx);
-            assert_eq!(surface.provider, TerminalProvider::Ctrader);
-            assert_eq!(surface.chart_state, ChartState::Loading);
-            assert!(
-                !super::super::provider_chart_types(surface.provider)
-                    .contains(&ChartType::Footprint)
-            );
-        });
-        // A footprint request (palette, menu or template) is refused, not drawn blank.
-        surface.update(cx, |surface, cx| {
-            surface.set_chart_type(ChartType::Footprint, cx);
-            assert_ne!(surface.chart_chrome.chart_type, ChartType::Footprint);
-        });
-    }
-
     #[gpui::test]
     fn ticket_field_and_chart_menu_edit_one_order_quantity(cx: &mut TestAppContext) {
         let (surface, _requests, _publications, cx) = harness(cx);
@@ -731,13 +690,23 @@ mod timeframe_input {
     fn restored_chart_from_an_unavailable_provider_fails_explicitly(cx: &mut TestAppContext) {
         let product = InstallProviderInstrument {
             provider: "retired".to_string(),
-            ..ctrader_product()
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "retired:demo:1001:1".to_string(),
+            provider_symbol: "EURUSD".to_string(),
+            display_symbol: "EURUSD".to_string(),
+            venue_id: "retired".to_string(),
+            price_scale: 5,
+            quantity_scale: 2,
+            entitlement_id: "retired-authorized".to_string(),
+            ..Default::default()
         };
         let (surface, _requests, _publications, cx) = harness_with(cx, product);
         cx.read(|cx| {
             let surface = surface.read(cx);
             // Never silently presented as another provider's market.
             assert_eq!(surface.chart_state, ChartState::Error);
+            assert_eq!(surface.provider, super::super::FALLBACK_TERMINAL_PROVIDER);
             assert_eq!(
                 surface.chart_failure,
                 Some(ChartFailure::UnsupportedProvider)
@@ -3103,7 +3072,7 @@ fn header_market_dot_shows_session_only_while_the_feed_is_live() {
     let theme = super::AerisTheme::dark();
     let colors = theme.colors;
     let mut status = MarketSessionStatus {
-        instrument_id: "tastytrade:Future:/ESZ6".into(),
+        instrument_id: "rithmic:Future:ESZ6:CME".into(),
         phase: MarketSessionPhase::Regular,
         source: MarketSessionSource::ProviderCalendar,
         session_start_unix_nanos: Some(0),
@@ -3111,7 +3080,7 @@ fn header_market_dot_shows_session_only_while_the_feed_is_live() {
         next_open_unix_nanos: Some(1_440 * MINUTE),
     };
     let present = |state, status: &MarketSessionStatus| {
-        connection_presentation(TerminalProvider::Tastytrade, state, None).with_market(
+        connection_presentation(TerminalProvider::Rithmic, state, None).with_market(
             state == FeedConnectionState::Streaming,
             Some(status),
             aeris_chart_integration::DEFAULT_TIME_ZONE,
@@ -4758,11 +4727,11 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
 
 #[test]
 fn broker_exposure_nets_hedged_positions_and_knows_a_single_entry() {
-    let account = aeris_trading::TradingAccountId::try_new("ctrader-demo-1001").expect("id");
+    let account = aeris_trading::TradingAccountId::try_new("broker-demo-1001").expect("id");
     let point = |units, scale| aeris_trading::FixedPoint::try_new(units, scale).expect("point");
     let position = |id: &str, side, quantity| aeris_trading::BrokerPosition {
         account_id: account.clone(),
-        instrument_id: aeris_instruments::InstrumentId::try_new("ctrader:demo:1001:1")
+        instrument_id: aeris_instruments::InstrumentId::try_new("broker:demo:1001:1")
             .expect("instrument"),
         broker_position_id: id.into(),
         side,
@@ -4778,7 +4747,7 @@ fn broker_exposure_nets_hedged_positions_and_knows_a_single_entry() {
     };
     let single = [position("77", aeris_trading::OrderSide::Buy, 100_000)];
     assert_eq!(
-        super::broker_exposure(&single, &account, "ctrader:demo:1001:1"),
+        super::broker_exposure(&single, &account, "broker:demo:1001:1"),
         Some(super::BrokerExposure {
             net_units: 100_000,
             scale: 2,
@@ -4789,18 +4758,18 @@ fn broker_exposure_nets_hedged_positions_and_knows_a_single_entry() {
         position("77", aeris_trading::OrderSide::Buy, 100_000),
         position("78", aeris_trading::OrderSide::Sell, 30_000),
     ];
-    let exposure = super::broker_exposure(&hedged, &account, "ctrader:demo:1001:1").expect("net");
+    let exposure = super::broker_exposure(&hedged, &account, "broker:demo:1001:1").expect("net");
     assert_eq!((exposure.net_units, exposure.entry_price), (70_000, None));
     let flat = [
         position("77", aeris_trading::OrderSide::Buy, 100_000),
         position("78", aeris_trading::OrderSide::Sell, 100_000),
     ];
     assert_eq!(
-        super::broker_exposure(&flat, &account, "ctrader:demo:1001:1"),
+        super::broker_exposure(&flat, &account, "broker:demo:1001:1"),
         None
     );
     assert_eq!(
-        super::broker_exposure(&single, &account, "ctrader:demo:1001:2"),
+        super::broker_exposure(&single, &account, "broker:demo:1001:2"),
         None
     );
 }
@@ -4816,24 +4785,12 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         "Hyperliquid"
     );
     assert_eq!(
-        super::terminal_provider_display(super::TerminalProvider::Tastytrade),
-        "tastytrade"
-    );
-    assert_eq!(
         super::default_listing_query(super::TerminalProvider::Rithmic),
         "MNQ"
     );
     assert_eq!(
         super::default_listing_query(super::TerminalProvider::Hyperliquid),
         ""
-    );
-    assert_eq!(
-        super::default_listing_query(super::TerminalProvider::Tastytrade),
-        "/ES"
-    );
-    assert_eq!(
-        super::terminal_provider_display(super::TerminalProvider::Ctrader),
-        "cTrader"
     );
     // Every provider id round-trips; an id the build does not expose maps to none.
     for provider in super::TerminalProvider::ALL {
@@ -4843,14 +4800,9 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         );
     }
     assert_eq!(super::known_terminal_provider("binance"), None);
-    // Only providers that stream trade prints offer a footprint.
-    assert!(!super::provider_trades_available(
-        super::TerminalProvider::Ctrader
-    ));
     for provider in [
         super::TerminalProvider::Rithmic,
         super::TerminalProvider::Hyperliquid,
-        super::TerminalProvider::Tastytrade,
     ] {
         assert!(super::provider_chart_types(provider).contains(&super::ChartType::Footprint));
     }
@@ -4861,10 +4813,6 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
     assert!(
         super::provider_intervals(super::TerminalProvider::Hyperliquid)
             .contains(&ChartInterval::Day3)
-    );
-    assert!(
-        super::provider_intervals(super::TerminalProvider::Tastytrade)
-            .contains(&ChartInterval::Month1)
     );
     let product = InstallProviderInstrument {
         provider_symbol: "MNQ".to_string(),
@@ -4879,10 +4827,6 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         super::provider_ready_message(super::TerminalProvider::Hyperliquid, &product),
         "MNQ · Hyperliquid"
     );
-    assert_eq!(
-        super::provider_ready_message(super::TerminalProvider::Tastytrade, &product),
-        "MNQZ6 · tastytrade"
-    );
 }
 
 #[test]
@@ -4892,7 +4836,7 @@ fn switching_a_seconds_chart_to_a_minute_bar_provider_opens_it_at_one_minute() {
         ..Default::default()
     };
     let hyperliquid = instrument(super::TerminalProvider::Hyperliquid);
-    let tastytrade = instrument(super::TerminalProvider::Tastytrade);
+    let rithmic = instrument(super::TerminalProvider::Rithmic);
     assert_eq!(
         super::instrument_interval(&hyperliquid, ChartInterval::Second30),
         ChartInterval::Minute1
@@ -4907,7 +4851,7 @@ fn switching_a_seconds_chart_to_a_minute_bar_provider_opens_it_at_one_minute() {
         "an offered interval is kept"
     );
     assert_eq!(
-        super::instrument_interval(&tastytrade, ChartInterval::Second30),
+        super::instrument_interval(&rithmic, ChartInterval::Second30),
         ChartInterval::Second30,
         "a provider with second bars keeps the seconds chart"
     );

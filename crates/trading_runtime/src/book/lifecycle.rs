@@ -450,19 +450,19 @@ pub(crate) fn broker_missing(
         (
             OrderStatus::Filled,
             OrderEventKind::Filled,
-            "filled at cTrader",
+            "filled at the broker",
         )
     } else if bound || order.filled_quantity.units() > 0 {
         (
             OrderStatus::Cancelled,
             OrderEventKind::Cancelled,
-            "no longer open at cTrader",
+            "no longer open at the broker",
         )
     } else {
         (
             OrderStatus::Rejected,
             OrderEventKind::Rejected,
-            "cTrader did not receive the order",
+            "the broker did not receive the order",
         )
     };
     advance(&mut order, owner_unix_nanos)?;

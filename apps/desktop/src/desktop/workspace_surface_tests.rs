@@ -23,7 +23,7 @@ fn live_snapshot_gaps_keep_the_metric_and_bound_the_evidence() {
 fn chart_countdown_stops_only_for_the_products_closed_session() {
     use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
     let product = InstallProviderInstrument {
-        instrument_id: "tastytrade:Future:/GCZ6".into(),
+        instrument_id: "rithmic:Future:GCZ6:COMEX".into(),
         ..InstallProviderInstrument::default()
     };
     let status = |instrument_id: &str, phase| MarketSessionStatus {
@@ -34,7 +34,7 @@ fn chart_countdown_stops_only_for_the_products_closed_session() {
         session_end_unix_nanos: None,
         next_open_unix_nanos: None,
     };
-    let closed = status("tastytrade:Future:/GCZ6", MarketSessionPhase::Closed);
+    let closed = status("rithmic:Future:GCZ6:COMEX", MarketSessionPhase::Closed);
     assert!(!chart_market_trading(Some(&closed), Some(&product)));
     for phase in [
         MarketSessionPhase::Regular,
@@ -44,7 +44,7 @@ fn chart_countdown_stops_only_for_the_products_closed_session() {
     ] {
         assert!(
             chart_market_trading(
-                Some(&status("tastytrade:Future:/GCZ6", phase)),
+                Some(&status("rithmic:Future:GCZ6:COMEX", phase)),
                 Some(&product)
             ),
             "{phase:?} keeps the countdown"
@@ -54,7 +54,7 @@ fn chart_countdown_stops_only_for_the_products_closed_session() {
     assert!(
         chart_market_trading(
             Some(&status(
-                "tastytrade:Future:/ESZ6",
+                "rithmic:Future:ESZ6:CME",
                 MarketSessionPhase::Closed
             )),
             Some(&product)

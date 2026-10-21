@@ -1,8 +1,8 @@
 use super::super::history::tracker::HistoryTicket;
 use super::{CandleHandoffSeed, RecoveryReason, SeriesFailure, SeriesInput, SeriesLifecycle};
 use crate::market_service::{
-    BarSeriesKey, Coordinator, FailureStage, FormingBar, LiveModel, LiveSeriesPublication,
-    MarketStream, MarketTrade, ProviderGeneration, ProviderHealth, TradeHandoffSeed, id,
+    BarSeriesKey, Coordinator, FailureStage, FormingBar, LiveModel, MarketStream, MarketTrade,
+    ProviderGeneration, ProviderHealth, TradeHandoffSeed, id,
 };
 use aeris_observability::diagnostic;
 
@@ -283,7 +283,7 @@ impl Coordinator<'_> {
         }
         diagnostic!(
             "Aeris market series recovery started for {}: {detail}",
-            crate::market_service::LoggedInstrument(&series.instrument_id)
+            series.instrument_id
         );
         self.cancel_inflight_history_for_live_recovery(series, generation);
         if let Some(live) = self.series.trade_lifecycle_mut(series) {
@@ -554,7 +554,7 @@ impl Coordinator<'_> {
         }
         diagnostic!(
             "Aeris market series recovery started for {}: {detail}",
-            crate::market_service::LoggedInstrument(&series.instrument_id)
+            series.instrument_id
         );
         self.cancel_inflight_history_for_live_recovery(series, generation);
         if let Some(live) = self.series.candle_mut(series) {
@@ -594,20 +594,9 @@ impl Coordinator<'_> {
                 ))
             })
             .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, update, trade_built) in ready {
-            let published = match update {
-                LiveSeriesPublication::Tails(bars) => {
-                    self.install_live_tails(&series, generation, price_scale, quantity_scale, bars)
-                }
-                LiveSeriesPublication::CompletedCorrection(bar) => self
-                    .install_completed_live_correction(
-                        &series,
-                        generation,
-                        price_scale,
-                        quantity_scale,
-                        bar,
-                    ),
-            };
+        for (series, generation, price_scale, quantity_scale, tails, trade_built) in ready {
+            let published =
+                self.install_live_tails(&series, generation, price_scale, quantity_scale, tails);
             if let Err(error) = published {
                 diagnostic!("Aeris engine live publication failed: {error}");
                 self.recover_lifecycle_series(
@@ -620,8 +609,6 @@ impl Coordinator<'_> {
                 model.last_publication_at = self.clock.monotonic();
             }
         }
-        // A bounded trade correction may follow a queued tail in the next
-        // publication turn even if no further provider event arrives.
         self.collect_dirty_series();
     }
 }

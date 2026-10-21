@@ -61,6 +61,7 @@ pub use crate::strategy::{
 use crate::venue::VenueInbox;
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
+use aeris_trading::venue::BROKER_VENUE_ID;
 use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
     AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, EquitySample, FeeSchedule, Fill,
@@ -93,12 +94,12 @@ pub(crate) const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
 pub(crate) const MAXIMUM_COPY_DISPATCHES: usize = 128;
 pub(crate) const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
 pub(crate) const LIVE_TRADING_DISABLED: &str =
-    "cTrader live accounts are data-only; trading is disabled";
-pub(crate) const DEMO_VENUE_UNAVAILABLE: &str = "cTrader demo venue is not connected";
+    "broker live accounts are data-only; trading is disabled";
+pub(crate) const DEMO_VENUE_UNAVAILABLE: &str = "broker demo venue is not connected";
+pub(crate) const VENUE_UNSUPPORTED: &str = "trading account venue is not supported";
 pub(crate) const BROKER_PNL_UNAVAILABLE: &str =
     "the broker account is unreachable, so its open P&L for the loss rules is unknown";
-/// One request per connected account with open broker positions, well inside cTrader's
-/// 50 requests per second.
+/// One request per connected account with open broker positions.
 pub(crate) const UNREALIZED_PNL_INTERVAL: Duration = Duration::from_secs(1);
 /// The equity timer cadence; the owner wakes on it alongside the other timer deadlines.
 pub(crate) const EQUITY_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
@@ -109,7 +110,7 @@ pub(crate) type Reply<T> = SyncSender<Result<T, String>>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VenueRoute {
     Simulated,
-    CtraderDemo,
+    BrokerDemo,
 }
 
 impl VenueRoute {
@@ -121,8 +122,13 @@ impl VenueRoute {
         account.validate().map_err(|error| error.to_string())?;
         match (account.venue_id.as_str(), account.environment) {
             ("aeris-sim", AccountEnvironment::Simulated) => Ok(Self::Simulated),
-            ("ctrader", AccountEnvironment::Demo) => Ok(Self::CtraderDemo),
-            ("ctrader", AccountEnvironment::Live) => Err(LIVE_TRADING_DISABLED.into()),
+            (BROKER_VENUE_ID, AccountEnvironment::Demo) => Ok(Self::BrokerDemo),
+            (BROKER_VENUE_ID, AccountEnvironment::Live) => Err(LIVE_TRADING_DISABLED.into()),
+            // Accounts recorded by a venue this build no longer routes stay readable but
+            // can never trade.
+            (_, AccountEnvironment::Demo | AccountEnvironment::Live) => {
+                Err(VENUE_UNSUPPORTED.into())
+            }
             _ => Err("trading account route is invalid".into()),
         }
     }

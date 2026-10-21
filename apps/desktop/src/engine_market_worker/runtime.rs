@@ -225,15 +225,14 @@ fn update_ticket_interest(
     }
 }
 
-/// Sends each chart its market session status when its product or the runtime calendar
-/// changed since the last send, and on every `tick_due` so phase boundaries are crossed.
+/// Sends each chart its market session status when its product changed since the last
+/// send, and on every `tick_due` so phase boundaries are crossed.
 fn publish_session_statuses(
     market: &MarketService,
     endpoints: &mut [EndpointRecord],
     tick_due: bool,
     clock: &dyn Clock,
 ) {
-    let revision = market.market_session_revision();
     let mut now = None;
     for record in endpoints
         .iter_mut()
@@ -241,9 +240,8 @@ fn publish_session_statuses(
     {
         if !tick_due
             && !session_status_stale(
-                record.session_status_sent.as_ref(),
+                record.session_status_sent.as_deref(),
                 &record.product.instrument_id,
-                revision,
             )
         {
             continue;
@@ -258,10 +256,10 @@ fn publish_session_statuses(
                 status,
             }) {
             Ok(()) => {
-                record.session_status_sent = Some((record.product.instrument_id.clone(), revision));
+                record.session_status_sent = Some(record.product.instrument_id.clone());
             }
             Err(error) => {
-                // Keep the last acknowledged revision so a full mailbox retries
+                // Keep the last acknowledged instrument so a full mailbox retries
                 // on the next worker iteration without waiting for the minute tick.
                 diagnostic!("Aeris market session status was not delivered: {error}");
             }
@@ -269,10 +267,8 @@ fn publish_session_statuses(
     }
 }
 
-fn session_status_stale(sent: Option<&(String, u64)>, instrument_id: &str, revision: u64) -> bool {
-    sent.is_none_or(|(sent_instrument, sent_revision)| {
-        sent_instrument != instrument_id || *sent_revision != revision
-    })
+fn session_status_stale(sent: Option<&str>, instrument_id: &str) -> bool {
+    sent != Some(instrument_id)
 }
 
 /// Coalesces only adjacent latest-value commands. A click is a barrier, so a
@@ -1101,20 +1097,12 @@ mod tests {
     }
 
     #[test]
-    fn session_status_is_resent_when_the_calendar_or_product_changes() {
-        let sent = ("tastytrade:Future:/GCZ6".to_string(), 3);
-        assert!(session_status_stale(None, "tastytrade:Future:/GCZ6", 0));
-        assert!(!session_status_stale(
-            Some(&sent),
-            "tastytrade:Future:/GCZ6",
-            3
-        ));
+    fn session_status_is_resent_when_the_product_changes() {
+        let sent = Some("rithmic:Future:GCZ6:COMEX");
+        assert!(session_status_stale(None, "rithmic:Future:GCZ6:COMEX"));
+        assert!(!session_status_stale(sent, "rithmic:Future:GCZ6:COMEX"));
         assert!(
-            session_status_stale(Some(&sent), "tastytrade:Future:/GCZ6", 4),
-            "a status computed before the calendar loaded must be replaced"
-        );
-        assert!(
-            session_status_stale(Some(&sent), "tastytrade:Future:/ESZ6", 3),
+            session_status_stale(sent, "rithmic:Future:ESZ6:CME"),
             "a chart that switched instrument needs its own status"
         );
     }

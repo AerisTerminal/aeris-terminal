@@ -33,12 +33,11 @@ Measure everything on the same machine and publish the method:
 | 1 | **Futures prop firms** | Lost ProjectX; need branded platforms; decide fast; buy B2B | Rithmic conformance |
 | 2 | **Small and mid futures brokers / IBs** | List many third-party platforms; some openly invite new ones | Rithmic conformance |
 | 3 | **Crypto exchange broker programs** | Pay revenue share on routed volume; some need no company | Indian legal check on rebates |
-| 4 | **cTrader brokers and prop firms (forex/CFD)** | cTrader Open API is free, uses OAuth and works with any cTrader broker | Spotware app approval, then the integration (`plan/longterm_plan/trading_platform.md` T9) |
-| 5 | **Large brokers (Schwab, IBKR Web API, TradeStation)** | Big brands, but need a US entity, traction and due diligence | Revenue and a US entity |
+| 4 | **Large brokers (Schwab, IBKR Web API, TradeStation)** | Big brands, but need a US entity, traction and due diligence | Revenue and a US entity |
 
 ### What not to do
 
-- Don't pitch yourself as an MT5 replacement to MT5 brokers. MetaQuotes doesn't allow third-party terminals on MT4/MT5 accounts, and the challengers (TradeLocker, Match-Trader, DXtrade, cTrader) sell a full server and back office, not just a front end.
+- Don't pitch yourself as an MT5 replacement to MT5 brokers. MetaQuotes doesn't allow third-party terminals on MT4/MT5 accounts, and the challengers (TradeLocker, Match-Trader, DXtrade) sell a full server and back office, not just a front end.
 - Don't approach Topstep. It runs a closed ecosystem.
 - Deprioritise Optimus Futures, EdgeClear, Ironbeam and Cannon, since each has its own platform, and NinjaTrader/Tradovate, which is a direct competitor.
 - Don't promote offshore forex brokers to Indian users, and block US users from offshore crypto-derivatives integrations.
@@ -50,7 +49,7 @@ Measure everything on the same machine and publish the method:
 
 What Aeris can do on each route today, and the work left to make it trade, is tracked in
 `plan/longterm_plan/trading_platform.md` (Broker coverage). As of October 2026, market data works through
-Rithmic (Test system only), tastytrade (Level 1) and Hyperliquid. No live broker or exchange
+Rithmic (Test system only) and Hyperliquid. No live broker or exchange
 account can trade yet.
 
 ### Futures prop firms (primary)
@@ -114,19 +113,17 @@ Rules for every route:
 
 | Rank | Route | Login | Notes |
 |---|---|---|---|
-| 1 | **cTrader Open API** (IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and others) | OAuth 2.0 | Free; Spotware reviews each new app; one integration covers many brokers. No US brokers |
-| 2 | **TradeLocker Public API** | Email, password and server, exchanged for a JWT | Used by 320+ brokers and 1,281+ prop firms; join the Developer Program for multi-user apps; quotes by REST polling |
-| 3 | **DXtrade** | Broker-issued credentials | Each broker must enable API access and may whitelist IPs |
-| 4 | **Match-Trader Platform API** | Credentials or one-time token | REST plus WebSocket; brokers can disable it |
-| 5 | **OANDA v20** | Token; OAuth via the Partner Form | US-regulated; mature API |
-| 6 | **Interactive Brokers TWS API** | User's local TWS or IB Gateway | No fee or approval; works for US users |
-| 7 | **Capital.com** | User API key | Self-serve; no vendor program; 10-minute sessions; 40 streaming instruments |
-| 8 | **IG (outside US)** | User API key and credentials | Vendor terms not public |
-| — | **tastyfx (IG US)** | Unclear | Same group as tastytrade (IG Group); ask your tastytrade contact for an introduction |
+| 1 | **TradeLocker Public API** | Email, password and server, exchanged for a JWT | Used by 320+ brokers and 1,281+ prop firms; join the Developer Program for multi-user apps; quotes by REST polling |
+| 2 | **DXtrade** | Broker-issued credentials | Each broker must enable API access and may whitelist IPs |
+| 3 | **Match-Trader Platform API** | Credentials or one-time token | REST plus WebSocket; brokers can disable it |
+| 4 | **OANDA v20** | Token; OAuth via the Partner Form | US-regulated; mature API |
+| 5 | **Interactive Brokers TWS API** | User's local TWS or IB Gateway | No fee or approval; works for US users |
+| 6 | **Capital.com** | User API key | Self-serve; no vendor program; 10-minute sessions; 40 streaming instruments |
+| 7 | **IG (outside US)** | User API key and credentials | Vendor terms not public |
 | — | **FOREX.com** | Credentials after support enables API | US-regulated; terms unclear |
 
 **Cautions:**
-- **US users:** retail forex is legal only through firms registered with the CFTC (OANDA, FOREX.com, IBKR, tastyfx).
+- **US users:** retail forex is legal only through firms registered with the CFTC (OANDA, FOREX.com, IBKR).
 - **India, trading:** RBI does not allow residents to send margin abroad for forex, and many of these brokers are on RBI's Alert List.
 - **India, marketing:** the Alert List also covers sites that promote unauthorised platforms. Don't market forex integrations to Indian residents, and get Indian legal advice.
 - **Credentials:** routes that need user passwords should store them in the operating system keychain, and you should check each broker's terms on third-party access.
@@ -213,7 +210,7 @@ offers 40% off a yearly plan instead. Settle it before launching a founder offer
    - A statement that the AI never places orders.
    - A named security contact.
 5. **White-label demo:** one installer branded with the target firm's logo, sent with the first email.
-6. **Proof points:** tastytrade production approval, Rithmic conformance once passed, user counts and zero incidents.
+6. **Proof points:** Rithmic conformance once passed, user counts and zero incidents.
 
 ---
 
@@ -259,7 +256,7 @@ Day 0 email or DM, then a follow-up on day 3, day 7 and day 14 with new value ea
 | Objection | Answer |
 |---|---|
 | "You're too small / what if you disappear?" | Source-code escrow, a written support agreement and a pilot with no long commitment |
-| "Is it reliable?" | Passed Rithmic conformance, test suite, signed releases, live on tastytrade with zero incidents |
+| "Is it reliable?" | Passed Rithmic conformance, test suite, signed releases and zero incidents |
 | "Why not Quantower or Tradesea?" | Native Mac and Linux, a branded desktop app, a tiny footprint and a lower price |
 | "You're not a US company" | Invoice as an export of services from India for now, and form a US entity once contracts justify it |
 | "Who holds the data?" | Nobody but the trader. Data goes from your systems straight to their computer |
@@ -281,9 +278,9 @@ Day 0 email or DM, then a follow-up on day 3, day 7 and day 14 with new value ea
 
 | Weeks | Actions |
 |---|---|
-| 1–2 | Build the sales kit (benchmarks, video, one-pagers, security page, white-label theming). Register a cTrader Open API app. Apply to Hyperliquid, Bybit and Kraken. Get Indian legal and CA advice. Confirm Rithmic dev-kit terms and costs. |
-| 3–6 | Run Rithmic conformance when Rithmic onboarding allows. Without waiting for Rithmic, build cTrader market data and the shared live venue on cTrader demo accounts (`plan/longterm_plan/trading_platform.md` T9). Send the first outreach wave to 15 prop firms and 3 brokers. Launch the founder lifetime offer. Post once in each community (Show HN, r/algotrading, r/FuturesTrading, NexusFi). |
-| 7–12 | Run 2 pilots. Get listed on rithmic.com/platforms and by Discount Trading or AMP. Ship cTrader trading after demo qualification on two brokers. Send the second outreach wave to cTrader brokers and the remaining prop firms. Reapply to TradeStation with traction. |
+| 1–2 | Build the sales kit (benchmarks, video, one-pagers, security page, white-label theming). Apply to Hyperliquid, Bybit and Kraken. Get Indian legal and CA advice. Confirm Rithmic dev-kit terms and costs. |
+| 3–6 | Run Rithmic conformance when Rithmic onboarding allows. Send the first outreach wave to 15 prop firms and 3 brokers. Launch the founder lifetime offer. Post once in each community (Show HN, r/algotrading, r/FuturesTrading, NexusFi). |
+| 7–12 | Run 2 pilots. Get listed on rithmic.com/platforms and by Discount Trading or AMP. Send the second outreach wave to the remaining prop firms. Reapply to TradeStation with traction. |
 
 ### Targets by day 90
 
@@ -299,7 +296,7 @@ Day 0 email or DM, then a follow-up on day 3, day 7 and day 14 with new value ea
 
 | Risk | Mitigation |
 |---|---|
-| Fail or delay Rithmic conformance | Build a test suite first that simulates disconnects, partial fills, rejections and rate limits. Build cTrader in parallel so a Rithmic delay does not stall live trading |
+| Fail or delay Rithmic conformance | Build a test suite first that simulates disconnects, partial fills, rejections and rate limits |
 | A bug that sends a wrong order | Order confirmations, size limits, kill switch, paper testing for every broker, terms of service that cover execution errors |
 | Solo-founder bus factor | Escrow, documentation, signed and reproducible builds |
 | Legal exposure (crypto rebates, US broker payments, data licensing) | Indian and US legal checks before signing or taking any revenue share |

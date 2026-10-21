@@ -393,12 +393,9 @@ fn replay_timeframe_label(replay: &ReplaySnapshot) -> String {
     }
 }
 
-/// cTrader venues name the account environment too; the legend shows only the provider.
 fn replay_venue_label(venue: &str) -> &str {
     if venue.eq_ignore_ascii_case("rithmic") {
         "Rithmic"
-    } else if matches!(venue, "cTrader Demo" | "cTrader Live") {
-        "cTrader"
     } else {
         venue
     }
@@ -463,8 +460,6 @@ mod tests {
 
     #[test]
     fn legend_venues_name_the_provider_not_the_account_environment() {
-        assert_eq!(replay_venue_label("cTrader Demo"), "cTrader");
-        assert_eq!(replay_venue_label("cTrader Live"), "cTrader");
         assert_eq!(replay_venue_label("rithmic"), "Rithmic");
         assert_eq!(replay_venue_label("CME"), "CME");
     }

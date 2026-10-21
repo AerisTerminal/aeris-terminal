@@ -11,14 +11,14 @@ user's machine; no Aeris server ever sees them.
 - Native desktop application written in Rust with GPUI. Windows first; Linux is supported.
 - One application process. Market, trading, account and context work run on bounded background
   workers inside that process; the UI thread never blocks on network or disk.
-- A small AWS backend serves the website and broker sign-in only (see [AWS deployment](#aws-deployment)).
+- A small AWS backend serves the website and mail only (see [AWS deployment](#aws-deployment)).
 
 ## What it does
 
-- Streams live and historical market data from Rithmic, Hyperliquid, tastytrade and cTrader.
+- Streams live and historical market data from Rithmic and Hyperliquid.
 - Draws charts with the Aeris Charts engine: candles, footprint, volume, volume profile, studies
   and drawings.
-- Places and tracks orders, fills, positions and PnL through cTrader or the simulated venue.
+- Places and tracks orders, fills, positions and PnL through the simulated venue.
 - Shows economic and fundamentals context fetched directly from official public sources.
 - Saves workspaces, tabs, layouts and chart settings locally.
 
@@ -42,8 +42,7 @@ user's machine; no Aeris server ever sees them.
 - **market_runtime** is the only owner of provider sessions and canonical candles. It opens one
   session per provider, merges on-demand history with live data, and fans updates out to every
   chart. Changing symbol, timeframe or layout never tears down a healthy session.
-- **trading_runtime** is the only owner of orders, fills, positions and PnL. cTrader orders travel
-  over the cTrader session that `market_runtime` already holds; there is never a second connection.
+- **trading_runtime** is the only owner of orders, fills, positions and PnL.
 - **account_runtime** and **context_runtime** run their own background work and publish immutable
   snapshots to the UI.
 - **Charts**: `crates/ui/chart_integration` passes market, trading and study data to Aeris Charts.
@@ -59,11 +58,9 @@ All AWS infrastructure is defined with CDK in the website repository (`infra/`),
 | What | Services | Status |
 | --- | --- | --- |
 | Website `aeristerminal.com` | Route 53, ACM, private S3, CloudFront | Live |
-| Broker OAuth `app.aeristerminal.com` (tastytrade, cTrader) | API Gateway, Lambda, DynamoDB, KMS, SSM, CloudWatch alarms | Live |
 | Aeris account sign-in, billing, licence leases, release downloads | Planned: Cognito, Paddle, KMS, S3 | Not deployed |
 
-- Broker OAuth only handles broker authorization tokens. It never receives market data, orders or
-  account state.
+- No AWS service receives market data, orders or account state.
 - Sign-in and automatic updates are disabled in the desktop until the account backend exists.
 - Deploy the site with `npm run deploy` and the stacks with `npx cdk deploy` from the website repo.
 
@@ -85,7 +82,7 @@ All AWS infrastructure is defined with CDK in the website repository (`infra/`),
 | `crates/trading_runtime` | Orders, fills, positions, PnL, simulated venue |
 | `crates/account_runtime` | Aeris account sign-in |
 | `crates/context_runtime` | Public economic and fundamentals data |
-| `crates/adapters` | Rithmic, Hyperliquid, tastytrade and cTrader protocols |
+| `crates/adapters` | Rithmic and Hyperliquid protocols |
 | `crates/domain`, `crates/contracts`, `crates/application` | Shared types and saved-workspace format |
 | `crates/provider_history` | History loading and live cutover |
 | `crates/study_sdk` | Study SDK |
@@ -99,8 +96,7 @@ All AWS infrastructure is defined with CDK in the website repository (`infra/`),
 | Directory | Contents |
 | --- | --- |
 | `src` | Next.js site (static export) |
-| `infra/lib` | CDK stacks: DNS, site, mail, broker OAuth |
-| `infra/backend/broker_oauth` | Broker OAuth Lambda |
+| `infra/lib` | CDK stacks: DNS, site, mail |
 | `scripts` | Dev and deploy scripts |
 
 ### Chart engine

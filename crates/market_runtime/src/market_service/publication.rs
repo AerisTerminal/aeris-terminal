@@ -987,11 +987,7 @@ mod tests {
             price_increment: Some(25),
             ..Default::default()
         };
-        let mut order_book = ProviderOrderBook::new(
-            instrument.clone(),
-            super::super::TradeContinuity::Sequence,
-            false,
-        );
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), false);
         let snapshot = aeris_market_data::DepthSnapshot {
             metadata: aeris_market_data::EventMetadata {
                 provider_id: instrument.provider.clone(),
@@ -1065,17 +1061,13 @@ mod tests {
     #[test]
     fn level_one_publication_is_ready_on_the_first_current_bbo() {
         let instrument = aeris_contracts::InstallProviderInstrument {
-            provider: "tastytrade".into(),
+            provider: "fixture".into(),
             session_generation: 4,
-            instrument_id: "tastytrade:Equity:SPY".into(),
-            entitlement_id: "tastytrade-authorized".into(),
+            instrument_id: "fixture:equity:SPY".into(),
+            entitlement_id: "fixture-authorized".into(),
             ..Default::default()
         };
-        let mut order_book = ProviderOrderBook::new(
-            instrument.clone(),
-            super::super::TradeContinuity::Indexed,
-            true,
-        );
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), true);
         order_book.install_top_of_book(&aeris_market_data::TopOfBookQuote {
             metadata: aeris_market_data::EventMetadata {
                 provider_id: instrument.provider.clone(),
@@ -1188,11 +1180,7 @@ mod tests {
     #[test]
     fn depth_capable_book_without_a_depth_subscription_publishes_the_live_quote() {
         let instrument = hyperliquid_instrument(1);
-        let mut order_book = ProviderOrderBook::new(
-            instrument.clone(),
-            super::super::TradeContinuity::Indexed,
-            false,
-        );
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), false);
         order_book.set_depth_subscribed(false);
         assert!(order_book.install_top_of_book(&quote(&instrument, 1, 7, 8_381_500_000)));
 
@@ -1220,11 +1208,7 @@ mod tests {
     #[test]
     fn unsubscribed_depth_never_republishes_a_retained_image_from_an_older_session() {
         let instrument = hyperliquid_instrument(1);
-        let mut order_book = ProviderOrderBook::new(
-            instrument.clone(),
-            super::super::TradeContinuity::Indexed,
-            false,
-        );
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), false);
         let level = |price| aeris_market_data::DepthLevel {
             price,
             quantity: 1,

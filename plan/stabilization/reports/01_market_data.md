@@ -3,7 +3,7 @@
 Repository: `C:\Users\devraj\Downloads\Softwares\aeris-terminal` (branch `main`, 4 commits ahead of `origin/main`, 1189 commits).
 Method: read-only. Files were read directly, `git log`/`git show` were used for history, and churn was counted over the last 300 commits. No build or test was run, so every "needs verification" item below still needs a test.
 
-Scope: `crates/market_runtime/src/market_service/*` (coordinator, realtime, history, runtime, mod, tastytrade, publication), `crates/market_runtime/src/{rithmic_realtime,hyperliquid_realtime,study}.rs`, `crates/market_engine/src/series_store.rs`, `crates/adapters/rithmic_protocol/src/calendar.rs`, and the desktop bridge (`apps/desktop/src/market_worker.rs`, `apps/desktop/src/engine_market_worker.rs` plus its `publications.rs`, `runtime.rs`, `replay_conversion.rs`, and `selection_commands.rs`).
+Scope: `crates/market_runtime/src/market_service/*` (coordinator, realtime, history, runtime, mod, publication and a since-removed broker provider module), `crates/market_runtime/src/{rithmic_realtime,hyperliquid_realtime,study}.rs`, `crates/market_engine/src/series_store.rs`, `crates/adapters/rithmic_protocol/src/calendar.rs`, and the desktop bridge (`apps/desktop/src/market_worker.rs`, `apps/desktop/src/engine_market_worker.rs` plus its `publications.rs`, `runtime.rs`, `replay_conversion.rs`, and `selection_commands.rs`).
 
 ---
 
@@ -11,9 +11,9 @@ Scope: `crates/market_runtime/src/market_service/*` (coordinator, realtime, hist
 
 The market-data path works for the common case but is in a "fix the symptom where it shows" phase. Three structural problems drive most of the recent churn:
 
-1. **Two parallel live models in one coordinator.** Rithmic-style trade-built series and provider-candle series (tastytrade, cTrader, Hyperliquid) each have their own copy of the lifecycle (connecting, online, recovering, failed, series recovering, publish). Every handler branches on `LiveModel`. Fixes land in one branch and miss the other, and the "rithmic_*" names are now used for every provider.
+1. **Two parallel live models in one coordinator.** Rithmic-style trade-built series and provider-candle series (Hyperliquid and two since-removed broker providers) each have their own copy of the lifecycle (connecting, online, recovering, failed, series recovering, publish). Every handler branches on `LiveModel`. Fixes land in one branch and miss the other, and the "rithmic_*" names are now used for every provider.
 2. **History state spread across eight parallel maps keyed by `(series, generation)`.** Retry, deferral, empty answers, exhaustion, detachment, and cancellation are tracked separately and pruned separately. Current-edge recovery and older backfill share one retry ticket, and recent fixes (`dfe6c287`) added guards instead of separating those two lanes.
-3. **Provider and calendar knowledge leaks into generic layers and into the desktop.** The generic handoff depends on the Rithmic adapter's CME calendar. The coordinator calls tastytrade-only session status. The desktop holds four separate interval/cadence mapping tables and more than 100 provider string literals.
+3. **Provider and calendar knowledge leaks into generic layers and into the desktop.** The generic handoff depends on the Rithmic adapter's CME calendar. The coordinator calls session status that only one (since-removed) broker provider implements. The desktop holds four separate interval/cadence mapping tables and more than 100 provider string literals.
 
 These produce concrete defects:
 - A persisted 3-day chart pane cannot be restored (MD-01).
@@ -30,16 +30,16 @@ None of the scalability or performance claims in the code are backed by measurem
 
 | File | Fix commits / 300 | Size (lines) | Notes |
 |---|---|---|---|
-| `crates/market_runtime/src/market_service/tastytrade.rs` | 20 | 2692 | Candle overlay, session status, and calendar heuristics |
+| Removed Level 1 broker module in `market_service` | 20 | 2692 | Candle overlay, session status, and calendar heuristics |
 | `crates/market_runtime/src/market_service/realtime.rs` | 13 | 5179 | Lifecycle duplication; handoff heuristics (`4f885153`) |
-| `crates/market_runtime/src/market_service/tastytrade_tests.rs` | 12 | - | Tests track the tastytrade patches |
+| Removed Level 1 broker module tests in `market_service` | 12 | - | Tests track that provider's patches |
 | `crates/market_runtime/src/market_service/coordinator.rs` | 11 | 5183 (about 3870 of them inline tests) | God struct with about 30 maps |
 | `crates/market_runtime/src/market_service/mod.rs` | 10 | 1827 | Descriptor flags keep growing |
 | `apps/desktop/src/engine_market_worker.rs` | 10 | 2874 | Desktop compensations (`771a8d73`, `f504ab86`, `6222102d`) |
 | `apps/desktop/src/engine_market_worker/publications.rs` | 8 | 547 | Desktop re-derives load and live state |
 | `crates/market_runtime/src/market_service/history.rs` | 6 | 2379 | History ledger (`dfe6c287`) |
 | `crates/market_runtime/src/market_service/publication.rs` | 6 | - | |
-| `crates/adapters/tastytrade/src/{lib,session}.rs` | 6 / 6 | - | |
+| Removed Level 1 broker adapter `{lib,session}.rs` | 6 / 6 | - | |
 | `apps/desktop/src/market_worker.rs` | 4 | 3311 | Mailbox coalescing |
 | `crates/market_runtime/src/market_service/runtime.rs` | 4 | 2087 | Provider-literal session status |
 | `provider_event.rs` | 4 | - | |
@@ -62,10 +62,10 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 - **Proposed clean fix:** Define one bidirectional mapping between `ChartInterval` and the persisted `SeriesKey` cadence. Either persist the resolved `BarSeriesKey` period, or add a single `ChartInterval::to_series_cadence`/`from_series_cadence` pair in `aeris_market_data`. Remove the other three tables, and add a property test that round-trips every `ChartInterval` for every provider presentation. Restore should skip or repair an unsupported pane with a visible notice rather than fail the whole workspace.
 - **Verification:** Add a unit test: `pane_interval(Some(&workspace_series(ChartInterval::Day3, &hyperliquid_instrument)), "hyperliquid")` should return `Ok(Day3)`. It currently should return `Err`. Then confirm manually: open a Hyperliquid 3D chart, quit, and relaunch.
 
-### MD-02: The stalled-live recovery watchdog only works for tastytrade
+### MD-02: The stalled-live recovery watchdog only works for one broker provider
 - **Severity:** High
 - **Category:** Bug
-- **Evidence:** `realtime.rs:3497-3556` (`recover_stalled_live_series`) decides whether a market is open by calling `self.broker_api.market_session_status(...)` and `super::tastytrade::now_nanos`. The broker API implementation (`tastytrade.rs:587-627`) returns `Unknown` for any non-tastytrade instrument, so Rithmic (TradeBuilt), Hyperliquid, and cTrader series never pass the "market open" gate. A provider-neutral resolver already exists at `runtime.rs:1146` (`MarketService::market_session_status`). The logic was introduced in `4f885153`.
+- **Evidence:** `realtime.rs:3497-3556` (`recover_stalled_live_series`) decides whether a market is open by calling `self.broker_api.market_session_status(...)` and the removed Level 1 broker module's `now_nanos`. That broker API implementation returns `Unknown` for any instrument of another provider, so Rithmic (TradeBuilt), Hyperliquid, and the removed FX/CFD broker's series never pass the "market open" gate. A provider-neutral resolver already exists at `runtime.rs:1146` (`MarketService::market_session_status`). The logic was introduced in `4f885153`.
 - **Root cause:** A feature built for one provider was placed in the generic coordinator but wired to that provider's API.
 - **Proposed clean fix:** Have the coordinator ask a provider-neutral session-calendar owner (see MD-09) whether a market is open, and apply the stall policy per descriptor. The coordinator should not call `broker_api` directly.
 - **Verification:** Add a coordinator test with a Rithmic live series, an open CME session, and no trades past the stall threshold. The test should expect a recovery to be issued. It currently should not issue one.
@@ -81,10 +81,10 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 ### MD-04: Weekly and monthly live updates are silently missing for non-CME venues
 - **Severity:** Medium
 - **Category:** Bug / maturity gap
-- **Evidence:** `TradeLiveHandoff::new` returns `None` when `RithmicExchangeCalendar::for_venue` does not match `CME|CBOT|COMEX|NYMEX` (`calendar.rs:29-33`; `realtime.rs:459-467`). `ensure_realtime` (`realtime.rs:1999-2004`) then creates no handoff and raises no error, so tastytrade equities and CFE 1W/1M charts never go live. The tape's `trading_day` (`realtime.rs:282-289`) is also `None` for those venues.
+- **Evidence:** `TradeLiveHandoff::new` returns `None` when `RithmicExchangeCalendar::for_venue` does not match `CME|CBOT|COMEX|NYMEX` (`calendar.rs:29-33`; `realtime.rs:459-467`). `ensure_realtime` (`realtime.rs:1999-2004`) then creates no handoff and raises no error, so the removed Level 1 broker's equities and CFE 1W/1M charts never go live. The tape's `trading_day` (`realtime.rs:282-289`) is also `None` for those venues.
 - **Root cause:** Calendar availability is treated as optional instead of as an explicit capability.
 - **Proposed clean fix:** Make "has a calendar for this venue" a checked capability. Reject unsupported periods at demand time with a `MarketDemandError` (stage `Handoff`), or provide calendars per venue (MD-09).
-- **Verification:** Add a coordinator test that subscribes to a tastytrade equity 1W series. Expect either a live handoff or an explicit demand error, never silence.
+- **Verification:** Add a coordinator test that subscribes to a non-CME equity 1W series. Expect either a live handoff or an explicit demand error, never silence.
 
 ### MD-05: Hot paths copy the full canonical series on every live tick
 - **Severity:** High (performance; unmeasured)
@@ -142,7 +142,7 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 - **Category:** Architecture drift
 - **Evidence:**
   - Generic `ProviderOrderBook` and `TradeLiveHandoff` import `aeris_rithmic_protocol_adapter::RithmicExchangeCalendar`.
-  - tastytrade has two more classifiers with different venue vocabularies: `market_collection` (`tastytrade.rs:687`) uses CME names and `tastytrade_market_collection` (`tastytrade.rs:611`) uses XCME names.
+  - The removed Level 1 broker module has two more classifiers with different venue vocabularies: one uses CME names and the other uses XCME names.
   - `session_hours.rs` is a third calendar source.
   - `runtime.rs:1146-1171` branches on provider strings to pick a session source.
 - **Proposed clean fix:** Add a provider-neutral `ExchangeCalendar` in `crates/domain` keyed by canonical venue (MIC), used by history, live bucketing (MD-03/04), session status, and the watchdog (MD-02). Providers map their venue codes to MICs once at the adapter boundary.
@@ -153,9 +153,9 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 - **Category:** Architecture drift (violates the AGENTS.md invariant that the desktop stays provider-neutral)
 - **Evidence:**
   - There are 100 provider id literals across 12 non-test desktop files. The largest counts are `engine_market_worker.rs` (31), `readiness_conformance.rs` (15), `replay_conversion.rs` (14), and `market_worker.rs` (14).
-  - `replay_conversion.rs:209-344` hard-codes the provider id set, entitlement ids (`"tastytrade-authorized"`, `"hyperliquid-public"`, `"ctrader-authorized"`), and instrument-id prefixes.
+  - `replay_conversion.rs:209-344` hard-codes the provider id set, entitlement ids (`"hyperliquid-public"` and the two removed brokers' `-authorized` ids), and instrument-id prefixes.
   - `series_key` (`replay_conversion.rs:354-420`) decides `BarPeriod` per provider.
-  - `worker_identity` (`engine_market_worker.rs:695-701`) labels tastytrade and cTrader workers as "Rithmic market runtime" (`engine_market_worker.rs:54-57`).
+  - `worker_identity` (`engine_market_worker.rs:695-701`) labels the removed broker providers' workers as "Rithmic market runtime" (`engine_market_worker.rs:54-57`).
   - The `--rithmic` and `--multi-chart` startup modes (`desktop.rs:5365-5386`) build fake instruments through the non-test `default_product` (`engine_market_worker.rs:712-727`: entitlement `rithmic-test:CME:MNQ`, `price_scale: 2`).
   - Four interval tables exist (see MD-01).
 - **Proposed clean fix:** Have the runtime publish a resolved `SeriesKey` and validation result in the selection reply, so the desktop sends `ChartInterval` plus the instrument and receives a key. Move identity validation into `market_runtime`. Remove the fake-instrument CLI modes or route them through the catalog.
@@ -187,8 +187,8 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
   - `PROVIDER_RECONNECT_DELAY = 250 ms` (`mod.rs:77`) applies to Rithmic and Hyperliquid (`mod.rs:1108`, `1159`).
   - The Hyperliquid loop reconnects forever at that fixed delay (`hyperliquid_realtime.rs:530-620`).
   - Rithmic uses `Duration::ZERO` for non-transport recovery (`rithmic_realtime.rs:964-966`, `1100-1106`).
-  - tastytrade and cTrader use a fixed 3 s delay. No exponential backoff or jitter exists anywhere.
-  - `coordinator.rs:233-245` reports "Market data retry limit reached". Its only producer is a cTrader publish failure while paused (`ctrader.rs:2224`). No retry limit actually exists.
+  - The two removed broker providers use a fixed 3 s delay. No exponential backoff or jitter exists anywhere.
+  - `coordinator.rs:233-245` reports "Market data retry limit reached". Its only producer is a publish failure while paused in the removed FX/CFD broker module. No retry limit actually exists.
 - **Risk:** Rithmic enforces login and concurrency limits (AGENTS.md). A 250 ms or zero-delay loop during an outage risks lockout and wastes CPU and network.
 - **Proposed clean fix:** Add a shared `ReconnectPolicy` (exponential backoff with jitter, a cap, and a reset on a healthy session) to the descriptor or provider trait, plus a real attempt budget that produces an explicit failure state. Rename the failure message to match the actual cause.
 - **Verification:** Add a deterministic clock test of the backoff sequence. With the network unplugged, record the observed connect cadence for each provider.
@@ -208,9 +208,9 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 - **Severity:** Low-Medium
 - **Category:** Bloat
 - **Evidence:**
-  - The handoff struct has about 25 fields (`mod.rs:759-790`). It mixes Rithmic sequence trades with tastytrade's indexed overlay and candle reconciliation heuristics (`realtime.rs:931-1092`, including the "wait for older bucket" special cases from `4f885153`).
-  - The candle symbol `format!("{}{{={}}}")` runs on every event (`realtime.rs:1994`, `2241`, `2570`) and duplicates `tastytrade.rs:1175-1184`.
-  - Error strings say "Rithmic" on tastytrade paths.
+  - The handoff struct has about 25 fields (`mod.rs:759-790`). It mixes Rithmic sequence trades with the removed Level 1 broker's indexed overlay and candle reconciliation heuristics (`realtime.rs:931-1092`, including the "wait for older bucket" special cases from `4f885153`).
+  - The candle symbol `format!("{}{{={}}}")` runs on every event (`realtime.rs:1994`, `2241`, `2570`) and duplicates the same formatting in the removed Level 1 broker module.
+  - Error strings say "Rithmic" on the removed Level 1 broker's paths.
 - **Proposed clean fix:** Split the handoff into `SequenceTradeHandoff` and `CandleOverlayHandoff` behind the MD-06 strategy. Cache the provider wire symbol in the demand.
 
 ### MD-15: The desktop re-derives runtime state to work around fencing gaps
@@ -229,11 +229,11 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 - **Severity:** Low
 - **Category:** Bugs / code quality
 - **Evidence:**
-  - `prune_recent_trades` prunes by time only for `Sequence` continuity (`realtime.rs:224-227`), so tastytrade tapes rely on the 65,536-entry count cap alone.
+  - `prune_recent_trades` prunes by time only for `Sequence` continuity (`realtime.rs:224-227`), so indexed-provider tapes rely on the 65,536-entry count cap alone.
   - `candle_provider_recovering` sets `demand_dirty` twice (`realtime.rs:2972-2975`).
   - `handle_idle_stop_overlap` checks `!self.order_books.is_empty()` across all providers instead of the stopping provider (`realtime.rs:2696`).
   - Doc comments are attached to the wrong items at `mod.rs:814-816` and `history.rs:860-880`.
-  - `BrokerApi` holds its state mutex across HTTP calls (`tastytrade.rs:263-288`, `444-492`). Only catalog-thread callers were found, so this is a latent risk.
+  - `BrokerApi` holds its state mutex across HTTP calls (in the removed Level 1 broker module). Only catalog-thread callers were found, so this is a latent risk.
   - The desktop mailbox `enqueue` does several linear scans per message (`market_worker.rs:427-505`). This is acceptable at capacity 256, but it is O(n) per message.
 
 ### MD-17: The test structure locks in the current implementation
@@ -241,7 +241,7 @@ For context, desktop files outside the market path churn more: `desktop.rs` had 
 - **Category:** Maturity
 - **Evidence:**
   - About 3,870 of the 5,183 lines in `coordinator.rs` are inline tests, and `realtime.rs` tests start at line 3925.
-  - Tests inspect private maps and tuples (`coordinator.rs:3547`, `3589`), and `ctrader_tests.rs` is 3,003 lines long.
+  - Tests inspect private maps and tuples (`coordinator.rs:3547`, `3589`), and the removed FX/CFD broker's test file is 3,003 lines long.
   - The Day3 round-trip test uses a hand-built shape (MD-01).
   - No benchmark or endurance measurement covers the per-tick path (MD-05).
 - **Proposed clean fix:** Move tests to the coordinator command/event boundary using provider fixtures, and add a small number of measured workloads (tick throughput, allocation per tick, idle wakeups).

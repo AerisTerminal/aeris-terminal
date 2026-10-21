@@ -1534,7 +1534,7 @@ mod tests {
         let money = |units| aeris_trading::FixedPoint::try_new(units, 2).expect("money");
         aeris_trading::BrokerPosition {
             account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
-            instrument_id: aeris_instruments::InstrumentId::try_new("ctrader:demo:1001:1")
+            instrument_id: aeris_instruments::InstrumentId::try_new("broker:demo:1001:1")
                 .expect("instrument"),
             broker_position_id: id.into(),
             side: aeris_trading::OrderSide::Buy,

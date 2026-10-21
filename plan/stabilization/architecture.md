@@ -30,7 +30,7 @@ Root causes this mission removes, and the mechanism that removes each one:
 | R2 | Hand-made generation fencing (4,693 raw-integer uses) | `Epoch<Tag>` / `Fenced<Tag, T>` / `Fence<Tag>` (3.5.3), one drop point per boundary |
 | R3 | God objects (`WorkspaceSurface` 96 fields, `TerminalApp` 63, market `Coordinator` ~300 methods, trading `Coordinator` ~150 methods in a 5.4k-line `lib.rs`) | Controllers (3.7.1), lifecycle/history/calendar/provider modules (3.5), `TradingCore` modules (3.6) |
 | R4 | Errors as strings (1,196 `Result<_, String>`, 322 `let _ =`, control flow on display text) | Typed error enums on every rebuilt boundary, `UserNotice` (3.7.6), ratchet rules (3.9) |
-| R5 | Provider logic outside adapters (100 desktop literals, tastytrade-only gates and watchdog) | `ProviderSession` + `ProviderCapabilities` (3.5.5), `MarketCalendarService` (3.5.4), descriptors (3.5.8), neutrality rule (3.9) |
+| R5 | Provider logic outside adapters (100 desktop literals, single-provider gates and watchdog) | `ProviderSession` + `ProviderCapabilities` (3.5.5), `MarketCalendarService` (3.5.4), descriptors (3.5.8), neutrality rule (3.9) |
 
 Working rules that follow from these principles:
 
@@ -55,7 +55,7 @@ domain:   aeris_account, aeris_instruments, aeris_market_data, aeris_contracts, 
 platform: aeris_platform_runtime -> observability   (68 unsafe blocks, lint lowered to deny; also hosts
           lifecycle.rs, release_delivery.rs, rollout.rs, release_identity.rs, bin/aeris_launcher.rs,
           native_data_root(), display_timing.rs, session_shutdown.rs, power/network FFI)
-adapters: rithmic_protocol, hyperliquid_market, tastytrade_market, ctrader_open_api -> platform_runtime, market_data (+obs, provider_history)
+adapters: rithmic_protocol, hyperliquid_market -> platform_runtime, market_data (+obs, provider_history)
 runtime:  aeris_market_engine -> market_data
           aeris_market_runtime -> engine, market_data, instruments, trading (domain), contracts, provider_history,
                                   platform_runtime, observability, 4 adapters
@@ -199,21 +199,21 @@ pub struct CrashContext { pub crash_directory: PathBuf, pub release_identity: St
 New in `platform_runtime`:
 
 ```rust
-pub enum DataRootMode { Production, Validation { root: PathBuf, borrow_stored_ctrader: bool } }
+pub enum DataRootMode { Production, Validation { root: PathBuf } }
 pub struct DataRoot { path: PathBuf, mode: DataRootMode }
 impl DataRoot {
     pub fn resolve(mode: DataRootMode) -> Result<Self, DataRootError>;   // replaces lifecycle.rs native_data_root()
     pub fn path(&self) -> &Path;                                        // production: %LOCALAPPDATA%\Aeris
     pub fn vault(&self) -> VaultNamespace;
 }
-pub enum VaultNamespace { Production, Validation { id: String, borrow_stored_ctrader: bool } }
+pub enum VaultNamespace { Production, Validation { id: String } }
 pub struct InstanceLock { file: File }
 impl InstanceLock { pub fn acquire(root: &DataRoot) -> Result<Self, InstanceLockError>; } // File::try_lock on <root>/instance.lock
 pub enum InstanceLockError { HeldByAnotherProcess { root: PathBuf }, Io(io::Error) }
 ```
 
 - CLI, accepted by `aeris_desktop` (before any command, including `--desktop-readiness`) and by every
-  `tools/aeris_probes` binary: `--validation-root <absolute dir>` and `--validation-allow-stored-ctrader`. The root
+  `tools/aeris_probes` binary: `--validation-root <absolute dir>`. The root
   must be absolute, must not equal or contain the production root, and becomes `<dir>\Aeris`.
 - The lock is keyed per data root, so isolated validators can run beside each other and beside the user's instance,
   while two processes on one root cannot. Acquired in `desktop::run()` right after argument parsing and before
@@ -224,12 +224,7 @@ pub enum InstanceLockError { HeldByAnotherProcess { root: PathBuf }, Io(io::Erro
   bound, logs, then calls `std::process::exit(code)`. A test proves the exit path returns within the bound.
 - Vault namespace: `NativeCredentialVault::new(service)` gets `com.aeris.terminal` in production and
   `com.aeris.terminal.validation.<first 12 hex of sha256(canonical root)>` in validation mode. Validation instances
-  therefore see no stored broker connection: the cTrader venue does not attach and no hosted-broker traffic occurs.
-- Explicit opt-in `--validation-allow-stored-ctrader`: the vault resolves only the cTrader connection keys from the
-  production namespace (read and write-through, because the OAuth refresh may rotate the token and a split copy
-  would desync); every other key stays isolated. The flag is logged once (`vault: borrowing stored cTrader
-  connection`) and reported in readiness/probe evidence. Validators must confirm no user instance is running
-  before using it.
+  therefore see no stored broker connection and never read production vault entries.
 - Validation mode also disables launcher promotion and update checks, and skips the notification AUMID registry
   write.
 
@@ -270,7 +265,7 @@ cadence.rs        resolve_cadence (M1), the single ChartInterval -> SeriesCadenc
 lifecycle/{mod,state,live_model,forming_bar,watchdog}.rs
 history/{tracker,worker}.rs          worker = today's history.rs minus the 1 ms spin
 calendar/{mod,cme,weekly_hours,venues}.rs
-provider/{mod,hyperliquid,ctrader,tastytrade,rithmic}.rs   ProviderSession impls wrapping existing realtime modules
+provider/{mod,hyperliquid,rithmic}.rs   ProviderSession impls wrapping existing realtime modules
 reconnect.rs      ReconnectPolicy, Backoff
 quotes.rs         QuoteBook, QuoteSubscription
 trading_feed.rs   TradingFeed: QuoteInterest -> instrument leases; MarketFeedEvent emission
@@ -323,7 +318,7 @@ impl SeriesLifecycle { fn step(&mut self, input: SeriesInput<'_>, ctx: &StepCont
   never inferred from opaque ids. Which model applies comes from `ProviderCapabilities::live_model`.
 - `LiveCadence::Session` asks the calendar for the session window (fixes MD-03, MD-04 weekly/monthly). The
   `Session -> Fixed{days*86400}` mapping (`realtime.rs`) is deleted.
-- Port order: candle path first (cTrader, Hyperliquid), then trade path (tastytrade Indexed, Rithmic Sequence).
+- Port order: candle path first (Hyperliquid), then trade path (Rithmic Sequence).
 - The watchdog (`lifecycle/watchdog.rs`) evaluates every `Live` series of every model; it declares a stall only when
   the calendar phase is trading-open and no progress for `capabilities.stall_threshold(cadence)`. `Unknown` phase uses
   a conservative long threshold (fixes MD-02).
@@ -405,10 +400,10 @@ impl MarketCalendarService {
   close_utc_ms }`, `CalendarSourceKind`. Mapping from today's `MarketSessionPhase` (`contracts/src/messages.rs`):
   Regular -> Open, PreMarket/PostMarket/Overnight -> Extended, Closed -> Closed, AlwaysOpen, Unknown.
   `MarketSessionPhase`/`MarketSessionStatus` are deleted once nothing uses them.
-- Resolution order at catalog install: provider-published calendar, provider contract hours (cTrader,
-  `session_hours.rs` moved to `calendar/weekly_hours.rs`), exchange rule by normalized venue code (CME Globex 17:00
+- Resolution order at catalog install: provider-published calendar, provider contract hours
+  (`session_hours.rs` moved to `calendar/weekly_hours.rs`), exchange rule by normalized venue code (CME Globex 17:00
   America/Chicago roll with DST, moved unchanged with its tests from `adapters/rithmic_protocol/src/calendar.rs`;
-  one venue table replaces tastytrade `market_collection`, `tastytrade_market_collection` and Rithmic `for_venue`),
+  one venue table replaces the per-adapter venue collections and Rithmic `for_venue`),
   `AlwaysOpen` for declared 24/7 venues (Hyperliquid), else `Unknown`.
 - `MarketService::market_session_status` becomes a thin wrapper; the watchdog, `LiveCadence::Session`, the
   instrument descriptor and the trading feed all read this one service. `chrono-tz` stays in `market_runtime`.
@@ -439,12 +434,12 @@ pub struct ReconnectPolicy { initial: Duration, multiplier: u32, cap: Duration, 
 - `ProviderRegistry` holds `Box<dyn ProviderSession>` by `ProviderId`; dyn dispatch per command, never per tick.
   `ProviderDemandSet` is computed by the engine; symbol, timeframe, viewport, tab and layout changes only change the
   set and never reconnect (asserted in replay).
-- Reconnect defaults (keep today's values, add jitter): cTrader 3 s x2 cap 48 s budget 5 equal jitter; tastytrade
-  same scheme; Hyperliquid 500 ms x2 cap 30 s full jitter, no budget (today fixed 250 ms forever); Rithmic: the
+- Reconnect defaults (keep today's values, add jitter): broker sessions 3 s x2 cap 48 s budget 5 equal jitter;
+  Hyperliquid 500 ms x2 cap 30 s full jitter, no budget (today fixed 250 ms forever); Rithmic: the
   adapter's `RithmicRetryScheduler` remains the only transport retry, and `serve_demand` non-transport recovery goes
   through `Backoff` (min 1 s) so policies no longer stack; `ConcurrencyLimits` respects Rithmic login limits. Jitter
   is seeded from the injected clock so replay is deterministic. Budget exhaustion moves the connection to `Failed`
-  and fails its series; error text states what happened ("cTrader: 5 reconnect attempts failed; last error: ...").
+  and fails its series; error text states what happened ("<provider>: 5 reconnect attempts failed; last error: ...").
 - Presentation fields move to the published `ProviderDescriptor` (3.5.8). Bogus Rithmic values
   (`selection_entitlement_id "crypto_public_realtime"`, `" spot"` suffix) are deleted. `ChartInterval::rithmic_aggregation`
   moves from `aeris_market_data` into `provider/rithmic.rs`.
@@ -484,8 +479,8 @@ pub struct QuoteState { pub quote: TradingQuote, pub phase: SessionPhase, pub so
 
 - `provider_demand` (`realtime.rs`) and `reconcile_order_books` (`coordinator.rs`) include
   `instrument_subscriptions()` with `MarketStream::Quotes`; each `ProviderSession` maps a Quotes-only instrument demand
-  to its top-of-book subscription (Hyperliquid `bbo`/`l2Book`, cTrader spots on the shared session, tastytrade Quote
-  events, Rithmic TOB within login limits). Price alerts migrate to `LeaseOwner::PriceAlerts`, deleting their
+  to its top-of-book subscription (Hyperliquid `bbo`/`l2Book`, Rithmic TOB within login
+  limits). Price alerts migrate to `LeaseOwner::PriceAlerts`, deleting their
   out-of-engine merge in `realtime.rs`.
 - `QuoteBook` (coordinator-owned) keeps one slot per leased or chart-active instrument (bounded by demand).
   `QuoteCapability` declares the source (dedicated stream, derived from canonical L2, last trade only); last-trade-only
@@ -549,7 +544,7 @@ pub enum ReplayStep { Advance(Duration), SetWall(UtcMillis), Command(Command), P
                       ExpectEvent(EventMatcher), ExpectEffect(EffectMatcher), ExpectState(BarSeriesKey, StateMatcher) }
 ```
 
-Required scenarios: Day3 persistence round trip (MD-01); cTrader candle stall while open, none while closed (MD-02);
+Required scenarios: Day3 persistence round trip (MD-01); candle stall while open, none while closed (MD-02);
 Day1 close at the CME 17:00 CT roll across a DST change (MD-03); non-CME venue resolution (MD-04); Hyperliquid backoff
 schedule and Rithmic single policy (MD-12); stale-epoch history completion ignored; overflow -> covering snapshot;
 reseed under live flow keeps one forming bar and contiguous completed history; switch storm (50 alternating
@@ -676,23 +671,23 @@ offset_ticks, allocation_percent }`. Semantics are those of `09_trading_design.m
   with today's sizing rules) are as in the design. Scale-in growth keeps today's behavior (first-triggering stop and
   target grow); the target question is recorded as an open product question, not changed.
 - Managed trailing/break-even ratchets persist only when the stop moves at least one tick; refused on broker routes.
-  cTrader brackets remain broker-owned SL/TP (no local group).
+  Broker brackets remain broker-owned SL/TP (no local group).
 - Restart: groups are rows written with the transitions that change them; `core/recovery.rs` verifies invariants and
   repairs deterministically with a typed `RecoveryNotice`. No in-memory fence.
 
 #### 3.6.6 Admission (M5)
 
 `admission::admit(ctx, request, route) -> Result<Admitted, RejectReason>` is the only validator for simulated and
-broker routes and for every member of brackets, OCO and protection requests: account and route (live cTrader stays
+broker routes and for every member of brackets, OCO and protection requests: account and route (live broker routes stay
 data-only), lock and risk (`risk::evaluate`, unchanged rules), instrument registration and scales, price grid
 (`PriceGrid::Fixed(tick)` exact multiple; `SignificantFigures{figures, max_decimals}`; `Unknown` -> `OffGrid`
 rejection is not applied, a warning is attached), quantity increment, trigger sides (buy stop/stop-limit trigger above
 ask, sell below bid; bracket legs on correct sides), TIF capability (`VenueCapabilities`; IOC/FOK only with Market and
-Limit; group legs GTC; cTrader DAY mapped to GTC), client id length (cTrader 50), open-order and quote-interest
+Limit; group legs GTC; broker DAY mapped to GTC where required), client id length (per venue), open-order and quote-interest
 capacity, and for the simulated route: currency match, session gating and quote freshness (3.6.7). `RestingAt{price}`
 resolves to Limit (passive side of the touch) or Stop (beyond the touch); the desktop's `resting_entry_order_type` is
 deleted. Hook: `admission::BuyingPower` step, a no-op now (margin is out of scope). A parity test runs the same cases
-through both routes; `venue/scripted.rs` and `market_service/ctrader_tests.rs` must stay green unchanged.
+through both routes; `venue/scripted.rs` must stay green unchanged.
 
 #### 3.6.7 Market gating and execution rules (M4 gating, M5 rules)
 
@@ -945,7 +940,7 @@ and zero frames per idle second; before/after idle CPU for 1, 4, 16 panes record
 #### 3.7.7 Provider neutrality (M6)
 
 - Replace `TerminalProvider`, `terminal_provider_id` literals and `FALLBACK_TERMINAL_PROVIDER` with opaque `ProviderId`
-  and runtime descriptors; `ConnectTastytrade/ConnectCtrader/ConnectRithmic` -> `ConnectProvider(ProviderId)`;
+  and runtime descriptors; per-provider `Connect*` actions such as `ConnectRithmic` -> `ConnectProvider(ProviderId)`;
   `components/rithmic_login.rs` -> `components/provider_login.rs` (form from `ConnectMethod::VaultCredentials`, still
   vault-only); `rithmic_shell.rs` -> `provider_symbol_browser.rs`; entitlement strings (`rithmic-test:`), the
   `worker_identity` branches, `default_rithmic_contract_index`, `DEFAULT_RITHMIC_LISTING_QUERY` are deleted; logos by
@@ -1042,7 +1037,7 @@ Structural rules (target set by M8):
 3. No `fs::write(`, `fs::rename(`, `File::create(` followed by rename, or `MoveFileExW` outside `platform_sys` in
    production code of desktop, runtimes, platform, release crates (explicit allowlist: directory moves in lifecycle,
    user-chosen PNG export).
-4. Provider neutrality: no provider names (`rithmic`, `tastytrade`, `ctrader`, `hyperliquid`, case-insensitive) or
+4. Provider neutrality: no provider names (`rithmic`, `hyperliquid` or any other registered provider, case-insensitive) or
    provider id formats in production sources of `apps/desktop/src`, `crates/ui/chart_integration/src` and the neutral
    `market_runtime` modules (`lifecycle/`, `history/`, `calendar/mod.rs`, `quotes.rs`, `outbox.rs`, `trading_feed.rs`,
    `coordinator.rs`); allowlist with reasons, stale entries fail the test.
@@ -1133,8 +1128,7 @@ jobs:
 20. Every durable file write goes through `platform_sys::fs`; a crash at any point leaves either the old or the new
     complete content.
 21. One process per data root; a second instance on the same root exits without touching state.
-22. A validation-mode process never reads or writes production vault entries except the cTrader connection, and only
-    with `--validation-allow-stored-ctrader`.
+22. A validation-mode process never reads or writes production vault entries.
 23. No secret (token, password, credential) is ever formatted into a log line, crash file, notice or evidence file.
 24. The desktop production source contains no provider names except the allowlisted logo file mapping.
 25. Every production panic is captured in a crash file; every `diagnostic!` line reaches the rotating log unless
@@ -1151,10 +1145,10 @@ jobs:
 
 | Artifact (production root `%LOCALAPPDATA%\Aeris`) | Today | Migration | Safety net |
 |---|---|---|---|
-| `trading\trading.sqlite3` (+ `-wal`, `-shm`; existing `.pre-repair-*` files untouched) | `user_version` 19 | M1: table-driven V1..V19 (no data change). M4: V20 `fill_accounting`, `trade_cycles`, indexes, backfilled from `fills.realized_pnl_*`/`completed_trade_pnl_*` and the two cycle tables. M5: V21 order columns (`revision=1`, `accepted=updated=submitted`, `reason_code` derived once from known detail strings, detail kept); V22 `order_groups`/`order_group_legs` with Rust data migration (`store/migrate_groups.rs`): awaiting brackets -> Pending groups with `Inactive` legs priced exactly as `planned_legs` projects today, active brackets link existing orders, terminal brackets -> terminal groups, `protective_orders` -> one-leg Protection groups, unpriceable -> Cancelled group + `RecoveryNotice` shown at first start; V23 ledger entries (`Deposit` from `starting_equity`, `RealizedPnl` from `fill_accounting`), checkpoints, fee schedules (zero), equity samples, risk sessions, instrument `instrument_class`/`price_grid_json`/`market_route_json` (null until the next `Terms`; such instruments show "feed unavailable" per order until re-resolved; Hyperliquid and cTrader public catalogs auto-resolve by symbol), positions rebuilt with exact cost basis = stored average x quantity (no PnL jump), `unrealized_*` dropped; V24 (drop `managed_brackets`, `protective_orders`, `trade_pnl_cycles`, `risk_trade_cycles` and per-fill PnL columns) is DEFERRED out of this mission; those tables remain in place and are no longer read by production code. Open DAY orders get `expires_at` at first start from the calendar (recovery), not in SQL. | `VACUUM INTO trading\backups\trading-v{old}-{unix}.sqlite3` before the first step (newest 3 kept); per-step transactions; a fixture test per version step (pattern `migration_v18_preserves_v17_rows_and_adds_empty_broker_tables`); newer schema refused with a typed error |
+| `trading\trading.sqlite3` (+ `-wal`, `-shm`; existing `.pre-repair-*` files untouched) | `user_version` 19 | M1: table-driven V1..V19 (no data change). M4: V20 `fill_accounting`, `trade_cycles`, indexes, backfilled from `fills.realized_pnl_*`/`completed_trade_pnl_*` and the two cycle tables. M5: V21 order columns (`revision=1`, `accepted=updated=submitted`, `reason_code` derived once from known detail strings, detail kept); V22 `order_groups`/`order_group_legs` with Rust data migration (`store/migrate_groups.rs`): awaiting brackets -> Pending groups with `Inactive` legs priced exactly as `planned_legs` projects today, active brackets link existing orders, terminal brackets -> terminal groups, `protective_orders` -> one-leg Protection groups, unpriceable -> Cancelled group + `RecoveryNotice` shown at first start; V23 ledger entries (`Deposit` from `starting_equity`, `RealizedPnl` from `fill_accounting`), checkpoints, fee schedules (zero), equity samples, risk sessions, instrument `instrument_class`/`price_grid_json`/`market_route_json` (null until the next `Terms`; such instruments show "feed unavailable" per order until re-resolved; Hyperliquid public catalogs auto-resolve by symbol), positions rebuilt with exact cost basis = stored average x quantity (no PnL jump), `unrealized_*` dropped; V24 (drop `managed_brackets`, `protective_orders`, `trade_pnl_cycles`, `risk_trade_cycles` and per-fill PnL columns) is DEFERRED out of this mission; those tables remain in place and are no longer read by production code. Open DAY orders get `expires_at` at first start from the calendar (recovery), not in SQL. | `VACUUM INTO trading\backups\trading-v{old}-{unix}.sqlite3` before the first step (newest 3 kept); per-step transactions; a fixture test per version step (pattern `migration_v18_preserves_v17_rows_and_adds_empty_broker_tables`); newer schema refused with a typed error |
 | `workspace-state.pb` (raw proto, `schema_revision` 1); legacy `workspace-state.frame`; `workspace-state.pb.bak` | no real versioning | M1: written through the durable writer (format unchanged); legacy Day3 reader maps `FixedSeconds/259200` and `SessionDays/3` to `ChartInterval::Day3` (fixes the broken restore). M7: first save after upgrade writes the `DurableDocument` envelope, schema 2, after the migration chain; `workspace-state.pb.pre-v2` copy kept once | old `.bak` read as fallback; corrupt primaries quarantined; newer versions never overwritten |
 | `desktop\chart-chrome` (unversioned key=value) | own writer | M1: durable writer. M7: folded into the workspace document by migration step 1->2; the old file is left untouched (not deleted) for one release and no longer written | parse failures reported as a notice, not silently defaulted |
-| Vault `com.aeris.terminal` (Windows Credential Manager) | legacy `tradingplot`/`axiusflow` probes | No production key changes. Validation namespaces are new. AC-02 size cap rejects oversize writes explicitly (existing entries are already within the OS limit). Legacy probes removed only after maintainer confirmation | production namespace never written by validation instances (except opt-in cTrader keys) |
+| Vault `com.aeris.terminal` (Windows Credential Manager) | legacy `tradingplot`/`axiusflow` probes | No production key changes. Validation namespaces are new. AC-02 size cap rejects oversize writes explicitly (existing entries are already within the OS limit). Legacy probes removed only after maintainer confirmation | production namespace never written by validation instances |
 | `logs\aeris*.log`, `logs\crash-*.log` | none | new; rotating 4 MiB x 5, newest 10 crash files | - |
 | `instance.lock` | none | new, per data root | released on exit |
 | `trading` export directory files | non-atomic | durable writes (M1) | - |
@@ -1190,7 +1184,7 @@ every check passed, network required (not part of `cargo test`). Evidence envelo
 ```json
 { "schema": "aeris.probe.v1", "probe": "<name>", "git_revision": "<sha>", "source_clean": true,
   "started_at": "<rfc3339>", "finished_at": "<rfc3339>", "validation_root": "<dir>",
-  "vault_namespace": "validation", "borrowed_stored_ctrader": false,
+  "vault_namespace": "validation",
   "outcome": "passed|failed",
   "checks": [ { "id": "<stable id>", "outcome": "passed|failed|skipped", "detail": "<text>", "measured": { } } ],
   "metrics": { } }
@@ -1211,11 +1205,7 @@ No secrets, account numbers (masked to last 2 digits), or raw private payloads i
    (via an instrument with no quotes: `QuoteUnavailable`), `restart_state_identical` (orders, groups, positions,
    ledger, revision), `quotes_resume_without_ui`, `day_expiry_utc_midnight_scheduled`, `flatten_all_flat`,
    `ledger_identity` (balance = deposit + realized - fees), `export_atomic_parity`.
-3. cTrader demo regression probe: `cargo run -p aeris_probes --bin ctrader_demo_probe --locked -- --validation-root
-   <dir> --validation-allow-stored-ctrader --out <json>`. Requires the user's desktop closed and explicit approval;
-   demo host only, refuses live accounts. Checks: `session_opened`, `eurusd_history_contiguous` (H1, D1, M1),
-   `live_candle_seen`, `venue_attached`, `account_reconciled`, `far_limit_placed_and_cancelled` (one demo order through
-   shared admission), `bracket_sltp_mapped` (only if approved for that run), `session_closed_cleanly`.
+3. Retired: the broker demo regression probe was removed together with its broker provider.
 4. Desktop readiness: `aeris_desktop --validation-root <dir> --desktop-readiness <report.json>`. Report schema 5 from
    M1 (adds `instance_lock`, `log_path`, `vault_namespace`, `validation_mode`), shared `ReadinessReport` type from M8;
    exit 0 in under 5 s with all `services.*` true; from M8 the real trading DB `user_version` is unchanged.
@@ -1234,7 +1224,7 @@ asserted early or through probes.
 | M2 market foundations | characterization tests; benchmark baselines; `aeris_clock` adoption in market_runtime; `MarketCalendarService` + watchdog for all models + session cadences (MD-02/03/04); `ReconnectPolicy`/`Backoff` (MD-12); `Epoch`/`Fenced`/`Fence` + `CommandFences` (removes the `u32::MAX` sentinel with a minimal desktop adaptation); `HistoryTracker` + worker blocking send; `provider_history` trim |
 | M3 market lifecycle | `SeriesLifecycle` (candle path, then trade path); hot path (`series_tail`, dirty set, deadline timers) with measured numbers; `ProviderSession`/`ProviderCapabilities`/`ProviderRegistry`; `MarketDemandKey::Instrument`, `QuoteBook`, `QuoteSubscription`, price alerts as leases, `trading_feed.rs` + `aeris_trading::market` contract + terms conversion; waitable outbox, `select_and_demand`, descriptors, `CatalogReady` (runtime side; the desktop bridge consumes them minimally, full desktop rework in M6); `Fenced` study/alert events; replay harness + scenarios; `market_lifecycle_probe` |
 | M4 trading core | `aeris_clock` injection, owner shell + `TradingCore` with commit-then-apply; trading replay harness v1 (goldens unchanged); indexed `book/`; module split; runtime-owned quotes (`market/`, inbox, interest incl. ticket interest, desktop wiring, delete relay and desktop registration); provider-neutral gating (3.6.7 policy, `eligible_after`, delete `PracticeMarketSession` and `require_practice_market_session`); V20 single fill accounting; facts-only persistence + retention timer + quote-throughput bench |
-| M5 trading engine | V21 state machine + typed events/reasons; single admission + price grid + capabilities; execution rules v2 + DAY/IOC/FOK + trigger index; V22 order groups + migration, then deletion of protection layers; V23 ledger/fees/checkpoints/equity/retention; emergency ops; risk rollover; publication API + paged history + 50k-order test; (V24 deferred); v2 goldens; `paper_trading_probe`; `ctrader_demo_probe` |
+| M5 trading engine | V21 state machine + typed events/reasons; single admission + price grid + capabilities; execution rules v2 + DAY/IOC/FOK + trigger index; V22 order groups + migration, then deletion of protection layers; V23 ledger/fees/checkpoints/equity/retention; emergency ops; risk rollover; publication API + paged history + 50k-order test; (V24 deferred); v2 goldens; `paper_trading_probe` |
 | M6 desktop bridge | `DesktopServices` + `test_support`; `NotificationCenter` + discarded-result resolution; `ChartPaneController`/`ChartBinding`; `market_bridge.rs` on the waitable outbox; single `select_and_demand` per selection; descriptor rendering, typed provider/risk events, provider login/symbol browser from descriptors, neutrality rule; delete `--rithmic`/`--multi-chart`; `TradingStore` consuming `subscribe()`; delete `MarketGeneration<T>` |
 | M7 desktop structure | controller split of `TerminalApp`/`WorkspaceSurface`/`AerisChartView` glue; `AccountGate` module; `ChartHostEvent`; `FrameScheduler`; `DurableDocument` + versioned workspace document + migrations + chart chrome fold-in + corruption UX; Aeris Charts hollow style (and chart reset if needed) with pin bump; runtime sweep annotation + incremental tape; color tokens with website mirror; desktop tests rewritten against controller boundaries |
 | M8 lifecycle and trim | `release_lifecycle` crate split + LC fixes + `release_packager` + e2e harness; AC-02/03/04/06/07/08; naming_check reduced to the structural set (3.9) with ratchets; trims (gpui_base LSP editor, stale tools, deps, `live_market_gate`, unused prost messages, Axiusflow residue); README and `AGENTS.md` final update |
@@ -1264,13 +1254,12 @@ evidence and options) otherwise.
 |---|---|
 | Lifecycle port regressions (detached windows, FromTimeOnly history, sequence gaps) | Decide: characterization tests first, candle path before trade path. Escalate if a characterization test must change expected output. |
 | Calendar correctness (DST, holidays, venue normalization) | Decide: move CME rules unchanged with tests; publish calendar provenance. Escalate any instrument class that would resolve to `Unknown` for a provider that trades today (it becomes untradable in paper trading). |
-| Equities extended hours (tastytrade) mapping to `Extended` | Decide per provider evidence; escalate if a provider cannot distinguish extended from regular sessions. |
-| Provider Quotes-only demand per provider (Hyperliquid `bbo`, cTrader spots, tastytrade Quote, Rithmic TOB limits) | Decide for Hyperliquid and cTrader with fixture-backed tests; Rithmic and tastytrade are verified with scripted sessions only. Escalate before any live Rithmic session (excluded). |
+| Equities extended hours mapping to `Extended` | Decide per provider evidence; escalate if a provider cannot distinguish extended from regular sessions. |
+| Provider Quotes-only demand per provider (Hyperliquid `bbo`, Rithmic TOB limits) | Decide for Hyperliquid with fixture-backed tests; Rithmic is verified with scripted sessions only. Escalate before any live Rithmic session (excluded). |
 | Hyperliquid significant-figure price grid and Day1 alignment | Verify from current Hyperliquid documentation and observed public responses; until verified, `PriceGrid::Unknown` (warn, do not reject). Escalate if docs and responses disagree. |
 | Bracket data migration (V22) on live user data | Decide within the approved rules; never delete a user row without a migrated equivalent; backup first. Escalate any case that would cancel a working order. |
 | Golden transcript changes | Decide only in M5 with per-difference explanations; escalate any golden change in M4. |
 | Scale-in target growth, risk session default, per-pane vs workspace account | Decided here (keep today / 00:00 UTC / per pane). Escalate if implementation evidence contradicts. |
-| Validation vault opt-in and cTrader token rotation | Decide: write-through for borrowed cTrader keys only. Escalate if a validation run ever needs another provider's credentials. |
 | Hosted CI disk/time limits on `windows-latest` | Decide caching/profile settings; escalate before dropping or splitting any gate. |
 | Chart entity reset requiring Aeris Charts changes | Decide the engine API in Aeris Charts following its AGENTS.md; escalate if the user's staged aeris-charts work is still uncommitted. |
 | `NativeSessionShutdownGuard` and `CancelIoEx` removal | Delete only with proof (abort-latency test; manual logoff flush test by the user). Otherwise keep in `platform_sys`. |
@@ -1278,5 +1267,5 @@ evidence and options) otherwise.
 | Readiness `provider_count > 0` on fresh installs, uninstall Inno page | Decide implementation; manual install/uninstall verification is user-only and reported as unverified. |
 | `quick_check` cost, handshake timing, idle CPU, tape apply, hot-path numbers | Measure and record; never claim improvement without numbers. |
 | Public repository disclosure (reports, fixtures, evidence) | Decide redaction; escalate if any credential, token or full account number is found in history or fixtures. |
-| Rithmic live behavior, fresh cTrader OAuth (broker 404), production release publication | Out of scope for validation; report as user-only. |
+| Rithmic live behavior, production release publication | Out of scope for validation; report as user-only. |
 | A worker finds that an approved design element breaks an invariant in section 4 | Stop and escalate with the conflicting invariant; do not weaken the invariant. |

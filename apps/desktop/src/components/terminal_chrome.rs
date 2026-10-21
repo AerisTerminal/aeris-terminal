@@ -1627,7 +1627,7 @@ mod tests {
         ] {
             assert!(shows_rithmic_attribution(TerminalProvider::Rithmic, state));
             assert!(!shows_rithmic_attribution(
-                TerminalProvider::Tastytrade,
+                TerminalProvider::Hyperliquid,
                 state
             ));
         }
