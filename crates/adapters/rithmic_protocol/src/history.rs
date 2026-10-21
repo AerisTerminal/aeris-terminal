@@ -385,7 +385,7 @@ fn code_shape(handler: &[String], terminal: &[String]) -> Result<CodeShape, Prot
     match (handler.is_empty(), terminal.is_empty()) {
         (false, true) if accepted(handler) => Ok(CodeShape::Data),
         (false, true) => Err(ProtocolError::RejectedDataFrame),
-        (true, false) => Ok(CodeShape::Terminal(accepted(terminal))),
+        (true, false) => Ok(CodeShape::Terminal(replay_completed(terminal))),
         _ => Err(ProtocolError::ResponseCodeShape),
     }
 }
@@ -425,6 +425,13 @@ fn validate_code_field(field: &'static str, codes: &[String]) -> Result<(), Prot
 #[cfg(rithmic_kit)]
 fn accepted(codes: &[String]) -> bool {
     codes.len() == 1 && codes[0] == "0"
+}
+
+/// Rithmic ends a replay over a window that holds no bars with code 7, "no
+/// data": an empty answer, not a refusal. Any other code 7 is a refusal.
+#[cfg(rithmic_kit)]
+fn replay_completed(terminal: &[String]) -> bool {
+    accepted(terminal) || matches!(terminal, [code, detail] if code == "7" && detail == "no data")
 }
 
 #[cfg(rithmic_kit)]
@@ -624,6 +631,37 @@ mod tests {
             codec.decode_history(&rejection).expect("rejection decodes"),
             DecodedHistoryMessage::ReplayComplete {
                 kind: ReplayKind::Time,
+                accepted: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_replay_over_an_empty_window_completes_while_other_code_seven_refuses() {
+        let codec = RithmicProtocolCodec;
+        let terminal = |detail: &str| {
+            rti::ResponseTickBarReplay {
+                template_id: 207,
+                rp_code: vec!["7".to_string(), detail.to_string()],
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        assert_eq!(
+            codec
+                .decode_history(&terminal("no data"))
+                .expect("empty replay decodes"),
+            DecodedHistoryMessage::ReplayComplete {
+                kind: ReplayKind::Tick,
+                accepted: true,
+            }
+        );
+        assert_eq!(
+            codec
+                .decode_history(&terminal("permission denied"))
+                .expect("refusal decodes"),
+            DecodedHistoryMessage::ReplayComplete {
+                kind: ReplayKind::Tick,
                 accepted: false,
             }
         );

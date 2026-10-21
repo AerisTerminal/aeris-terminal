@@ -372,8 +372,17 @@ impl HistoryCollector {
         if bar.bar_type != bar_type || bar.period != expected_period.to_string() {
             return Err(CollectorError::SeriesMismatch);
         }
-        if !(self.request.start_seconds..=self.request.finish_seconds).contains(&bar.marker_seconds)
-        {
+        // Rithmic stamps a second or minute bar with the time its period
+        // closes, and a minute replay returns every bar whose period overlaps
+        // the requested seconds, so the last one closes up to one period
+        // after the finish.
+        let latest_marker = match bar_type {
+            DecodedTimeBarType::Second | DecodedTimeBarType::Minute => {
+                self.request.finish_seconds.saturating_add(expected_period)
+            }
+            DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => self.request.finish_seconds,
+        };
+        if !(self.request.start_seconds..=latest_marker).contains(&bar.marker_seconds) {
             return Err(CollectorError::OutsideRequestedRange);
         }
         if let Some(existing) = self.time_bars.get(&bar.marker_seconds) {
@@ -432,9 +441,16 @@ impl HistoryCollector {
         if first.0 > self.request.finish_seconds || last.0 < self.request.start_seconds {
             return Err(CollectorError::OutsideRequestedRange);
         }
-        if !keys.windows(2).all(|pair| pair[0] < pair[1]) {
+        // A tick bar carries the keys of its first and last trades, the same
+        // key twice for a one-trade bar. Their sequence text is opaque, so only
+        // their times must be in order.
+        if !keys
+            .windows(2)
+            .all(|pair| (pair[0].0, pair[0].1) <= (pair[1].0, pair[1].1))
+        {
             return Err(CollectorError::NonMonotonic);
         }
+        keys.dedup();
         if keys.iter().any(|key| self.tick_keys.contains(key)) {
             return Err(CollectorError::TickKeyOverlap);
         }
@@ -614,6 +630,19 @@ mod tests {
     }
 
     #[test]
+    fn minute_replay_accepts_the_bar_closing_one_period_after_the_finish() {
+        let mut collector = HistoryCollector::try_new(time_request(1)).expect("valid collector");
+        collector
+            .accept(replay_time(time_bar(360)))
+            .expect("the bar open at the finish closes one period later");
+        let mut later = HistoryCollector::try_new(time_request(1)).expect("valid collector");
+        assert!(matches!(
+            later.accept(replay_time(time_bar(361))),
+            Err(CollectorError::OutsideRequestedRange)
+        ));
+    }
+
+    #[test]
     fn history_preserves_live_bars_and_latches_conflicting_replay() {
         let mut collector = HistoryCollector::try_new(time_request(1)).expect("valid collector");
         let live = DecodedHistoryMessage::TimeBar {
@@ -661,6 +690,21 @@ mod tests {
         assert!(matches!(
             mismatched.accept(replay_tick(bar)),
             Err(CollectorError::SeriesMismatch)
+        ));
+    }
+
+    #[test]
+    fn tick_history_orders_trades_by_time_not_by_opaque_sequence_text() {
+        let mut collector = HistoryCollector::try_new(tick_request(3)).expect("valid collector");
+        collector
+            .accept(replay_tick(tick_bar(&[(120, 5, "14"), (120, 5, "14")])))
+            .expect("a one-trade bar repeats its only key");
+        collector
+            .accept(replay_tick(tick_bar(&[(121, 1, "14"), (121, 2, "13")])))
+            .expect("sequence text carries no order");
+        assert!(matches!(
+            collector.accept(replay_tick(tick_bar(&[(123, 1, "20"), (122, 1, "21")]))),
+            Err(CollectorError::NonMonotonic)
         ));
     }
 

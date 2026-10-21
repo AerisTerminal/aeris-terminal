@@ -1,8 +1,8 @@
 use crate::{
-    CollectedHistory, CollectionProgress, DecodedControlMessage, DecodedTimeBar,
+    CollectedHistory, CollectionProgress, CollectorError, DecodedControlMessage, DecodedTimeBar,
     DecodedTimeBarType, HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
-    RithmicHistoryConnection, RithmicProviderInstrument, RithmicSessionMessage,
-    TimeBarReplayRequest, TimeBarType,
+    RithmicHistoryConnection, RithmicProviderInstrument, RithmicSessionError,
+    RithmicSessionMessage, TimeBarReplayRequest, TimeBarType,
 };
 use aeris_instruments::calendar::{
     ExchangeCalendar, ExchangeCalendarBucket, ExchangeCalendarPeriod,
@@ -26,6 +26,8 @@ use std::{
 
 const PROVIDER_ID: &str = "rithmic";
 const MAXIMUM_REPLAY_BARS: usize = 10_000;
+/// Bars a padded time replay may return outside the requested window.
+const TIME_REPLAY_PADDING_BARS: usize = 3;
 const MAXIMUM_CONTROL_MESSAGES: usize = 256;
 const MAXIMUM_REPLAY_TIMEOUT: Duration = Duration::from_mins(5);
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -131,12 +133,19 @@ mod chart_interval_tests {
     }
 }
 
-/// Coarse Rithmic history adapter failures.
+/// Rithmic history adapter failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RithmicHistoryAdapterError {
     InvalidConfiguration,
     InvalidRequest,
-    Transport,
+    /// The history session could not send the replay, read its reply or log out.
+    Session(RithmicSessionError),
+    /// Rithmic refused the replay request.
+    Rejected,
+    /// Rithmic ended the history session during the replay.
+    ForcedLogout,
+    /// A replay frame contradicted the request (identity, series, range, order or bound).
+    Collection(CollectorError),
     IncompleteCoverage,
     MalformedHistory,
     SessionPoisoned,
@@ -230,8 +239,9 @@ impl RithmicHistoryLimits {
     ///
     /// # Errors
     ///
-    /// Returns an error for a page above the protocol maximum or a range that
-    /// cannot be represented by Rithmic's signed-second indexes.
+    /// Returns an error for a page that, with its replay padding, exceeds the
+    /// protocol maximum, or a range that cannot be represented by Rithmic's
+    /// signed-second indexes.
     pub fn try_new(
         maximum_lookback_nanos: NonZeroU64,
         maximum_request_span_nanos: NonZeroU64,
@@ -240,7 +250,7 @@ impl RithmicHistoryLimits {
         let maximum_index_span = u64::try_from(i32::MAX)
             .unwrap_or(u64::MAX)
             .saturating_mul(NANOS_PER_SECOND);
-        if maximum_bars.get() > MAXIMUM_REPLAY_BARS
+        if maximum_bars.get() > MAXIMUM_REPLAY_BARS - TIME_REPLAY_PADDING_BARS
             || maximum_request_span_nanos.get() > maximum_index_span
         {
             return Err(RithmicHistoryAdapterError::InvalidConfiguration);
@@ -259,11 +269,11 @@ pub trait RithmicHistoryTransport {
     ///
     /// # Errors
     ///
-    /// Returns a coarse error when the session or collection cannot continue.
+    /// Returns why the session or collection could not continue.
     fn collect_history(
         &mut self,
         request: HistoryCollectionRequest,
-    ) -> Result<CollectedHistory, String>;
+    ) -> Result<CollectedHistory, RithmicHistoryAdapterError>;
 }
 
 /// One authenticated history connection with an absolute replay deadline.
@@ -300,11 +310,11 @@ impl RithmicHistorySessionTransport {
     /// Logs out and closes the authenticated history session within its native deadline.
     ///
     /// # Errors
-    /// Returns a redacted transport failure when logout or socket close is not confirmed.
+    /// Returns the redacted session failure when logout or socket close is not confirmed.
     pub fn close(self) -> Result<(), RithmicHistoryAdapterError> {
         self.connection
             .close()
-            .map_err(|_| RithmicHistoryAdapterError::Transport)
+            .map_err(RithmicHistoryAdapterError::Session)
     }
 }
 
@@ -312,9 +322,9 @@ impl RithmicHistoryTransport for RithmicHistorySessionTransport {
     fn collect_history(
         &mut self,
         request: HistoryCollectionRequest,
-    ) -> Result<CollectedHistory, String> {
+    ) -> Result<CollectedHistory, RithmicHistoryAdapterError> {
         let maximum_bars = u16::try_from(request.maximum_bars.get())
-            .map_err(|_| RithmicHistoryAdapterError::InvalidRequest.to_string())?;
+            .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
         match request.series {
             HistorySeries::Time { bar_type, period } => {
                 let wire_type = match bar_type {
@@ -345,38 +355,42 @@ impl RithmicHistoryTransport for RithmicHistorySessionTransport {
                     })
             }
         }
-        .map_err(|_| RithmicHistoryAdapterError::Transport.to_string())?;
+        .map_err(RithmicHistoryAdapterError::Session)?;
         let mut collector = HistoryCollector::try_new(request)
-            .map_err(|_| RithmicHistoryAdapterError::InvalidRequest.to_string())?;
+            .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
         let deadline = Instant::now() + self.replay_timeout;
         let mut control_messages = 0_usize;
         loop {
             match self
                 .connection
                 .read_next_until(deadline)
-                .map_err(|_| RithmicHistoryAdapterError::Transport.to_string())?
+                .map_err(RithmicHistoryAdapterError::Session)?
             {
-                RithmicSessionMessage::History(message) => {
-                    match collector
-                        .accept(message)
-                        .map_err(|_| RithmicHistoryAdapterError::MalformedHistory.to_string())?
-                    {
-                        CollectionProgress::Pending => {}
-                        CollectionProgress::Complete(history) => return Ok(history),
-                        CollectionProgress::Unhandled(_) => {
-                            return Err(RithmicHistoryAdapterError::MalformedHistory.to_string());
-                        }
+                RithmicSessionMessage::History(message) => match collector.accept(message) {
+                    Ok(CollectionProgress::Pending) => {}
+                    Ok(CollectionProgress::Complete(history)) => return Ok(history),
+                    Ok(CollectionProgress::Unhandled(_)) => {
+                        return Err(RithmicHistoryAdapterError::MalformedHistory);
                     }
+                    Err(CollectorError::Rejected) => {
+                        return Err(RithmicHistoryAdapterError::Rejected);
+                    }
+                    Err(error) => return Err(RithmicHistoryAdapterError::Collection(error)),
+                },
+                RithmicSessionMessage::Control(DecodedControlMessage::ForcedLogout) => {
+                    return Err(RithmicHistoryAdapterError::ForcedLogout);
                 }
-                RithmicSessionMessage::Control(
-                    DecodedControlMessage::ForcedLogout | DecodedControlMessage::Reject,
-                ) => return Err(RithmicHistoryAdapterError::Transport.to_string()),
+                RithmicSessionMessage::Control(DecodedControlMessage::Reject) => {
+                    return Err(RithmicHistoryAdapterError::Rejected);
+                }
                 RithmicSessionMessage::Control(_)
                 | RithmicSessionMessage::Catalog(_)
                 | RithmicSessionMessage::Market(_) => {
                     control_messages = control_messages.saturating_add(1);
                     if control_messages > self.maximum_control_messages.get() {
-                        return Err(RithmicHistoryAdapterError::Transport.to_string());
+                        return Err(RithmicHistoryAdapterError::Session(
+                            RithmicSessionError::UnexpectedMessage,
+                        ));
                     }
                 }
             }
@@ -385,9 +399,10 @@ impl RithmicHistoryTransport for RithmicHistorySessionTransport {
 }
 
 struct PreparedRequest {
-    collection: HistoryCollectionRequest,
     instrument: RithmicProviderInstrument,
     resolution: RithmicTimeBarResolution,
+    start_seconds: i32,
+    end_seconds: i32,
     expected_bars: usize,
 }
 
@@ -544,71 +559,41 @@ impl<T> RithmicHistoryCapabilityAdapter<T> {
         }
         let start_seconds = i32::try_from(start_nanos / NANOS_PER_SECOND)
             .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
-        let finish_seconds = i32::try_from(
-            end_nanos
-                .checked_div(NANOS_PER_SECOND)
-                .and_then(|value| value.checked_sub(1))
-                .ok_or(RithmicHistoryAdapterError::InvalidRequest)?,
-        )
-        .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
+        let end_seconds = i32::try_from(end_nanos / NANOS_PER_SECOND)
+            .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
         Ok(PreparedRequest {
-            collection: HistoryCollectionRequest {
-                symbol: instrument.descriptor.provider_symbol.clone(),
-                exchange: instrument.descriptor.venue_id.clone(),
-                series: HistorySeries::Time {
-                    bar_type: resolution.decoded_type(),
-                    period: i32::from(resolution.period.get()),
-                },
-                start_seconds,
-                finish_seconds,
-                maximum_bars: NonZeroUsize::new(expected_bars).unwrap_or(NonZeroUsize::MIN),
-            },
             instrument,
             resolution,
+            start_seconds,
+            end_seconds,
             expected_bars,
         })
     }
 
-    fn page_from_history(
+    fn page_from_bars(
         request: &HistoryPageRequest,
         prepared: &PreparedRequest,
-        history: CollectedHistory,
+        bars: Vec<SequencedHistory<MarketBar>>,
     ) -> Result<HistoryPage, RithmicHistoryAdapterError> {
-        if history.request != prepared.collection {
-            return Err(RithmicHistoryAdapterError::MalformedHistory);
-        }
-        let HistoryBars::Time(bars) = history.bars else {
-            return Err(RithmicHistoryAdapterError::MalformedHistory);
-        };
         if bars.len() != prepared.expected_bars {
             return Err(RithmicHistoryAdapterError::IncompleteCoverage);
         }
-        let interval = i32::try_from(prepared.resolution.interval_seconds()?)
+        let interval = i64::try_from(prepared.resolution.interval_seconds()?)
             .map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
         let mut items = Vec::with_capacity(bars.len());
         for (index, bar) in bars.into_iter().enumerate() {
-            let expected_marker = prepared
-                .collection
-                .start_seconds
-                .checked_add(
-                    i32::try_from(index)
-                        .ok()
-                        .and_then(|value| value.checked_mul(interval))
-                        .ok_or(RithmicHistoryAdapterError::MalformedHistory)?,
-                )
+            let expected_open = i64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_mul(interval))
+                .and_then(|offset| offset.checked_add(i64::from(prepared.start_seconds)))
                 .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
-            if bar.marker_seconds != expected_marker {
+            if bar.value.exchange_timestamp_seconds != expected_open {
                 return Err(RithmicHistoryAdapterError::IncompleteCoverage);
             }
-            let sequenced =
-                canonical_rithmic_time_bar(&prepared.instrument, &prepared.resolution, &bar)?;
-            let event_time_unix_nanos = i64::from(bar.marker_seconds)
-                .checked_mul(NANOS_PER_SECOND_I64)
-                .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
             items.push(HistoryItem {
-                sequence: sequenced.sequence.get(),
-                event_time_unix_nanos,
-                payload: encode_history_bar(sequenced.value),
+                sequence: bar.sequence.get(),
+                event_time_unix_nanos: bar.value.exchange_timestamp_unix_nanos,
+                payload: encode_history_bar(bar.value),
             });
         }
         Ok(HistoryPage {
@@ -626,21 +611,30 @@ impl<T: RithmicHistoryTransport> ProviderHistoryAdapter for RithmicHistoryCapabi
 
     fn fetch_page(&mut self, request: &HistoryPageRequest) -> Result<HistoryPage, String> {
         let prepared = self.prepare(request).map_err(|error| error.to_string())?;
-        let Ok(history) = self.transport.collect_history(prepared.collection.clone()) else {
+        let replay_bars = NonZeroUsize::new(
+            prepared
+                .expected_bars
+                .saturating_add(TIME_REPLAY_PADDING_BARS),
+        )
+        .unwrap_or(NonZeroUsize::MIN);
+        collect_time_bars(
+            &mut self.transport,
+            &prepared.instrument,
+            &prepared.resolution,
+            prepared.start_seconds,
+            prepared.end_seconds,
+            replay_bars,
+        )
+        .and_then(|bars| Self::page_from_bars(request, &prepared, bars))
+        .map_err(|error| {
             self.failed = true;
-            return Err(RithmicHistoryAdapterError::Transport.to_string());
-        };
-        match Self::page_from_history(request, &prepared, history) {
-            Ok(page) => Ok(page),
-            Err(error) => {
-                self.failed = true;
-                Err(error.to_string())
-            }
-        }
+            error.to_string()
+        })
     }
 }
 
-/// Converts one replay or live time bar to the shared contiguous sequence model.
+/// Converts one replay or live time bar to the shared contiguous sequence model,
+/// labelled and sequenced by the time its period opens.
 ///
 /// # Errors
 ///
@@ -673,15 +667,25 @@ pub fn canonical_rithmic_time_bar(
     if marker % interval != 0 {
         return Err(RithmicHistoryAdapterError::MalformedHistory);
     }
-    let sequence = marker
+    // Rithmic stamps a second or minute bar with the time its period closes.
+    let open = match resolution.decoded_type() {
+        DecodedTimeBarType::Second | DecodedTimeBarType::Minute => marker.checked_sub(interval),
+        DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => Some(marker),
+    }
+    .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
+    let sequence = open
         .checked_div(interval)
         .and_then(|value| value.checked_add(1))
         .and_then(NonZeroU64::new)
         .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
+    let open_seconds =
+        i64::try_from(open).map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
     let market_bar = MarketBar {
         source_sequence: sequence.get(),
-        exchange_timestamp_seconds: i64::from(bar.marker_seconds),
-        exchange_timestamp_unix_nanos: i64::from(bar.marker_seconds) * NANOS_PER_SECOND_I64,
+        exchange_timestamp_seconds: open_seconds,
+        exchange_timestamp_unix_nanos: open_seconds
+            .checked_mul(NANOS_PER_SECOND_I64)
+            .ok_or(RithmicHistoryAdapterError::MalformedHistory)?,
         open: fixed_price(bar.ohlc.open, instrument.descriptor.price_scale)?,
         high: fixed_price(bar.ohlc.high, instrument.descriptor.price_scale)?,
         low: fixed_price(bar.ohlc.low, instrument.descriptor.price_scale)?,
@@ -760,7 +764,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
     }
     let start_seconds = i32::try_from(range.start_unix_nanos / NANOS_PER_SECOND_I64)
         .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
-    let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND_I64)
+    let end_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND_I64)
         .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
     match rithmic_chart_aggregation(interval) {
         RithmicChartAggregation::Trades { trades_per_bar } => collect_tick_chart_history(
@@ -768,7 +772,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
             instrument,
             trades_per_bar.get(),
             start_seconds,
-            finish_seconds,
+            end_seconds,
             maximum_bars,
         ),
         RithmicChartAggregation::Time { unit, period } => collect_time_chart_history(
@@ -784,7 +788,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
                 period,
             )?,
             start_seconds,
-            finish_seconds,
+            end_seconds,
             maximum_bars,
         ),
         RithmicChartAggregation::DailySessions { period } => {
@@ -797,7 +801,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
                     NonZeroU16::MIN,
                 )?,
                 start_seconds,
-                finish_seconds,
+                end_seconds,
                 maximum_bars,
             )?;
             aggregate_daily_chart_history(daily, period, &instrument.descriptor.venue_id)
@@ -810,45 +814,75 @@ fn collect_time_chart_history<T: RithmicHistoryTransport>(
     instrument: &RithmicProviderInstrument,
     resolution: &RithmicTimeBarResolution,
     start_seconds: i32,
-    finish_seconds: i32,
+    end_seconds: i32,
     maximum_bars: NonZeroUsize,
 ) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
+    let bars = collect_time_bars(
+        transport,
+        instrument,
+        resolution,
+        start_seconds,
+        end_seconds,
+        maximum_bars,
+    )?;
+    Ok(bars
+        .into_iter()
+        .enumerate()
+        .map(|(index, sequenced)| {
+            let mut value = sequenced.value;
+            value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+            value
+        })
+        .collect())
+}
+
+/// Replays the canonical time bars that open in `[start_seconds, end_seconds)`.
+///
+/// Rithmic answers a minute replay with every bar whose period overlaps the
+/// requested seconds, but a second replay only with the bars whose close
+/// marker falls inside them. The replay is padded by one period on each side
+/// and trimmed by open time, so both return exactly the bars of the window.
+fn collect_time_bars<T: RithmicHistoryTransport>(
+    transport: &mut T,
+    instrument: &RithmicProviderInstrument,
+    resolution: &RithmicTimeBarResolution,
+    start_seconds: i32,
+    end_seconds: i32,
+    maximum_bars: NonZeroUsize,
+) -> Result<Vec<SequencedHistory<MarketBar>>, RithmicHistoryAdapterError> {
     let interval_seconds = i32::try_from(resolution.interval_seconds()?)
         .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
-    let collection_start = start_seconds
-        .checked_sub(interval_seconds)
-        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
-    let collection_finish = finish_seconds
-        .checked_add(interval_seconds)
-        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
-    let collected = transport
-        .collect_history(HistoryCollectionRequest {
-            symbol: instrument.descriptor.provider_symbol.clone(),
-            exchange: instrument.descriptor.venue_id.clone(),
-            series: HistorySeries::Time {
-                bar_type: resolution.decoded_type(),
-                period: i32::from(resolution.period.get()),
-            },
-            start_seconds: collection_start,
-            finish_seconds: collection_finish,
-            maximum_bars,
-        })
-        .map_err(|_| RithmicHistoryAdapterError::Transport)?;
+    let request = HistoryCollectionRequest {
+        symbol: instrument.descriptor.provider_symbol.clone(),
+        exchange: instrument.descriptor.venue_id.clone(),
+        series: HistorySeries::Time {
+            bar_type: resolution.decoded_type(),
+            period: i32::from(resolution.period.get()),
+        },
+        start_seconds: start_seconds
+            .checked_sub(interval_seconds)
+            .ok_or(RithmicHistoryAdapterError::InvalidRequest)?,
+        finish_seconds: end_seconds
+            .checked_add(interval_seconds)
+            .ok_or(RithmicHistoryAdapterError::InvalidRequest)?,
+        maximum_bars,
+    };
+    let collected = transport.collect_history(request.clone())?;
+    if collected.request != request {
+        return Err(RithmicHistoryAdapterError::MalformedHistory);
+    }
     let HistoryBars::Time(decoded) = collected.bars else {
         return Err(RithmicHistoryAdapterError::MalformedHistory);
     };
-    decoded
-        .iter()
-        .filter(|bar| bar.marker_seconds >= start_seconds && bar.marker_seconds <= finish_seconds)
-        .enumerate()
-        .map(|(index, bar)| {
-            canonical_rithmic_time_bar(instrument, resolution, bar).map(|sequenced| {
-                let mut value = sequenced.value;
-                value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-                value
-            })
-        })
-        .collect()
+    let window = i64::from(start_seconds)..i64::from(end_seconds);
+    let mut bars = Vec::with_capacity(decoded.len());
+    for bar in &decoded {
+        let sequenced = canonical_rithmic_time_bar(instrument, resolution, bar)?;
+        if window.contains(&sequenced.value.exchange_timestamp_seconds) {
+            bars.push(sequenced);
+        }
+    }
+    Ok(bars)
 }
 
 fn collect_tick_chart_history<T: RithmicHistoryTransport>(
@@ -859,16 +893,14 @@ fn collect_tick_chart_history<T: RithmicHistoryTransport>(
     finish_seconds: i32,
     maximum_bars: NonZeroUsize,
 ) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
-    let collected = transport
-        .collect_history(HistoryCollectionRequest {
-            symbol: instrument.descriptor.provider_symbol.clone(),
-            exchange: instrument.descriptor.venue_id.clone(),
-            series: HistorySeries::Tick { trades_per_bar },
-            start_seconds,
-            finish_seconds,
-            maximum_bars,
-        })
-        .map_err(|_| RithmicHistoryAdapterError::Transport)?;
+    let collected = transport.collect_history(HistoryCollectionRequest {
+        symbol: instrument.descriptor.provider_symbol.clone(),
+        exchange: instrument.descriptor.venue_id.clone(),
+        series: HistorySeries::Tick { trades_per_bar },
+        start_seconds,
+        finish_seconds,
+        maximum_bars,
+    })?;
     let HistoryBars::Tick(decoded) = collected.bars else {
         return Err(RithmicHistoryAdapterError::MalformedHistory);
     };
@@ -1323,19 +1355,17 @@ mod tests {
 
     #[derive(Clone)]
     struct FixtureTransport {
-        responses: Rc<RefCell<VecDeque<Result<CollectedHistory, String>>>>,
+        responses: Rc<RefCell<VecDeque<Result<CollectedHistory, RithmicHistoryAdapterError>>>>,
     }
 
     impl RithmicHistoryTransport for FixtureTransport {
         fn collect_history(
             &mut self,
             request: HistoryCollectionRequest,
-        ) -> Result<CollectedHistory, String> {
-            let mut history = self
-                .responses
-                .borrow_mut()
-                .pop_front()
-                .ok_or_else(|| RithmicHistoryAdapterError::Transport.to_string())??;
+        ) -> Result<CollectedHistory, RithmicHistoryAdapterError> {
+            let mut history = self.responses.borrow_mut().pop_front().ok_or(
+                RithmicHistoryAdapterError::Session(RithmicSessionError::Transport),
+            )??;
             history.request = request;
             Ok(history)
         }
@@ -1347,7 +1377,7 @@ mod tests {
         fn collect_history(
             &mut self,
             request: HistoryCollectionRequest,
-        ) -> Result<CollectedHistory, String> {
+        ) -> Result<CollectedHistory, RithmicHistoryAdapterError> {
             let bars = match request.series {
                 HistorySeries::Time { bar_type, period } => {
                     let interval = match bar_type {
@@ -1356,7 +1386,16 @@ mod tests {
                         DecodedTimeBarType::Daily => period.saturating_mul(86_400),
                         DecodedTimeBarType::Weekly => period.saturating_mul(7 * 86_400),
                     };
-                    let marker_seconds = request.start_seconds.saturating_add(interval);
+                    // The bar that opens one period after the padded start;
+                    // second and minute markers are its close time.
+                    let marker_seconds = match bar_type {
+                        DecodedTimeBarType::Second | DecodedTimeBarType::Minute => request
+                            .start_seconds
+                            .saturating_add(interval.saturating_mul(2)),
+                        DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => {
+                            request.start_seconds.saturating_add(interval)
+                        }
+                    };
                     HistoryBars::Time(vec![DecodedTimeBar {
                         identity: BarIdentity {
                             symbol: request.symbol.clone(),
@@ -1716,7 +1755,7 @@ mod tests {
     }
 
     fn adapter(
-        responses: Vec<Result<CollectedHistory, String>>,
+        responses: Vec<Result<CollectedHistory, RithmicHistoryAdapterError>>,
     ) -> RithmicHistoryCapabilityAdapter<FixtureTransport> {
         RithmicHistoryCapabilityAdapter::try_with_transport(
             FixtureTransport {
@@ -1732,10 +1771,14 @@ mod tests {
     #[test]
     fn fetches_exact_covering_page_and_decodes_canonical_bars() {
         let (start_nanos, end_nanos, start_seconds) = aligned_range(3);
+        // Markers are close times. The padded replay also returns the bar
+        // before the window and the one opening at its end.
         let bars = [
-            time_bar(start_seconds, 5100.25, 1),
-            time_bar(start_seconds + 60, 5101.00, 2),
-            time_bar(start_seconds + 120, 5101.50, 3),
+            time_bar(start_seconds, 5099.75, 9),
+            time_bar(start_seconds + 60, 5100.25, 1),
+            time_bar(start_seconds + 120, 5101.00, 2),
+            time_bar(start_seconds + 180, 5101.50, 3),
+            time_bar(start_seconds + 240, 5102.00, 9),
         ];
         let mut capability = adapter(vec![Ok(collected(start_seconds, &bars))]);
         let page_request = request(start_nanos, end_nanos, 3);
@@ -1744,6 +1787,11 @@ mod tests {
             .expect("covering page fetches");
         assert_eq!(page.request, page_request);
         assert_eq!(page.items.len(), 3);
+        assert_eq!(
+            page.items[0].sequence,
+            u64::try_from(start_seconds / 60).unwrap() + 1
+        );
+        assert_eq!(page.items[0].event_time_unix_nanos, start_nanos);
         assert!(page.next.is_none());
         let decoded = page
             .items
@@ -1765,11 +1813,81 @@ mod tests {
     }
 
     #[test]
+    fn chart_history_labels_bars_by_open_time_and_trims_the_replay_padding() {
+        let start = 1_800_000_000_i32;
+        let second = |marker: i32| DecodedTimeBar {
+            bar_type: DecodedTimeBarType::Second,
+            period: "5".to_string(),
+            ..time_bar(marker, 5_100.0, 1)
+        };
+        // A second replay returns the bars whose close marker falls inside
+        // the padded window.
+        let replay = (start - 5..=start + 20)
+            .step_by(5)
+            .map(second)
+            .collect::<Vec<_>>();
+        let mut transport = FixtureTransport {
+            responses: Rc::new(RefCell::new(VecDeque::from([Ok(collected(
+                start, &replay,
+            ))]))),
+        };
+        let bars = collect_rithmic_chart_history(
+            &mut transport,
+            &instrument(),
+            ChartInterval::Second5,
+            HistoryRange {
+                start_unix_nanos: i64::from(start) * NANOS_PER_SECOND_I64,
+                end_unix_nanos: i64::from(start + 15) * NANOS_PER_SECOND_I64,
+            },
+            NonZeroUsize::new(8).unwrap(),
+        )
+        .expect("second history collects");
+        assert_eq!(
+            bars.iter()
+                .map(|bar| (bar.source_sequence, bar.exchange_timestamp_seconds))
+                .collect::<Vec<_>>(),
+            [
+                (1, i64::from(start)),
+                (2, i64::from(start + 5)),
+                (3, i64::from(start + 10)),
+            ]
+        );
+    }
+
+    #[test]
+    fn chart_history_reports_why_the_replay_failed() {
+        let (start_nanos, end_nanos, _) = aligned_range(2);
+        for error in [
+            RithmicHistoryAdapterError::Rejected,
+            RithmicHistoryAdapterError::ForcedLogout,
+            RithmicHistoryAdapterError::Collection(CollectorError::OutsideRequestedRange),
+            RithmicHistoryAdapterError::Session(RithmicSessionError::Deadline),
+        ] {
+            let mut transport = FixtureTransport {
+                responses: Rc::new(RefCell::new(VecDeque::from([Err(error)]))),
+            };
+            assert_eq!(
+                collect_rithmic_chart_history(
+                    &mut transport,
+                    &instrument(),
+                    ChartInterval::Minute1,
+                    HistoryRange {
+                        start_unix_nanos: start_nanos,
+                        end_unix_nanos: end_nanos,
+                    },
+                    NonZeroUsize::new(8).unwrap(),
+                ),
+                Err(error)
+            );
+        }
+    }
+
+    #[test]
     fn incomplete_or_gapped_coverage_fails_closed_and_poisons_session() {
         let (start_nanos, end_nanos, start_seconds) = aligned_range(3);
         let incomplete = [
-            time_bar(start_seconds, 5100.00, 1),
-            time_bar(start_seconds + 60, 5101.00, 2),
+            time_bar(start_seconds + 60, 5100.00, 1),
+            time_bar(start_seconds + 120, 5101.00, 2),
         ];
         let mut capability = adapter(vec![Ok(collected(start_seconds, &incomplete))]);
         let page_request = request(start_nanos, end_nanos, 3);
@@ -1777,9 +1895,9 @@ mod tests {
         assert!(capability.fetch_page(&page_request).is_err());
 
         let gapped = [
-            time_bar(start_seconds, 5100.00, 1),
-            time_bar(start_seconds + 120, 5102.00, 2),
-            time_bar(start_seconds + 180, 5103.00, 3),
+            time_bar(start_seconds, 5099.00, 1),
+            time_bar(start_seconds + 60, 5100.00, 1),
+            time_bar(start_seconds + 180, 5102.00, 2),
         ];
         let mut capability = adapter(vec![Ok(collected(start_seconds, &gapped))]);
         assert!(capability.fetch_page(&page_request).is_err());
@@ -1822,9 +1940,9 @@ mod tests {
     fn covering_resnapshot_discards_overlap_and_rejects_incomplete_recovery() {
         let (start_nanos, end_nanos, start_seconds) = aligned_range(3);
         let bars = [
-            time_bar(start_seconds, 5100.00, 1),
-            time_bar(start_seconds + 60, 5101.00, 2),
-            time_bar(start_seconds + 120, 5102.00, 3),
+            time_bar(start_seconds + 60, 5100.00, 1),
+            time_bar(start_seconds + 120, 5101.00, 2),
+            time_bar(start_seconds + 180, 5102.00, 3),
         ];
         let mut capability = adapter(vec![Ok(collected(start_seconds, &bars))]);
         let first_page = capability
