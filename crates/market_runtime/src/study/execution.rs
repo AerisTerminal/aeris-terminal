@@ -1,6 +1,7 @@
 //! Bounded native calculation isolation. One worker per study runtime, one job
-//! in flight. A deadline opens the circuit: no replacement worker or queued
-//! backlog is created, and a late result cannot commit state or publications.
+//! in flight. A deadline opens the circuit until the abandoned calculation
+//! finishes: no replacement worker or queued backlog is created, and a late
+//! result cannot commit state or publications.
 use super::{
     AssertUnwindSafe, NativeStudyCalculate, NativeStudyCalculation, NativeStudyState, OrderBook,
     ResolvedStudyInput, StudyDepthView, StudyDirtyRange, StudyExecutionContext,
@@ -11,7 +12,8 @@ use crate::RetainedMarketTrade;
 use std::{
     cell::Cell,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        Arc,
+        atomic::{AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -19,6 +21,8 @@ use std::{
 };
 
 const CALCULATION_DEADLINE: Duration = Duration::from_millis(50);
+pub(super) const BUSY_DETAIL: &str =
+    "study worker is still finishing a calculation that missed its deadline";
 type Output = Result<(Vec<StudyOutputBuffer>, Option<NativeStudyState>), String>;
 
 struct LiveInput {
@@ -79,13 +83,16 @@ struct Job {
 
 pub(super) struct Executor {
     jobs: mpsc::SyncSender<Job>,
-    failed: AtomicBool,
+    submitted: Cell<u64>,
+    finished: Arc<AtomicU64>,
     turn_remaining: Cell<Option<Duration>>,
 }
 
 impl Executor {
     pub(super) fn start() -> Result<Self, String> {
         let (jobs, receiver) = mpsc::sync_channel::<Job>(1);
+        let finished = Arc::new(AtomicU64::new(0));
+        let worker_finished = Arc::clone(&finished);
         thread::Builder::new()
             .name("aeris-study-calculation".into())
             .spawn(move || {
@@ -113,12 +120,14 @@ impl Executor {
                         Err(_) => Err("native study panicked".into()),
                     };
                     let _ = job.reply.try_send(result);
+                    worker_finished.fetch_add(1, Ordering::Release);
                 }
             })
             .map_err(|error| format!("study worker start failed: {error}"))?;
         Ok(Self {
             jobs,
-            failed: AtomicBool::new(false),
+            submitted: Cell::new(0),
+            finished,
             turn_remaining: Cell::new(None),
         })
     }
@@ -127,8 +136,9 @@ impl Executor {
         self.turn_remaining.set(Some(CALCULATION_DEADLINE));
     }
 
-    pub(super) fn is_failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
+    /// Whether the worker is still running a calculation abandoned at its deadline.
+    pub(super) fn is_busy(&self) -> bool {
+        self.finished.load(Ordering::Acquire) != self.submitted.get()
     }
 
     pub(super) fn calculate(
@@ -137,13 +147,12 @@ impl Executor {
         outputs: Vec<StudyOutputBuffer>,
         state: Option<NativeStudyState>,
     ) -> Output {
-        if self.failed.load(Ordering::Acquire) {
-            return Err("study execution disabled after worker deadline; restart required".into());
+        if self.is_busy() {
+            return Err(BUSY_DETAIL.into());
         }
         let remaining = self.turn_remaining.get().unwrap_or(CALCULATION_DEADLINE);
         if remaining.is_zero() {
-            self.failed.store(true, Ordering::Release);
-            return Err("study execution disabled after exhausting coordinator turn budget".into());
+            return Err("study calculation deferred: coordinator turn budget exhausted".into());
         }
         let started = Instant::now();
         let (reply, response) = mpsc::sync_channel(1);
@@ -165,16 +174,14 @@ impl Executor {
         self.jobs
             .try_send(job)
             .map_err(|_| "study worker unavailable".to_string())?;
+        self.submitted.set(self.submitted.get().wrapping_add(1));
         let result = response.recv_timeout(remaining);
         if self.turn_remaining.get().is_some() {
             self.turn_remaining
                 .set(Some(remaining.saturating_sub(started.elapsed())));
         }
-        if let Ok(result) = result {
-            result
-        } else {
-            self.failed.store(true, Ordering::Release);
+        result.unwrap_or_else(|_| {
             Err("study calculation deadline exceeded; late result discarded".into())
-        }
+        })
     }
 }

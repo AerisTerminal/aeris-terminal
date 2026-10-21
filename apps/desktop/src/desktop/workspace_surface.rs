@@ -4343,6 +4343,7 @@ impl WorkspaceSurface {
         let Ok(series) = self.current_runtime_series() else {
             return;
         };
+        let now = Instant::now();
         let stale = self
             .studies
             .active
@@ -4353,6 +4354,9 @@ impl WorkspaceSurface {
                     && !self.studies.removing.contains(&state.study_id)
                     && !self.studies.automatic_removals.contains(&state.study_id)
                     && !self.studies.reinitializing.contains_key(&state.study_id)
+                    && self
+                        .studies
+                        .reinitialization_due(state.study_id, &series, now)
             })
             .map(|state| state.study_id)
             .collect::<Vec<_>>();
@@ -4464,7 +4468,8 @@ impl WorkspaceSurface {
         study_id: StudyInstanceId,
         cx: &mut Context<Self>,
     ) {
-        self.studies.cancel_reinitialization(study_id);
+        self.studies
+            .reject_reinitialization(study_id, Instant::now());
         if let Some(dialog) = self.study_settings_dialog_mut()
             && dialog.study_id == study_id
         {

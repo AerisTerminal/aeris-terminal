@@ -763,9 +763,54 @@ fn failed_study_setting_reinitialization_preserves_durable_configuration() {
 
     // Runtime failure retires only the pending candidate. The active
     // durable configuration is not replaced until success is acknowledged.
-    studies.cancel_reinitialization(study_id);
+    let now = std::time::Instant::now();
+    studies.reject_reinitialization(study_id, now);
     assert_eq!(studies.active[0].persisted, original);
     assert!(!studies.suppressing_outputs.contains(&study_id));
+    let series = studies.active[0]
+        .resolved_chart_series
+        .clone()
+        .expect("resolved series");
+    assert!(
+        studies.reinitialization_due(study_id, &series, now),
+        "a rejected settings change never delays automatic synchronization"
+    );
+}
+
+#[test]
+fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_series() {
+    let study_id = StudyInstanceId::try_from_u64(1).expect("study id");
+    let rejected = custom_package_series("instrument:rithmic:CME:MNQ");
+    let other = custom_package_series("instrument:rithmic:CME:ES");
+    let mut studies = RuntimeStudiesState::default();
+    studies.begin_reinitialization(
+        study_id,
+        PendingStudyReinitialization {
+            series: rejected.clone(),
+            replacement_persisted: None,
+        },
+    );
+    let now = std::time::Instant::now();
+    studies.reject_reinitialization(study_id, now);
+
+    assert!(!studies.reinitializing.contains_key(&study_id));
+    assert!(!studies.reinitialization_due(study_id, &rejected, now));
+    assert!(studies.reinitialization_due(study_id, &other, now));
+    assert!(studies.reinitialization_due(
+        study_id,
+        &rejected,
+        now + STUDY_REINITIALIZATION_RETRY_DELAY
+    ));
+
+    studies.begin_reinitialization(
+        study_id,
+        PendingStudyReinitialization {
+            series: rejected.clone(),
+            replacement_persisted: None,
+        },
+    );
+    assert_eq!(studies.complete_reinitialization(study_id), Some(false));
+    assert!(studies.reinitialization_due(study_id, &rejected, now));
 }
 
 fn reinitializing_dependency_chain() -> (

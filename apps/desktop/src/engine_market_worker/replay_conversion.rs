@@ -87,6 +87,9 @@ pub(crate) fn replay_runtime_tail_update(
     .map_err(|error| error.to_string())
 }
 
+/// Projects a book for the pane. The frame carries the consumer's demand generation, the
+/// identity panes fence every publication with; a provider catalog numbers its own
+/// instrument selections independently of that demand.
 pub(crate) fn runtime_order_book_frame(
     snapshot: &MarketOrderBookSnapshot,
     instrument: &InstallProviderInstrument,
@@ -124,7 +127,7 @@ pub(crate) fn runtime_order_book_frame(
             instrument_id: publication.instrument_id.clone(),
             entitlement_id: publication.entitlement_id.clone(),
             session_generation: publication.session_generation,
-            selection_generation: instrument.selection_generation,
+            selection_generation: generation,
             precision,
             price_increment: instrument.price_increment,
         },

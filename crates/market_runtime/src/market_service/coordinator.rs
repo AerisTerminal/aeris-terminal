@@ -2457,7 +2457,7 @@ impl Coordinator<'_> {
         let metrics = self.engine.metrics();
         MarketServiceStatus {
             connected_desktop_clients: self.attached.len(),
-            study_execution_failed: self.studies.execution_failed(),
+            study_execution_failed: self.studies.execution_isolated(),
             providers: self
                 .providers
                 .records
@@ -9188,6 +9188,66 @@ mod tests {
                 if selection.command_generation == 12
         ));
         assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+    }
+
+    #[test]
+    fn session_independent_catalog_resolution_joins_a_session_opened_meanwhile() {
+        for (resolved, joins_current_session) in
+            [(hyperliquid_instrument(), true), (instrument(), false)]
+        {
+            let mut coordinator = coordinator();
+            let consumer = consumer(1);
+            register(&mut coordinator, consumer);
+            coordinator
+                .events
+                .insert(consumer, ConsumerEvents::default());
+            // Another restored pane's selection opened a newer provider session
+            // after the catalog stamped this resolution with the one it last saw.
+            coordinator
+                .engine
+                .begin_provider_session(&resolved.provider, ProviderGeneration(nonzero(2)))
+                .expect("provider session");
+            coordinator.command_fences.record_operation(
+                consumer,
+                resolved.provider.clone(),
+                super::super::CommandKind::Select,
+                12,
+                true,
+            );
+            let mut resolution = resolved.clone();
+            resolution.selection_generation = 12;
+            coordinator.handle_provider_catalog(
+                &resolved.provider,
+                super::super::ProviderCatalogEvent::SelectionResolved {
+                    consumer_id: consumer.0.get(),
+                    command_generation: 12,
+                    instrument: resolution,
+                },
+            );
+
+            let installed = coordinator
+                .catalog
+                .get(&(resolved.provider.clone(), resolved.instrument_id.clone()))
+                .map(|instrument| instrument.session_generation);
+            let published = &coordinator
+                .events
+                .get(&consumer)
+                .expect("consumer outbox")
+                .catalog_selection;
+            if joins_current_session {
+                assert_eq!(installed, Some(2), "{}", resolved.provider);
+                assert!(matches!(
+                    published,
+                    Some(MarketRuntimeEvent::ProviderInstrumentSelection(_))
+                ));
+            } else {
+                assert_eq!(installed, None, "{}", resolved.provider);
+                assert!(matches!(
+                    published,
+                    Some(MarketRuntimeEvent::ProviderCatalogRejected(_))
+                ));
+            }
+        }
     }
 
     #[test]

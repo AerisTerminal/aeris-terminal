@@ -2389,9 +2389,9 @@ impl StudyRuntime {
         }
     }
 
-    pub(crate) fn execution_failed(&self) -> bool {
+    pub(crate) fn execution_isolated(&self) -> bool {
         self.executor.get().is_some_and(|executor| match executor {
-            Ok(executor) => executor.is_failed(),
+            Ok(executor) => executor.is_busy(),
             Err(_) => true,
         })
     }
@@ -2400,13 +2400,17 @@ impl StudyRuntime {
         &self,
         study_id: StudyInstanceId,
     ) -> Result<(), StudyRuntimeError> {
-        if self.execution_failed() {
-            return Err(StudyRuntimeError::ExecutionRejected {
+        match self.executor.get() {
+            Some(Err(detail)) => Err(StudyRuntimeError::ExecutionRejected {
                 study_id,
-                detail: "study execution disabled after worker deadline; restart required".into(),
-            });
+                detail: detail.clone(),
+            }),
+            Some(Ok(executor)) if executor.is_busy() => Err(StudyRuntimeError::ExecutionRejected {
+                study_id,
+                detail: execution::BUSY_DETAIL.into(),
+            }),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Returns the number of registered study instances.

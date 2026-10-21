@@ -181,7 +181,8 @@ impl Drop for QuoteSubscription {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketServiceStatus {
     pub connected_desktop_clients: usize,
-    /// Calculation lane was isolated after an execution deadline or worker failure.
+    /// Calculation lane is isolated while a calculation abandoned at its deadline
+    /// finishes, or permanently after the worker failed to start.
     pub study_execution_failed: bool,
     pub providers: Vec<ProviderState>,
     pub retained_series: usize,
@@ -903,6 +904,19 @@ struct ProviderCapabilities {
     candle_demand_policy: CandleDemandPolicy,
     trade_demand_policy: TradeDemandPolicy,
     instrument_missing_detail: &'static str,
+    catalog_session_binding: CatalogSessionBinding,
+}
+
+/// Which provider session a resolved catalog instrument belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogSessionBinding {
+    /// The metadata is valid only for the session that resolved it, so a
+    /// resolution from a retired session is rejected as stale.
+    ResolvingSession,
+    /// The metadata does not depend on the transport session. The adapter
+    /// stamps the session it last saw, which a concurrent selection may have
+    /// replaced before the resolution installs; it joins the current session.
+    CurrentSession,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1083,6 +1097,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         candle_demand_policy: CandleDemandPolicy::SessionManaged,
         trade_demand_policy: TradeDemandPolicy::Immediate,
         instrument_missing_detail: "Rithmic instrument is not installed",
+        catalog_session_binding: CatalogSessionBinding::ResolvingSession,
     },
     start: ProviderRuntimeRegistry::start_rithmic_runtime,
     flush_demand: flush_rithmic_provider_demand,
@@ -1151,6 +1166,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     candle_demand_policy: CandleDemandPolicy::ReconcileAfterSelection,
     trade_demand_policy: TradeDemandPolicy::SessionManaged,
     instrument_missing_detail: "Hyperliquid instrument is not installed",
+    catalog_session_binding: CatalogSessionBinding::CurrentSession,
 };
 
 fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {

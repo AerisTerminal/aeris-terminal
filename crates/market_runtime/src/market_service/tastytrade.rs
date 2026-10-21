@@ -97,6 +97,7 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
         candle_demand_policy: super::CandleDemandPolicy::SessionManaged,
         trade_demand_policy: super::TradeDemandPolicy::SessionManaged,
         instrument_missing_detail: "Tastytrade instrument is not installed",
+        catalog_session_binding: super::CatalogSessionBinding::ResolvingSession,
     },
     start: super::ProviderRuntimeRegistry::start_tastytrade_runtime,
     flush_demand,

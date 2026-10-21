@@ -114,6 +114,7 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
         candle_demand_policy: super::CandleDemandPolicy::SessionManaged,
         trade_demand_policy: super::TradeDemandPolicy::SessionManaged,
         instrument_missing_detail: "cTrader instrument is not installed",
+        catalog_session_binding: super::CatalogSessionBinding::ResolvingSession,
         authorization_revoked_detail: "cTrader disconnected",
     },
     start: super::ProviderRuntimeRegistry::start_ctrader_runtime,

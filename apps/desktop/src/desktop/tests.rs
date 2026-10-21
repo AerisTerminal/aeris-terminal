@@ -129,6 +129,25 @@ const fn catalog_rejection_order_bookain(
 }
 
 #[test]
+fn a_fresh_symbol_browser_accepts_every_provider_default_listing() {
+    for provider in [
+        super::TerminalProvider::Rithmic,
+        super::TerminalProvider::Hyperliquid,
+        super::TerminalProvider::Tastytrade,
+        super::TerminalProvider::Ctrader,
+    ] {
+        let mut browser = crate::desktop::rithmic_shell::RithmicSymbolBrowser::default();
+        assert!(
+            browser
+                .begin_search(super::default_listing_query(provider))
+                .is_ok(),
+            "{} default listing is rejected before any provider switch",
+            super::terminal_provider_display(provider)
+        );
+    }
+}
+
+#[test]
 fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
     use crate::desktop::rithmic_shell::RithmicSymbolBrowser;
     use std::num::NonZeroUsize;

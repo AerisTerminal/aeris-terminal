@@ -775,6 +775,28 @@ impl Coordinator<'_> {
         Ok(())
     }
 
+    fn bind_catalog_instrument_session(&self, instrument: &mut InstallProviderInstrument) {
+        if self
+            .providers
+            .descriptor(&instrument.provider)
+            .is_none_or(|descriptor| {
+                descriptor.capabilities.catalog_session_binding
+                    != super::CatalogSessionBinding::CurrentSession
+            })
+        {
+            return;
+        }
+        let engine_session = self
+            .engine
+            .provider_status(&instrument.provider)
+            .and_then(|status| status.generation)
+            .map(|generation| generation.0.get());
+        let catalog_session = self.catalog_sessions.get(&instrument.provider).copied();
+        if let Some(current) = engine_session.into_iter().chain(catalog_session).max() {
+            instrument.session_generation = instrument.session_generation.max(current);
+        }
+    }
+
     pub(super) fn handle_provider_catalog(&mut self, provider: &str, event: ProviderCatalogEvent) {
         if self
             .provider_registry
@@ -825,9 +847,10 @@ impl Coordinator<'_> {
             ProviderCatalogEvent::SelectionResolved {
                 consumer_id,
                 command_generation,
-                instrument,
+                mut instrument,
             } => {
                 self.restore_provider_catalog_health(&instrument.provider);
+                self.bind_catalog_instrument_session(&mut instrument);
                 if consumer_id == 0 {
                     self.finish_trading_route_resolution(command_generation, &instrument);
                     return;

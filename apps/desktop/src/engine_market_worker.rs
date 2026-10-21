@@ -2921,7 +2921,8 @@ mod tests {
     /// with accurate Rithmic integer-contract volumes.
     #[test]
     fn rithmic_order_book_snapshot_uses_the_consumers_selection_identity() {
-        let product = default_product("MNQ");
+        let mut product = default_product("MNQ");
+        product.selection_generation = 9;
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let outcome = apply_pushed_event(
@@ -2984,7 +2985,10 @@ mod tests {
             !frame.rows.is_empty(),
             "a projected Rithmic Order Book frame must carry price rows"
         );
-        assert_eq!(frame.selection_generation, product.selection_generation);
+        assert_eq!(
+            frame.selection_generation, 1,
+            "the frame carries the demand generation the pane accepts, not the catalog's"
+        );
         assert_eq!(
             frame.best_bid.as_ref().map(|level| level.price),
             Some(7_798_670)

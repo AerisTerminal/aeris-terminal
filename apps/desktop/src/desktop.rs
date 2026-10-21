@@ -540,6 +540,9 @@ const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const CHROME_OVERLAY_EXIT_DURATION: Duration = Duration::from_millis(100);
 const CHART_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(600);
 const CHART_COPY_SUCCESS_ANIMATION_DURATION: Duration = Duration::from_millis(180);
+/// Minimum wait before an automatic study reinitialization the runtime rejected
+/// is sent again for the same chart series.
+const STUDY_REINITIALIZATION_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 mod lifecycle;
 use lifecycle::DesktopLifecycle;
@@ -1440,6 +1443,9 @@ struct RuntimeStudiesState {
     active: Vec<RuntimeStudyState>,
     pending: HashMap<u64, PendingRuntimeStudyState>,
     reinitializing: HashMap<StudyInstanceId, PendingStudyReinitialization>,
+    /// Rejected automatic reinitializations: the chart series each targeted and
+    /// when it may be retried.
+    reinitialization_retries: HashMap<StudyInstanceId, (BarSeriesKey, Instant)>,
     suppressing_outputs: HashSet<StudyInstanceId>,
     automatic_removals: HashSet<StudyInstanceId>,
     removing: HashSet<StudyInstanceId>,
@@ -1453,6 +1459,7 @@ impl Default for RuntimeStudiesState {
             active: Vec::new(),
             pending: HashMap::new(),
             reinitializing: HashMap::new(),
+            reinitialization_retries: HashMap::new(),
             suppressing_outputs: HashSet::new(),
             automatic_removals: HashSet::new(),
             removing: HashSet::new(),
@@ -1483,6 +1490,7 @@ impl RuntimeStudiesState {
 
     fn complete_reinitialization(&mut self, study_id: StudyInstanceId) -> Option<bool> {
         let pending = self.reinitializing.remove(&study_id)?;
+        self.reinitialization_retries.remove(&study_id);
         let mut persisted_changed = false;
         if let Some(state) = self
             .active
@@ -1498,9 +1506,30 @@ impl RuntimeStudiesState {
         Some(persisted_changed)
     }
 
-    fn cancel_reinitialization(&mut self, study_id: StudyInstanceId) {
-        self.reinitializing.remove(&study_id);
+    /// Cancels a rejected reinitialization. An automatic one (no settings
+    /// replacement) waits before it is retried for the same series, so a runtime
+    /// that keeps rejecting it is not asked again on every market update.
+    fn reject_reinitialization(&mut self, study_id: StudyInstanceId, now: Instant) {
         self.suppressing_outputs.remove(&study_id);
+        if let Some(pending) = self.reinitializing.remove(&study_id)
+            && pending.replacement_persisted.is_none()
+        {
+            self.reinitialization_retries.insert(
+                study_id,
+                (pending.series, now + STUDY_REINITIALIZATION_RETRY_DELAY),
+            );
+        }
+    }
+
+    fn reinitialization_due(
+        &self,
+        study_id: StudyInstanceId,
+        series: &BarSeriesKey,
+        now: Instant,
+    ) -> bool {
+        self.reinitialization_retries
+            .get(&study_id)
+            .is_none_or(|(rejected, retry_at)| rejected != series || now >= *retry_at)
     }
 
     fn invalidate_study_outputs(&mut self, study_ids: &[StudyInstanceId]) {
@@ -1559,6 +1588,7 @@ impl RuntimeStudiesState {
         changed |= self.deferred.len() != previous_deferred_len;
         for study_id in study_ids {
             self.reinitializing.remove(study_id);
+            self.reinitialization_retries.remove(study_id);
             self.suppressing_outputs.remove(study_id);
             self.automatic_removals.remove(study_id);
             self.removing.remove(study_id);

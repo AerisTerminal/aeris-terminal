@@ -2295,7 +2295,7 @@ fn secondary_timeframe_changes_map_to_primary_rows_by_timestamp_not_row_index() 
 }
 
 #[test]
-fn slow_native_calculation_cannot_commit_late_or_start_replacement_workers() {
+fn slow_native_calculation_cannot_commit_late_or_start_replacement_workers_and_recovers() {
     fn delayed(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(150));
         calculate_scaled_close(context)
@@ -2323,10 +2323,27 @@ fn slow_native_calculation_cannot_commit_late_or_start_replacement_workers() {
     // A subsequent call rejects admission while the original worker is busy.
     assert!(
         matches!(fixture.runtime.execute_ready(&fixture.engine, fixture.producer),
-            Err(StudyRuntimeError::ExecutionRejected { detail, .. }) if detail.contains("disabled"))
+            Err(StudyRuntimeError::ExecutionRejected { detail, .. }) if detail.contains("still finishing"))
     );
+    assert!(fixture.runtime.execution_isolated());
     std::thread::sleep(std::time::Duration::from_millis(160));
     assert_eq!(fixture.runtime.output_series(output), Some(&committed));
+
+    // Once the abandoned calculation finishes, the same worker accepts work again.
+    assert!(!fixture.runtime.execution_isolated());
+    fixture
+        .runtime
+        .studies
+        .get_mut(&fixture.producer)
+        .unwrap()
+        .program = Some(NativeStudyProgram::stateless(calculate_scaled_close));
+    fixture.runtime.begin_turn();
+    assert!(
+        fixture
+            .runtime
+            .execute_ready(&fixture.engine, fixture.producer)
+            .expect("recovered execution")
+    );
 }
 
 #[test]

@@ -51,7 +51,6 @@ pub(crate) struct RithmicSymbolSelection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicSymbolBrowser {
     maximum_results: usize,
-    allow_empty_query: bool,
     next_search_id: usize,
     pending_search_id: Option<NonZeroUsize>,
     pending_search_query: Option<String>,
@@ -68,7 +67,6 @@ impl Default for RithmicSymbolBrowser {
     fn default() -> Self {
         Self {
             maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,
-            allow_empty_query: false,
             next_search_id: 0,
             pending_search_id: None,
             pending_search_query: None,
@@ -88,7 +86,6 @@ impl RithmicSymbolBrowser {
     pub(crate) fn rithmic_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
         Self {
             maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,
-            allow_empty_query: true,
             next_search_id: request_id.get(),
             pending_search_id: Some(request_id),
             pending_search_query: Some(query.to_string()),
@@ -105,7 +102,6 @@ impl RithmicSymbolBrowser {
         self.results.clear();
         self.pending_selection = None;
         self.selected = None;
-        self.allow_empty_query = true;
     }
 
     pub(crate) fn begin_search(
@@ -113,7 +109,7 @@ impl RithmicSymbolBrowser {
         query: &str,
     ) -> Result<RithmicSymbolSearchRequest, &'static str> {
         let query = query.trim();
-        self.validate_query(query)?;
+        Self::validate_query(query)?;
         self.next_search_id = self.next_search_id.saturating_add(1).max(1);
         let request_id = NonZeroUsize::new(self.next_search_id).unwrap_or(NonZeroUsize::MIN);
         self.pending_search_id = Some(request_id);
@@ -167,7 +163,7 @@ impl RithmicSymbolBrowser {
 
     pub(crate) fn retain_latest_search(&mut self, query: &str) -> Result<bool, &'static str> {
         let query = query.trim();
-        if let Err(error) = self.validate_query(query) {
+        if let Err(error) = Self::validate_query(query) {
             self.retained_search_query = None;
             return Err(error);
         }
@@ -281,16 +277,11 @@ impl RithmicSymbolBrowser {
         self.selected = None;
     }
 
-    fn validate_query(&self, query: &str) -> Result<(), &'static str> {
-        if (!self.allow_empty_query && query.is_empty())
-            || query.len() > MAXIMUM_SYMBOL_QUERY_BYTES
-            || query.chars().any(char::is_control)
-        {
-            return Err(if self.allow_empty_query {
-                "symbol search must be at most 64 printable bytes"
-            } else {
-                "symbol search must be 1-64 printable bytes"
-            });
+    /// An empty query asks the provider catalog for its default listing; the
+    /// runtime catalog owns whether a provider accepts it.
+    fn validate_query(query: &str) -> Result<(), &'static str> {
+        if query.len() > MAXIMUM_SYMBOL_QUERY_BYTES || query.chars().any(char::is_control) {
+            return Err("symbol search must be at most 64 printable bytes");
         }
         Ok(())
     }
@@ -391,7 +382,10 @@ mod tests {
     fn symbol_browser_bounds_queries_results_and_indexes() {
         let mut browser = RithmicSymbolBrowser::default();
         assert_eq!(browser.maximum_results(), MAXIMUM_RITHMIC_SYMBOL_RESULTS);
-        assert!(browser.begin_search("").is_err());
+        assert!(
+            browser.begin_search("").is_ok(),
+            "a fresh browser requests the empty-query default listing"
+        );
         assert!(
             browser
                 .begin_search(&"x".repeat(MAXIMUM_SYMBOL_QUERY_BYTES + 1))
@@ -541,7 +535,7 @@ mod tests {
         let mut browser = RithmicSymbolBrowser::default();
         let active = browser.begin_search("E").expect("prefix validates");
         assert!(!browser.retain_latest_search("ES").expect("query validates"));
-        assert!(browser.retain_latest_search("").is_err());
+        assert!(browser.retain_latest_search("ES\u{7}").is_err());
 
         assert!(browser.apply_results(active.request_id, vec![result("ESU6")]));
         assert!(browser.begin_retained_search().is_none());
