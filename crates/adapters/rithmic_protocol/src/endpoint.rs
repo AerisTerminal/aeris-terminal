@@ -255,11 +255,10 @@ pub enum RithmicSessionError {
     SystemUnavailable,
     DiscoveryRejected,
     DiscoveryClose,
+    /// Rithmic refused the login. Its answer does not say whether the user ID
+    /// and password were wrong or the account lacks access for Aeris: it
+    /// returns `rp_code` 13, "permission denied", even for an unknown user.
     LoginRejected,
-    /// Rithmic answered the login with `rp_code` 13, "permission denied": the
-    /// user is not entitled to this application on this system, for example a
-    /// demo trial without a paid market-data subscription.
-    LoginPermissionDenied,
     SchemaMismatch,
 }
 
@@ -281,7 +280,6 @@ impl RithmicSessionError {
             | Self::SystemUnavailable
             | Self::DiscoveryRejected
             | Self::LoginRejected
-            | Self::LoginPermissionDenied
             | Self::SchemaMismatch => RetryDisposition::Terminal,
             Self::Resolve
             | Self::Connect
@@ -315,10 +313,9 @@ impl fmt::Display for RithmicSessionError {
             Self::SystemUnavailable => "this Rithmic server does not offer the selected system",
             Self::DiscoveryRejected => "Rithmic system discovery was rejected",
             Self::DiscoveryClose => "Rithmic discovery connection did not close cleanly",
-            Self::LoginRejected => "Rithmic rejected the login; check the user ID and password",
-            Self::LoginPermissionDenied => {
-                "Rithmic denied this login for Aeris; the account needs a paid market-data \
-                 subscription and Aeris enabled by its broker or prop firm"
+            Self::LoginRejected => {
+                "Rithmic refused the login; check the user ID, password and system, and that \
+                 the account has market data and Aeris enabled"
             }
             Self::SchemaMismatch => "Rithmic protocol schema does not match the installed kit",
         })

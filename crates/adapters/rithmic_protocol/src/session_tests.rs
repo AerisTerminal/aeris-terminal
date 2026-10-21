@@ -713,7 +713,7 @@ fn discovery_lists_every_offered_system_and_closes() {
 }
 
 #[test]
-fn permission_denied_login_is_terminal_and_distinct() {
+fn permission_denied_login_is_a_terminal_rejection() {
     let fixture = LocalTlsFixture::bind();
     let endpoint = fixture.endpoint;
     let client_config = fixture.client_config;
@@ -758,7 +758,7 @@ fn permission_denied_login_is_terminal_and_distinct() {
     let Err(error) = result else {
         panic!("permission-denied login unexpectedly succeeded");
     };
-    assert_eq!(error, RithmicSessionError::LoginPermissionDenied);
+    assert_eq!(error, RithmicSessionError::LoginRejected);
     assert_eq!(error.retry_disposition(), RetryDisposition::Terminal);
     server
         .join()

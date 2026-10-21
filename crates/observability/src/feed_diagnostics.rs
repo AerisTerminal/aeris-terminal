@@ -106,7 +106,6 @@ pub enum FeedConnectionState {
 pub enum FeedRecoveryReason {
     Transport,
     Authentication,
-    PermissionDenied,
     AgreementRequired,
     UnsupportedSystem,
     SchemaMismatch,

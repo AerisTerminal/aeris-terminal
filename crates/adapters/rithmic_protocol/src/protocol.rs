@@ -413,8 +413,6 @@ pub enum DecodedControlMessage {
     },
     Login {
         accepted: bool,
-        /// The rejection carried `rp_code` 13, Rithmic's "permission denied".
-        permission_denied: bool,
         heartbeat_seconds: Option<f64>,
         unique_user_id: Option<String>,
     },
@@ -596,7 +594,6 @@ mod kit {
     const MAX_RESPONSE_CODES: usize = 8;
     const MAX_SYSTEMS: usize = 64;
     const MAX_HEARTBEAT_INTERVAL_SECONDS: f64 = 300.0;
-    const PERMISSION_DENIED_CODE: &str = "13";
     const TEMPLATE_VERSION: &str = env!("RITHMIC_TEMPLATE_VERSION");
     const SYSTEM_INFO_REQUEST: i32 = 16;
     const SYSTEM_INFO_RESPONSE: i32 = 17;
@@ -1115,11 +1112,8 @@ mod kit {
         if let Some(unique_user_id) = response.unique_user_id.as_deref() {
             validate_field("unique_user_id", unique_user_id)?;
         }
-        let accepted = accepted(&response.rp_code);
         Ok(DecodedControlMessage::Login {
-            accepted,
-            permission_denied: !accepted
-                && response.rp_code.first().map(String::as_str) == Some(PERMISSION_DENIED_CODE),
+            accepted: accepted(&response.rp_code),
             heartbeat_seconds,
             unique_user_id: response.unique_user_id,
         })
@@ -1541,7 +1535,6 @@ mod tests {
             codec.decode_control(&login).expect("login decodes"),
             DecodedControlMessage::Login {
                 accepted: true,
-                permission_denied: false,
                 heartbeat_seconds: Some(10.0),
                 unique_user_id: Some("fixture-unique-user-id".to_string()),
             }
@@ -1549,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn login_rejections_distinguish_permission_denied() {
+    fn every_login_refusal_decodes_as_a_rejection() {
         let codec = RithmicProtocolCodec;
         let rejection = |codes: &[&str]| {
             rti::ResponseLogin {
@@ -1566,22 +1559,20 @@ mod tests {
             }
             .encode_to_vec()
         };
-        assert!(matches!(
-            codec.decode_control(&rejection(&["13", "permission denied"])),
-            Ok(DecodedControlMessage::Login {
-                accepted: false,
-                permission_denied: true,
-                ..
-            })
-        ));
-        assert!(matches!(
-            codec.decode_control(&rejection(&["3", "bad username or password"])),
-            Ok(DecodedControlMessage::Login {
-                accepted: false,
-                permission_denied: false,
-                ..
-            })
-        ));
+        // Rithmic answers an unknown user with code 13, "permission denied", on both the
+        // production and test gateways, so the code says nothing about the credentials.
+        for codes in [
+            &["13", "permission denied"][..],
+            &["3", "bad username or password"],
+        ] {
+            assert!(matches!(
+                codec.decode_control(&rejection(codes)),
+                Ok(DecodedControlMessage::Login {
+                    accepted: false,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

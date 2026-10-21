@@ -137,9 +137,6 @@ impl InstrumentDescriptor {
 pub enum ProviderInvalidationReason {
     Transport,
     Authentication,
-    /// The credentials are valid but the login is not permitted on this API
-    /// or system, for example a trial without a market-data subscription.
-    PermissionDenied,
     AgreementRequired,
     UnsupportedSystem,
     SchemaMismatch,

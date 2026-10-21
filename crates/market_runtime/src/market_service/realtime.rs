@@ -3349,7 +3349,6 @@ mod tests {
     fn terminal_rithmic_failures_do_not_auto_resubscribe() {
         for reason in [
             ProviderInvalidationReason::Authentication,
-            ProviderInvalidationReason::PermissionDenied,
             ProviderInvalidationReason::AgreementRequired,
             ProviderInvalidationReason::UnsupportedSystem,
             ProviderInvalidationReason::SchemaMismatch,

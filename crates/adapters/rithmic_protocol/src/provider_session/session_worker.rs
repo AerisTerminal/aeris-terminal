@@ -27,10 +27,7 @@ pub(super) fn emit_connection_failure(
     error: RithmicSessionError,
 ) {
     diagnostic!("Aeris Rithmic session could not log in: {error}");
-    if matches!(
-        error,
-        RithmicSessionError::LoginRejected | RithmicSessionError::LoginPermissionDenied
-    ) {
+    if error == RithmicSessionError::LoginRejected {
         let _ = emitter.send(ProviderSessionEvent::AuthenticationChanged {
             generation,
             state: AuthenticationState::Rejected,

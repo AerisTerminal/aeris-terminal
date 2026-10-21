@@ -2063,7 +2063,6 @@ use canonical_market::{CanonicalSessionState, MAXIMUM_MBO_ORDERS, malformed, uni
 fn session_failure(error: RithmicSessionError) -> (ProviderInvalidationReason, RetryDisposition) {
     let reason = match error {
         RithmicSessionError::LoginRejected => ProviderInvalidationReason::Authentication,
-        RithmicSessionError::LoginPermissionDenied => ProviderInvalidationReason::PermissionDenied,
         RithmicSessionError::SystemUnavailable => ProviderInvalidationReason::UnsupportedSystem,
         RithmicSessionError::SchemaMismatch | RithmicSessionError::KitUnavailable => {
             ProviderInvalidationReason::SchemaMismatch

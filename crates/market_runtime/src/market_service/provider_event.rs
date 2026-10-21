@@ -11,10 +11,7 @@ pub(super) const fn rithmic_invalidation_detail(
     match reason {
         Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
         Some(ProviderInvalidationReason::Authentication) => {
-            "Rithmic rejected the user ID or password for the selected system"
-        }
-        Some(ProviderInvalidationReason::PermissionDenied) => {
-            "Rithmic denied this login for Aeris; the account needs a paid market-data subscription and Aeris enabled by its broker or prop firm"
+            "Rithmic refused the saved login; check the user ID, password and system, and that the account has market data and Aeris enabled"
         }
         Some(ProviderInvalidationReason::AgreementRequired) => {
             "Rithmic account requires an agreement before market data can stream"

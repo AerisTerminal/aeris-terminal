@@ -222,12 +222,9 @@ fn sign_in_error(error: RithmicSessionError, credentials: RithmicCredentials<'_>
     let (label, host, system) = (server.label(), server.host(), credentials.system_name);
     match error {
         RithmicSessionError::LoginRejected => format!(
-            "Rithmic rejected this login for {system}. Check the user ID, password and system."
-        ),
-        RithmicSessionError::LoginPermissionDenied => format!(
-            "Rithmic accepted the user ID and password but denied access for Aeris on {system}. \
-             The account needs a paid market-data subscription and Aeris enabled by its broker \
-             or prop firm."
+            "Rithmic refused this login for {system}. Check the user ID, password and system. \
+             If they are right, the account needs a paid market-data subscription and Aeris \
+             enabled by its broker or prop firm."
         ),
         RithmicSessionError::SystemUnavailable => {
             format!("The {label} server does not offer {system}. Choose another system.")
@@ -396,8 +393,9 @@ mod tests {
         for (refusal, expected) in [
             (
                 RithmicSessionError::LoginRejected,
-                "Rithmic rejected this login for Rithmic Paper Trading. Check the user ID, \
-                 password and system.",
+                "Rithmic refused this login for Rithmic Paper Trading. Check the user ID, \
+                 password and system. If they are right, the account needs a paid market-data \
+                 subscription and Aeris enabled by its broker or prop firm.",
             ),
             (
                 RithmicSessionError::SystemUnavailable,
@@ -431,7 +429,6 @@ mod tests {
         let credentials = login("Rithmic 01", "fixture-user", "fixture-password");
         for error in [
             RithmicSessionError::LoginRejected,
-            RithmicSessionError::LoginPermissionDenied,
             RithmicSessionError::Resolve,
             RithmicSessionError::Protocol,
         ] {

@@ -455,11 +455,6 @@ impl RithmicSession {
                 })
             }
             DecodedControlMessage::Login {
-                accepted: false,
-                permission_denied: true,
-                ..
-            } => Err(RithmicSessionError::LoginPermissionDenied),
-            DecodedControlMessage::Login {
                 accepted: false, ..
             } => Err(RithmicSessionError::LoginRejected),
             _ => Err(RithmicSessionError::UnexpectedMessage),
