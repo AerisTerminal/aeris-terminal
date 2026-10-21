@@ -766,13 +766,13 @@ mod tests {
         let dark = AerisTheme::dark().colors;
         assert_eq!(light.book_bid_fill, ThemeColor::from_rgb8(102, 168, 235));
         assert_eq!(light.book_bid_text, light.primary);
-        assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(255, 172, 191));
-        assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(102, 19, 38));
+        assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(255, 130, 158));
+        assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(191, 35, 71));
         assert_eq!(light.book_fill_text, ThemeColor::from_rgb8(0, 0, 0));
         assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(9, 75, 142));
         assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(51, 139, 228));
-        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(116, 33, 51));
-        assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 172, 191));
+        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(162, 37, 66));
+        assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 78, 118));
         assert_eq!(dark.book_fill_text, ThemeColor::from_rgb8(255, 255, 255));
 
         let light_tokens = AerisTheme::light().color_tokens();
@@ -783,7 +783,7 @@ mod tests {
         );
         assert_eq!(
             token_source(&light_tokens, "book-ask-text"),
-            "color-mix(in srgb, #ff2f5e 40%, #000000)"
+            "color-mix(in srgb, #ff2f5e 75%, #000000)"
         );
         assert_eq!(
             token_source(&dark_tokens, "book-bid-text"),
@@ -791,7 +791,7 @@ mod tests {
         );
         assert_eq!(
             token_source(&dark_tokens, "book-ask-fill"),
-            "color-mix(in srgb, #ff2f5e 40%, var(--surface))"
+            "color-mix(in srgb, #ff2f5e 60%, var(--surface))"
         );
         assert_eq!(token_source(&dark_tokens, "book-fill-text"), "#ffffff");
     }

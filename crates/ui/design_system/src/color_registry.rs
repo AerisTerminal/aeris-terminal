@@ -80,15 +80,15 @@ macro_rules! platform_color_registry {
             sell_disabled => "sell-disabled",
             sell_disabled_foreground => "sell-disabled-foreground",
             sell_foreground => "sell-foreground",
-            /// Order-book bid depth bar; text on it uses `book_fill_text`.
+            /// Order-book bid depth bar. Pair only with `book_bid_text`.
             book_bid_fill => "book-bid-fill",
-            /// Order-book bid price text, drawn beside the bid depth bars.
+            /// Order-book bid price and quantity text, on and beside `book_bid_fill`.
             book_bid_text => "book-bid-text",
-            /// Order-book ask depth bar; text on it uses `book_fill_text`.
+            /// Order-book ask depth bar. Pair only with `book_ask_text`.
             book_ask_fill => "book-ask-fill",
-            /// Order-book ask price text, drawn beside the ask depth bars.
+            /// Order-book ask price and quantity text, on and beside `book_ask_fill`.
             book_ask_text => "book-ask-text",
-            /// Quantity text drawn on top of either depth bar.
+            /// Neutral text for content drawn on a depth fill that is not a side's own value.
             book_fill_text => "book-fill-text",
             /// The one focus ring for every control; always the `primary` color.
             ring_primary => "ring-primary",
