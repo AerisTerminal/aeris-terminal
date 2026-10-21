@@ -22,8 +22,8 @@ use aeris_rithmic_protocol_adapter::{
     InstrumentContractMetadata, InstrumentDescriptor, RITHMIC_APPLICATION_NAME,
     RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
     RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSession,
-    RithmicSessionLimits, collect_rithmic_chart_history, collect_rithmic_trade_history,
-    rithmic_chart_aggregation,
+    RithmicSessionLimits, collect_rithmic_chart_history, collect_rithmic_session_history,
+    collect_rithmic_trade_history, rithmic_chart_aggregation,
 };
 use zeroize::Zeroize;
 
@@ -31,7 +31,6 @@ const REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAXIMUM_CONTROL_MESSAGES: usize = 64;
 const MAXIMUM_REPLAY_BARS: usize = 10_000;
 const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
-const DAILY_SESSION_PADDING_BARS: usize = 150;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// Upper bound on the one-trade replay that rebuilds an open tick bundle.
 const MAXIMUM_FORMING_TRADES: usize = 1_000;
@@ -53,6 +52,8 @@ enum FormingPlan {
     Bucket { closed_before_unix_nanos: i64 },
     /// Fold the trades after the newest complete bundle into the open bundle.
     Bundle { trades_per_bar: u32 },
+    /// The adapter returns the session bucket still trading apart from the closed ones.
+    Session,
     /// The provider only serves closed periods for this interval.
     Closed,
 }
@@ -151,17 +152,35 @@ fn collect_replay(
     maximum_visible_bars: usize,
     stop: &Arc<AtomicBool>,
 ) -> Result<(Vec<MarketBar>, Option<FormingBar>, i64), String> {
-    let mut bars = collect_rithmic_chart_history(
-        transport,
-        instrument,
-        interval,
-        replay.range,
-        replay.maximum_bars,
-    )
-    .map_err(|error| error.to_string())?;
+    let (mut bars, mut open_session) = if matches!(replay.forming, FormingPlan::Session) {
+        let history = collect_rithmic_session_history(
+            transport,
+            instrument,
+            interval,
+            replay.range,
+            replay.maximum_bars,
+        )
+        .map_err(|error| error.to_string())?;
+        (history.closed, history.open)
+    } else {
+        let bars = collect_rithmic_chart_history(
+            transport,
+            instrument,
+            interval,
+            replay.range,
+            replay.maximum_bars,
+        )
+        .map_err(|error| error.to_string())?;
+        (bars, None)
+    };
     bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
     if bars.len() > maximum_visible_bars {
         bars.drain(..bars.len() - maximum_visible_bars);
+    }
+    // One completed bar always has to remain: a series whose only bar is
+    // still open has no history to hand over.
+    if bars.is_empty() {
+        bars.extend(open_session.take());
     }
     if bars.is_empty() {
         return Ok(empty_replay_result(replay));
@@ -172,7 +191,8 @@ fn collect_replay(
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| "Rithmic history sequence overflowed".to_string())?;
     }
-    let (forming, boundary) = split_forming_period(transport, instrument, replay, &mut bars, stop)?;
+    let (forming, boundary) =
+        split_forming_period(transport, instrument, replay, &mut bars, open_session, stop)?;
     Ok((bars, forming, boundary))
 }
 
@@ -200,10 +220,24 @@ fn split_forming_period(
     instrument: &RithmicProviderInstrument,
     replay: ReplayEnvelope,
     bars: &mut Vec<MarketBar>,
+    open_session: Option<MarketBar>,
     stop: &Arc<AtomicBool>,
 ) -> Result<(Option<FormingBar>, i64), String> {
     match replay.forming {
         FormingPlan::Closed => Ok((None, replay.range.end_unix_nanos)),
+        FormingPlan::Session => {
+            let forming = open_session
+                .map(|mut bar| {
+                    bar.source_sequence = bars
+                        .last()
+                        .and_then(|last| last.source_sequence.checked_add(1))
+                        .ok_or_else(|| "Rithmic history sequence overflowed".to_string())?;
+                    Ok::<_, String>(FormingBar { bar, trades: None })
+                })
+                .transpose()?;
+            // The open trading date was replayed up to the end of the window.
+            Ok((forming, replay.range.end_unix_nanos))
+        }
         FormingPlan::Bucket {
             closed_before_unix_nanos,
         } => {
@@ -434,11 +468,6 @@ fn replay_envelope(
                 .ok_or_else(|| "Rithmic forming boundary overflowed".to_string())?,
         }
     };
-    let requested_bars = if interval == ChartInterval::Day1 {
-        maximum_visible_bars.saturating_add(DAILY_SESSION_PADDING_BARS)
-    } else {
-        maximum_visible_bars
-    };
     // The replay returns the first bars of its window, so the window has to end at the bars
     // the chart shows. Padding a second-bar window with the longest market closure would fill
     // the replay cap with second bars from days ago.
@@ -448,7 +477,7 @@ fn replay_envelope(
         MAXIMUM_NON_TRADING_GAP_SECONDS
     };
     let span_seconds = interval_seconds
-        .checked_mul(requested_bars as u64)
+        .checked_mul(maximum_visible_bars as u64)
         .and_then(|span| span.checked_add(closure_padding))
         .ok_or_else(|| "Rithmic visible range overflowed".to_string())?;
     let start_seconds = closed_before_seconds
@@ -521,35 +550,33 @@ fn aggregate_replay_envelope(
 ) -> Result<ReplayEnvelope, String> {
     const DAY_SECONDS: u64 = 24 * 60 * 60;
     let maximum_days_per_bar = match period {
+        RithmicDailyAggregation::Days(days) => usize::from(days.get()),
         RithmicDailyAggregation::Week => 7,
         RithmicDailyAggregation::Month => 31,
     };
+    // Every bucket is built from one-day bars and a daily replay holds one bar
+    // per trading date, so the window never spans more dates than one replay.
     let source_days = maximum_visible_bars
+        .saturating_add(1)
         .saturating_mul(maximum_days_per_bar)
-        .saturating_add(maximum_days_per_bar)
         .saturating_add(
             usize::try_from(MAXIMUM_NON_TRADING_GAP_SECONDS / DAY_SECONDS).unwrap_or(usize::MAX),
-        );
-    let maximum_bars = source_days.saturating_add(3);
-    if maximum_bars > MAXIMUM_REPLAY_BARS {
-        return Err("Rithmic aggregate source exceeds replay capacity".to_string());
-    }
-    let end_seconds = now_seconds - now_seconds % DAY_SECONDS;
+        )
+        .min(MAXIMUM_REPLAY_BARS - 1);
     let span_seconds = u64::try_from(source_days)
         .ok()
         .and_then(|days| days.checked_mul(DAY_SECONDS))
         .ok_or_else(|| "Rithmic aggregate range overflowed".to_string())?;
-    let start_seconds = end_seconds
+    let start_seconds = now_seconds
         .checked_sub(span_seconds)
         .ok_or_else(|| "Rithmic aggregate range underflowed".to_string())?;
     Ok(ReplayEnvelope {
-        range: history_range(start_seconds, end_seconds)?,
-        maximum_bars: NonZeroUsize::new(maximum_bars).unwrap_or(NonZeroUsize::MIN),
-        // Weeks and months are aggregated locally from daily session bars, and
-        // the venue calendar — not a clock — decides where their buckets end.
-        // Splitting an open one here would need that calendar, so the live
-        // handoff opens it from trades as it always has.
-        forming: FormingPlan::Closed,
+        // The window runs to now so the trading date still open is replayed
+        // too; the adapter splits its bucket from the closed ones.
+        range: history_range(start_seconds, now_seconds)?,
+        // A span of whole days touches at most one more trading date.
+        maximum_bars: NonZeroUsize::new(source_days + 1).unwrap_or(NonZeroUsize::MIN),
+        forming: FormingPlan::Session,
     })
 }
 
@@ -684,6 +711,31 @@ mod tests {
         assert_eq!(bars, [] as [MarketBar; 0]);
         assert!(forming.is_none());
         assert_eq!(boundary, replay.range.end_unix_nanos);
+    }
+
+    #[test]
+    fn session_replay_runs_to_now_within_one_daily_replay() {
+        let now_seconds = 1_792_633_200;
+        let now = UNIX_EPOCH + Duration::from_secs(now_seconds);
+        for interval in [
+            ChartInterval::Day1,
+            ChartInterval::Day3,
+            ChartInterval::Week1,
+            ChartInterval::Month1,
+        ] {
+            let replay = replay_envelope(interval, 1_600, now).expect("session replay envelope");
+            assert_eq!(
+                replay.range.end_unix_nanos,
+                i64::try_from(now_seconds).unwrap() * NANOS_PER_SECOND
+            );
+            assert!(replay.maximum_bars.get() <= MAXIMUM_REPLAY_BARS);
+            assert!(matches!(replay.forming, FormingPlan::Session));
+        }
+        let daily = replay_envelope(ChartInterval::Day1, 100, now).expect("daily envelope");
+        assert_eq!(
+            daily.range.end_unix_nanos - daily.range.start_unix_nanos,
+            (101 + 4) * 86_400 * NANOS_PER_SECOND
+        );
     }
 
     #[test]

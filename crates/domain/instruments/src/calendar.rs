@@ -1,3 +1,5 @@
+use std::num::NonZeroU16;
+
 const SECONDS_PER_DAY: i64 = 86_400;
 pub mod weekly_hours;
 const CME_SESSION_ROLL_SECONDS: i64 = 17 * 60 * 60;
@@ -26,6 +28,8 @@ pub fn classify_venue(code: &str) -> Option<Venue> {
 /// Calendar aggregation requested for one exchange session series.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExchangeCalendarPeriod {
+    /// Trading dates grouped `days` at a time from the Unix epoch, as live session bars group them.
+    Days(NonZeroU16),
     Week,
     Month,
 }
@@ -65,6 +69,9 @@ impl ExchangeCalendar {
             CalendarKind::CmeGlobex => {
                 let trading_day = cme_trading_day(exchange_timestamp_seconds);
                 match period {
+                    ExchangeCalendarPeriod::Days(days) => {
+                        ExchangeCalendarBucket(trading_day.div_euclid(i64::from(days.get())))
+                    }
                     ExchangeCalendarPeriod::Week => {
                         let monday = trading_day - (trading_day + 3).rem_euclid(7);
                         ExchangeCalendarBucket(monday)
@@ -87,6 +94,23 @@ impl ExchangeCalendar {
             CalendarKind::CmeGlobex => cme_trading_day(exchange_timestamp_seconds),
         }
     }
+
+    /// Returns the instant a trading date (days since the Unix epoch) opens, in Unix seconds:
+    /// the inverse of [`Self::trading_day`]. A CME Globex date opens at 17:00 Chicago time on the
+    /// previous day.
+    #[must_use]
+    pub fn trading_day_open(self, trading_day: i64) -> i64 {
+        match self.kind {
+            CalendarKind::CmeGlobex => cme_trading_day_open(trading_day),
+        }
+    }
+}
+
+fn cme_trading_day_open(trading_day: i64) -> i64 {
+    let local_open = (trading_day - 1) * SECONDS_PER_DAY + CME_SESSION_ROLL_SECONDS;
+    // Chicago changes its offset at 02:00 local time, so the standard-time
+    // reading of 17:00 already falls on the side of any change that 17:00 does.
+    local_open - chicago_utc_offset_seconds(local_open + 6 * 60 * 60)
 }
 
 fn cme_trading_day(timestamp_seconds: i64) -> i64 {
@@ -249,6 +273,38 @@ mod tests {
         assert_eq!(
             calendar.trading_day(utc_seconds(2026, 8, 17, 22)),
             monday + 1
+        );
+    }
+
+    #[test]
+    fn cme_trading_day_open_is_the_previous_evening_across_dst() {
+        let calendar = ExchangeCalendar::for_code("CME").expect("CME calendar");
+        for (trading_day, open) in [
+            (days_from_civil(2026, 1, 15), utc_seconds(2026, 1, 14, 23)),
+            (days_from_civil(2026, 3, 9), utc_seconds(2026, 3, 8, 22)),
+            (days_from_civil(2026, 10, 22), utc_seconds(2026, 10, 21, 22)),
+            (days_from_civil(2026, 11, 2), utc_seconds(2026, 11, 1, 23)),
+        ] {
+            assert_eq!(calendar.trading_day_open(trading_day), open);
+            assert_eq!(calendar.trading_day(open), trading_day);
+            assert_eq!(calendar.trading_day(open - 1), trading_day - 1);
+        }
+    }
+
+    #[test]
+    fn day_buckets_group_trading_dates_from_the_epoch() {
+        let calendar = ExchangeCalendar::for_code("CME").expect("CME calendar");
+        let three = ExchangeCalendarPeriod::Days(NonZeroU16::new(3).expect("three days"));
+        let first = days_from_civil(2026, 10, 19);
+        assert_eq!(first.rem_euclid(3), 0);
+        let open = |day| calendar.trading_day_open(day);
+        assert_eq!(
+            calendar.bucket(open(first), three),
+            calendar.bucket(open(first + 2), three)
+        );
+        assert_ne!(
+            calendar.bucket(open(first + 2), three),
+            calendar.bucket(open(first + 3), three)
         );
     }
 

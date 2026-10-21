@@ -185,11 +185,13 @@ pub enum ChartAggregation {
 pub enum RithmicTimeUnit {
     Second,
     Minute,
-    Day,
 }
 
+/// How daily session bars are grouped into one chart bar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RithmicDailyAggregation {
+    /// Trading dates grouped `days` at a time.
+    Days(NonZeroU16),
     Week,
     Month,
 }

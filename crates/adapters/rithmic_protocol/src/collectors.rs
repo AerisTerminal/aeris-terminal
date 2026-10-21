@@ -212,7 +212,9 @@ pub struct HistoryCollectionRequest {
     pub symbol: String,
     pub exchange: String,
     pub series: HistorySeries,
+    /// Replay start index: Unix seconds, or the YYYYMMDD trading date for daily and weekly bars.
     pub start_seconds: i32,
+    /// Inclusive replay finish index, in the same units as `start_seconds`.
     pub finish_seconds: i32,
     pub maximum_bars: NonZeroUsize,
 }
@@ -229,6 +231,12 @@ impl HistoryCollectionRequest {
             return Err(CollectorError::IdentityMismatch);
         }
         let invalid_series = match self.series {
+            // Rithmic ignores the period of a daily or weekly replay and
+            // always answers with single-day or single-week bars.
+            HistorySeries::Time {
+                bar_type: DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly,
+                period,
+            } => period != 1,
             HistorySeries::Time { period, .. } => period <= 0,
             HistorySeries::Tick { trades_per_bar } => trades_per_bar == 0,
         };
@@ -239,6 +247,18 @@ impl HistoryCollectionRequest {
             return Err(CollectorError::OutsideRequestedRange);
         }
         Ok(())
+    }
+}
+
+/// The period text Rithmic puts on a replayed time bar: seconds for second and
+/// minute bars, and the unit name for day and week bars (`daily` as observed
+/// on Rithmic Test).
+pub(crate) fn rithmic_wire_period(bar_type: DecodedTimeBarType, period: i32) -> Option<String> {
+    match bar_type {
+        DecodedTimeBarType::Second => Some(period.to_string()),
+        DecodedTimeBarType::Minute => period.checked_mul(60).map(|seconds| seconds.to_string()),
+        DecodedTimeBarType::Daily => Some("daily".to_string()),
+        DecodedTimeBarType::Weekly => Some("weekly".to_string()),
     }
 }
 
@@ -362,24 +382,22 @@ impl HistoryCollector {
             return Err(CollectorError::ReplayKindMismatch);
         };
         self.validate_identity(&bar.identity.symbol, &bar.identity.exchange)?;
-        let expected_period = match bar_type {
-            DecodedTimeBarType::Minute => period.checked_mul(60),
-            DecodedTimeBarType::Second | DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => {
-                Some(period)
-            }
-        }
-        .ok_or(CollectorError::SeriesMismatch)?;
-        if bar.bar_type != bar_type || bar.period != expected_period.to_string() {
+        if bar.bar_type != bar_type
+            || rithmic_wire_period(bar_type, period).as_deref() != Some(bar.period.as_str())
+        {
             return Err(CollectorError::SeriesMismatch);
         }
         // Rithmic stamps a second or minute bar with the time its period
         // closes, and a minute replay returns every bar whose period overlaps
         // the requested seconds, so the last one closes up to one period
-        // after the finish.
+        // after the finish. Day and week markers are YYYYMMDD trading dates,
+        // inside the YYYYMMDD request range.
         let latest_marker = match bar_type {
-            DecodedTimeBarType::Second | DecodedTimeBarType::Minute => {
-                self.request.finish_seconds.saturating_add(expected_period)
-            }
+            DecodedTimeBarType::Second => self.request.finish_seconds.saturating_add(period),
+            DecodedTimeBarType::Minute => self
+                .request
+                .finish_seconds
+                .saturating_add(period.saturating_mul(60)),
             DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => self.request.finish_seconds,
         };
         if !(self.request.start_seconds..=latest_marker).contains(&bar.marker_seconds) {
@@ -639,6 +657,41 @@ mod tests {
         assert!(matches!(
             later.accept(replay_time(time_bar(361))),
             Err(CollectorError::OutsideRequestedRange)
+        ));
+    }
+
+    #[test]
+    fn daily_replay_is_one_day_bars_indexed_by_trading_date() {
+        let request = |period| HistoryCollectionRequest {
+            series: HistorySeries::Time {
+                bar_type: DecodedTimeBarType::Daily,
+                period,
+            },
+            start_seconds: 20_261_015,
+            finish_seconds: 20_261_021,
+            ..time_request(4)
+        };
+        assert_eq!(
+            HistoryCollector::try_new(request(3)).err(),
+            Some(CollectorError::InvalidLimit)
+        );
+        let daily = |marker_seconds, period: &str| DecodedTimeBar {
+            bar_type: DecodedTimeBarType::Daily,
+            period: period.to_string(),
+            ..time_bar(marker_seconds)
+        };
+        let mut collector = HistoryCollector::try_new(request(1)).expect("valid daily collector");
+        collector
+            .accept(replay_time(daily(20_261_020, "daily")))
+            .expect("a closed trading date inside the range");
+        assert!(matches!(
+            collector.accept(replay_time(daily(20_261_022, "daily"))),
+            Err(CollectorError::OutsideRequestedRange)
+        ));
+        let mut numbered = HistoryCollector::try_new(request(1)).expect("valid daily collector");
+        assert!(matches!(
+            numbered.accept(replay_time(daily(20_261_020, "1"))),
+            Err(CollectorError::SeriesMismatch)
         ));
     }
 

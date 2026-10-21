@@ -57,10 +57,11 @@ pub use history::{
 pub use history_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicBarContinuity, RithmicCoveringRecoveryEvidence,
     RithmicHistoryAdapterError, RithmicHistoryCapabilityAdapter, RithmicHistoryLimits,
-    RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicTimeBarResolution,
-    canonical_rithmic_tick_bar, canonical_rithmic_time_bar, collect_rithmic_chart_history,
-    collect_rithmic_covering_recovery_evidence, collect_rithmic_trade_history,
-    covering_snapshot_from_page, decode_rithmic_history_bar, rithmic_chart_aggregation,
+    RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicSessionHistory,
+    RithmicTimeBarResolution, canonical_rithmic_tick_bar, canonical_rithmic_time_bar,
+    collect_rithmic_chart_history, collect_rithmic_covering_recovery_evidence,
+    collect_rithmic_session_history, collect_rithmic_trade_history, covering_snapshot_from_page,
+    decode_rithmic_history_bar, rithmic_chart_aggregation,
 };
 pub use market::{
     DecodedMarketMessage, DepthByOrderEndEvent, DepthByOrderMutation, DepthByOrderMutationKind,
