@@ -4,7 +4,7 @@ use super::*;
 use aeris_desktop::market_worker::{
     EngineWorkerStartup, MarketWorkerCommand, MarketWorkerSender, market_worker_channel,
 };
-use aeris_desktop::test_support::FixtureMarketWorker;
+use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
 use gpui::{TestAppContext, VisualTestContext};
 use std::num::NonZeroUsize;
 use std::sync::{atomic::AtomicU64, mpsc};
@@ -13,6 +13,7 @@ struct PaneHarness {
     pane: Entity<WorkspaceSurface>,
     window: Entity<PaneWindow>,
     market: FixtureMarketWorker,
+    market_events: FixtureMarketEvents,
     publications: MarketWorkerSender,
     commands: Option<mpsc::Receiver<MarketWorkerCommand>>,
 }
@@ -173,6 +174,7 @@ impl PaneHarness {
                 pane,
                 window: view,
                 market: FixtureMarketWorker::try_new().expect("fixture market"),
+                market_events: FixtureMarketEvents::default(),
                 publications,
                 commands: Some(requests),
             },
@@ -181,28 +183,36 @@ impl PaneHarness {
     }
 
     fn publish_snapshot(&mut self, bar_count: usize, cx: &mut VisualTestContext) {
+        let product = cx.read(|cx| self.pane.read(cx).product.clone().expect("product"));
+        let series = engine_market_worker::series_key(&product, ChartInterval::Minute1)
+            .expect("fixture series");
+        let route = FixtureSeries {
+            series,
+            provider_generation: product.session_generation,
+            price_scale: u8::try_from(product.price_scale).expect("price scale"),
+            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+        };
         let snapshot = self
             .market
-            .publish_snapshot(bar_count)
-            .expect("fixture snapshot");
+            .publish_runtime_snapshot(bar_count, &route, 1, &self.market_events)
+            .expect("canonical fixture snapshot");
         self.publications
-            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(snapshot.snapshot),
-                generation: snapshot.generation,
-                subscription_id: snapshot.subscription_id,
-                worker_label: snapshot.worker_label,
-                ui_diagnostics: None,
-            }))
+            .send(MarketWorkerMessage::RuntimeSeriesPublication {
+                event: snapshot,
+                received_unix_nanos: 301_000_000_000,
+            })
             .expect("bounded fixture mailbox accepts publication");
         self.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
         self.publications
-            .send(MarketWorkerMessage::SeriesState {
-                generation: 1,
-                state: ChartState::Ready,
-                message: "disconnected fixture ready".into(),
-            })
+            .send(MarketWorkerMessage::RuntimeSeriesStatus(
+                self.market_events.readiness(
+                    1,
+                    aeris_contracts::SeriesLoadState::Live,
+                    "disconnected fixture ready",
+                ),
+            ))
             .expect("fixture readiness enters mailbox");
         self.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1195,36 +1205,22 @@ fn runtime_bar_snapshot_message(
     product: &InstallProviderInstrument,
     series: &aeris_market_data::BarSeriesKey,
     bar: aeris_market_data::MarketBar,
-    envelope: &aeris_market_runtime::fence::Fenced<aeris_market_runtime::fence::ConsumerTag, ()>,
+    events: &FixtureMarketEvents,
     generation: u64,
     publication_generation: u64,
 ) -> MarketWorkerMessage {
-    use aeris_market_runtime::{
-        CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
-        MarketProviderGeneration, MarketRuntimeEvent, MarketSeriesSnapshot, fence::Fenced,
-    };
-    use std::num::NonZeroU64;
-
     MarketWorkerMessage::RuntimeSeriesPublication {
-        event: Fenced {
-            epoch: envelope.epoch,
-            value: MarketRuntimeEvent::SeriesSnapshot(MarketSeriesSnapshot {
-                consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                generation: MarketGenerationId(NonZeroU64::new(generation).expect("selection")),
-                publication_generation,
-                snapshot: Arc::new(CanonicalMarketSeriesSnapshot {
-                    series: series.clone(),
-                    provider_generation: MarketProviderGeneration(
-                        NonZeroU64::new(product.session_generation).expect("provider"),
-                    ),
-                    publication_generation,
-                    price_scale: u8::try_from(product.price_scale).expect("price scale"),
-                    quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
-                    forming: false,
-                    bars: Arc::from([bar]),
-                }),
-            }),
-        },
+        event: events.snapshot(
+            &FixtureSeries {
+                series: series.clone(),
+                provider_generation: product.session_generation,
+                price_scale: u8::try_from(product.price_scale).expect("price scale"),
+                quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+            },
+            generation,
+            publication_generation,
+            [bar].as_slice(),
+        ),
         received_unix_nanos: 301_000_000_000,
     }
 }
@@ -1235,35 +1231,31 @@ fn publish_runtime_bar_tail(
     series: aeris_market_data::BarSeriesKey,
     bar: aeris_market_data::MarketBar,
     provider_generation: aeris_market_runtime::MarketProviderGeneration,
-    envelope: &aeris_market_runtime::fence::Fenced<aeris_market_runtime::fence::ConsumerTag, ()>,
+    events: &FixtureMarketEvents,
     sequence: u64,
 ) {
-    use aeris_market_runtime::{
-        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketSeriesUpdate,
-        SeriesTailOperation, fence::Fenced,
-    };
-    use std::num::NonZeroU64;
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
     harness
         .publications
         .send(MarketWorkerMessage::RuntimeSeriesPublication {
-            event: Fenced {
-                epoch: envelope.epoch,
-                value: MarketRuntimeEvent::SeriesUpdate(MarketSeriesUpdate {
-                    consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                    generation: MarketGenerationId(NonZeroU64::new(sequence).expect("selection")),
-                    publication_generation: 2,
+            event: events.update(
+                &FixtureSeries {
                     series,
-                    provider_generation,
-                    forming: true,
-                    operation: SeriesTailOperation::Append,
-                    bar: aeris_market_data::MarketBar {
-                        source_sequence: 2,
-                        exchange_timestamp_seconds: 600,
-                        exchange_timestamp_unix_nanos: 600_000_000_000,
-                        ..bar
-                    },
-                }),
-            },
+                    provider_generation: provider_generation.0.get(),
+                    price_scale: u8::try_from(product.price_scale).expect("price scale"),
+                    quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+                },
+                sequence,
+                2,
+                aeris_market_runtime::SeriesTailOperation::Append,
+                aeris_market_data::MarketBar {
+                    source_sequence: 2,
+                    exchange_timestamp_seconds: 600,
+                    exchange_timestamp_unix_nanos: 600_000_000_000,
+                    ..bar
+                },
+                true,
+            ),
             received_unix_nanos: 601_000_000_000,
         })
         .expect("tail update");
@@ -1277,10 +1269,7 @@ fn publish_runtime_bar_tail(
 #[gpui::test]
 fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut TestAppContext) {
     use aeris_market_data::MarketBar;
-    use aeris_market_runtime::{
-        MarketProviderGeneration,
-        fence::{ConsumerTag, EpochSequence, Fenced},
-    };
+    use aeris_market_runtime::MarketProviderGeneration;
     use std::num::NonZeroU64;
 
     let (mut harness, cx) = PaneHarness::open(cx);
@@ -1300,15 +1289,13 @@ fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut
     };
     let provider_generation =
         MarketProviderGeneration(NonZeroU64::new(product.session_generation).expect("provider"));
-    let mut epochs = EpochSequence::<ConsumerTag>::default();
-    let epoch = epochs.next();
-    let envelope = Fenced { epoch, value: () };
+    let events = FixtureMarketEvents::default();
     let snapshot = |generation, publication_generation| {
         runtime_bar_snapshot_message(
             &product,
             &series,
             bar,
-            &envelope,
+            &events,
             generation,
             publication_generation,
         )
@@ -1366,7 +1353,7 @@ fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut
         series,
         bar,
         provider_generation,
-        &envelope,
+        &events,
         sequence,
     );
 }
@@ -1376,29 +1363,11 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     cx: &mut TestAppContext,
 ) {
     use aeris_contracts::SeriesLoadState;
-    use aeris_market_runtime::{
-        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketSeriesState,
-        fence::{ConsumerTag, EpochSequence, Fenced},
-    };
-    use std::num::NonZeroU64;
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
-    let mut epochs = EpochSequence::<ConsumerTag>::default();
-    let epoch = epochs.next();
+    let events = FixtureMarketEvents::default();
     let readiness = |generation, state, detail: &str| {
-        MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
-            epoch,
-            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
-                consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                generation: MarketGenerationId(
-                    NonZeroU64::new(generation).expect("selection generation"),
-                ),
-                series: None,
-                state,
-                detail: Some(detail.into()),
-                presentation: None,
-            }),
-        })
+        MarketWorkerMessage::RuntimeSeriesStatus(events.readiness(generation, state, detail))
     };
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_interval(ChartInterval::Minute5, cx));
@@ -1463,27 +1432,15 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
 #[gpui::test]
 fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAppContext) {
     use aeris_contracts::SeriesLoadState;
-    use aeris_market_runtime::{
-        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketSeriesState,
-        fence::{ConsumerTag, EpochSequence, Fenced},
-    };
-    use std::num::NonZeroU64;
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
-    let mut epochs = EpochSequence::<ConsumerTag>::default();
-    let epoch = epochs.next();
+    let events = FixtureMarketEvents::default();
     let failed = |generation| {
-        MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
-            epoch,
-            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
-                consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
-                series: None,
-                state: SeriesLoadState::Failed,
-                detail: Some("market unavailable".into()),
-                presentation: None,
-            }),
-        })
+        MarketWorkerMessage::RuntimeSeriesStatus(events.readiness(
+            generation,
+            SeriesLoadState::Failed,
+            "market unavailable",
+        ))
     };
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_interval(ChartInterval::Minute5, cx));
@@ -1532,33 +1489,17 @@ fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAp
 
 #[gpui::test]
 fn pane_harness_runtime_demand_error_projects_only_current_series(cx: &mut TestAppContext) {
-    use aeris_contracts::{EngineFaultCode, FailureStage};
-    use aeris_market_runtime::{
-        MarketConsumerId, MarketDemandError, MarketDemandErrorScope, MarketGenerationId,
-        MarketRuntimeEvent,
-        fence::{ConsumerTag, EpochSequence, Fenced},
-    };
-    use std::num::NonZeroU64;
+    use aeris_market_runtime::MarketDemandErrorScope;
 
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
-    let mut epochs = EpochSequence::<ConsumerTag>::default();
-    let epoch = epochs.next();
+    let events = FixtureMarketEvents::default();
     let error = |generation, scope| {
-        MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
-            epoch,
-            value: MarketRuntimeEvent::DemandError(MarketDemandError {
-                consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
-                scope,
-                code: EngineFaultCode::Retryable,
-                stage: FailureStage::ProviderHistory,
-                detail: "coverage unavailable".into(),
-                series: None,
-                cause: "fixture".into(),
-                elapsed_millis: None,
-            }),
-        })
+        MarketWorkerMessage::RuntimeSeriesStatus(events.demand_error(
+            generation,
+            scope,
+            "coverage unavailable",
+        ))
     };
     harness
         .publications
@@ -3508,7 +3449,10 @@ fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext)
             "fixture snapshot creates the real chart"
         );
         assert_eq!(pane.chart_state, ChartState::Ready);
-        assert!(pane.worker_label.contains("disconnected"));
-        assert_eq!(pane.subscription_id, "desktop_fixture_market_bars");
+        assert_eq!(
+            (pane.subscription_id.as_str(), pane.worker_label.as_str()),
+            engine_market_worker::worker_identity("hyperliquid"),
+            "canonical fixture bars use the runtime's projection identity"
+        );
     });
 }

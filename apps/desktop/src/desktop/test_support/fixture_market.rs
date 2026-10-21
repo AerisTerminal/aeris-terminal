@@ -4,8 +4,10 @@ use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     ReplayStreamUpdate,
 };
+use aeris_market_runtime::MarketConsumerEvent;
 use std::num::NonZeroUsize;
 
+use super::{FixtureMarketEvents, FixtureSeries};
 use crate::market_worker::{
     MarketPublicationGeneration, MarketWorkerBootstrap, MarketWorkerPublication,
 };
@@ -19,6 +21,32 @@ pub struct FixtureMarketWorker {
 }
 
 impl FixtureMarketWorker {
+    /// Builds a canonical covering publication for the selected fixture series.
+    ///
+    /// # Errors
+    /// Returns an error if the disconnected replay source cannot supply the bars.
+    pub fn publish_runtime_snapshot(
+        &mut self,
+        bar_count: usize,
+        route: &FixtureSeries,
+        selection: u64,
+        events: &FixtureMarketEvents,
+    ) -> Result<MarketConsumerEvent, String> {
+        let bootstrap = self.publish_snapshot(bar_count)?;
+        let bars: Vec<_> = bootstrap
+            .snapshot
+            .bars()
+            .iter()
+            .map(|item| *item.value())
+            .collect();
+        Ok(events.snapshot(
+            route,
+            selection,
+            bootstrap.generation.publication_generation(),
+            bars,
+        ))
+    }
+
     /// Creates a deterministic disconnected fixture worker.
     ///
     /// # Errors
@@ -115,6 +143,9 @@ impl FixtureMarketWorker {
 #[cfg(test)]
 mod tests {
     use super::FixtureMarketWorker;
+    use crate::test_support::{FixtureMarketEvents, FixtureSeries};
+    use aeris_market_data::{BarPeriod, BarSeriesKey};
+    use aeris_market_runtime::MarketRuntimeEvent;
 
     #[test]
     fn fixture_market_publishes_disconnected_bounded_snapshots() {
@@ -128,5 +159,30 @@ mod tests {
         assert!(
             next.generation.publication_generation() > first.generation.publication_generation()
         );
+        let series = BarSeriesKey {
+            provider_id: "hyperliquid".into(),
+            instrument_id: "hyperliquid:perp:BTC".into(),
+            entitlement_id: "fixture".into(),
+            period: BarPeriod::Time { seconds: 60 },
+            definition_version: 1,
+        };
+        let route = FixtureSeries {
+            series: series.clone(),
+            provider_generation: 1,
+            price_scale: 2,
+            quantity_scale: 3,
+        };
+        let event = market
+            .publish_runtime_snapshot(3, &route, 7, &FixtureMarketEvents::default())
+            .expect("canonical snapshot");
+        let MarketRuntimeEvent::SeriesSnapshot(publication) = event.value else {
+            panic!("expected canonical series snapshot");
+        };
+        assert_eq!(publication.generation.0.get(), 7);
+        assert_eq!(publication.snapshot.series, series);
+        assert_eq!(publication.snapshot.bars.len(), 3);
+        assert_eq!(publication.snapshot.price_scale, 2);
+        assert_eq!(publication.snapshot.quantity_scale, 3);
+        assert!(publication.publication_generation > next.generation.publication_generation());
     }
 }

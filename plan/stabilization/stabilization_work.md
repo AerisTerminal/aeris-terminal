@@ -1606,6 +1606,19 @@ Status: pending
     Worker-created endpoint faults, legacy worker bar conversions and their
     tests, `ChartState`, and the synthetic fixture route remain for Part 5d2;
     M6.6 and VAL-DSK-021/022 remain open.
+  - Part 5d2a1: the disconnected fixture now constructs canonical, valid
+    series snapshots in a coordinator-fenced consumer event. PaneHarness's
+    initial snapshot and readiness use the same runtime publication/status
+    projection as production, and its fenced snapshot, tail, readiness,
+    failure and demand-error examples share the test-support event builder.
+    Migrated tests: fixture_market_publishes_disconnected_bounded_snapshots,
+    pane_harness_smoke_disconnected_fixture_renders_pane,
+    pane_harness_fenced_runtime_bars_project_only_after_selection_commit,
+    pane_harness_fenced_runtime_readiness_projects_only_committed_selection,
+    pane_harness_fenced_runtime_failure_restores_previous_binding and
+    pane_harness_runtime_demand_error_projects_only_current_series.
+    The remaining pane, mailbox and diagnostic fixtures are Parts 5d2a2-4;
+    the old production route is removed only in 5d2b. M6.6 stays unchecked.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2022,6 +2035,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 5b refactor(desktop): runtime series readiness retains the fenced coordinator envelope through the bounded pane queue and projects at the GPUI consumer after the exact selection/lifecycle fence. The GPUI regression exercises early, retired and current readiness. Bars, synthetic failures and remaining routes still use the old message shape; M6.6 and VAL-DSK-021/022 remain open.
 - 2026-10-21 M6.6 Part 5c refactor(desktop): runtime snapshots/tail updates retain the fenced coordinator event through the bounded pane queue; GPUI projects canonical bars after exact selection acceptance. Bridge and pane regressions cover FIFO, pending/retired rejection, covering snapshot and tail. Legacy fixture/worker conversions, ChartState and other routes still require Parts 5d-8; M6.6 remains unchecked.
 - 2026-10-21 M6.6 Part 5d1 refactor(desktop): coordinator-fenced series failures and demand errors reach the GPUI pane unchanged; the pane rejects pending/retired lifecycle generations, distinguishes older-history diagnostics and retryable recovery, and retains failed-replacement restoration. Focused bridge and GPUI regressions pass. Part 5d2 must remove synthetic worker readiness and old bar conversions, then ChartState; M6.6 stays unchecked.
+- 2026-10-21 M6.6 Part 5d2a1 test(desktop): shared fixture coordinator-event builder and canonical disconnected snapshot migrate the pane's initial snapshot/readiness and the existing fenced examples. The pane's displayed worker identity now matches production's runtime projection; the fixture's disconnected label remains asserted at the source. Remaining 5d2a2-4 fixtures and 5d2b production deletion are outstanding.
 
 ## 7. Known gaps / deferred
 
