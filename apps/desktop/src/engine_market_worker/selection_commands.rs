@@ -1,11 +1,10 @@
 //! Selection commands.
 
 use super::{
-    ChartState, ConsumerResourceClass, EndpointRecord, FeedConnectionState,
-    InstallProviderInstrument, MarketPriceAlert, MarketRecoveryFailure, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, ReplayRecoveryCommand, StreamRequirements,
-    WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams,
-    provider_display_name, retire_endpoint, send_recovery,
+    ConsumerResourceClass, EndpointRecord, FeedConnectionState, InstallProviderInstrument,
+    MarketPriceAlert, MarketRecoveryFailure, MarketService, MarketWorkerCommand,
+    MarketWorkerMessage, ReplayRecoveryCommand, StreamRequirements, WorkerEndpoint,
+    cancel_pending_recovery, chart_demand_streams, chart_streams, retire_endpoint, send_recovery,
 };
 use aeris_desktop::market_worker::MarketWorkerSendError;
 use aeris_market_runtime::{InstrumentRef, InstrumentRequest, SelectionRequest};
@@ -87,13 +86,6 @@ fn begin_endpoint_demand(
     client_id: u64,
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
-    let provider_name = provider_display_name(record.product.provider.as_str());
-    super::runtime::report_state(
-        &record.endpoint.messages,
-        Some(record.endpoint.active_generation),
-        ChartState::Loading,
-        format!("Loading {provider_name} history"),
-    );
     let streams = chart_demand_streams(
         market,
         &record.product.provider,
@@ -102,10 +94,9 @@ fn begin_endpoint_demand(
     if let Err(error) = dispatch_initial_selection(record, streams, |request| {
         market.select_and_demand(client_id, request)
     }) {
-        super::runtime::report_state(
+        super::runtime::report_failure(
             &record.endpoint.messages,
             Some(record.endpoint.active_generation),
-            ChartState::Error,
             error,
         );
         return Ok(());
@@ -322,15 +313,6 @@ fn process_engine_select(
     request: &aeris_desktop::market_worker::EngineSelectionRequest,
 ) -> Result<(), String> {
     cancel_pending_recovery(endpoint)?;
-    super::runtime::report_state(
-        &endpoint.messages,
-        Some(endpoint.active_generation),
-        ChartState::Loading,
-        format!(
-            "Loading {} history",
-            provider_display_name(&request.product.provider)
-        ),
-    );
     market.select_and_demand(
         client_id,
         SelectionRequest {

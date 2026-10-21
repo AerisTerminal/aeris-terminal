@@ -1682,6 +1682,35 @@ Status: pending
     remain unchanged because they exercise the model, not the mailbox.
     Part 5d2a is complete. Part 5d2b must delete the old production chart
     route before M6.6 and VAL-DSK-021/022 can close.
+  - Part 5d2b: deleted the duplicate `apply_pushed_event` bar/readiness/demand
+    conversion and the old `Update`/synthetic `SeriesState` message and pane
+    consumers. The market summary now converts coordinator-fenced canonical
+    snapshots/tails under its exact initial selection; local failures carry
+    `EndpointFailure` with an exact selection generation, rather than claiming
+    to be coordinator readiness. `complete_pending_recovery` retains its
+    covering snapshot, request-ID and selection fences. Migrated
+    engine_market_worker characterization tests:
+    native_market_runtime_hyperliquid_startup_resolves_stale_default_generation
+    (still ignored without an optimized live runtime),
+    retained_partial_history_and_live_repair_keep_fenced_readiness_order,
+    empty_provider_history_keeps_its_fenced_readiness_reason,
+    covering_snapshots_are_forwarded_to_the_chart_validator,
+    non_contiguous_engine_tail_is_left_for_the_chart_validator,
+    a_burst_larger_than_one_frame_reaches_the_chart_bridge_without_recovery,
+    retained_snapshot_from_older_provider_session_reaches_the_chart_baseline,
+    calendar_series_accepts_the_engine_live_handoff,
+    replacement_engine_snapshots_are_forwarded_without_a_worker_generation_fence,
+    retryable_and_permanent_demand_errors_retain_their_fenced_classification,
+    older_history_demand_error_keeps_the_live_chart_and_its_pending_recovery,
+    and hyperliquid_publication_uses_hyperliquid_worker_identity. New summary
+    regression: market_summary_accepts_only_current_fenced_canonical_bars.
+    pane_harness_fenced_runtime_readiness_projects_only_committed_selection
+    additionally asserts that a post-Live partial backfill cannot re-cover a
+    ready chart; pane_harness_endpoint_failure_is_selection_fenced verifies
+    that only the current endpoint failure reaches chart presentation.
+    The book/tape/study cases remain on their current route for Part 6.
+    Part 5d2c still moves ChartState to pane presentation; M6.6 and
+    VAL-DSK-021/022 remain open.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2102,6 +2131,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 M6.6 Part 5d2a2 test(desktop): pane switch permutations, retired/early bar and status fences, replacement cover, recovery, presentation and redacted failure cases use canonical fenced coordinator events through the production GPUI projection; direct setter-reinstall fixture remains deliberate. M6.6 stays unchecked pending mailbox/diagnostic migration, old-route deletion and later parts.
 - 2026-10-21 M6.6 Part 5d2a3 fix(desktop): mailbox order, frame-budget, explicit overflow, foreground/background and wake tests now exercise canonical fenced bars and readiness. Fixed the discovered mailbox classification gap so fenced bars share the market-publication capacity and suppression policy. Diagnostic fixtures and the production legacy-route deletion remain; M6.6 stays unchecked.
 - 2026-10-21 M6.6 Part 5d2a4 test(desktop): the diagnostic 10,000-event burst and bounded endurance fixture now send and inspect canonical fenced coordinator snapshots while retaining their generation continuity, high-water, memory and checkpoint assertions. Part 5d2a is complete; production legacy deletion is next.
+- 2026-10-21 M6.6 Part 5d2b refactor(desktop): removed superseded production bar and readiness conversion and its message consumers in one change; market-summary bars use the fenced coordinator event, local endpoint failures have their own generation-stamped message, and engine characterization runs against the fenced path. Recovery request fencing and replay converters remain. M6.6 stays unchecked pending ChartState relocation and Parts 6-8.
 
 ## 7. Known gaps / deferred
 

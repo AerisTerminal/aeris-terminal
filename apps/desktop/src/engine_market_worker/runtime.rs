@@ -1,8 +1,8 @@
 //! Runtime.
 
 use super::{
-    ChartState, EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent,
-    MarketService, MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
+    EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
+    MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
     initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
     process_command,
@@ -84,13 +84,12 @@ fn run_attached_workers(
                             ticket_interest_dirty = true;
                         }
                         Err(error) => {
-                            report_state(
+                            report_failure(
                                 &record.endpoint.messages,
                                 record
                                     .role
                                     .demands_series()
                                     .then_some(record.endpoint.active_generation),
-                                ChartState::Error,
                                 error,
                             );
                             retire_endpoint(market, client_id, &mut record.endpoint);
@@ -108,13 +107,12 @@ fn run_attached_workers(
             let (commands, disconnected) = drain_command_batch(&record.endpoint.commands);
             for command in commands {
                 if let Err(error) = process_command(market, client_id, record, command) {
-                    report_state(
+                    report_failure(
                         &record.endpoint.messages,
                         record
                             .role
                             .demands_series()
                             .then_some(record.endpoint.active_generation),
-                        ChartState::Error,
                         error,
                     );
                 }
@@ -324,28 +322,25 @@ fn coalesces(previous: &MarketWorkerCommand, next: &MarketWorkerCommand) -> bool
 /// reconnects are handled inside the runtime and never arrive through this path.
 fn report_runtime_failure(endpoints: &[EndpointRecord], error: &str) {
     for record in endpoints.iter().filter(|record| record.endpoint.active) {
-        report_state(
+        report_failure(
             &record.endpoint.messages,
             record
                 .role
                 .demands_series()
                 .then_some(record.endpoint.active_generation),
-            ChartState::Error,
             error.to_string(),
         );
     }
 }
 
-pub(super) fn report_state(
+pub(super) fn report_failure(
     messages: &MarketWorkerSender,
     generation: Option<u64>,
-    state: ChartState,
     message: String,
 ) {
     let publication = match generation {
-        Some(generation) => MarketWorkerMessage::SeriesState {
+        Some(generation) => MarketWorkerMessage::EndpointFailure {
             generation,
-            state,
             message,
         },
         None => MarketWorkerMessage::CatalogFailure { message },
@@ -494,7 +489,7 @@ fn apply_received_event(
         )?;
         return Ok(false);
     }
-    forward_runtime_publication(event, endpoint, &record.product, generation, clock);
+    forward_runtime_publication(event, endpoint, &record.product, generation);
     Ok(false)
 }
 
@@ -545,7 +540,6 @@ fn forward_runtime_publication(
     endpoint: &mut WorkerEndpoint,
     product: &super::InstallProviderInstrument,
     generation: Option<u64>,
-    clock: &dyn Clock,
 ) {
     let result = apply_pushed_event(
         event,
@@ -554,17 +548,15 @@ fn forward_runtime_publication(
             active_generation: endpoint.active_generation,
             realtime: true,
             instrument: product,
-            received_unix_nanos: clock.wall_unix_nanos(),
         },
-        &mut endpoint.live,
         &endpoint.messages,
     );
     if let Err(error) = result {
-        report_state(&endpoint.messages, generation, ChartState::Error, error);
+        report_failure(&endpoint.messages, generation, error);
     }
 }
 
-fn deliver_runtime_series_event(
+pub(super) fn deliver_runtime_series_event(
     endpoint: &WorkerEndpoint,
     event: aeris_market_runtime::MarketConsumerEvent,
 ) -> Result<(), String> {
@@ -590,10 +582,9 @@ fn deliver_runtime_series_state(
         None
     };
     if let Some(error) = error {
-        report_state(
+        report_failure(
             &endpoint.messages,
             Some(endpoint.active_generation),
-            ChartState::Error,
             error.into(),
         );
     } else if state.generation.0.get() == endpoint.active_generation {
@@ -645,10 +636,9 @@ fn adopt_selection_outcome(
         && let Err(error) =
             super::selection_commands::apply_depth_visibility(market, client_id, record)
     {
-        report_state(
+        report_failure(
             &record.endpoint.messages,
             Some(record.endpoint.active_generation),
-            ChartState::Error,
             error,
         );
     }
@@ -711,7 +701,6 @@ pub(super) fn apply_selection_outcome(
                         .map_err(|error| error.to_string())?;
                 }
                 record.endpoint.active_generation = generation.0.get();
-                record.endpoint.live = false;
                 record.session_status_sent = None;
             }
         }
@@ -719,10 +708,9 @@ pub(super) fn apply_selection_outcome(
             if selection_matches_request(record, generation.0.get()) {
                 if record.pending_selection.is_none() {
                     record.initial_selection_pending = false;
-                    report_state(
+                    report_failure(
                         &record.endpoint.messages,
                         Some(generation.0.get()),
-                        ChartState::Error,
                         "Market history could not start. Try again.".to_string(),
                     );
                     return Ok(());
@@ -954,50 +942,29 @@ mod tests {
     #[test]
     fn runtime_failure_uses_bounded_pane_mailbox_and_tolerates_retirement() {
         let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
-        report_state(
-            &messages,
-            Some(7),
-            ChartState::Error,
-            "market unavailable".into(),
-        );
+        report_failure(&messages, Some(7), "market unavailable".into());
         let (queued, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::SeriesState {
+            [MarketWorkerMessage::EndpointFailure {
                 generation: 7,
-                state: ChartState::Error,
                 message,
             }] if message == "market unavailable"
         ));
         for _ in 0..9 {
-            report_state(
-                &messages,
-                Some(7),
-                ChartState::Error,
-                "market unavailable".into(),
-            );
+            report_failure(&messages, Some(7), "market unavailable".into());
         }
-        report_state(
-            &messages,
-            Some(7),
-            ChartState::Error,
-            "saturated pane".into(),
-        );
+        report_failure(&messages, Some(7), "saturated pane".into());
         assert_eq!(messages.occupancy().0, 9, "control reserve remains bounded");
         drop(receiver);
-        report_state(&messages, Some(7), ChartState::Error, "retired pane".into());
+        report_failure(&messages, Some(7), "retired pane".into());
     }
 
     #[test]
     fn non_series_endpoint_failure_remains_app_scoped() {
         let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
-        report_state(
-            &messages,
-            None,
-            ChartState::Error,
-            "catalog unavailable".into(),
-        );
+        report_failure(&messages, None, "catalog unavailable".into());
         let (queued, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
@@ -1078,9 +1045,8 @@ mod tests {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::SeriesState {
+                .send(MarketWorkerMessage::EndpointFailure {
                     generation: 1,
-                    state: ChartState::Loading,
                     message: String::new(),
                 })
                 .expect("fill bounded control reserve");

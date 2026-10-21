@@ -14,39 +14,42 @@ use std::{
     thread,
 };
 
+#[cfg(test)]
+use aeris_application::ReplayStreamUpdate;
 use aeris_application::{
     MarketEventProvenance, Provenanced, ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot,
-    ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
+    ReplayTailOperation, ReplayTailUpdate,
 };
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesLoadState, WorkspacePaneKind, WorkspaceState,
+    ProviderState, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
-use aeris_contracts::{SeriesKey, WorkspacePaneState, WorkspaceTabState};
+use aeris_contracts::{SeriesKey, SeriesLoadState, WorkspacePaneState, WorkspaceTabState};
 use aeris_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use aeris_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
+#[cfg(test)]
+use aeris_market_runtime::MarketSeriesState;
 pub(super) use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError,
     MarketDemandErrorScope, MarketOrderBookSnapshot, MarketPriceAlert, MarketPriceAlertTrigger,
-    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
-    MarketStream, SeriesTailOperation, StreamRequirements,
+    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesUpdate, MarketService, MarketStream,
+    SeriesTailOperation, StreamRequirements,
 };
 use aeris_observability::FeedConnectionState;
 
 #[cfg(test)]
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_desktop::market_worker::{
-    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure,
-    MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
-    MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
-    market_worker_channel,
+    MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
+    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup,
+    classify_provider_catalog_event, market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
-const INITIAL_GENERATION: u64 = 1;
+pub(super) const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
 const SUBSCRIPTION_ID: &str = "desktop_runtime_rithmic_bars";
@@ -534,9 +537,6 @@ struct WorkerEndpoint {
     commands: mpsc::Receiver<MarketWorkerCommand>,
     shutdown: mpsc::SyncSender<()>,
     pending_recovery: Option<ReplayRecoveryCommand>,
-    /// Set once the engine has reported this demand generation live. After that
-    /// a `Partial` state is a background history repair, not a loading chart.
-    live: bool,
     active_generation: u64,
     resource_class: ConsumerResourceClass,
     depth_visible: bool,
@@ -675,7 +675,6 @@ fn worker_endpoint_with_wake(
             commands: command_rx,
             shutdown: shutdown_tx,
             pending_recovery: None,
-            live: false,
             active_generation: initial_generation,
             resource_class: ConsumerResourceClass::Foreground,
             depth_visible: false,
@@ -751,13 +750,12 @@ fn spawn_group(
                 clock.as_ref(),
             ) {
                 for record in &endpoints {
-                    runtime::report_state(
+                    runtime::report_failure(
                         &record.endpoint.messages,
                         record
                             .role
                             .demands_series()
                             .then_some(record.endpoint.active_generation),
-                        ChartState::Error,
                         error.clone(),
                     );
                 }
@@ -803,7 +801,6 @@ struct PushedEventContext<'a> {
     active_generation: u64,
     realtime: bool,
     instrument: &'a InstallProviderInstrument,
-    received_unix_nanos: i64,
 }
 
 pub(crate) fn worker_identity(provider: &str) -> (&'static str, &'static str) {
@@ -916,9 +913,7 @@ use selection_commands::{
 #[path = "engine_market_worker/publications.rs"]
 mod publications;
 #[cfg(test)]
-use publications::{
-    apply_provider_state, apply_realtime_demand_error, apply_series_state, send_publication,
-};
+use publications::apply_provider_state;
 use publications::{
     apply_pushed_event, cancel_pending_recovery, complete_pending_recovery, send_recovery,
 };
@@ -931,11 +926,39 @@ mod tests {
         ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
     use aeris_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
+    use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
     use aeris_market_runtime::{
         CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
         MarketProviderGeneration, MarketProviderInstrumentSelection, MarketTradeTapeSnapshot,
     };
     use std::collections::BTreeMap;
+
+    fn fenced_event(value: MarketRuntimeEvent) -> aeris_market_runtime::MarketConsumerEvent {
+        Fenced {
+            epoch: EpochSequence::<ConsumerTag>::default().next(),
+            value,
+        }
+    }
+
+    fn series_endpoint(
+        messages: MarketWorkerSender,
+        consumer_id: u64,
+        generation: u64,
+    ) -> WorkerEndpoint {
+        let (_command_sender, commands) = mpsc::channel();
+        let (shutdown, _shutdown_receiver) = mpsc::sync_channel(1);
+        WorkerEndpoint {
+            consumer_id,
+            messages,
+            commands,
+            shutdown,
+            pending_recovery: None,
+            active_generation: generation,
+            resource_class: ConsumerResourceClass::Foreground,
+            depth_visible: false,
+            active: true,
+        }
+    }
 
     #[test]
     fn depth_visible_chart_explicitly_demands_real_trades() {
@@ -1259,21 +1282,29 @@ mod tests {
             let (messages, disconnected) = worker.drain_messages();
             for message in messages {
                 match message {
-                    MarketWorkerMessage::Update(MarketWorkerPublication {
-                        update: ReplayStreamUpdate::Snapshot(snapshot),
+                    MarketWorkerMessage::RuntimeSeriesPublication {
+                        event:
+                            Fenced {
+                                value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                                ..
+                            },
                         ..
-                    }) => {
-                        assert_ne!(
-                            snapshot.bars(),
-                            [] as [aeris_application::Provenanced<aeris_market_data::MarketBar>; 0]
-                        );
+                    } => {
+                        assert!(!snapshot.snapshot.bars.is_empty());
                         return;
                     }
-                    MarketWorkerMessage::SeriesState {
-                        state: ChartState::Error,
-                        message,
+                    MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                        value:
+                            MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                                state: SeriesLoadState::Failed,
+                                detail,
+                                ..
+                            }),
                         ..
-                    } => panic!("Hyperliquid market runtime startup failed: {message}"),
+                    }) => panic!("Hyperliquid market runtime startup failed: {detail:?}"),
+                    MarketWorkerMessage::EndpointFailure { message, .. } => {
+                        panic!("Hyperliquid market endpoint failed: {message}")
+                    }
                     _ => {}
                 }
             }
@@ -1660,19 +1691,18 @@ mod tests {
 
     fn drained_states(
         receiver: &aeris_desktop::market_worker::MarketWorkerReceiver,
-    ) -> Vec<(ChartState, String)> {
+    ) -> Vec<(SeriesLoadState, Option<String>)> {
         receiver
             .drain()
             .0
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::SeriesState {
-                    generation,
-                    state,
-                    message,
-                } => {
-                    assert!(generation > 0, "runtime series state carries a selection");
-                    Some((state, message))
+                MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                    value: MarketRuntimeEvent::SeriesState(state),
+                    ..
+                }) => {
+                    assert!(state.generation.0.get() > 0);
+                    Some((state.state, state.detail))
                 }
                 _ => None,
             })
@@ -1682,10 +1712,10 @@ mod tests {
     /// The engine says outright that a series serving retained canonical history is
     /// not ready. Swallowing that is what showed a stale chart as current.
     #[test]
-    fn retained_partial_history_presents_as_loading_until_the_series_goes_live() {
+    fn retained_partial_history_and_live_repair_keep_fenced_readiness_order() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
-        let mut live = false;
+        let endpoint = series_endpoint(sender, 1, 1);
         let state = |load_state: SeriesLoadState, detail: Option<&str>| MarketSeriesState {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::MIN),
@@ -1695,74 +1725,71 @@ mod tests {
             presentation: None,
         };
 
-        apply_series_state(
-            state(
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(state(
                 SeriesLoadState::Partial,
                 Some("Showing retained canonical history while provider coverage repairs"),
-            ),
-            "rithmic",
-            true,
-            &mut live,
-            &sender,
+            ))),
         )
         .expect("a partial series is not a failure");
         assert_eq!(
             drained_states(&receiver),
             vec![(
-                ChartState::Loading,
-                "Showing retained canonical history while provider coverage repairs".to_string()
+                SeriesLoadState::Partial,
+                Some(
+                    "Showing retained canonical history while provider coverage repairs"
+                        .to_string()
+                )
             )],
             "retained history has to read as loading, with the engine's own reason"
         );
 
-        apply_series_state(
-            state(SeriesLoadState::Ready, None),
-            "rithmic",
-            true,
-            &mut live,
-            &sender,
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(state(
+                SeriesLoadState::Ready,
+                None,
+            ))),
         )
         .expect("provider history can precede the live handoff");
         assert_eq!(
             drained_states(&receiver),
-            vec![(
-                ChartState::Loading,
-                "Rithmic history is loaded; connecting the live edge".to_string()
-            )],
+            vec![(SeriesLoadState::Ready, None)],
             "the replacement stays covered until the trade handoff is live"
         );
 
-        apply_series_state(
-            state(SeriesLoadState::Live, None),
-            "rithmic",
-            true,
-            &mut live,
-            &sender,
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(state(
+                SeriesLoadState::Live,
+                None,
+            ))),
         )
         .expect("the handoff completes");
-        assert!(live, "the series is live from here on");
         assert_eq!(
-            drained_states(&receiver)
-                .into_iter()
-                .map(|(state, _)| state)
-                .collect::<Vec<_>>(),
-            vec![ChartState::Ready]
+            drained_states(&receiver),
+            vec![(SeriesLoadState::Live, None)]
         );
 
         // The same state now means a backfill repairing history behind a chart
         // that is streaming. Reporting that as loading would flap the surface on
         // every viewport repair.
-        apply_series_state(
-            state(SeriesLoadState::Partial, Some("visible coverage repairs")),
-            "rithmic",
-            true,
-            &mut live,
-            &sender,
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(state(
+                SeriesLoadState::Partial,
+                Some("visible coverage repairs"),
+            ))),
         )
         .expect("a backfill is not a failure");
-        assert!(
-            drained_states(&receiver).is_empty(),
-            "a repair behind a live chart must not put it back into loading"
+        assert_eq!(
+            drained_states(&receiver),
+            vec![(
+                SeriesLoadState::Partial,
+                Some("visible coverage repairs".to_string())
+            )],
+            "the pane's readiness projection, not the bridge, suppresses live backfill loading"
         );
     }
 
@@ -1770,10 +1797,10 @@ mod tests {
     /// not failing. Presenting it as recovering invalidated the replay stream
     /// and re-requested the identical empty history about once a minute.
     #[test]
-    fn empty_provider_history_presents_as_awaiting_data_not_recovering() {
+    fn empty_provider_history_keeps_its_fenced_readiness_reason() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut live = true;
+        let endpoint = series_endpoint(sender, 1, 1);
         let empty = MarketSeriesState {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::MIN),
@@ -1783,40 +1810,32 @@ mod tests {
             presentation: None,
         };
 
-        apply_series_state(empty.clone(), "rithmic", true, &mut live, &sender)
-            .expect("an empty provider answer is not a failure");
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(empty.clone())),
+        )
+        .expect("an empty provider answer is not a failure");
         assert_eq!(
             drained_states(&receiver),
             vec![(
-                ChartState::AwaitingData,
-                "waiting for live trades".to_string()
+                SeriesLoadState::Empty,
+                Some("waiting for live trades".to_string())
             )]
         );
-        assert!(!live, "a series without history is not live");
-
-        apply_series_state(
-            MarketSeriesState {
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(MarketSeriesState {
                 detail: None,
                 ..empty
-            },
-            "rithmic",
-            true,
-            &mut live,
-            &sender,
+            })),
         )
         .expect("an empty provider answer is not a failure");
         let states = drained_states(&receiver);
-        assert_eq!(
-            states,
-            vec![(
-                ChartState::AwaitingData,
-                "Rithmic has no market history for this period yet".to_string()
-            )]
-        );
+        assert_eq!(states, vec![(SeriesLoadState::Empty, None)]);
         assert!(
             states
                 .iter()
-                .all(|(state, _)| !matches!(state, ChartState::Recovering | ChartState::Error))
+                .all(|(state, _)| *state == SeriesLoadState::Empty)
         );
     }
 
@@ -1832,7 +1851,7 @@ mod tests {
         .expect("series");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut live = false;
+        let endpoint = series_endpoint(sender, 1, 1);
         let snapshot = |publication_generation: u64, sequence: u64| {
             runtime_snapshot(
                 1,
@@ -1856,20 +1875,11 @@ mod tests {
                 false,
             )
         };
-        let context = PushedEventContext {
-            consumer_id: 1,
-            active_generation: 1,
-            realtime: true,
-            instrument: &default_product("MNQ"),
-            received_unix_nanos: 1_000_000_000,
-        };
-
         assert_eq!(
-            apply_pushed_event(
-                MarketRuntimeEvent::SeriesSnapshot(snapshot(4, 2)),
-                &context,
-                &mut live,
-                &sender,
+            runtime::deliver_runtime_series_publication(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::SeriesSnapshot(snapshot(4, 2))),
+                1_000_000_000,
             ),
             Ok(())
         );
@@ -1877,11 +1887,10 @@ mod tests {
         // publication rejection rather than a second model in this worker.
         for superseded in [snapshot(1, 2), snapshot(4, 1)] {
             assert_eq!(
-                apply_pushed_event(
-                    MarketRuntimeEvent::SeriesSnapshot(superseded),
-                    &context,
-                    &mut live,
-                    &sender,
+                runtime::deliver_runtime_series_publication(
+                    &endpoint,
+                    fenced_event(MarketRuntimeEvent::SeriesSnapshot(superseded)),
+                    1_000_000_000,
                 ),
                 Ok(()),
                 "a superseded covering snapshot must not take the chart down"
@@ -1892,12 +1901,29 @@ mod tests {
         let forwarded = messages
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(snapshot),
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event:
+                        Fenced {
+                            value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                            ..
+                        },
                     ..
-                }) => Some((
-                    snapshot.evidence().publication_generation,
-                    snapshot.sequence_range(),
+                } => Some((
+                    snapshot.publication_generation,
+                    (
+                        snapshot
+                            .snapshot
+                            .bars
+                            .first()
+                            .expect("first bar")
+                            .source_sequence,
+                        snapshot
+                            .snapshot
+                            .bars
+                            .last()
+                            .expect("last bar")
+                            .source_sequence,
+                    ),
                 )),
                 _ => None,
             })
@@ -2161,7 +2187,7 @@ mod tests {
         .expect("series");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut live = false;
+        let endpoint = series_endpoint(sender, 1, 1);
         let snapshot = runtime_snapshot(
             1,
             1,
@@ -2183,17 +2209,10 @@ mod tests {
             false,
         );
         assert_eq!(
-            apply_pushed_event(
-                MarketRuntimeEvent::SeriesSnapshot(snapshot),
-                &PushedEventContext {
-                    consumer_id: 1,
-                    active_generation: 1,
-                    realtime: true,
-                    instrument: &default_product("MNQ"),
-                    received_unix_nanos: 1_000_000_000,
-                },
-                &mut live,
-                &sender,
+            runtime::deliver_runtime_series_publication(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::SeriesSnapshot(snapshot)),
+                1_000_000_000,
             ),
             Ok(())
         );
@@ -2217,17 +2236,10 @@ mod tests {
             SeriesTailOperation::Append,
         );
         assert_eq!(
-            apply_pushed_event(
-                MarketRuntimeEvent::SeriesUpdate(skipped_tail),
-                &PushedEventContext {
-                    consumer_id: 1,
-                    active_generation: 1,
-                    realtime: true,
-                    instrument: &default_product("MNQ"),
-                    received_unix_nanos: 1_000_000_000,
-                },
-                &mut live,
-                &sender,
+            runtime::deliver_runtime_series_publication(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::SeriesUpdate(skipped_tail)),
+                1_000_000_000,
             ),
             Ok(())
         );
@@ -2262,18 +2274,12 @@ mod tests {
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
-        let mut live = false;
-        let context = PushedEventContext {
-            consumer_id: 1,
-            active_generation: 1,
-            realtime: true,
-            instrument: &product,
-            received_unix_nanos: 1_000_000_000,
-        };
+        let endpoint = series_endpoint(sender, 1, 1);
 
         assert_eq!(
-            apply_pushed_event(
-                MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
+            runtime::deliver_runtime_series_publication(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
                     1,
                     1,
                     series.clone(),
@@ -2283,17 +2289,16 @@ mod tests {
                     vec![burst_bar(1)],
                     1,
                     false,
-                )),
-                &context,
-                &mut live,
-                &sender,
+                ))),
+                1_000_000_000,
             ),
             Ok(())
         );
         for sequence in 2..=BURST {
             assert_eq!(
-                apply_pushed_event(
-                    MarketRuntimeEvent::SeriesUpdate(runtime_update(
+                runtime::deliver_runtime_series_publication(
+                    &endpoint,
+                    fenced_event(MarketRuntimeEvent::SeriesUpdate(runtime_update(
                         1,
                         1,
                         series.clone(),
@@ -2302,10 +2307,8 @@ mod tests {
                         sequence == BURST,
                         sequence,
                         SeriesTailOperation::Append,
-                    )),
-                    &context,
-                    &mut live,
-                    &sender,
+                    ))),
+                    1_000_000_000,
                 ),
                 Ok(()),
                 "bar {sequence} must apply without a resnapshot"
@@ -2343,10 +2346,26 @@ mod tests {
         let mut delivered = Vec::new();
         for frame in messages.chunks(MARKET_MESSAGES_PER_FRAME) {
             for message in frame {
-                let MarketWorkerMessage::Update(publication) = message else {
+                let MarketWorkerMessage::RuntimeSeriesPublication {
+                    event,
+                    received_unix_nanos,
+                } = message
+                else {
                     continue;
                 };
-                match &publication.update {
+                let update = match &event.value {
+                    MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
+                        replay_runtime_snapshot(snapshot, None, *received_unix_nanos)
+                            .map(ReplayStreamUpdate::Snapshot)
+                    }
+                    MarketRuntimeEvent::SeriesUpdate(tail) => {
+                        replay_runtime_tail_update(tail, *received_unix_nanos)
+                            .map(ReplayStreamUpdate::Tail)
+                    }
+                    _ => continue,
+                }
+                .expect("fenced chart data converts");
+                match &update {
                     ReplayStreamUpdate::Snapshot(snapshot) => {
                         delivered.extend(
                             snapshot
@@ -2418,19 +2437,12 @@ mod tests {
             false,
         );
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut live = false;
+        let endpoint = series_endpoint(sender, 1, 7);
 
-        apply_pushed_event(
-            MarketRuntimeEvent::SeriesSnapshot(snapshot),
-            &PushedEventContext {
-                consumer_id: 1,
-                active_generation: 7,
-                realtime: true,
-                instrument: &product,
-                received_unix_nanos: 1_000_000_000,
-            },
-            &mut live,
-            &sender,
+        runtime::deliver_runtime_series_publication(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesSnapshot(snapshot)),
+            1_000_000_000,
         )
         .expect("runtime-owned retained baseline applies");
 
@@ -2438,10 +2450,13 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Snapshot(snapshot),
+            [MarketWorkerMessage::RuntimeSeriesPublication {
+                event: Fenced {
+                    value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                    ..
+                },
                 ..
-            })] if snapshot.evidence().session_generation == 1
+            }] if snapshot.snapshot.provider_generation.0.get() == 1
         ));
     }
 
@@ -2478,7 +2493,6 @@ mod tests {
     fn newer_provider_session_reaches_the_connection_presentation() {
         let product = default_product("MNQ");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut live = false;
         apply_pushed_event(
             MarketRuntimeEvent::ProviderState(ProviderState {
                 provider: product.provider.clone(),
@@ -2492,9 +2506,7 @@ mod tests {
                 active_generation: 7,
                 realtime: true,
                 instrument: &product,
-                received_unix_nanos: 1_000_000_000,
             },
-            &mut live,
             &sender,
         )
         .expect("new engine-owned provider session");
@@ -2651,43 +2663,40 @@ mod tests {
             1,
             false,
         );
-        let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut live = false;
-        apply_pushed_event(
-            MarketRuntimeEvent::SeriesSnapshot(snapshot),
-            &PushedEventContext {
-                consumer_id: 1,
-                active_generation: 7,
-                realtime: true,
-                instrument: &default_product("MNQ"),
-                received_unix_nanos: 1_000_000_000,
-            },
-            &mut live,
-            &sender,
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let endpoint = series_endpoint(sender, 1, 7);
+        runtime::deliver_runtime_series_publication(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesSnapshot(snapshot)),
+            1_000_000_000,
         )
         .expect("calendar snapshot applies");
 
-        apply_pushed_event(
-            MarketRuntimeEvent::SeriesState(MarketSeriesState {
+        runtime::deliver_runtime_series_event(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesState(MarketSeriesState {
                 consumer_id: MarketConsumerId(NonZeroU64::MIN),
                 generation: MarketGenerationId(NonZeroU64::new(7).expect("generation validates")),
                 series: None,
                 state: SeriesLoadState::Live,
                 detail: None,
                 presentation: None,
-            }),
-            &PushedEventContext {
-                consumer_id: 1,
-                active_generation: 7,
-                realtime: true,
-                instrument: &default_product("MNQ"),
-                received_unix_nanos: 1_000_000_000,
-            },
-            &mut live,
-            &sender,
+            })),
         )
         .expect("calendar live state applies");
-        assert!(live);
+        assert!(matches!(
+            receiver.drain().0.as_slice(),
+            [
+                MarketWorkerMessage::RuntimeSeriesPublication { .. },
+                MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                    value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                        state: SeriesLoadState::Live,
+                        ..
+                    }),
+                    ..
+                })
+            ]
+        ));
     }
 
     #[test]
@@ -2719,35 +2728,21 @@ mod tests {
             ))
         };
         let (sender, receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
-        let mut live = false;
+        let endpoint = series_endpoint(sender, 1, 1);
         assert_eq!(
-            apply_pushed_event(
-                snapshot(9, 12, 12),
-                &PushedEventContext {
-                    consumer_id: 1,
-                    active_generation: 1,
-                    realtime: true,
-                    instrument: &default_product("MNQ"),
-                    received_unix_nanos: 1_000_000_000,
-                },
-                &mut live,
-                &sender,
+            runtime::deliver_runtime_series_publication(
+                &endpoint,
+                fenced_event(snapshot(9, 12, 12)),
+                1_000_000_000,
             ),
             Ok(())
         );
 
         assert_eq!(
-            apply_pushed_event(
-                snapshot(1, 1, 1),
-                &PushedEventContext {
-                    consumer_id: 1,
-                    active_generation: 1,
-                    realtime: true,
-                    instrument: &default_product("MNQ"),
-                    received_unix_nanos: 1_000_000_000,
-                },
-                &mut live,
-                &sender,
+            runtime::deliver_runtime_series_publication(
+                &endpoint,
+                fenced_event(snapshot(1, 1, 1)),
+                1_000_000_000,
             ),
             Ok(())
         );
@@ -2756,10 +2751,14 @@ mod tests {
         let generations = messages
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(snapshot),
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event:
+                        Fenced {
+                            value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                            ..
+                        },
                     ..
-                }) => Some(snapshot.evidence().publication_generation),
+                } => Some(snapshot.publication_generation),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -2798,8 +2797,9 @@ mod tests {
     }
 
     #[test]
-    fn retryable_demand_error_recovers_without_making_the_chart_unavailable() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+    fn retryable_and_permanent_demand_errors_retain_their_fenced_classification() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let endpoint = series_endpoint(sender, 1, 2);
         let retryable = MarketDemandError {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::new(2).expect("generation validates")),
@@ -2813,27 +2813,50 @@ mod tests {
         };
 
         assert_eq!(
-            apply_realtime_demand_error(&retryable, 1, 2, &sender),
+            runtime::deliver_runtime_series_event(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::DemandError(retryable.clone())),
+            ),
             Ok(())
         );
-        assert_eq!(
-            drained_states(&receiver),
-            vec![(
-                ChartState::Recovering,
-                "provider history failed (retryable) after 4 ms: covering history is retrying"
-                    .to_string(),
-            )]
-        );
+        assert!(matches!(
+            receiver.drain().0.as_slice(),
+            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                value: MarketRuntimeEvent::DemandError(MarketDemandError {
+                    code: EngineFaultCode::Retryable,
+                    ..
+                }),
+                ..
+            })]
+        ));
 
         let permanent = MarketDemandError {
             code: EngineFaultCode::Permanent,
             detail: "permanent fixture failure".to_string(),
             elapsed_millis: None,
-            ..retryable
+            ..retryable.clone()
         };
-        assert!(
-            apply_realtime_demand_error(&permanent, 1, 2, &sender)
-                .is_err_and(|detail| detail.contains("permanent fixture failure"))
+        assert_eq!(
+            runtime::deliver_runtime_series_event(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::DemandError(permanent)),
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            receiver.drain().0.as_slice(),
+            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                value: MarketRuntimeEvent::DemandError(MarketDemandError {
+                    code: EngineFaultCode::Permanent,
+                    detail,
+                    ..
+                }),
+                ..
+            })] if detail == "permanent fixture failure"
+        ));
+        assert_eq!(
+            demand_error(&retryable),
+            "provider history failed (retryable) after 4 ms: covering history is retrying"
         );
     }
 
@@ -2869,24 +2892,27 @@ mod tests {
         );
         assert!(record.endpoint.pending_recovery.is_some());
         assert_eq!(
-            apply_realtime_demand_error(&error, 41, 3, &record.endpoint.messages),
+            runtime::deliver_runtime_series_event(
+                &record.endpoint,
+                fenced_event(MarketRuntimeEvent::DemandError(error)),
+            ),
             Ok(())
         );
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
-        let states = messages
-            .iter()
-            .filter_map(|message| match message {
-                MarketWorkerMessage::SeriesState {
-                    generation: 1,
-                    state,
-                    message,
-                } => Some((*state, message.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(states, Vec::new(), "the live chart keeps its state");
-        assert!(messages.is_empty(), "the live chart keeps its stream");
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                    value: MarketRuntimeEvent::DemandError(MarketDemandError {
+                        scope: MarketDemandErrorScope::OlderHistory,
+                        ..
+                    }),
+                    ..
+                })]
+            ),
+            "the pane receives the scoped error and keeps its live chart"
+        );
     }
 
     /// The Rithmic Order Book panel stayed empty because the engine's order-book
@@ -2898,7 +2924,6 @@ mod tests {
         let product = default_product("MNQ");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut live = false;
         let outcome = apply_pushed_event(
             MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
                 consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -2943,9 +2968,7 @@ mod tests {
                 active_generation: 1,
                 realtime: true,
                 instrument: &product,
-                received_unix_nanos: 1_000_000_000,
             },
-            &mut live,
             &sender,
         );
         assert_eq!(outcome, Ok(()));
@@ -3010,14 +3033,11 @@ mod tests {
             active_generation: 2,
             realtime: true,
             instrument: &product,
-            received_unix_nanos: 1_000_000_000,
         };
-        let mut live = false;
         assert_eq!(
             apply_pushed_event(
                 MarketRuntimeEvent::TradeTapeSnapshot(snapshot(1, 8)),
                 &context,
-                &mut live,
                 &sender,
             ),
             Ok(())
@@ -3026,7 +3046,6 @@ mod tests {
             apply_pushed_event(
                 MarketRuntimeEvent::TradeTapeSnapshot(snapshot(2, 9)),
                 &context,
-                &mut live,
                 &sender,
             ),
             Ok(())
@@ -3321,15 +3340,18 @@ mod tests {
             1,
             false,
         );
-        let replay =
-            replay_runtime_snapshot(&snapshot, None, 1_000_000_000).expect("HL snapshot converts");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-
-        send_publication(
-            &sender,
-            ReplayStreamUpdate::Snapshot(replay),
-            "hyperliquid",
-            8,
+        let endpoint = series_endpoint(sender, 1, 8);
+        // This fixture previously stamped a different selection onto converted
+        // replay data. The canonical event now carries that selection itself.
+        let snapshot = MarketSeriesSnapshot {
+            generation: MarketGenerationId(NonZeroU64::new(8).expect("generation")),
+            ..snapshot
+        };
+        runtime::deliver_runtime_series_publication(
+            &endpoint,
+            fenced_event(MarketRuntimeEvent::SeriesSnapshot(snapshot)),
+            1_000_000_000,
         )
         .expect("publication queues");
 
@@ -3337,11 +3359,25 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Update(publication)]
-                if publication.subscription_id == HYPERLIQUID_SUBSCRIPTION_ID
-                    && publication.worker_label == HYPERLIQUID_WORKER_LABEL
-                    && publication.generation.selection_generation() == 8
+            [MarketWorkerMessage::RuntimeSeriesPublication {
+                event: Fenced {
+                    value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                    ..
+                },
+                ..
+            }] if snapshot.snapshot.series.provider_id == "hyperliquid"
+                && snapshot.generation.0.get() == 8
         ));
+        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &messages[0] else {
+            panic!("canonical snapshot");
+        };
+        let MarketRuntimeEvent::SeriesSnapshot(snapshot) = &event.value else {
+            panic!("canonical snapshot");
+        };
+        let (subscription_id, worker_label) =
+            worker_identity(&snapshot.snapshot.series.provider_id);
+        assert_eq!(subscription_id, HYPERLIQUID_SUBSCRIPTION_ID);
+        assert_eq!(worker_label, HYPERLIQUID_WORKER_LABEL);
     }
 
     #[test]

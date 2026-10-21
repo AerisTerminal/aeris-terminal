@@ -3573,6 +3573,37 @@ impl MarketSummaryEntry {
         self.message = None;
     }
 
+    fn apply_runtime_publication(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        received_unix_nanos: i64,
+    ) {
+        use aeris_market_runtime::MarketRuntimeEvent;
+        let update = match event.value {
+            MarketRuntimeEvent::SeriesSnapshot(snapshot)
+                if snapshot.generation.0.get() == engine_market_worker::INITIAL_GENERATION =>
+            {
+                engine_market_worker::replay_runtime_snapshot(
+                    &snapshot,
+                    Some(&self.instrument),
+                    received_unix_nanos,
+                )
+                .map(ReplayStreamUpdate::Snapshot)
+            }
+            MarketRuntimeEvent::SeriesUpdate(tail)
+                if tail.generation.0.get() == engine_market_worker::INITIAL_GENERATION =>
+            {
+                engine_market_worker::replay_runtime_tail_update(&tail, received_unix_nanos)
+                    .map(ReplayStreamUpdate::Tail)
+            }
+            _ => return,
+        };
+        match update {
+            Ok(update) => self.apply_update(update),
+            Err(_) => self.message = Some("Market data unavailable".to_string()),
+        }
+    }
+
     fn poll(&mut self) -> bool {
         let Some(worker) = &mut self.worker else {
             return false;
@@ -3581,7 +3612,10 @@ impl MarketSummaryEntry {
         let changed = !messages.is_empty() || disconnected;
         for message in messages {
             match message {
-                MarketWorkerMessage::Update(publication) => self.apply_update(publication.update),
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    event,
+                    received_unix_nanos,
+                } => self.apply_runtime_publication(event, received_unix_nanos),
                 MarketWorkerMessage::CatalogFailure { message } => self.message = Some(message),
                 _ => {}
             }

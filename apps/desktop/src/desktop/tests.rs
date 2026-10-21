@@ -3776,6 +3776,69 @@ fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
 }
 
 #[test]
+fn market_summary_accepts_only_current_fenced_canonical_bars() {
+    use aeris_desktop::test_support::{FixtureMarketEvents, FixtureSeries};
+    use aeris_market_runtime::SeriesTailOperation;
+
+    let instrument = super::local_state::default_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("default watchlist instrument");
+    let route = FixtureSeries {
+        series: super::engine_market_worker::series_key(
+            &instrument,
+            aeris_market_data::ChartInterval::Day1,
+        )
+        .expect("valid summary series"),
+        provider_generation: instrument.session_generation.max(1),
+        price_scale: u8::try_from(instrument.price_scale).expect("price scale"),
+        quantity_scale: u8::try_from(instrument.quantity_scale).expect("quantity scale"),
+    };
+    let mut entry =
+        MarketSummaryEntry::new(instrument, None, None, ConsumerResourceClass::Background);
+    let events = FixtureMarketEvents::default();
+    let bar = |sequence, close| MarketBar {
+        source_sequence: sequence,
+        exchange_timestamp_seconds: i64::try_from(sequence).expect("sequence") * 86_400,
+        exchange_timestamp_unix_nanos: i64::try_from(sequence).expect("sequence")
+            * 86_400_000_000_000,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 10,
+    };
+
+    entry.apply_runtime_publication(events.snapshot(&route, 1, 1, [bar(1, 10_000)]), 1);
+    assert_eq!(entry.last.expect("snapshot").close, 10_000);
+    entry.apply_runtime_publication(
+        events.update(
+            &route,
+            2,
+            2,
+            SeriesTailOperation::Append,
+            bar(2, 99_000),
+            false,
+        ),
+        2,
+    );
+    assert_eq!(entry.last.expect("retired selection ignored").close, 10_000);
+    entry.apply_runtime_publication(
+        events.update(
+            &route,
+            1,
+            2,
+            SeriesTailOperation::Append,
+            bar(2, 10_500),
+            false,
+        ),
+        3,
+    );
+    assert_eq!(entry.last.expect("current tail").close, 10_500);
+    assert_eq!(entry.previous_close, Some(10_000));
+}
+
+#[test]
 fn tab_and_watchlist_share_one_daily_summary_requirement() {
     let instrument = super::local_state::default_workspace().watchlist_entries[0]
         .instrument

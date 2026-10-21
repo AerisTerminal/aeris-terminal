@@ -294,7 +294,6 @@ pub enum MarketRecoveryFailure {
 }
 
 pub enum MarketWorkerMessage {
-    Update(MarketWorkerPublication),
     /// Coordinator-fenced readiness and demand failures are projected by the
     /// pane only under its exact lifecycle selection generation.
     RuntimeSeriesStatus(aeris_market_runtime::MarketConsumerEvent),
@@ -310,15 +309,15 @@ pub enum MarketWorkerMessage {
     Recovery {
         generation: u64,
         request_id: u64,
-        result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
+        result: Result<Box<MarketWorkerBootstrap>, MarketRecoveryFailure>,
     },
     /// A catalog or screen endpoint has no chart selection generation.
     CatalogFailure {
         message: String,
     },
-    SeriesState {
+    /// Local endpoint or command failure, not a coordinator series transition.
+    EndpointFailure {
         generation: u64,
-        state: ChartState,
         message: String,
     },
     Connection {
@@ -497,8 +496,7 @@ impl MarketWorkerSender {
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
-        MarketWorkerMessage::Update(_)
-            | MarketWorkerMessage::RuntimeSeriesPublication { .. }
+        MarketWorkerMessage::RuntimeSeriesPublication { .. }
             | MarketWorkerMessage::StudyOutput(_)
             | MarketWorkerMessage::OrderBook(_)
             | MarketWorkerMessage::TradeTape(_)
@@ -2742,7 +2740,7 @@ mod tests {
                 .send(MarketWorkerMessage::Recovery {
                     generation: 1,
                     request_id: 8,
-                    result: Ok(bootstrap),
+                    result: Ok(Box::new(bootstrap)),
                 })
                 .is_ok()
         );
@@ -2774,7 +2772,7 @@ mod tests {
                 .send(MarketWorkerMessage::Recovery {
                     generation: 1,
                     request_id: 9,
-                    result: Ok(stale_bootstrap),
+                    result: Ok(Box::new(stale_bootstrap)),
                 })
                 .is_ok()
         );

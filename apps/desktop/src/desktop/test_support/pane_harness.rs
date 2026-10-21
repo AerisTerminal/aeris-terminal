@@ -1486,6 +1486,22 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.chart_state, ChartState::Ready);
     });
+    harness
+        .publications
+        .send(readiness(
+            sequence,
+            SeriesLoadState::Partial,
+            "background history repair",
+        ))
+        .expect("live backfill state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            pane.chart_state,
+            ChartState::Ready,
+            "a backfill after live handoff must not return the pane to loading"
+        );
+    });
 }
 
 #[gpui::test]
@@ -3424,6 +3440,36 @@ fn pane_harness_late_catalog_failure_cannot_fail_selected_chart(cx: &mut TestApp
             Some(chart.entity_id())
         );
         assert_eq!(harness.window.read(cx).toaster.notices().len(), 1);
+    });
+}
+
+#[gpui::test]
+fn pane_harness_endpoint_failure_is_selection_fenced(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness
+        .publications
+        .send(MarketWorkerMessage::EndpointFailure {
+            generation: 2,
+            message: "retired endpoint failed".into(),
+        })
+        .expect("retired failure");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Ready);
+        assert_eq!(pane.chart_failure, None);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EndpointFailure {
+            generation: 1,
+            message: "current endpoint failed".into(),
+        })
+        .expect("current failure");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Error);
+        assert_eq!(pane.chart_failure, Some(ChartFailure::Market));
     });
 }
 

@@ -3777,7 +3777,7 @@ impl WorkspaceSurface {
         &mut self,
         generation: u64,
         request_id: u64,
-        result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
+        result: Result<Box<MarketWorkerBootstrap>, MarketRecoveryFailure>,
         cx: &mut Context<Self>,
     ) {
         // A recovery result is a lifecycle outcome, not an incremental bar.
@@ -3790,7 +3790,7 @@ impl WorkspaceSurface {
     fn apply_recovery(
         &mut self,
         request_id: u64,
-        result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
+        result: Result<Box<MarketWorkerBootstrap>, MarketRecoveryFailure>,
         cx: &mut Context<Self>,
     ) {
         let bootstrap = match result {
@@ -3965,7 +3965,6 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         match message {
-            MarketWorkerMessage::Update(publication) => self.apply_publication(publication, cx),
             MarketWorkerMessage::RuntimeSeriesStatus(event) => {
                 self.apply_runtime_series_status(event, cx);
             }
@@ -3987,11 +3986,10 @@ impl WorkspaceSurface {
                     cx,
                 );
             }
-            MarketWorkerMessage::SeriesState {
+            MarketWorkerMessage::EndpointFailure {
                 generation,
-                state,
                 message,
-            } => self.apply_series_state_message(generation, state, message, cx),
+            } => self.apply_series_state_message(generation, ChartState::Error, message, cx),
             MarketWorkerMessage::EngineSelectionCommitted { sequence } => {
                 self.commit_pending_selection(sequence, cx);
             }
@@ -5026,8 +5024,7 @@ impl WorkspaceSurface {
         let chart_update_received = messages.iter().any(|message| {
             matches!(
                 message,
-                MarketWorkerMessage::Update(_)
-                    | MarketWorkerMessage::RuntimeSeriesPublication { .. }
+                MarketWorkerMessage::RuntimeSeriesPublication { .. }
             )
         });
         for message in messages {
