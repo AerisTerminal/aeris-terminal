@@ -1192,6 +1192,95 @@ fn deliver_retired_interval_outcomes(
 }
 
 #[gpui::test]
+fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
+    cx: &mut TestAppContext,
+) {
+    use aeris_contracts::SeriesLoadState;
+    use aeris_market_runtime::{
+        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketSeriesState,
+        fence::{ConsumerTag, EpochSequence, Fenced},
+    };
+    use std::num::NonZeroU64;
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut epochs = EpochSequence::<ConsumerTag>::default();
+    let epoch = epochs.next();
+    let readiness = |generation, state, detail: &str| {
+        MarketWorkerMessage::RuntimeSeriesState(Fenced {
+            epoch,
+            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                generation: MarketGenerationId(
+                    NonZeroU64::new(generation).expect("selection generation"),
+                ),
+                series: None,
+                state,
+                detail: Some(detail.into()),
+                presentation: None,
+            }),
+        })
+    };
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    harness
+        .publications
+        .send(readiness(sequence, SeriesLoadState::Live, "early live"))
+        .expect("early runtime state");
+    let before = cx.read(|cx| harness.pane.read(cx).chart_state);
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, before);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .expect("commit");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    harness
+        .publications
+        .send(readiness(1, SeriesLoadState::Live, "retired live"))
+        .expect("retired runtime state");
+    harness.pane.update(cx, |pane, cx| {
+        let before = pane.chart_state;
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, before);
+    });
+    harness
+        .publications
+        .send(readiness(
+            sequence,
+            SeriesLoadState::Empty,
+            "waiting for trades",
+        ))
+        .expect("current runtime state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::AwaitingData);
+    });
+    harness
+        .publications
+        .send(readiness(sequence, SeriesLoadState::Live, "live handoff"))
+        .expect("live runtime state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Ready);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

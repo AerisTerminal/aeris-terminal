@@ -3893,6 +3893,9 @@ impl WorkspaceSurface {
     ) {
         match message {
             MarketWorkerMessage::Update(publication) => self.apply_publication(publication, cx),
+            MarketWorkerMessage::RuntimeSeriesState(event) => {
+                self.apply_runtime_series_state(event, cx);
+            }
             MarketWorkerMessage::Diagnostics(snapshot) => {
                 #[cfg(feature = "diagnostics")]
                 diagnostic!("desktop market diagnostics: {snapshot:?}");
@@ -4578,6 +4581,56 @@ impl WorkspaceSurface {
     ) {
         if self.chart_pane_controller.accept_series_state(generation) {
             self.apply_market_state_message(state, message, cx);
+        }
+    }
+
+    fn apply_runtime_series_state(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use aeris_contracts::SeriesLoadState;
+
+        let aeris_market_runtime::MarketRuntimeEvent::SeriesState(state) = event.value else {
+            diagnostic!("Aeris pane received an unexpected runtime readiness event");
+            return;
+        };
+        if !self
+            .chart_pane_controller
+            .accept_series_state(state.generation.0.get())
+        {
+            return;
+        }
+        let projected = match state.state {
+            SeriesLoadState::Live => {
+                Some((ChartState::Ready, "Market history/live handoff is current"))
+            }
+            SeriesLoadState::Ready => Some((
+                ChartState::Loading,
+                "Market history is loaded; connecting the live edge",
+            )),
+            SeriesLoadState::Resolving => Some((
+                ChartState::Loading,
+                "Market runtime is loading current coverage",
+            )),
+            SeriesLoadState::Partial if self.chart_state.awaits_engine_readiness() => Some((
+                ChartState::Loading,
+                "Market runtime is loading current coverage",
+            )),
+            SeriesLoadState::Empty => Some((
+                ChartState::AwaitingData,
+                "Market has no history for this period yet",
+            )),
+            SeriesLoadState::Partial | SeriesLoadState::Superseded | SeriesLoadState::Failed => {
+                None
+            }
+        };
+        if let Some((chart_state, fallback)) = projected {
+            self.apply_market_state_message(
+                chart_state,
+                state.detail.unwrap_or_else(|| fallback.to_string()),
+                cx,
+            );
         }
     }
 

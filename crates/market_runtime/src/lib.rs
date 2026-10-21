@@ -4,6 +4,11 @@
 //! history, and realtime fanout inside the desktop process. There is no secondary local process, serialized runtime transport, or restart-replay layer here.
 
 mod cadence;
+/// Consumer-event fence types exposed without a desktop dependency on the
+/// market engine implementation crate.
+pub mod fence {
+    pub use aeris_market_engine::fence::{ConsumerTag, EpochSequence, Fenced};
+}
 mod hyperliquid_display_depth;
 mod hyperliquid_history;
 mod hyperliquid_market_screen;

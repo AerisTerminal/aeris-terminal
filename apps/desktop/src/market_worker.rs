@@ -295,6 +295,9 @@ pub enum MarketRecoveryFailure {
 
 pub enum MarketWorkerMessage {
     Update(MarketWorkerPublication),
+    /// The coordinator's consumer-lifetime envelope is retained until the
+    /// pane projects readiness under its exact selection generation.
+    RuntimeSeriesState(aeris_market_runtime::MarketConsumerEvent),
     StudyOutput(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),

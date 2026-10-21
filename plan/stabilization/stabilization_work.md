@@ -1578,6 +1578,17 @@ Status: pending
     reject recovery. Chart data, readiness, and the remaining routes have
     not yet been moved to direct fenced pane projection; `ChartState` and
     `MarketWorkerMessage` remain, so VAL-DSK-021/022 are not claimed complete.
+  - Part 5b: runtime `SeriesState` now retains its coordinator-issued
+    `Fenced<ConsumerTag, MarketRuntimeEvent>` envelope in the bounded pane
+    queue; the GPUI pane projects readiness only after exact lifecycle
+    acceptance. The worker still handles failed series as a generation-stamped
+    error; pending and retired readiness cannot change the chart. The pane
+    regression exercises early, retired, awaiting-data and live outcomes.
+    Legacy synthetic `SeriesState` messages, bar conversions, `ChartState`,
+    and the remaining routes still need the ordered Part 5-8 collapse;
+    VAL-DSK-021/022 remain unclaimed. The naming-check test fixture reader
+    normalizes Windows CRLF for its LF-only source-literal assertions; this
+    repaired two baseline test failures after the concurrent UI commits.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -1991,6 +2002,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 UI feat(desktop): no stabilization item. Pinned Aeris Charts to 9bd919db (right-edge order-book depth bars and CVD candles). Order entry moved out of the order book into its own sidebar panel; saved workspaces that showed the ticket inside the order book open the new panel (local-state schema revision 2). The chart order-flow menu adds "Order book on chart (DOM)" and a CVD Line/Candles style, both saved with the pane. The chart's book shares the pane's single order-book demand with the docked panel, is fed only frames the pane accepted, and clears on product switch, recovery, disconnect and stop. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-21 UI fix(desktop): no stabilization item. Pinned Aeris Charts to 9f819dcb (depth profile ticks merge into rows at least one label tall at any zoom). A restored chart that opened the order book before its saved instrument resolved now keeps that intent and applies the depth stream once the selection is adopted, so the chart book receives full depth instead of staying on the top of book. A regression covers depth opened during restored-selection resolution. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-21 UI feat(desktop): no stabilization item. Pinned Aeris Charts to 7dbd7ad9 (CVD reset and colors, delta colors, in-place depth profile options). CVD, Delta and Order Book on chart each open their own settings window from the legend gear (CVD style, reset and colors; delta colors; order-book levels, width, opacity, sizes and colors); the chart Settings menu no longer carries those controls. The options persist with the pane in new optional workspace fields, and older workspaces restore the defaults. fmt, Clippy, workspace tests and naming_check passed.
+- 2026-10-21 M6.6 Part 5b refactor(desktop): runtime series readiness retains the fenced coordinator envelope through the bounded pane queue and projects at the GPUI consumer after the exact selection/lifecycle fence. The GPUI regression exercises early, retired and current readiness. Bars, synthetic failures and remaining routes still use the old message shape; M6.6 and VAL-DSK-021/022 remain open.
 
 ## 7. Known gaps / deferred
 

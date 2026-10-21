@@ -391,6 +391,7 @@ fn apply_received_event(
     endpoints: &mut [EndpointRecord],
     clock: &dyn Clock,
 ) -> Result<bool, String> {
+    let consumer_epoch = event.epoch;
     let event = event.value;
     if consumer_id == 0 {
         let MarketRuntimeEvent::Fault(fault) = event else {
@@ -472,13 +473,34 @@ fn apply_received_event(
     if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
         return Ok(false);
     }
+    if matches!(&event, MarketRuntimeEvent::SeriesState(_)) {
+        deliver_runtime_series_state(
+            endpoint,
+            aeris_market_runtime::MarketConsumerEvent {
+                epoch: consumer_epoch,
+                value: event,
+            },
+        )?;
+        return Ok(false);
+    }
+    forward_runtime_publication(event, endpoint, &record.product, generation, clock);
+    Ok(false)
+}
+
+fn forward_runtime_publication(
+    event: MarketRuntimeEvent,
+    endpoint: &mut WorkerEndpoint,
+    product: &super::InstallProviderInstrument,
+    generation: Option<u64>,
+    clock: &dyn Clock,
+) {
     let result = apply_pushed_event(
         event,
         &PushedEventContext {
             consumer_id: endpoint.consumer_id,
             active_generation: endpoint.active_generation,
             realtime: true,
-            instrument: &record.product,
+            instrument: product,
             received_unix_nanos: clock.wall_unix_nanos(),
         },
         &mut endpoint.live,
@@ -487,7 +509,48 @@ fn apply_received_event(
     if let Err(error) = result {
         report_state(&endpoint.messages, generation, ChartState::Error, error);
     }
-    Ok(false)
+}
+
+fn deliver_runtime_series_state(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    let MarketRuntimeEvent::SeriesState(state) = &event.value else {
+        return Err("unexpected runtime readiness event".into());
+    };
+    let error = if state.consumer_id.0.get() != endpoint.consumer_id {
+        Some("engine realtime state identity mismatched")
+    } else if state.generation.0.get() > endpoint.active_generation {
+        Some("engine realtime state generation advanced unexpectedly")
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        report_state(
+            &endpoint.messages,
+            Some(endpoint.active_generation),
+            ChartState::Error,
+            error.into(),
+        );
+    } else if state.generation.0.get() == endpoint.active_generation {
+        if state.state == super::SeriesLoadState::Failed {
+            report_state(
+                &endpoint.messages,
+                Some(endpoint.active_generation),
+                ChartState::Error,
+                state
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "Market realtime failed".into()),
+            );
+        } else {
+            endpoint
+                .messages
+                .send(MarketWorkerMessage::RuntimeSeriesState(event))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Applies a selection reply, then gives an adopted selection the depth visibility the

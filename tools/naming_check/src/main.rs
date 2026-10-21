@@ -927,6 +927,7 @@ mod tests {
     fn manifest(relative: &str) -> String {
         fs::read_to_string(repository_root().join(relative))
             .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
+            .replace("\r\n", "\n")
     }
 
     fn collect_files(directory: &Path, matches: fn(&Path) -> bool, files: &mut Vec<PathBuf>) {
