@@ -3601,16 +3601,38 @@ jobs:
         }
         assert_eq!(workflow.matches("runs-on:").count(), 1);
         assert!(workflow.contains("runs-on: macos-latest"));
+        // The licensed kit reaches the hosted runner only for an explicit tester
+        // build: an opt-in input gates the one secret, every other run disables
+        // the kit, and the kit is deleted after the build, before packaging.
         assert!(
-            workflow.contains("AERIS_RITHMIC_KIT_DISABLED: \"1\"")
-                && !workflow.contains("provider_kit")
-                && !workflow.contains("RITHMIC_KIT_ROOT"),
-            "public hosted runners must never receive the licensed Rithmic kit"
+            workflow.contains("rithmic_kit:")
+                && workflow.contains("type: boolean")
+                && workflow.contains("default: false"),
+            "the Rithmic kit must stay an opt-in input of the preview build"
         );
+        assert!(
+            workflow.contains("if: ${{ !inputs.rithmic_kit }}")
+                && workflow.contains("echo \"AERIS_RITHMIC_KIT_DISABLED=1\" >> \"$GITHUB_ENV\""),
+            "a preview without the Rithmic input must build kitless"
+        );
+        assert_eq!(
+            workflow.matches("secrets.").count(),
+            1,
+            "the preview build may read only the Rithmic kit secret"
+        );
+        assert!(
+            workflow.contains("RITHMIC_KIT_ARCHIVE: ${{ secrets.AERIS_RITHMIC_KIT_TAR_XZ_B64 }}")
+                && workflow.contains("if: ${{ inputs.rithmic_kit }}")
+                && workflow.contains("if: ${{ always() && inputs.rithmic_kit }}")
+                && workflow.contains("rm -rf provider_kit")
+                && workflow.contains("rithmic.protobuf.rs"),
+            "the Rithmic kit must be unpacked only on request, deleted after the build, \
+             and proven compiled in"
+        );
+        assert!(!workflow.contains("RITHMIC_KIT_ROOT"));
         // A preview is an expiring workflow artifact, never a published or
         // updater-visible release, and it is signed ad hoc without identities.
         for forbidden in [
-            "secrets.",
             "gh release",
             "action-gh-release",
             "notarytool",

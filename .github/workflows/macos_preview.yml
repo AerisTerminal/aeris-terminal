@@ -5,8 +5,18 @@ name: macOS preview build
 # release: nothing is published, notarized, or offered to the updater.
 # Manual dispatch only, and only while the repository is public, because the
 # account carries no paid Actions quota.
+#
+# A tester build with Rithmic sets `rithmic_kit`: only then does the runner
+# unpack the licensed kit from the AERIS_RITHMIC_KIT_TAR_XZ_B64 repository
+# secret (a base64 tar.xz of the kit's `proto` folder), and it deletes the kit
+# right after the build. The kit itself is never committed or uploaded.
 on:
   workflow_dispatch:
+    inputs:
+      rithmic_kit:
+        description: Build with the licensed Rithmic kit (tester builds)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,17 +30,42 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     env:
-      # Public hosted runners never receive the licensed Rithmic kit.
-      AERIS_RITHMIC_KIT_DISABLED: "1"
       CARGO_INCREMENTAL: "0"
       PREVIEW_ROOT: target/macos-preview
       BUNDLE: target/macos-preview/Aeris Terminal.app
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build without the Rithmic kit
+        if: ${{ !inputs.rithmic_kit }}
+        run: |
+          echo "AERIS_RITHMIC_KIT_DISABLED=1" >> "$GITHUB_ENV"
+          echo "PREVIEW_FLAVOR=" >> "$GITHUB_ENV"
+      - name: Unpack licensed Rithmic kit
+        if: ${{ inputs.rithmic_kit }}
+        env:
+          RITHMIC_KIT_ARCHIVE: ${{ secrets.AERIS_RITHMIC_KIT_TAR_XZ_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RITHMIC_KIT_ARCHIVE" ]; then
+            echo "::error::AERIS_RITHMIC_KIT_TAR_XZ_B64 is not set; a Rithmic tester build needs the kit"
+            exit 1
+          fi
+          mkdir -p provider_kit/current
+          printf '%s' "$RITHMIC_KIT_ARCHIVE" | base64 --decode | tar -xJf - -C provider_kit/current
+          test -f provider_kit/current/proto/change_log
+          ls provider_kit/current/proto/*.proto > /dev/null
+          echo "PREVIEW_FLAVOR=-rithmic" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Build release desktop
         run: cargo build -p aeris_desktop --release --locked
+      - name: Delete Rithmic kit and confirm it was compiled in
+        if: ${{ always() && inputs.rithmic_kit }}
+        run: |
+          set -euo pipefail
+          rm -rf provider_kit
+          # A missing kit falls back to a kitless build silently; fail instead.
+          ls target/release/build/aeris_rithmic_protocol_adapter-*/out/rithmic.protobuf.rs
       - name: Assemble app bundle
         run: |
           set -euo pipefail
@@ -75,7 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           stage="$PREVIEW_ROOT/dmg-root"
-          image="$PREVIEW_ROOT/Aeris-Terminal-$PREVIEW_VERSION-macos-arm64-preview.dmg"
+          image="$PREVIEW_ROOT/Aeris-Terminal-$PREVIEW_VERSION$PREVIEW_FLAVOR-macos-arm64-preview.dmg"
           mount="$PREVIEW_ROOT/dmg-verify"
           mkdir -p "$stage"
           ditto "$BUNDLE" "$stage/Aeris Terminal.app"
@@ -89,7 +124,7 @@ jobs:
       - name: Upload app bundle disk image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: aeris-terminal-macos-arm64-preview
+          name: aeris-terminal${{ env.PREVIEW_FLAVOR }}-macos-arm64-preview
           path: target/macos-preview/Aeris-Terminal-*-macos-arm64-preview.dmg
           if-no-files-found: error
           retention-days: 14

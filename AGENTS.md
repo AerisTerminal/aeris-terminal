@@ -358,8 +358,11 @@ tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check. T
 runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
 references and self-hosted runners are forbidden on the pull-request path, and any workflow that uses
 a self-hosted runner must stay `workflow_dispatch`-only in every trigger form; live, credentialed and
-performance lanes stay `workflow_dispatch`-only. `tools/naming_check` enforces this shape across
-every workflow.
+performance lanes stay `workflow_dispatch`-only. The manual `macos_preview.yml` tester build is the
+one hosted lane that may receive the Rithmic kit: only when its `rithmic_kit` input is set does it
+unpack the kit's `proto` folder from the `AERIS_RITHMIC_KIT_TAR_XZ_B64` repository secret (its only
+secret), and it deletes the kit right after the build and fails if the kit was not compiled in.
+`tools/naming_check` enforces this shape across every workflow.
 
 ## Build output hygiene
 
