@@ -224,9 +224,9 @@ while invalid.
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
-  --book-bid-fill: color-mix(in srgb, var(--primary) 60%, var(--surface));
+  --book-bid-fill: color-mix(in srgb, var(--primary) 40%, var(--surface));
   --book-bid-text: var(--primary);
-  --book-ask-fill: color-mix(in srgb, #ff2f5e 60%, var(--surface));
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
   --book-ask-text: color-mix(in srgb, #ff2f5e 75%, #000000);
   --book-fill-text: #000000;
 
@@ -345,9 +345,9 @@ while invalid.
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
-  --book-bid-fill: color-mix(in srgb, var(--primary) 60%, var(--surface));
+  --book-bid-fill: color-mix(in srgb, var(--primary) 35%, var(--surface));
   --book-bid-text: color-mix(in srgb, var(--primary) 80%, #ffffff);
-  --book-ask-fill: color-mix(in srgb, #ff2f5e 60%, var(--surface));
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 35%, var(--surface));
   --book-ask-text: color-mix(in srgb, #ff2f5e 85%, #ffffff);
   --book-fill-text: #ffffff;
 
