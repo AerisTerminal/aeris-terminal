@@ -335,6 +335,33 @@ impl HistoryTracker {
         }
     }
 
+    /// Failed attempts counted against the lane's current retry budget.
+    pub(crate) fn attempts(
+        &self,
+        series: &BarSeriesKey,
+        provider: Epoch<ProviderTag>,
+        kind: LaneKind,
+    ) -> u8 {
+        self.entries
+            .get(&(series.clone(), provider))
+            .map_or(0, |entry| entry.lane(kind).attempts)
+    }
+
+    /// Points a lane's pending retry at the newest request for that lane.
+    pub(crate) fn retarget_retry(
+        &mut self,
+        series: &BarSeriesKey,
+        provider: Epoch<ProviderTag>,
+        kind: LaneKind,
+        range: Option<HistoryRange>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(&(series.clone(), provider))
+            && let LaneState::RetryAt(_, retained) = &mut entry.lane_mut(kind).state
+        {
+            *retained = range;
+        }
+    }
+
     pub(crate) fn retry_due(
         &self,
         now: Instant,

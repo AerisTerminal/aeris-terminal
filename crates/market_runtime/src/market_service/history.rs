@@ -577,12 +577,9 @@ impl Coordinator<'_> {
         } else {
             LaneKind::Current
         };
-        let attempts = self
-            .history
-            .pending(series, epoch, kind)
-            .map_or(1, |(_, _, attempts)| attempts);
+        let attempt = self.history.attempts(series, epoch, kind).saturating_add(1);
         diagnostic!(
-            "Aeris engine {} history attempt {attempts} failed for {}: {error}",
+            "Aeris engine {} history attempt {attempt} failed for {}: {error}",
             series.provider_id,
             series.instrument_id
         );
@@ -948,6 +945,10 @@ impl Coordinator<'_> {
         })
     }
 
+    /// A failed request holds its whole lane until the retry deadline. Provider
+    /// failures such as rate limits apply to every range, so a viewport that keeps
+    /// moving retargets the pending retry instead of bypassing its backoff, and
+    /// the failed attempts count across ranges until one succeeds.
     fn history_retry_ready(
         &mut self,
         series: &BarSeriesKey,
@@ -955,14 +956,13 @@ impl Coordinator<'_> {
         kind: LaneKind,
         range: Option<HistoryRange>,
     ) -> bool {
-        if let Some((retry_at, failed_range, attempts)) = self.history.pending(series, epoch, kind)
-        {
-            if failed_range == range && self.clock.monotonic() < retry_at {
+        if let Some((retry_at, _, attempts)) = self.history.pending(series, epoch, kind) {
+            if self.clock.monotonic() < retry_at {
+                self.history.retarget_retry(series, epoch, kind, range);
                 return false;
             }
-            if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
-                // The failed cooldown expired, or the user moved to a genuinely
-                // different range. Start that request with a fresh retry budget.
+            if attempts > MAXIMUM_HISTORY_RETRIES {
+                // The failed cooldown expired; start with a fresh retry budget.
                 self.history.clear_retry(series, epoch, kind);
             }
         }

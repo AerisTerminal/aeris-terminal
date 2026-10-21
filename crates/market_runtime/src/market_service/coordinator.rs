@@ -5946,8 +5946,12 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_ranged_history_retry_cools_down_exact_range_but_not_new_range() {
+    fn exhausted_ranged_history_cooldown_holds_every_range_until_it_expires() {
+        use super::super::clock::ScriptedClock;
+        use super::super::history::tracker::LaneKind;
+        let clock = Arc::new(ScriptedClock::new(1_000_000_000));
         let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
         let selected = series();
         let generation = ProviderGeneration(nonzero(1));
         coordinator
@@ -5963,49 +5967,123 @@ mod tests {
             coordinator.history.schedule(
                 selected.clone(),
                 epoch,
-                super::super::history::tracker::LaneKind::Backfill,
+                LaneKind::Backfill,
                 Some(failed),
                 coordinator.clock.as_ref(),
                 false,
             );
         }
 
-        assert!(
-            coordinator
-                .enqueue_history_request(&selected, generation, Some(failed))
-                .is_ok(),
-            "identical failed range is suppressed during cooldown"
-        );
-        assert!(
-            coordinator
-                .history
-                .pending(
-                    &selected,
-                    epoch,
-                    super::super::history::tracker::LaneKind::Backfill
-                )
-                .is_some()
-        );
-
         let older = HistoryRange {
             start_unix_nanos: -60_000_000_000,
             end_unix_nanos: 60_000_000_000,
         };
+        for requested in [failed, older] {
+            assert!(
+                coordinator
+                    .enqueue_history_request(&selected, generation, Some(requested))
+                    .is_ok(),
+                "the failed cooldown holds every range of the lane"
+            );
+        }
+        assert_eq!(
+            coordinator
+                .history
+                .pending(&selected, epoch, LaneKind::Backfill)
+                .map(|(_, range, attempts)| (attempts, range)),
+            Some((MAXIMUM_HISTORY_RETRIES + 1, Some(older)))
+        );
+        assert!(coordinator.history.inflight(&selected, epoch).is_none());
+
+        clock.advance(super::super::HISTORY_FAILED_RETRY_COOLDOWN);
         assert!(
             coordinator
                 .enqueue_history_request(&selected, generation, Some(older))
                 .is_err(),
-            "a genuinely different viewport range proceeds to provider dispatch"
+            "after the cooldown the newest range proceeds to provider dispatch"
         );
         assert!(
             coordinator
                 .history
-                .pending(
-                    &selected,
-                    epoch,
-                    super::super::history::tracker::LaneKind::Backfill
-                )
+                .pending(&selected, epoch, LaneKind::Backfill)
                 .is_none()
+        );
+        assert_eq!(
+            coordinator
+                .history
+                .attempts(&selected, epoch, LaneKind::Backfill),
+            0,
+            "the expired cooldown starts a fresh retry budget"
+        );
+    }
+
+    /// A rate-limited backfill was re-requested for every viewport move: each
+    /// move carried a new range that bypassed the retry deadline and reset the
+    /// attempt count, so the provider kept rejecting one request per scroll step.
+    #[test]
+    fn backfill_retry_deadline_holds_moving_viewport_ranges_and_keeps_attempts() {
+        use super::super::clock::{Clock, ScriptedClock};
+        use super::super::history::tracker::LaneKind;
+        let clock = Arc::new(ScriptedClock::new(1_000_000_000));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
+        let range = |minutes: i64| HistoryRange {
+            start_unix_nanos: -minutes * 60_000_000_000,
+            end_unix_nanos: 60_000_000_000,
+        };
+        assert!(coordinator.schedule_history_retry(
+            &selected,
+            generation,
+            Some(range(1)),
+            "HTTP 429"
+        ));
+
+        for minutes in 2..=6 {
+            assert!(
+                coordinator
+                    .enqueue_history_request(&selected, generation, Some(range(minutes)))
+                    .is_ok(),
+                "a moved viewport waits for the retry deadline"
+            );
+            assert!(
+                coordinator.history.inflight(&selected, epoch).is_none(),
+                "nothing is dispatched before the retry deadline"
+            );
+        }
+        let (deadline, retained, attempts) = coordinator
+            .history
+            .pending(&selected, epoch, LaneKind::Backfill)
+            .expect("one retry is retained for the lane");
+        assert_eq!((retained, attempts), (Some(range(6)), 1));
+
+        clock.advance(deadline.saturating_duration_since(clock.monotonic()));
+        assert_eq!(
+            coordinator
+                .history
+                .retry_due(clock.monotonic())
+                .map(|(_, _, kind, range)| (kind, range)),
+            Some((LaneKind::Backfill, Some(range(6)))),
+            "the retry asks for the newest viewport range"
+        );
+        assert!(
+            coordinator
+                .enqueue_history_request(&selected, generation, Some(range(7)))
+                .is_err(),
+            "after the deadline the request proceeds to provider dispatch"
+        );
+        assert_eq!(
+            coordinator
+                .history
+                .attempts(&selected, epoch, LaneKind::Backfill),
+            1,
+            "a new range does not reset the failed attempts"
         );
     }
 
