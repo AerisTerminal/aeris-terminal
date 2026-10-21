@@ -265,7 +265,8 @@ pub(super) fn collect_market(
         };
         state.last_message = Instant::now();
         state.source_ordinal = state.source_ordinal.checked_add(1).ok_or_else(malformed)?;
-        if !handle_session_message(
+        let kind = message.kind();
+        match handle_session_message(
             connection,
             message,
             generation,
@@ -273,8 +274,16 @@ pub(super) fn collect_market(
             &mut state,
             &mut canonical,
             stop,
-        )? {
-            return Ok(());
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(failure) => {
+                diagnostic!(
+                    "Aeris Rithmic session ended handling a {kind} message: {:?}",
+                    failure.0
+                );
+                return Err(failure);
+            }
         }
     }
 }

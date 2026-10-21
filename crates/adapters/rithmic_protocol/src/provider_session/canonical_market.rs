@@ -1,6 +1,8 @@
 //! Canonical market.
 
+use aeris_market_data::MarketDataValidationError;
 use aeris_observability::diagnostic;
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -19,6 +21,17 @@ pub(super) struct CanonicalSessionState {
     quotes: BTreeMap<String, QuoteState>,
     mbo_books: BTreeMap<String, MboBookAssembler>,
     depth_resnapshots: VecDeque<String>,
+    /// Instrument and condition pairs already reported as withheld, so each
+    /// is logged once per session.
+    withheld: BTreeSet<(String, WithheldFrame)>,
+}
+
+/// Provider frames the canonical market model cannot represent.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum WithheldFrame {
+    CrossedBook,
+    NonPositivePrice,
+    ZeroQuantity,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -635,6 +648,7 @@ impl CanonicalSessionState {
             quotes: BTreeMap::new(),
             mbo_books,
             depth_resnapshots: VecDeque::new(),
+            withheld: BTreeSet::new(),
         }
     }
 
@@ -648,6 +662,11 @@ impl CanonicalSessionState {
         match message {
             DecodedMarketMessage::Trade(trade) => {
                 let instrument = self.instrument(&trade.identity)?;
+                if trade.size == 0 {
+                    let instrument_id = instrument.descriptor.instrument_id.clone();
+                    self.withhold(&instrument_id, WithheldFrame::ZeroQuantity);
+                    return Ok(None);
+                }
                 let event = MarketEvent::Trade(MarketTrade {
                     metadata: metadata(
                         instrument,
@@ -665,7 +684,7 @@ impl CanonicalSessionState {
                         None => AggressorSide::Unknown,
                     },
                 });
-                validate_market(event).map(Some)
+                self.publishable(event)
             }
             DecodedMarketMessage::Quote(quote) => {
                 let instrument = self.instrument(&quote.identity)?.clone();
@@ -689,13 +708,15 @@ impl CanonicalSessionState {
                     bid: state
                         .bid
                         .map(|level| canonical_quote_level(level, &instrument))
-                        .transpose()?,
+                        .transpose()?
+                        .flatten(),
                     ask: state
                         .ask
                         .map(|level| canonical_quote_level(level, &instrument))
-                        .transpose()?,
+                        .transpose()?
+                        .flatten(),
                 });
-                validate_market(event).map(Some)
+                self.publishable(event)
             }
             // Depth comes from the order-level book. Price-level frames carry
             // incremental changes (including zero-size removals) that the image
@@ -812,7 +833,7 @@ impl CanonicalSessionState {
                             bids,
                             asks,
                         });
-                        validate_market(event).map(Some)
+                        self.publishable(event)
                     }
                 }
             }
@@ -850,7 +871,7 @@ impl CanonicalSessionState {
                             bids,
                             asks,
                         });
-                        validate_market(event).map(Some)
+                        self.publishable(event)
                     }
                 }
             }
@@ -898,7 +919,7 @@ impl CanonicalSessionState {
                             bids,
                             asks,
                         });
-                        validate_market(event).map(Some)
+                        self.publishable(event)
                     }
                 }
             }
@@ -913,6 +934,34 @@ impl CanonicalSessionState {
             .iter()
             .find(|instrument| instrument.identity_matches(identity))
             .ok_or_else(malformed)
+    }
+
+    /// Canonical events reject crossed or locked books, non-positive prices
+    /// and zero quantities. A futures book in pre-open is legitimately crossed
+    /// and spreads trade at or below zero, so such a frame is withheld instead
+    /// of failing every stream on the session. The order-level image stays
+    /// intact and the next representable frame publishes.
+    fn publishable(
+        &mut self,
+        event: MarketEvent,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let condition = match event.validate(MAXIMUM_CANONICAL_DEPTH_LEVELS) {
+            Ok(()) => return Ok(Some(event)),
+            Err(
+                MarketDataValidationError::InvalidQuote | MarketDataValidationError::InvalidDepth,
+            ) => WithheldFrame::CrossedBook,
+            Err(MarketDataValidationError::InvalidPrice) => WithheldFrame::NonPositivePrice,
+            Err(MarketDataValidationError::InvalidQuantity) => WithheldFrame::ZeroQuantity,
+            Err(_) => return Err(malformed()),
+        };
+        self.withhold(&event.metadata().instrument_id, condition);
+        Ok(None)
+    }
+
+    fn withhold(&mut self, instrument_id: &str, condition: WithheldFrame) {
+        if self.withheld.insert((instrument_id.to_string(), condition)) {
+            diagnostic!("Aeris Rithmic market frames withheld from publication: {condition:?}");
+        }
     }
 
     pub(super) fn add_instrument(
@@ -948,6 +997,8 @@ impl CanonicalSessionState {
         self.mbo_books.remove(instrument_id);
         self.depth_resnapshots
             .retain(|pending| pending != instrument_id);
+        self.withheld
+            .retain(|(withheld, _)| withheld != instrument_id);
     }
 
     /// Order-level books that need a fresh snapshot on the live connection.
@@ -995,25 +1046,32 @@ fn metadata(
     })
 }
 
+/// A side quoted with zero size carries no resting liquidity, so it publishes
+/// as absent rather than as a price the trading owner could fill against.
 fn canonical_quote_level(
     level: QuoteLevel,
     instrument: &RithmicProviderInstrument,
-) -> Result<aeris_market_data::QuoteLevel, (ProviderInvalidationReason, RetryDisposition)> {
-    Ok(aeris_market_data::QuoteLevel {
+) -> Result<Option<aeris_market_data::QuoteLevel>, (ProviderInvalidationReason, RetryDisposition)> {
+    if level.size == 0 {
+        return Ok(None);
+    }
+    Ok(Some(aeris_market_data::QuoteLevel {
         price: fixed_price(level.price, instrument.descriptor.price_scale)?,
         quantity: Some(fixed_quantity(
             level.size,
             instrument.descriptor.quantity_scale,
         )?),
         order_count: level.orders,
-    })
+    }))
 }
 
+/// Non-positive prices convert exactly; canonical validation decides whether
+/// the event carrying them can publish.
 fn fixed_price(
     value: f64,
     scale: u8,
 ) -> Result<i64, (ProviderInvalidationReason, RetryDisposition)> {
-    if !value.is_finite() || value <= 0.0 || scale > 18 {
+    if !value.is_finite() || scale > 18 {
         return Err(malformed());
     }
     let rendered = format!("{value:.precision$}", precision = usize::from(scale));
@@ -1057,13 +1115,6 @@ pub(super) fn unix_nanos_now() -> Result<i64, (ProviderInvalidationReason, Retry
         .map_err(|_| malformed())?
         .as_nanos();
     i64::try_from(nanos).map_err(|_| malformed())
-}
-
-pub(super) fn validate_market(
-    event: MarketEvent,
-) -> Result<MarketEvent, (ProviderInvalidationReason, RetryDisposition)> {
-    event.validate(4_096).map_err(|_| malformed())?;
-    Ok(event)
 }
 
 pub(super) const fn malformed() -> (ProviderInvalidationReason, RetryDisposition) {

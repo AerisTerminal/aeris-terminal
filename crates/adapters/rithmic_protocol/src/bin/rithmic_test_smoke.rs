@@ -426,7 +426,7 @@ fn test_subscription(
             }
             Err(error) => return Err(format!("stream_read_failed={error}")),
         };
-        println!("rithmic_stream_frame kind={}", stream_frame_kind(&message));
+        println!("rithmic_stream_frame kind={}", message.kind());
         match message {
             RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
                 accepted,
@@ -619,22 +619,6 @@ fn collect_depth_by_order_snapshot(
                 evidence.levels, evidence.orders, evidence.live_mutations
             ));
         }
-    }
-}
-
-fn stream_frame_kind(message: &RithmicSessionMessage) -> &'static str {
-    match message {
-        RithmicSessionMessage::Control(_) => "control",
-        RithmicSessionMessage::Catalog(_) => "catalog",
-        RithmicSessionMessage::Market(DecodedMarketMessage::Trade(_)) => "market-trade",
-        RithmicSessionMessage::Market(DecodedMarketMessage::Quote(_)) => "market-quote",
-        RithmicSessionMessage::Market(DecodedMarketMessage::OrderBook(_)) => "market-book",
-        RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(_)) => {
-            "market-dbo-snapshot"
-        }
-        RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrder(_)) => "market-dbo",
-        RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderEnd(_)) => "market-dbo-end",
-        RithmicSessionMessage::History(_) => "history",
     }
 }
 

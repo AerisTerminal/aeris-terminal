@@ -3144,6 +3144,162 @@ mod tests {
         ));
     }
 
+    fn quote(bid: QuoteSideUpdate, ask: QuoteSideUpdate) -> DecodedMarketMessage {
+        DecodedMarketMessage::Quote(QuoteUpdate {
+            identity: identity(),
+            bid,
+            ask,
+            is_snapshot: false,
+            timestamp: timestamp(),
+        })
+    }
+
+    fn quote_side(price: f64, size: u32) -> QuoteSideUpdate {
+        QuoteSideUpdate::Value(QuoteLevel {
+            price,
+            size,
+            orders: Some(1),
+        })
+    }
+
+    /// A futures book in pre-open is crossed; it must not end the session
+    /// that serves every chart, and the next representable quote publishes.
+    #[test]
+    fn crossed_pre_open_quote_is_withheld_and_the_next_quote_publishes() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(3));
+        assert_eq!(
+            canonical.convert(
+                quote(quote_side(5_100.50, 2), quote_side(5_100.25, 4)),
+                1,
+                1
+            ),
+            Ok(None)
+        );
+        let Some(MarketEvent::Quote(published)) = canonical
+            .convert(
+                quote(QuoteSideUpdate::Unchanged, quote_side(5_100.75, 4)),
+                2,
+                2,
+            )
+            .expect("uncrossed quote converts")
+        else {
+            panic!("an uncrossed quote must publish");
+        };
+        assert_eq!(published.bid.map(|level| level.price), Some(510_050));
+        assert_eq!(published.ask.map(|level| level.price), Some(510_075));
+    }
+
+    #[test]
+    fn zero_size_and_non_positive_frames_do_not_fail_the_session() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(4));
+        assert_eq!(
+            canonical.convert(
+                DecodedMarketMessage::Trade(TradeUpdate {
+                    identity: identity(),
+                    price: 5_100.25,
+                    size: 0,
+                    aggressor: None,
+                    is_snapshot: true,
+                    timestamp: timestamp(),
+                }),
+                1,
+                1,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            canonical.convert(quote(quote_side(-0.25, 2), quote_side(0.25, 4)), 2, 2),
+            Ok(None)
+        );
+        let Some(MarketEvent::Quote(published)) = canonical
+            .convert(
+                quote(quote_side(5_100.25, 0), quote_side(5_100.50, 4)),
+                3,
+                3,
+            )
+            .expect("zero-size side converts")
+        else {
+            panic!("a quote with one liquid side must publish");
+        };
+        assert_eq!(published.bid, None, "a zero-size side has no liquidity");
+        assert_eq!(published.ask.map(|level| level.price), Some(510_050));
+    }
+
+    #[test]
+    fn crossed_order_level_image_is_withheld_until_the_book_uncrosses() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(5));
+        for (ordinal, (side, price, order_id)) in [
+            (DepthByOrderSide::Bid, 5_100.50, "bid-1"),
+            (DepthByOrderSide::Ask, 5_100.25, "ask-1"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ordinal = u64::try_from(ordinal).expect("small ordinal") + 1;
+            assert_eq!(
+                canonical.convert(
+                    DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Level(
+                        crate::DepthByOrderSnapshotLevel {
+                            identity: identity(),
+                            sequence_number: None,
+                            side,
+                            price,
+                            orders: vec![crate::DepthByOrderSnapshotOrder {
+                                size: 2,
+                                priority: ordinal,
+                                exchange_order_id: order_id.to_string(),
+                            }],
+                        }
+                    )),
+                    ordinal,
+                    1,
+                ),
+                Ok(None)
+            );
+        }
+        assert_eq!(
+            canonical.convert(
+                DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                    accepted: true,
+                    identity: Some(identity()),
+                    sequence_number: None,
+                }),
+                3,
+                1,
+            ),
+            Ok(None),
+            "a crossed pre-open image is withheld, not a session failure"
+        );
+        let Some(MarketEvent::DepthSnapshot(depth)) = canonical
+            .convert(
+                DecodedMarketMessage::DepthByOrder(crate::DepthByOrderUpdate {
+                    identity: identity(),
+                    sequence_number: Some(10),
+                    mutations: vec![crate::DepthByOrderMutation {
+                        kind: crate::DepthByOrderMutationKind::Delete,
+                        side: DepthByOrderSide::Bid,
+                        price: 5_100.50,
+                        previous_price: None,
+                        size: 0,
+                        priority: 1,
+                        exchange_order_id: "bid-1".to_string(),
+                    }],
+                    timestamp: Some(timestamp()),
+                }),
+                4,
+                2,
+            )
+            .expect("live update applies to the retained image")
+        else {
+            panic!("the uncrossed book must publish");
+        };
+        assert_eq!(depth.bids, [] as [aeris_market_data::DepthLevel; 0]);
+        assert_eq!(depth.asks.first().map(|level| level.price), Some(510_025));
+    }
+
     #[test]
     fn price_level_frames_never_publish_depth_or_invalidate_the_session() {
         let config = config();

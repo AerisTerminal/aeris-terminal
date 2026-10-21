@@ -82,6 +82,43 @@ pub enum RithmicSessionMessage {
     History(DecodedHistoryMessage),
 }
 
+impl RithmicSessionMessage {
+    /// Names the message kind without any of its contents.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Control(message) => match message {
+                DecodedControlMessage::Reject => "control-reject",
+                DecodedControlMessage::ForcedLogout => "control-forced-logout",
+                DecodedControlMessage::Systems { .. } => "control-systems",
+                DecodedControlMessage::Login { .. } => "control-login",
+                DecodedControlMessage::Logout { .. } => "control-logout",
+                DecodedControlMessage::Heartbeat { .. } => "control-heartbeat",
+                DecodedControlMessage::MarketDataSubscription { .. } => {
+                    "control-market-data-subscription"
+                }
+                DecodedControlMessage::DepthByOrderSubscription { .. } => {
+                    "control-dbo-subscription"
+                }
+            },
+            Self::Catalog(message) => match message {
+                DecodedCatalogMessage::SearchResult(_) => "catalog-search-result",
+                DecodedCatalogMessage::SearchComplete { .. } => "catalog-search-complete",
+                DecodedCatalogMessage::InstrumentReference(_) => "catalog-reference",
+            },
+            Self::Market(message) => match message {
+                DecodedMarketMessage::Trade(_) => "market-trade",
+                DecodedMarketMessage::Quote(_) => "market-quote",
+                DecodedMarketMessage::OrderBook(_) => "market-book",
+                DecodedMarketMessage::DepthByOrderSnapshot(_) => "market-dbo-snapshot",
+                DecodedMarketMessage::DepthByOrder(_) => "market-dbo",
+                DecodedMarketMessage::DepthByOrderEnd(_) => "market-dbo-end",
+            },
+            Self::History(_) => "history",
+        }
+    }
+}
+
 /// Rithmic session connector for the server named by each login.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RithmicSession;
