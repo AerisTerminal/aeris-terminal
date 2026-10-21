@@ -2,7 +2,8 @@
 
 use aeris_observability::diagnostic;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
+    mem,
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -25,12 +26,12 @@ use aeris_platform_runtime::{
 };
 use aeris_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentContractMetadata, InstrumentDescriptor, InstrumentType,
-    MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
-    ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
-    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicCallbackLimits,
-    RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
-    RithmicInstrumentSelection, RithmicProviderCommandError, RithmicProviderConfig,
-    RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_RETAINED_SEARCHES,
+    MAXIMUM_RITHMIC_SEARCH_RESULTS, ProviderInvalidationReason, ProviderSessionEvent,
+    RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE,
+    RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCommandError,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
     RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeError,
     RithmicProviderRuntimeState, RithmicReadOnlySubscription, RithmicRetryScheduler,
     RithmicSessionLimits, RithmicSymbolSearch, SearchPattern, SessionGeneration,
@@ -277,10 +278,188 @@ struct CatalogHandoff {
     retries: RithmicRetryScheduler,
     /// Saved-login revision the session signed in under.
     login: u64,
-    /// Searches still awaiting a callback, keyed by search generation.
-    searches: BTreeMap<usize, u64>,
-    /// Selections still awaiting a callback, keyed by selection generation.
-    selections: BTreeMap<usize, u64>,
+    commands: CatalogCommands,
+}
+
+/// The consumer that issued one catalog command and that command's own
+/// generation, which every publication answering it carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CatalogIssuer {
+    consumer_id: u64,
+    generation: u64,
+}
+
+/// Why a catalog command was not sent to the adapter session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogDispatchFailure {
+    NoActiveSession,
+    InvalidRequest,
+    WireGenerationExhausted,
+    /// The selection names a search the adapter session no longer retains.
+    UnretainedSearch,
+    Command(RithmicProviderCommandError),
+}
+
+impl CatalogDispatchFailure {
+    const fn reason(self) -> ProviderCatalogRejectionReason {
+        match self {
+            Self::UnretainedSearch => ProviderCatalogRejectionReason::SupersededSearch,
+            Self::NoActiveSession
+            | Self::InvalidRequest
+            | Self::WireGenerationExhausted
+            | Self::Command(_) => ProviderCatalogRejectionReason::DispatchUnavailable,
+        }
+    }
+}
+
+/// Catalog commands sent on the one shared ticker login.
+///
+/// Every consumer numbers its own searches and selections, so different
+/// consumers reuse the same generations. Each command sent to the adapter
+/// therefore carries a unique wire generation, and adapter callbacks are
+/// routed only by that wire generation.
+#[derive(Default)]
+struct CatalogCommands {
+    last_wire: Option<NonZeroUsize>,
+    searches: BTreeMap<NonZeroUsize, CatalogIssuer>,
+    selections: BTreeMap<NonZeroUsize, CatalogIssuer>,
+    /// Completed searches a selection may still name, oldest first. The
+    /// adapter session retains the same number of completed searches.
+    completed_searches: VecDeque<(CatalogIssuer, NonZeroUsize)>,
+}
+
+impl CatalogCommands {
+    fn mint(&mut self) -> Result<NonZeroUsize, CatalogDispatchFailure> {
+        let wire = match self.last_wire {
+            None => NonZeroUsize::MIN,
+            Some(last) => last
+                .checked_add(1)
+                .ok_or(CatalogDispatchFailure::WireGenerationExhausted)?,
+        };
+        self.last_wire = Some(wire);
+        Ok(wire)
+    }
+
+    fn search_request(
+        &mut self,
+        search: &SearchProviderInstruments,
+    ) -> Result<RithmicSymbolSearch, CatalogDispatchFailure> {
+        let maximum_results = bounded_search_results(search.maximum_results)
+            .ok_or(CatalogDispatchFailure::InvalidRequest)?;
+        let wire = self.mint()?;
+        // Rithmic symbols are upper case and the search matches them exactly.
+        // Aeris charts Rithmic futures only; filtering at the provider keeps a
+        // broad query's options and strategies from filling the bounded result
+        // set ahead of the futures contracts.
+        RithmicSymbolSearch::try_new(
+            wire,
+            search.query.to_ascii_uppercase(),
+            None,
+            None,
+            Some(InstrumentType::Future),
+            SearchPattern::Equals,
+            maximum_results,
+        )
+        .map_err(|_| CatalogDispatchFailure::InvalidRequest)
+    }
+
+    fn selection_request(
+        &mut self,
+        selection: &SelectProviderInstrument,
+        realtime_selection: bool,
+    ) -> Result<RithmicInstrumentSelection, CatalogDispatchFailure> {
+        let search = self
+            .completed_search(selection.consumer_id, selection.search_generation)
+            .ok_or(CatalogDispatchFailure::UnretainedSearch)?;
+        let subscription = catalog_selection_subscription(realtime_selection)
+            .ok_or(CatalogDispatchFailure::InvalidRequest)?;
+        let wire = self.mint()?;
+        let constructor = if realtime_selection {
+            RithmicInstrumentSelection::try_new_reference_only
+        } else {
+            RithmicInstrumentSelection::try_new
+        };
+        constructor(
+            wire,
+            search,
+            selection.symbol.as_str(),
+            selection.exchange.as_str(),
+            selection.entitlement_id.as_str(),
+            subscription,
+        )
+        .map_err(|_| CatalogDispatchFailure::InvalidRequest)
+    }
+
+    fn search_sent(&mut self, wire: NonZeroUsize, search: &SearchProviderInstruments) {
+        self.searches.insert(
+            wire,
+            CatalogIssuer {
+                consumer_id: search.consumer_id,
+                generation: search.search_generation,
+            },
+        );
+    }
+
+    fn selection_sent(&mut self, wire: NonZeroUsize, selection: &SelectProviderInstrument) {
+        self.selections.insert(
+            wire,
+            CatalogIssuer {
+                consumer_id: selection.consumer_id,
+                generation: selection.selection_generation,
+            },
+        );
+    }
+
+    /// Wire generation of the newest retained search this consumer issued
+    /// under `search_generation`.
+    fn completed_search(&self, consumer_id: u64, search_generation: u64) -> Option<NonZeroUsize> {
+        self.completed_searches
+            .iter()
+            .rev()
+            .find(|(issuer, _)| {
+                issuer.consumer_id == consumer_id && issuer.generation == search_generation
+            })
+            .map(|(_, wire)| *wire)
+    }
+
+    fn search_completed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
+        let issuer = self.searches.remove(&wire)?;
+        if self.completed_searches.len() >= MAXIMUM_RITHMIC_RETAINED_SEARCHES {
+            self.completed_searches.pop_front();
+        }
+        self.completed_searches.push_back((issuer, wire));
+        Some(issuer)
+    }
+
+    fn selection_installed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
+        self.selections.remove(&wire)
+    }
+
+    /// Removes a rejected command, reporting whether it was a selection.
+    fn rejected(&mut self, wire: NonZeroUsize) -> Option<(CatalogIssuer, bool)> {
+        if let Some(issuer) = self.searches.remove(&wire) {
+            return Some((issuer, false));
+        }
+        self.selections.remove(&wire).map(|issuer| (issuer, true))
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.searches.is_empty() || !self.selections.is_empty()
+    }
+
+    /// Ends the adapter session the commands were sent on. Returns every
+    /// pending command, searches first, flagging selections, and forgets the
+    /// completed searches because a new session retains none.
+    fn retire(&mut self) -> Vec<(CatalogIssuer, bool)> {
+        self.completed_searches.clear();
+        let searches = mem::take(&mut self.searches)
+            .into_values()
+            .map(|issuer| (issuer, false));
+        let selections = mem::take(&mut self.selections)
+            .into_values()
+            .map(|issuer| (issuer, true));
+        searches.chain(selections).collect()
+    }
 }
 
 enum CatalogSessionExit {
@@ -308,15 +487,14 @@ fn run_catalog_session(
 ) -> CatalogSessionExit {
     let login = channels.login.current();
     let mut retries = RithmicRetryScheduler::default();
-    let mut searches = BTreeMap::new();
-    let mut selections = BTreeMap::new();
+    let mut commands = CatalogCommands::default();
     let mut initial_control = Some(initial_control);
     if let Err(error) =
         apply_current_environment(&mut runtime, &events, &mut retries, *environment_state)
     {
         diagnostic!("Aeris Rithmic catalog session could not start: {error}");
         if let Some(control) = initial_control.take() {
-            reject_catalog_control(channels.catalog_publications, control, Some(generation));
+            reject_catalog_control(channels.catalog_publications, &control, Some(generation));
         }
         return retry_catalog_session(&mut runtime, generation);
     }
@@ -329,19 +507,19 @@ fn run_catalog_session(
             &mut retries,
         ) {
             Ok(true) => {
-                if searches.is_empty() && selections.is_empty() {
-                    generation = next_generation(generation, generation);
-                    continue;
-                }
-                // Retire pending demand before restarting an offline-born
-                // session so consumers can re-demand on the fresh generation.
+                let pending = commands.has_pending();
                 generation = retire_pending_catalog_generation(
                     channels.catalog_publications,
                     generation,
-                    &mut searches,
-                    &mut selections,
+                    &mut commands,
                 );
-                return retry_catalog_session(&mut runtime, generation);
+                if pending {
+                    // Restart an offline-born session after retiring its
+                    // pending demand so consumers re-demand on the fresh
+                    // generation.
+                    return retry_catalog_session(&mut runtime, generation);
+                }
+                continue;
             }
             Ok(false) => {}
             Err(()) => {
@@ -353,8 +531,7 @@ fn run_catalog_session(
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
-                &mut searches,
-                &mut selections,
+                &mut commands,
             );
             return retry_catalog_session(&mut runtime, generation);
         }
@@ -366,8 +543,7 @@ fn run_catalog_session(
                         events,
                         retries,
                         login,
-                        searches,
-                        selections,
+                        commands,
                     }),
                     generation,
                     demand,
@@ -390,9 +566,8 @@ fn run_catalog_session(
                     &events,
                     channels.catalog_publications,
                     generation,
-                    &mut searches,
-                    &mut selections,
-                    control,
+                    &mut commands,
+                    &control,
                     false,
                 ),
                 Err(TryRecvError::Empty) => break,
@@ -410,8 +585,7 @@ fn run_catalog_session(
                 channels.catalog_publications,
                 generation,
                 callback.event,
-                &mut searches,
-                &mut selections,
+                &mut commands,
             ) {
                 // The login stays open: the coordinator answers a resolved
                 // selection with a realtime demand for this same generation,
@@ -423,8 +597,7 @@ fn run_catalog_session(
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
-                &mut searches,
-                &mut selections,
+                &mut commands,
             );
             return retry_catalog_session(&mut runtime, generation);
         }
@@ -436,8 +609,7 @@ fn run_catalog_session(
                     reject_pending_catalog(
                         channels.catalog_publications,
                         generation,
-                        &mut searches,
-                        &mut selections,
+                        &mut commands,
                     );
                     return retry_catalog_session(&mut runtime, generation);
                 }
@@ -448,8 +620,7 @@ fn run_catalog_session(
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
-                &mut searches,
-                &mut selections,
+                &mut commands,
             );
         }
         thread::sleep(ADAPTER_CONTROL_WAIT);
@@ -500,112 +671,75 @@ fn catalog_selection_subscription(realtime: bool) -> Option<RithmicReadOnlySubsc
     RithmicReadOnlySubscription::try_new(realtime, true, realtime).ok()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dispatch_catalog_control(
     runtime: &Runtime,
     events: &RithmicProviderEvents,
     publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
-    searches: &mut BTreeMap<usize, u64>,
-    selections: &mut BTreeMap<usize, u64>,
-    control: RithmicCatalogControl,
+    commands: &mut CatalogCommands,
+    control: &RithmicCatalogControl,
     realtime_selection: bool,
 ) {
-    let Some(session_generation) = active_generation(runtime) else {
-        reject_catalog_control(publications, control, Some(provider_generation));
-        return;
-    };
+    if let Err(failure) =
+        send_catalog_control(runtime, events, commands, control, realtime_selection)
+    {
+        reject_undispatched(publications, provider_generation, control, failure);
+    }
+}
+
+fn send_catalog_control(
+    runtime: &Runtime,
+    events: &RithmicProviderEvents,
+    commands: &mut CatalogCommands,
+    control: &RithmicCatalogControl,
+    realtime_selection: bool,
+) -> Result<(), CatalogDispatchFailure> {
+    let session_generation =
+        active_generation(runtime).ok_or(CatalogDispatchFailure::NoActiveSession)?;
     match control {
         RithmicCatalogControl::Search(search) => {
-            let Some(generation) = usize_generation(search.search_generation) else {
-                reject_catalog_control(
-                    publications,
-                    RithmicCatalogControl::Search(search),
-                    Some(provider_generation),
-                );
-                return;
-            };
-            // Aeris charts Rithmic futures only. Filtering at the provider keeps
-            // a broad query's options and strategies from filling the bounded
-            // result set ahead of the futures contracts.
-            let request =
-                bounded_search_results(search.maximum_results).and_then(|maximum_results| {
-                    RithmicSymbolSearch::try_new(
-                        generation,
-                        search.query,
-                        None,
-                        None,
-                        Some(InstrumentType::Future),
-                        SearchPattern::Equals,
-                        maximum_results,
-                    )
-                    .ok()
-                });
-            if request
-                .is_some_and(|request| events.search_symbols(session_generation, request).is_ok())
-            {
-                searches.insert(generation.get(), search.consumer_id);
-            } else {
-                reject_catalog_generation(
-                    publications,
-                    search.consumer_id,
-                    Some(provider_generation),
-                    search.search_generation,
-                    false,
-                );
-            }
+            let request = commands.search_request(search)?;
+            let wire = request.generation();
+            events
+                .search_symbols(session_generation, request)
+                .map_err(CatalogDispatchFailure::Command)?;
+            commands.search_sent(wire, search);
         }
         RithmicCatalogControl::Select(selection) => {
-            let generation = usize_generation(selection.selection_generation);
-            let search_generation = usize_generation(selection.search_generation);
-            let subscription = catalog_selection_subscription(realtime_selection);
-            let request = generation
-                .zip(search_generation)
-                .zip(subscription)
-                .and_then(|((generation, search_generation), subscription)| {
-                    let constructor = if realtime_selection {
-                        RithmicInstrumentSelection::try_new_reference_only
-                    } else {
-                        RithmicInstrumentSelection::try_new
-                    };
-                    constructor(
-                        generation,
-                        search_generation,
-                        selection.symbol,
-                        selection.exchange,
-                        selection.entitlement_id,
-                        subscription,
-                    )
-                    .ok()
-                });
-            if request.is_some_and(|request| {
-                events
-                    .select_instrument(session_generation, request)
-                    .is_ok()
-            }) {
-                selections.insert(
-                    usize::try_from(selection.selection_generation).unwrap_or(usize::MAX),
-                    selection.consumer_id,
-                );
-            } else {
-                reject_catalog_generation(
-                    publications,
-                    selection.consumer_id,
-                    Some(provider_generation),
-                    selection.selection_generation,
-                    true,
-                );
-            }
+            let request = commands.selection_request(selection, realtime_selection)?;
+            let wire = request.generation();
+            events
+                .select_instrument(session_generation, request)
+                .map_err(CatalogDispatchFailure::Command)?;
+            commands.selection_sent(wire, selection);
         }
     }
+    Ok(())
+}
+
+fn reject_undispatched(
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
+    control: &RithmicCatalogControl,
+    failure: CatalogDispatchFailure,
+) {
+    let (issuer, selection) = catalog_issuer(control);
+    let lane = if selection { "selection" } else { "search" };
+    diagnostic!("Aeris Rithmic catalog {lane} was not dispatched: {failure:?}");
+    reject_catalog_generation(
+        publications,
+        issuer,
+        Some(provider_generation),
+        selection,
+        failure.reason(),
+    );
 }
 
 fn publish_catalog_callback(
     publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
     event: AdapterCatalogEvent,
-    searches: &mut BTreeMap<usize, u64>,
-    selections: &mut BTreeMap<usize, u64>,
+    commands: &mut CatalogCommands,
 ) -> Option<RithmicCatalogEvent> {
     match event {
         AdapterCatalogEvent::SearchCompleted {
@@ -613,8 +747,8 @@ fn publish_catalog_callback(
             symbols,
             ..
         } => {
-            let consumer_id = searches.remove(&search_generation.get())?;
-            let instruments = symbols
+            let issuer = commands.search_completed(search_generation)?;
+            let mut instruments = symbols
                 .results
                 .into_iter()
                 .map(|result| ProviderInstrumentSummary {
@@ -627,13 +761,14 @@ fn publish_catalog_callback(
                     expiration_date: result.expiration_date,
                     asset_class: None,
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            instruments.sort_by(front_month_first);
             let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
                 ProviderInstrumentSearchResult {
-                    consumer_id,
+                    consumer_id: issuer.consumer_id,
                     provider: "rithmic".to_string(),
                     provider_generation,
-                    search_generation: u64::try_from(search_generation.get()).unwrap_or(u64::MAX),
+                    search_generation: issuer.generation,
                     instruments,
                 },
             ));
@@ -645,13 +780,13 @@ fn publish_catalog_callback(
             entitlement_id,
             ..
         } => {
-            let consumer_id = selections.remove(&selection_generation.get())?;
+            let issuer = commands.selection_installed(selection_generation)?;
             Some(RithmicCatalogEvent::SelectionResolved {
-                consumer_id,
-                command_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
+                consumer_id: issuer.consumer_id,
+                command_generation: issuer.generation,
                 instrument: protocol_instrument(
                     provider_generation,
-                    selection_generation,
+                    issuer.generation,
                     instrument,
                     entitlement_id,
                 ),
@@ -662,39 +797,42 @@ fn publish_catalog_callback(
             reason,
             ..
         } => {
-            // A superseded search is reported for a selection that named a
-            // search result the session no longer holds.
-            let selection = matches!(
-                reason,
-                RithmicCatalogRejection::SupersededSearch
-                    | RithmicCatalogRejection::InstrumentUnavailable
-                    | RithmicCatalogRejection::SubscriptionRejected
-                    | RithmicCatalogRejection::SelectionDispatchUnavailable
-            );
-            let consumer_id = if selection {
-                selections.remove(&command_generation.get())
-            } else {
-                searches.remove(&command_generation.get())
-            };
-            let consumer_id = consumer_id?;
-            let _ = publications.send(RithmicCatalogEvent::Rejected {
-                rejection: ProviderCatalogRejected {
-                    consumer_id,
-                    provider: "rithmic".to_string(),
-                    provider_generation: Some(provider_generation),
-                    command_generation: u64::try_from(command_generation.get()).unwrap_or(u64::MAX),
-                    reason: protocol_rejection(reason),
-                },
+            let (issuer, selection) = commands.rejected(command_generation)?;
+            reject_catalog_generation(
+                publications,
+                issuer,
+                Some(provider_generation),
                 selection,
-            });
+                protocol_rejection(reason),
+            );
             None
         }
     }
 }
 
+/// Orders search results front month first. Rithmic returns them
+/// alphabetically, which lists far-dated contracts before the active one.
+/// Its expiration dates are `YYYYMMDD`, so text order is date order, and a
+/// real-time exchange such as `CME` sorts before its `CME-Delayed` variant.
+fn front_month_first(
+    left: &ProviderInstrumentSummary,
+    right: &ProviderInstrumentSummary,
+) -> std::cmp::Ordering {
+    left.product_code
+        .cmp(&right.product_code)
+        .then_with(|| {
+            left.expiration_date
+                .is_none()
+                .cmp(&right.expiration_date.is_none())
+        })
+        .then_with(|| left.expiration_date.cmp(&right.expiration_date))
+        .then_with(|| left.exchange.cmp(&right.exchange))
+        .then_with(|| left.symbol.cmp(&right.symbol))
+}
+
 fn protocol_instrument(
     provider_generation: u64,
-    selection_generation: NonZeroUsize,
+    selection_generation: u64,
     instrument: InstrumentDescriptor,
     entitlement_id: String,
 ) -> InstallProviderInstrument {
@@ -712,7 +850,7 @@ fn protocol_instrument(
     InstallProviderInstrument {
         provider: "rithmic".to_string(),
         session_generation: provider_generation,
-        selection_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
+        selection_generation,
         instrument_id,
         provider_symbol,
         display_symbol,
@@ -737,42 +875,55 @@ fn protocol_instrument(
     }
 }
 
+/// The issuer of a catalog control and whether it is a selection.
+const fn catalog_issuer(control: &RithmicCatalogControl) -> (CatalogIssuer, bool) {
+    match control {
+        RithmicCatalogControl::Search(search) => (
+            CatalogIssuer {
+                consumer_id: search.consumer_id,
+                generation: search.search_generation,
+            },
+            false,
+        ),
+        RithmicCatalogControl::Select(selection) => (
+            CatalogIssuer {
+                consumer_id: selection.consumer_id,
+                generation: selection.selection_generation,
+            },
+            true,
+        ),
+    }
+}
+
 fn reject_catalog_control(
     publications: &CatalogPublisher<RithmicCatalogEvent>,
-    control: RithmicCatalogControl,
+    control: &RithmicCatalogControl,
     provider_generation: Option<u64>,
 ) {
-    let (consumer_id, command_generation, selection) = match control {
-        RithmicCatalogControl::Search(search) => {
-            (search.consumer_id, search.search_generation, false)
-        }
-        RithmicCatalogControl::Select(selection) => {
-            (selection.consumer_id, selection.selection_generation, true)
-        }
-    };
+    let (issuer, selection) = catalog_issuer(control);
     reject_catalog_generation(
         publications,
-        consumer_id,
+        issuer,
         provider_generation,
-        command_generation,
         selection,
+        ProviderCatalogRejectionReason::DispatchUnavailable,
     );
 }
 
 fn reject_catalog_generation(
     publications: &CatalogPublisher<RithmicCatalogEvent>,
-    consumer_id: u64,
+    issuer: CatalogIssuer,
     provider_generation: Option<u64>,
-    command_generation: u64,
     selection: bool,
+    reason: ProviderCatalogRejectionReason,
 ) {
     let _ = publications.send(RithmicCatalogEvent::Rejected {
         rejection: ProviderCatalogRejected {
-            consumer_id,
+            consumer_id: issuer.consumer_id,
             provider: "rithmic".to_string(),
             provider_generation,
-            command_generation,
-            reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+            command_generation: issuer.generation,
+            reason,
         },
         selection,
     });
@@ -784,29 +935,17 @@ fn reject_catalog_generation(
 fn reject_pending_catalog(
     publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
-    searches: &mut BTreeMap<usize, u64>,
-    selections: &mut BTreeMap<usize, u64>,
+    commands: &mut CatalogCommands,
 ) {
-    for (command_generation, consumer_id) in searches.iter() {
+    for (issuer, selection) in commands.retire() {
         reject_catalog_generation(
             publications,
-            *consumer_id,
+            issuer,
             Some(provider_generation),
-            u64::try_from(*command_generation).unwrap_or(u64::MAX),
-            false,
+            selection,
+            ProviderCatalogRejectionReason::DispatchUnavailable,
         );
     }
-    for (command_generation, consumer_id) in selections.iter() {
-        reject_catalog_generation(
-            publications,
-            *consumer_id,
-            Some(provider_generation),
-            u64::try_from(*command_generation).unwrap_or(u64::MAX),
-            true,
-        );
-    }
-    searches.clear();
-    selections.clear();
 }
 
 /// Retires one provider generation and resolves every command that can no
@@ -815,10 +954,9 @@ fn reject_pending_catalog(
 fn retire_pending_catalog_generation(
     publications: &CatalogPublisher<RithmicCatalogEvent>,
     generation: u64,
-    searches: &mut BTreeMap<usize, u64>,
-    selections: &mut BTreeMap<usize, u64>,
+    commands: &mut CatalogCommands,
 ) -> u64 {
-    reject_pending_catalog(publications, generation, searches, selections);
+    reject_pending_catalog(publications, generation, commands);
     next_generation(generation, generation)
 }
 
@@ -866,10 +1004,6 @@ fn bounded_search_results(requested: u32) -> Option<NonZeroUsize> {
         .ok()
         .map(|requested| requested.min(MAXIMUM_RITHMIC_SEARCH_RESULTS))
         .and_then(NonZeroUsize::new)
-}
-
-fn usize_generation(generation: u64) -> Option<NonZeroUsize> {
-    usize::try_from(generation).ok().and_then(NonZeroUsize::new)
 }
 
 pub(crate) fn run(
@@ -977,8 +1111,7 @@ fn serve_demand(
                 reject_pending_catalog(
                     channels.catalog_publications,
                     generation,
-                    &mut handoff.searches,
-                    &mut handoff.selections,
+                    &mut handoff.commands,
                 );
                 let _ = handoff.runtime.stop();
             }
@@ -1075,7 +1208,7 @@ fn handle_idle_catalog(
         Ok(opened) => opened,
         Err(error) => {
             diagnostic!("Aeris Rithmic catalog runtime could not open: {error}");
-            reject_catalog_control(channels.catalog_publications, control, None);
+            reject_catalog_control(channels.catalog_publications, &control, None);
             thread::park_timeout(channels.reconnect_delay);
             return IdleCatalogOutcome::Unchanged;
         }
@@ -1108,7 +1241,7 @@ fn handle_idle_catalog(
 fn reject_unavailable_provider(channels: ProviderChannels<'_>) {
     loop {
         while let Ok(control) = channels.catalog_controls.try_recv() {
-            reject_catalog_control(channels.catalog_publications, control, None);
+            reject_catalog_control(channels.catalog_publications, &control, None);
         }
         match channels
             .realtime_controls
@@ -1158,8 +1291,7 @@ fn handle_live_catalog(
     events: &RithmicProviderEvents,
     channels: ProviderChannels<'_>,
     generation: u64,
-    searches: &mut BTreeMap<usize, u64>,
-    selections: &mut BTreeMap<usize, u64>,
+    commands: &mut CatalogCommands,
 ) -> Option<SelectionExit> {
     loop {
         match channels.catalog_controls.try_recv() {
@@ -1168,9 +1300,8 @@ fn handle_live_catalog(
                 events,
                 channels.catalog_publications,
                 generation,
-                searches,
-                selections,
-                control,
+                commands,
+                &control,
                 true,
             ),
             Err(TryRecvError::Empty) => break,
@@ -1188,8 +1319,7 @@ fn handle_live_catalog(
             channels.catalog_publications,
             generation,
             callback.event,
-            searches,
-            selections,
+            commands,
         ) {
             publish_live_catalog_selection(
                 channels.catalog_publications,
@@ -1207,8 +1337,7 @@ struct LiveSessionStart {
     runtime: Runtime,
     events: RithmicProviderEvents,
     retries: RithmicRetryScheduler,
-    searches: BTreeMap<usize, u64>,
-    selections: BTreeMap<usize, u64>,
+    commands: CatalogCommands,
     /// Adapter generation already streaming, when the login is handed over.
     streaming: Option<SessionGeneration>,
 }
@@ -1224,8 +1353,7 @@ fn live_session_start(handoff: Option<Box<CatalogHandoff>>) -> Result<LiveSessio
             runtime: handoff.runtime,
             events: handoff.events,
             retries: handoff.retries,
-            searches: handoff.searches,
-            selections: handoff.selections,
+            commands: handoff.commands,
             streaming,
         })
     } else {
@@ -1234,8 +1362,7 @@ fn live_session_start(handoff: Option<Box<CatalogHandoff>>) -> Result<LiveSessio
             runtime,
             events,
             retries: RithmicRetryScheduler::default(),
-            searches: BTreeMap::new(),
-            selections: BTreeMap::new(),
+            commands: CatalogCommands::default(),
             streaming: None,
         })
     }
@@ -1271,8 +1398,7 @@ fn run_demand(
         mut runtime,
         events,
         mut retries,
-        mut searches,
-        mut selections,
+        mut commands,
         streaming,
     } = start;
     channels.publish_realtime(RithmicRealtimeEvent::Connecting(generation));
@@ -1308,6 +1434,9 @@ fn run_demand(
             generation,
         ) {
             Ok(Some(updated)) => {
+                // The restarted connection is a new adapter session that can
+                // answer none of the commands sent on the previous one.
+                reject_pending_catalog(channels.catalog_publications, generation, &mut commands);
                 generation = updated;
                 subscription_generation = None;
                 subscription_dirty = true;
@@ -1345,14 +1474,9 @@ fn run_demand(
                 }
             }
         }
-        if let Some(exit) = handle_live_catalog(
-            &mut runtime,
-            &events,
-            channels,
-            generation,
-            &mut searches,
-            &mut selections,
-        ) {
+        if let Some(exit) =
+            handle_live_catalog(&mut runtime, &events, channels, generation, &mut commands)
+        {
             break LiveSessionEnd::Exit(exit);
         }
         if drain_live_events(
@@ -1406,8 +1530,7 @@ fn run_demand(
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
-                &mut searches,
-                &mut selections,
+                &mut commands,
             );
             subscription_generation = None;
             subscription_dirty = true;
@@ -1417,12 +1540,7 @@ fn run_demand(
     };
     // Every exit has stopped the session, so no callback can still answer
     // its searches or selections.
-    reject_pending_catalog(
-        channels.catalog_publications,
-        generation,
-        &mut searches,
-        &mut selections,
-    );
+    reject_pending_catalog(channels.catalog_publications, generation, &mut commands);
     match end {
         LiveSessionEnd::Exit(exit) => exit,
         LiveSessionEnd::Failed { transport_recovery } => wait_for_replacement(
@@ -1649,7 +1767,7 @@ fn wait_for_replacement(
                 Ok(control) => {
                     reject_catalog_control(
                         channels.catalog_publications,
-                        control,
+                        &control,
                         Some(generation),
                     );
                 }
@@ -1891,24 +2009,27 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
         num::{NonZeroU64, NonZeroUsize},
         sync::mpsc,
     };
 
     use super::{
-        EnvironmentState, MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogControl,
+        CatalogCommands, CatalogDispatchFailure, CatalogIssuer, EnvironmentState,
+        MAXIMUM_RITHMIC_RETAINED_SEARCHES, MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogControl,
         RithmicCatalogEvent, RithmicRealtimeControl, bounded_search_results,
         catalog_selection_subscription, next_generation, publish_catalog_callback,
         queue_depth_snapshot, reject_catalog_generation, reject_pending_catalog,
-        retire_pending_catalog_generation,
+        reject_undispatched, retire_pending_catalog_generation,
     };
-    use aeris_contracts::{InstrumentSearchCategories, SearchProviderInstruments};
+    use aeris_contracts::{
+        InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+        SearchProviderInstruments, SelectProviderInstrument,
+    };
     use aeris_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
     use aeris_platform_runtime::{NetworkEvent, PowerEvent};
     use aeris_rithmic_protocol_adapter::{
-        RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
-        RithmicEnvironmentEvent,
+        CollectedSymbols, InstrumentType, RithmicCatalogEvent as AdapterCatalogEvent,
+        RithmicCatalogRejection, RithmicEnvironmentEvent, SearchPattern, SymbolSearchResult,
     };
 
     #[test]
@@ -2000,31 +2121,133 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolved_selection_is_deferred_to_the_session_owner() {
-        let (publications, published) = mpsc::sync_channel(1);
-        let publications = super::CatalogPublisher::new(
-            publications,
-            "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
-        );
-        let mut searches = BTreeMap::new();
-        let mut selections = BTreeMap::from([(1, 41)]);
-        let callback = AdapterCatalogEvent::selection_installed(
+    type Publications = (
+        super::CatalogPublisher<RithmicCatalogEvent>,
+        mpsc::Receiver<RithmicCatalogEvent>,
+    );
+
+    fn publications(capacity: usize) -> Publications {
+        let (sender, published) = mpsc::sync_channel(capacity);
+        (
+            super::CatalogPublisher::new(
+                sender,
+                "rithmic",
+                crate::market_service::ProviderCoordinatorWake::for_tests(),
+            ),
+            published,
+        )
+    }
+
+    const fn issuer(consumer_id: u64, generation: u64) -> CatalogIssuer {
+        CatalogIssuer {
+            consumer_id,
+            generation,
+        }
+    }
+
+    fn wire(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).expect("wire generations are non-zero")
+    }
+
+    fn search_control(consumer_id: u64, generation: u64, query: &str) -> SearchProviderInstruments {
+        SearchProviderInstruments {
+            consumer_id,
+            search_generation: generation,
+            startup_resolve: false,
+            provider: "rithmic".into(),
+            query: query.into(),
+            maximum_results: 32,
+            categories: InstrumentSearchCategories::ALL,
+        }
+    }
+
+    fn selection_control(
+        consumer_id: u64,
+        selection_generation: u64,
+        search_generation: u64,
+        symbol: &str,
+    ) -> SelectProviderInstrument {
+        SelectProviderInstrument {
+            consumer_id,
+            selection_generation,
+            search_generation,
+            provider: "rithmic".into(),
+            symbol: symbol.into(),
+            exchange: "CME".into(),
+            entitlement_id: format!("rithmic-test:CME:{symbol}"),
+            ..SelectProviderInstrument::default()
+        }
+    }
+
+    fn issue_search(
+        commands: &mut CatalogCommands,
+        search: &SearchProviderInstruments,
+    ) -> NonZeroUsize {
+        let request = commands.search_request(search).expect("search validates");
+        let wire = request.generation();
+        commands.search_sent(wire, search);
+        wire
+    }
+
+    fn found(symbols: &[(&str, &str, &str, Option<&str>)]) -> CollectedSymbols {
+        CollectedSymbols {
+            results: symbols
+                .iter()
+                .map(
+                    |(symbol, exchange, product_code, expiration_date)| SymbolSearchResult {
+                        symbol: (*symbol).to_string(),
+                        exchange: (*exchange).to_string(),
+                        name: None,
+                        product_code: Some((*product_code).to_string()),
+                        instrument_type: Some("FUTURE".to_string()),
+                        expiration_date: expiration_date.map(str::to_string),
+                    },
+                )
+                .collect(),
+            duplicate_count: 0,
+        }
+    }
+
+    fn complete_search(
+        publications: &super::CatalogPublisher<RithmicCatalogEvent>,
+        commands: &mut CatalogCommands,
+        wire: NonZeroUsize,
+        symbols: CollectedSymbols,
+    ) {
+        let callback = AdapterCatalogEvent::search_completed(NonZeroU64::MIN, wire, symbols);
+        assert!(publish_catalog_callback(publications, 7, callback, commands).is_none());
+    }
+
+    fn installed(wire: NonZeroUsize, symbol: &str) -> AdapterCatalogEvent {
+        AdapterCatalogEvent::selection_installed(
             NonZeroU64::MIN,
-            NonZeroUsize::MIN,
-            "MNQ-CME".to_string(),
-            "MNQU6".to_string(),
-            "MNQ Sep 2026".to_string(),
+            wire,
+            format!("{symbol}-CME"),
+            symbol.to_string(),
+            symbol.to_string(),
             "CME".to_string(),
             2,
             0,
-            "rithmic-test:CME:MNQU6".to_string(),
+            format!("rithmic-test:CME:{symbol}"),
         )
-        .expect("valid selection callback");
+        .expect("valid selection callback")
+    }
+
+    fn search_result(event: RithmicCatalogEvent) -> ProviderInstrumentSearchResult {
+        match event {
+            RithmicCatalogEvent::SearchCompleted(result) => result,
+            _ => panic!("expected a search result"),
+        }
+    }
+
+    #[test]
+    fn resolved_selection_is_deferred_to_the_session_owner() {
+        let (publications, published) = publications(1);
+        let mut commands = CatalogCommands::default();
+        commands.selections.insert(wire(5), issuer(41, 1));
 
         let deferred =
-            publish_catalog_callback(&publications, 7, callback, &mut searches, &mut selections)
+            publish_catalog_callback(&publications, 7, installed(wire(5), "MNQU6"), &mut commands)
                 .expect("selection is deferred to the session owner");
 
         assert!(published.try_recv().is_err());
@@ -2035,6 +2258,7 @@ mod tests {
                 command_generation: 1,
                 instrument
             } if instrument.session_generation == 7
+                && instrument.selection_generation == 1
                 && instrument.provider_symbol == "MNQU6"
         ));
     }
@@ -2055,14 +2279,15 @@ mod tests {
 
     #[test]
     fn unconfirmed_catalog_close_rejects_the_deferred_selection() {
-        let (publications, published) = mpsc::sync_channel(1);
-        let publications = super::CatalogPublisher::new(
-            publications,
-            "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
-        );
+        let (publications, published) = publications(1);
 
-        reject_catalog_generation(&publications, 41, Some(7), 3, true);
+        reject_catalog_generation(
+            &publications,
+            issuer(41, 3),
+            Some(7),
+            true,
+            ProviderCatalogRejectionReason::DispatchUnavailable,
+        );
 
         assert!(matches!(
             published.recv().expect("close failure is published"),
@@ -2072,34 +2297,26 @@ mod tests {
             } if rejection.consumer_id == 41
                 && rejection.provider_generation == Some(7)
                 && rejection.command_generation == 3
+                && rejection.reason == ProviderCatalogRejectionReason::DispatchUnavailable
         ));
     }
 
     #[test]
     fn retired_generation_rejects_pending_searches_and_selections() {
-        let (publications, published) = mpsc::sync_channel(4);
-        let publications = super::CatalogPublisher::new(
-            publications,
-            "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
-        );
-        let mut searches = BTreeMap::from([(2, 41)]);
-        let mut selections = BTreeMap::from([(3, 42)]);
+        let (publications, published) = publications(4);
+        let mut commands = CatalogCommands::default();
+        commands.searches.insert(wire(2), issuer(41, 2));
+        commands.selections.insert(wire(3), issuer(42, 3));
+        commands
+            .completed_searches
+            .push_back((issuer(43, 1), wire(1)));
 
-        reject_pending_catalog(&publications, 9, &mut searches, &mut selections);
+        reject_pending_catalog(&publications, 9, &mut commands);
 
-        assert!(searches.is_empty());
-        assert!(selections.is_empty());
-        let mut rejections = [
-            published.recv().expect("search rejection is published"),
-            published.recv().expect("selection rejection is published"),
-        ];
-        rejections.sort_by_key(|event| match event {
-            RithmicCatalogEvent::Rejected { selection, .. } => *selection,
-            _ => true,
-        });
+        assert!(!commands.has_pending());
+        assert!(commands.completed_searches.is_empty());
         assert!(matches!(
-            &rejections[0],
+            published.recv().expect("search rejection is published"),
             RithmicCatalogEvent::Rejected {
                 rejection,
                 selection: false,
@@ -2108,7 +2325,7 @@ mod tests {
                 && rejection.command_generation == 2
         ));
         assert!(matches!(
-            &rejections[1],
+            published.recv().expect("selection rejection is published"),
             RithmicCatalogEvent::Rejected {
                 rejection,
                 selection: true,
@@ -2121,21 +2338,19 @@ mod tests {
 
     #[test]
     fn retry_advances_generation_and_rejects_every_pending_catalog_command() {
-        let (publications, published) = mpsc::sync_channel(2);
-        let publications = super::CatalogPublisher::new(
-            publications,
-            "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
-        );
-        let mut searches = BTreeMap::from([(2, 41)]);
-        let mut selections = BTreeMap::from([(3, 42)]);
+        let (publications, published) = publications(2);
+        let mut commands = CatalogCommands::default();
+        commands.searches.insert(wire(2), issuer(41, 2));
+        commands.selections.insert(wire(3), issuer(42, 3));
+        commands
+            .completed_searches
+            .push_back((issuer(43, 1), wire(1)));
 
-        let generation =
-            retire_pending_catalog_generation(&publications, 9, &mut searches, &mut selections);
+        let generation = retire_pending_catalog_generation(&publications, 9, &mut commands);
 
         assert_eq!(generation, 10);
-        assert!(searches.is_empty());
-        assert!(selections.is_empty());
+        assert!(!commands.has_pending());
+        assert!(commands.completed_searches.is_empty());
         let rejections = [
             published.recv().expect("search rejection is published"),
             published.recv().expect("selection rejection is published"),
@@ -2148,35 +2363,270 @@ mod tests {
     }
 
     #[test]
-    fn superseded_search_rejection_answers_the_pending_selection() {
-        let (publications, published) = mpsc::sync_channel(1);
-        let publications = super::CatalogPublisher::new(
-            publications,
-            "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
-        );
-        let mut searches = BTreeMap::from([(2, 41)]);
-        let mut selections = BTreeMap::from([(2, 42)]);
-        let callback = AdapterCatalogEvent::command_rejected(
-            Some(NonZeroU64::MIN),
-            NonZeroUsize::new(2).expect("generation"),
-            RithmicCatalogRejection::SupersededSearch,
-        );
+    fn rejection_lane_comes_from_the_command_that_holds_the_wire_generation() {
+        let (publications, published) = publications(2);
+        let mut commands = CatalogCommands::default();
+        commands.searches.insert(wire(2), issuer(41, 2));
+        commands.selections.insert(wire(3), issuer(42, 2));
+        let rejected = |wire, reason| {
+            AdapterCatalogEvent::command_rejected(Some(NonZeroU64::MIN), wire, reason)
+        };
 
-        assert!(
-            publish_catalog_callback(&publications, 7, callback, &mut searches, &mut selections)
+        for (command, reason) in [
+            (wire(3), RithmicCatalogRejection::SupersededSearch),
+            (wire(2), RithmicCatalogRejection::SubscriptionRejected),
+            (wire(9), RithmicCatalogRejection::SearchRejected),
+        ] {
+            assert!(
+                publish_catalog_callback(
+                    &publications,
+                    7,
+                    rejected(command, reason),
+                    &mut commands
+                )
                 .is_none()
+            );
+        }
+
+        assert!(matches!(
+            published.recv().expect("selection rejection is published"),
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: true,
+            } if rejection.consumer_id == 42
+                && rejection.command_generation == 2
+                && rejection.reason == ProviderCatalogRejectionReason::SupersededSearch
+        ));
+        assert!(matches!(
+            published.recv().expect("search rejection is published"),
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: false,
+            } if rejection.consumer_id == 41
+                && rejection.command_generation == 2
+                && rejection.reason == ProviderCatalogRejectionReason::SubscriptionRejected
+        ));
+        assert!(
+            published.try_recv().is_err(),
+            "an unknown wire generation answers nobody"
+        );
+        assert!(!commands.has_pending());
+    }
+
+    #[test]
+    fn consumers_reusing_a_search_generation_each_receive_their_own_result() {
+        let (publications, published) = publications(2);
+        let mut commands = CatalogCommands::default();
+        let first = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
+        let second = issue_search(&mut commands, &search_control(42, 1, "ES"));
+        assert_ne!(first, second);
+
+        complete_search(
+            &publications,
+            &mut commands,
+            second,
+            found(&[("ESZ6", "CME", "ES", Some("20261218"))]),
+        );
+        complete_search(
+            &publications,
+            &mut commands,
+            first,
+            found(&[("MNQZ6", "CME", "MNQ", Some("20261218"))]),
         );
 
+        let es = search_result(published.recv().expect("second consumer's result"));
+        let mnq = search_result(published.recv().expect("first consumer's result"));
+        assert_eq!((es.consumer_id, es.search_generation), (42, 1));
+        assert_eq!(es.instruments[0].symbol, "ESZ6");
+        assert_eq!((mnq.consumer_id, mnq.search_generation), (41, 1));
+        assert_eq!(mnq.instruments[0].symbol, "MNQZ6");
+        assert!(!commands.has_pending());
+    }
+
+    #[test]
+    fn selection_after_another_consumers_search_names_its_own_search_wire_generation() {
+        let (publications, published) = publications(2);
+        let mut commands = CatalogCommands::default();
+        let own = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
+        complete_search(
+            &publications,
+            &mut commands,
+            own,
+            found(&[("MNQZ6", "CME", "MNQ", Some("20261218"))]),
+        );
+        let other = issue_search(&mut commands, &search_control(0, 1, "ES"));
+        complete_search(
+            &publications,
+            &mut commands,
+            other,
+            found(&[("ESZ6", "CME", "ES", Some("20261218"))]),
+        );
+
+        let selection = selection_control(41, 3, 1, "MNQZ6");
+        let request = commands
+            .selection_request(&selection, false)
+            .expect("the consumer's retained search is still selectable");
+        assert_eq!(request.search_generation(), own);
+        let selection_wire = request.generation();
+        assert!(selection_wire > other);
+        commands.selection_sent(selection_wire, &selection);
+
+        let resolved = publish_catalog_callback(
+            &publications,
+            7,
+            installed(selection_wire, "MNQZ6"),
+            &mut commands,
+        );
+        assert!(matches!(
+            resolved,
+            Some(RithmicCatalogEvent::SelectionResolved {
+                consumer_id: 41,
+                command_generation: 3,
+                instrument,
+            }) if instrument.selection_generation == 3
+        ));
+        assert_eq!(
+            published.try_iter().count(),
+            2,
+            "only the two search results"
+        );
+    }
+
+    #[test]
+    fn selection_naming_an_unretained_search_is_rejected_as_superseded() {
+        let (publications, published) = publications(MAXIMUM_RITHMIC_RETAINED_SEARCHES + 2);
+        let mut commands = CatalogCommands::default();
+        let never_searched = selection_control(41, 2, 1, "MNQZ6");
+        let failure = commands
+            .selection_request(&never_searched, true)
+            .expect_err("no search was retained");
+        assert_eq!(failure, CatalogDispatchFailure::UnretainedSearch);
+
+        reject_undispatched(
+            &publications,
+            7,
+            &RithmicCatalogControl::Select(never_searched),
+            failure,
+        );
         assert!(matches!(
             published.recv().expect("rejection is published"),
             RithmicCatalogEvent::Rejected {
                 rejection,
                 selection: true,
-            } if rejection.consumer_id == 42 && rejection.command_generation == 2
+            } if rejection.consumer_id == 41
+                && rejection.command_generation == 2
+                && rejection.provider_generation == Some(7)
+                && rejection.reason == ProviderCatalogRejectionReason::SupersededSearch
         ));
-        assert_eq!(searches.len(), 1, "the search lane is untouched");
-        assert!(selections.is_empty());
+
+        let evicted = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
+        complete_search(&publications, &mut commands, evicted, found(&[]));
+        for generation in 1..=MAXIMUM_RITHMIC_RETAINED_SEARCHES {
+            let generation = u64::try_from(generation).expect("small generation");
+            let wire = issue_search(&mut commands, &search_control(42, generation, "ES"));
+            complete_search(&publications, &mut commands, wire, found(&[]));
+        }
+        assert_eq!(
+            commands.selection_request(&selection_control(41, 3, 1, "MNQZ6"), true),
+            Err(CatalogDispatchFailure::UnretainedSearch)
+        );
+        assert!(
+            commands
+                .selection_request(&selection_control(42, 4, 1, "ESZ6"), true)
+                .is_ok(),
+            "the oldest search inside the bound stays selectable"
+        );
+    }
+
+    #[test]
+    fn completed_searches_are_forgotten_when_the_session_retires() {
+        let (publications, published) = publications(1);
+        let mut commands = CatalogCommands::default();
+        let searched = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
+        complete_search(&publications, &mut commands, searched, found(&[]));
+        let _ = published.recv().expect("search result is published");
+
+        reject_pending_catalog(&publications, 7, &mut commands);
+
+        assert!(published.try_recv().is_err(), "nothing was pending");
+        assert_eq!(
+            commands.selection_request(&selection_control(41, 2, 1, "MNQZ6"), false),
+            Err(CatalogDispatchFailure::UnretainedSearch)
+        );
+        let next = issue_search(&mut commands, &search_control(41, 2, "MNQ"));
+        assert!(next > searched, "wire generations never repeat");
+    }
+
+    #[test]
+    fn search_query_is_upper_cased_for_the_exact_symbol_match() {
+        let mut commands = CatalogCommands::default();
+        let request = commands
+            .search_request(&search_control(41, 1, "mnq"))
+            .expect("search validates");
+
+        assert_eq!(request.query(), "MNQ");
+        assert_eq!(request.pattern(), SearchPattern::Equals);
+        assert_eq!(request.instrument_type(), Some(InstrumentType::Future));
+        assert_eq!(
+            commands.search_request(&search_control(41, 2, "")),
+            Err(CatalogDispatchFailure::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn exhausted_wire_generation_rejects_the_command() {
+        let mut commands = CatalogCommands {
+            last_wire: Some(NonZeroUsize::MAX),
+            ..CatalogCommands::default()
+        };
+
+        let failure = commands
+            .search_request(&search_control(41, 1, "MNQ"))
+            .expect_err("no wire generation is left");
+
+        assert_eq!(failure, CatalogDispatchFailure::WireGenerationExhausted);
+        assert_eq!(
+            failure.reason(),
+            ProviderCatalogRejectionReason::DispatchUnavailable
+        );
+    }
+
+    #[test]
+    fn search_results_are_ordered_front_month_first() {
+        let (publications, published) = publications(1);
+        let mut commands = CatalogCommands::default();
+        let searched = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
+
+        complete_search(
+            &publications,
+            &mut commands,
+            searched,
+            found(&[
+                ("ESZ6", "CME", "ES", Some("20261218")),
+                ("MNQ", "CME-Delayed", "MNQ", Some("20261218")),
+                ("MNQH7", "CME", "MNQ", Some("20270319")),
+                ("MNQSPREAD", "CME", "MNQ", None),
+                ("MNQZ6", "CME-Delayed", "MNQ", Some("20261218")),
+                ("MNQZ6", "CME", "MNQ", Some("20261218")),
+            ]),
+        );
+
+        let ordered = search_result(published.recv().expect("search result is published"))
+            .instruments
+            .into_iter()
+            .map(|instrument| format!("{}@{}", instrument.symbol, instrument.exchange))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            [
+                "ESZ6@CME",
+                "MNQZ6@CME",
+                "MNQ@CME-Delayed",
+                "MNQZ6@CME-Delayed",
+                "MNQH7@CME",
+                "MNQSPREAD@CME",
+            ]
+        );
     }
 
     #[test]

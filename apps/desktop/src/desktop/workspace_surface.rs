@@ -5862,6 +5862,13 @@ impl WorkspaceSurface {
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
+        // An empty field shows the provider's default listing: a provider that
+        // only searches by text would otherwise reject the request.
+        let query = if query.trim().is_empty() {
+            default_listing_query(self.symbol_provider)
+        } else {
+            query
+        };
         if self.symbol_browser.search_pending() {
             if let Ok(already_dispatched) = self.symbol_browser.retain_latest_search(query) {
                 cx.notify();
@@ -5976,15 +5983,10 @@ impl WorkspaceSurface {
         }
     }
 
-    fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        self.select_instrument(
-            InstrumentMenuSelection(index),
-            SymbolSelectionTarget::Chart,
-            cx,
-        )
-    }
-
     fn apply_catalog_event(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
+        if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
+            self.adopt_verified_terms(instrument);
+        }
         if provider_catalog_event_provider(&event) != terminal_provider_id(self.symbol_provider) {
             return;
         }
@@ -6015,12 +6017,11 @@ impl WorkspaceSurface {
                 }
             }
             ProviderCatalogEvent::CatalogReady { .. } => {
-                if !self.market_state.rithmic_autoload_started {
-                    self.market_state.rithmic_autoload_started = true;
-                    self.market_state.rithmic_autoload_selection_pending = true;
+                if !self.market_state.catalog_listing_started {
+                    self.market_state.catalog_listing_started = true;
                     // The search path owns dispatch failure feedback and queued
                     // replacement requests while catalog startup is pending.
-                    self.search_symbol_query(default_listing_query(self.provider), cx);
+                    self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
                 }
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
@@ -6032,6 +6033,17 @@ impl WorkspaceSurface {
             }
         }
         cx.notify();
+    }
+
+    /// The chart's provisional descriptor has no price increment, which the
+    /// footprint and order tools need; the provider's verified terms replace it.
+    fn adopt_verified_terms(&mut self, instrument: &InstallProviderInstrument) {
+        if self.product.as_ref().is_some_and(|product| {
+            product != instrument && verified_terms_supersede(product, instrument)
+        }) {
+            self.product = Some(instrument.clone());
+            self.chart_persistence_dirty = true;
+        }
     }
 
     fn apply_search_completed(
@@ -6067,14 +6079,6 @@ impl WorkspaceSurface {
             }
             Self::post_symbol_search_notice("No exact market matched the requested symbol.", cx);
         }
-        if self.symbol_provider == TerminalProvider::Rithmic
-            && self.market_state.rithmic_autoload_selection_pending
-            && self.symbol_browser.selected().is_none()
-            && let Some(index) = default_rithmic_contract_index(self.symbol_browser.results())
-        {
-            self.market_state.rithmic_autoload_selection_pending = false;
-            self.select_rithmic_symbol(index, cx);
-        }
         self.dispatch_retained_symbol_search(cx);
         if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
             self.sync_instrument_menu_keyboard(cx);
@@ -6099,6 +6103,12 @@ impl WorkspaceSurface {
         if !rejected {
             return;
         }
+        diagnostic!(
+            "Market catalog {} rejected by {}: {:?}",
+            if selection { "selection" } else { "search" },
+            rejection.provider,
+            rejection.reason
+        );
         if selection {
             self.pending_symbol_selection_target = None;
             if self.chrome_overlay != Some(ChromeOverlay::Instrument)

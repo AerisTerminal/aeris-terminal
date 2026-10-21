@@ -564,6 +564,12 @@ impl Coordinator<'_> {
             .provider_epochs
             .current(&series.provider_id, generation.0.get())
         else {
+            diagnostic!(
+                "Aeris engine {} history failed for {} at retired generation {}: {error}",
+                series.provider_id,
+                series.instrument_id,
+                generation.0.get()
+            );
             return false;
         };
         let kind = if range.is_some() {
@@ -1038,6 +1044,11 @@ impl Coordinator<'_> {
     ) -> Option<HistorySnapshot> {
         let series = &ticket.series;
         let Some(cancelled) = self.history.finish(ticket, range, result.is_ok()) else {
+            diagnostic!(
+                "Aeris market history completion for {} generation={} dropped: request is no longer tracked",
+                series.instrument_id,
+                generation.0.get()
+            );
             self.provider_epochs.drop_history();
             return None;
         };

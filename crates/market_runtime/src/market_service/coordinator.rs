@@ -330,6 +330,7 @@ impl<'a> Coordinator<'a> {
             display_generations: BTreeMap::new(),
             price_alerts: PriceAlertRegistry::default(),
             catalog: BTreeMap::new(),
+            provisional_default: None,
             catalog_sessions: BTreeMap::new(),
             command_fences: super::CommandFences::default(),
             pending_selections: BTreeMap::new(),
@@ -935,6 +936,10 @@ pub(super) struct Coordinator<'a> {
     /// workers remain shared with ordinary market demand.
     pub(super) price_alerts: PriceAlertRegistry,
     pub(super) catalog: BTreeMap<(String, String), InstallProviderInstrument>,
+    /// The public default installed before its provider resolved it. Its
+    /// generations are placeholders, so the provider's first resolution
+    /// replaces it even when that resolution carries the same numbers.
+    pub(super) provisional_default: Option<(String, String)>,
     pub(super) catalog_sessions: BTreeMap<String, u64>,
     /// Latest accepted provider-catalog command generation per consumer/provider.
     /// Provider callbacks are fenced here before entering the canonical consumer
@@ -985,6 +990,23 @@ impl Coordinator<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear_provider(id);
+        if self.provider_registry.adapter_labels_sessions(id) {
+            // The epoch number comes from another sequence than the adapter's
+            // session labels, so it must not begin a lifecycle session: events
+            // labelled below it would be ignored and history fenced as retired.
+            // The current label stays bound until the first event maps its own.
+            match self
+                .engine
+                .provider_status(id)
+                .and_then(|status| status.generation)
+            {
+                Some(generation) => self
+                    .provider_epochs
+                    .bind_wire(id, epoch, generation.0.get()),
+                None => self.provider_epochs.bind(id, epoch),
+            }
+            return;
+        }
         self.provider_epochs.bind(id, epoch);
         if let Some(descriptor) = self.providers.descriptor(id) {
             // The worker's Connecting event is asynchronous. History tickets
@@ -1214,6 +1236,11 @@ impl Coordinator<'_> {
                         != Some(generation)
                     || ticket.series != series
                 {
+                    diagnostic!(
+                        "Aeris market history completion for {} generation={} dropped: provider session retired",
+                        series.instrument_id,
+                        generation.0.get()
+                    );
                     self.provider_epochs.drop_history();
                 } else {
                     self.history_completed(&ticket, generation, range, result);
@@ -3505,6 +3532,7 @@ mod tests {
             display_generations: BTreeMap::new(),
             price_alerts: PriceAlertRegistry::default(),
             catalog: BTreeMap::new(),
+            provisional_default: None,
             catalog_sessions: BTreeMap::new(),
             command_fences: super::super::CommandFences::default(),
             pending_selections: BTreeMap::new(),
@@ -6488,6 +6516,74 @@ mod tests {
     }
 
     #[test]
+    fn rithmic_history_survives_reservation_after_another_provider_epoch() {
+        let (mut coordinator, history_receiver, events, _controls) =
+            scripted_rithmic_coordinator(Arc::new(super::super::clock::SystemClock));
+        // Another provider's startup session already holds the first epoch, so
+        // the Rithmic epoch number differs from the adapter's session label.
+        coordinator.provider_registry.reserve();
+        coordinator
+            .install_provider_instrument(&instrument())
+            .expect("catalog instrument installs");
+        let selected = series();
+        let consumer_id = consumer(31);
+        register(&mut coordinator, consumer_id);
+        demand_series(&mut coordinator, consumer_id, 1, &selected);
+        let reserved = coordinator
+            .provider_registry
+            .epoch("rithmic")
+            .expect("epoch reserved for demand");
+        assert_ne!(reserved.get().get(), 1);
+        let request = history_receiver.try_recv().expect("covering request");
+        assert_eq!(request.ticket.provider, reserved);
+        assert_eq!(
+            request.provider_generation,
+            ProviderGeneration(nonzero(1)),
+            "history must use the adapter's session label, not the epoch number"
+        );
+        for event in [
+            RithmicRealtimeEvent::Connecting(1),
+            RithmicRealtimeEvent::Connected(1),
+        ] {
+            events.send(event).unwrap();
+            let Some(ProviderRuntimeEvent::BoundRealtime(bound)) =
+                coordinator.providers.take_event(0)
+            else {
+                panic!("adapter event must be bound to the reserved epoch");
+            };
+            coordinator.handle_bound_provider_event(bound);
+        }
+        let status = coordinator
+            .engine
+            .provider_status("rithmic")
+            .expect("provider status");
+        assert_eq!(status.generation, Some(ProviderGeneration(nonzero(1))));
+        assert_eq!(status.health, ProviderHealth::Online);
+        coordinator.prune_history_tracking();
+        assert!(
+            !request.stop.load(Ordering::Acquire),
+            "a demand change must not cancel the current covering request"
+        );
+        coordinator.handle_command(Command::HistoryCompleted(
+            selected.clone(),
+            request.provider_generation,
+            None,
+            Err("fixture history failure".to_string()),
+            request.ticket.clone(),
+        ));
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    reserved,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .is_some(),
+            "a failed covering request must schedule its bounded retry"
+        );
+    }
+    #[test]
     fn retired_provider_and_history_epochs_are_dropped_once_each() {
         let (mut coordinator, _) = connected_rithmic_coordinator();
         let previous = coordinator
@@ -8549,9 +8645,11 @@ mod tests {
         }
     }
 
+    /// The adapter's first resolution carries the same session and selection
+    /// numbers as the provisional default it replaces.
     fn resolved_default_terms() -> InstallProviderInstrument {
         let mut resolved = super::super::descriptors::default_instrument();
-        resolved.selection_generation = 2;
+        resolved.price_increment = Some(100_000_000);
         resolved.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
             point_value: Some(1),
             point_value_scale: Some(0),
@@ -8645,12 +8743,20 @@ mod tests {
                 .get(&("hyperliquid".into(), "hyperliquid:perp:BTC".into()))
                 .is_some_and(|instrument| instrument.contract_metadata.is_none())
         );
-        coordinator.handle_catalog_selection(owner.0.get(), 10, resolved);
+        coordinator.handle_catalog_selection(owner.0.get(), 10, resolved.clone());
         let installed = coordinator
             .catalog
             .get(&("hyperliquid".into(), "hyperliquid:perp:BTC".into()))
             .expect("resolved default registered");
         assert!(super::super::instrument_terms_from_install(installed).is_ok());
+        assert_eq!(installed.price_increment, Some(100_000_000));
+        let mut conflicting = resolved;
+        conflicting.price_increment = Some(1);
+        assert_eq!(
+            coordinator.install_provider_instrument(&conflicting),
+            Err("provider instrument selection conflicts".to_string()),
+            "only the provisional default yields to a resolution with equal numbers"
+        );
         assert!(matches!(
             coordinator
                 .events

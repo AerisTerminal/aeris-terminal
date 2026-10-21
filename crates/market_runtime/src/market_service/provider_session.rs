@@ -38,6 +38,12 @@ pub(super) trait ProviderSession: Send {
     fn adapter_retries_transport(&self) -> bool {
         false
     }
+    /// Whether the adapter labels its sessions with its own wire generations,
+    /// which the coordinator maps to registry epochs as events arrive. A
+    /// reserved epoch number is then not a lifecycle generation.
+    fn adapter_labels_sessions(&self) -> bool {
+        false
+    }
     fn connect(
         &self,
         epoch: Epoch<ProviderTag>,
@@ -200,6 +206,9 @@ pub(super) struct RithmicBinding {
 
 impl ProviderSession for RithmicSession {
     fn adapter_retries_transport(&self) -> bool {
+        true
+    }
+    fn adapter_labels_sessions(&self) -> bool {
         true
     }
     fn connect(
@@ -717,6 +726,12 @@ impl ProviderRegistry {
         self.connections
             .get(id)
             .is_some_and(|connection| connection.session.adapter_retries_transport())
+    }
+
+    pub(super) fn adapter_labels_sessions(&self, id: &str) -> bool {
+        self.connections
+            .get(id)
+            .is_some_and(|connection| connection.session.adapter_labels_sessions())
     }
 }
 

@@ -121,6 +121,20 @@ pub enum ProviderCatalogEvent {
     ScreenRejected(ProviderCatalogRejected),
 }
 
+/// Whether a provider-verified selection carries current terms for the same
+/// instrument. A provisional descriptor yields to it; a different
+/// instrument's selection never replaces the charted one.
+#[must_use]
+pub fn verified_terms_supersede(
+    current: &InstallProviderInstrument,
+    verified: &InstallProviderInstrument,
+) -> bool {
+    current.provider == verified.provider
+        && current.instrument_id == verified.instrument_id
+        && verified.selection_generation >= current.selection_generation
+        && verified.session_generation >= current.session_generation
+}
+
 #[must_use]
 pub fn classify_provider_catalog_event(
     event: MarketRuntimeEvent,

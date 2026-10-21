@@ -150,6 +150,7 @@ use aeris_desktop::market_worker::{
     MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
     PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
+    verified_terms_supersede,
 };
 use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
 use aeris_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
@@ -735,20 +736,6 @@ fn instrument_listing_refresh_needed(
         && browser.results().is_empty()
         && !browser.search_pending()
         && !browser.has_retained_search()
-}
-
-fn default_rithmic_contract_index(results: &[ProviderInstrumentSummary]) -> Option<usize> {
-    results
-        .iter()
-        .enumerate()
-        .filter(|(_, result)| {
-            result.symbol.starts_with("MNQ")
-                && result.symbol != "MNQ"
-                && !result.symbol.contains('-')
-                && result.expiration_date.is_some()
-        })
-        .min_by_key(|(_, result)| result.expiration_date.as_deref())
-        .map(|(index, _)| index)
 }
 
 #[cfg(feature = "diagnostics")]
@@ -1559,10 +1546,9 @@ struct QuickTimeframeError {
 #[derive(Default)]
 struct WorkspaceMarketState {
     symbol_selection_pending: bool,
-    rithmic_autoload_started: bool,
-    /// The startup listing may pick the default contract exactly once; later
-    /// searches belong to the trader and must never re-select on their behalf.
-    rithmic_autoload_selection_pending: bool,
+    /// The first catalog-ready event loads the default listing once; later
+    /// searches belong to the trader.
+    catalog_listing_started: bool,
 }
 
 #[derive(Default)]

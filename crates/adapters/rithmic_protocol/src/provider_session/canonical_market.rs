@@ -56,6 +56,10 @@ struct MboBookAssembler {
     snapshot_asks: BTreeMap<i64, MboAggregateLevel>,
     snapshot_sequence: Option<u64>,
     pending_updates: VecDeque<crate::DepthByOrderUpdate>,
+    /// Buffered updates that arrived before the first snapshot level. They
+    /// precede the snapshot response on the ordered connection, so an image
+    /// without any sequence cannot be ordered against them and drops them.
+    updates_before_snapshot: Option<usize>,
     pending_mutations: usize,
     ready: bool,
     /// Set once snapshot recovery is exhausted; order-level depth stays off
@@ -90,6 +94,7 @@ impl MboBookAssembler {
             snapshot_asks: BTreeMap::new(),
             snapshot_sequence: None,
             pending_updates: VecDeque::new(),
+            updates_before_snapshot: None,
             pending_mutations: 0,
             ready: false,
             disabled: false,
@@ -157,19 +162,32 @@ impl MboBookAssembler {
             self.pending_updates.push_back(update);
             return Ok(MboBookOutcome::Pending);
         }
+        let timestamp = update.timestamp;
+        if self.apply_live_update(update, price_scale, quantity_scale)? {
+            Ok(self.snapshot(timestamp))
+        } else {
+            Ok(MboBookOutcome::IgnoredStale)
+        }
+    }
+
+    /// Applies one update to the ready image in arrival order. Returns false
+    /// for a stale update that was not applied.
+    fn apply_live_update(
+        &mut self,
+        update: crate::DepthByOrderUpdate,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<bool, (ProviderInvalidationReason, RetryDisposition)> {
         // An unsequenced frame applies in arrival order without consuming a
         // sequence. If it did consume one, the next sequenced frame is a gap.
-        if let Some(sequence) = update.sequence_number {
-            if self
-                .last_provider_sequence
-                .is_some_and(|last| sequence <= last)
-            {
-                return Ok(MboBookOutcome::IgnoredStale);
+        // Continuity starts at the first sequence observed after an image
+        // that carried none.
+        if let (Some(sequence), Some(last)) = (update.sequence_number, self.last_provider_sequence)
+        {
+            if sequence <= last {
+                return Ok(false);
             }
-            if self
-                .last_provider_sequence
-                .is_some_and(|last| sequence != last.saturating_add(1))
-            {
+            if sequence != last.saturating_add(1) {
                 return Err((
                     ProviderInvalidationReason::SequenceGap,
                     RetryDisposition::Transient,
@@ -182,11 +200,7 @@ impl MboBookAssembler {
         if let Some(sequence) = update.sequence_number {
             self.last_provider_sequence = Some(sequence);
         }
-        if self.ready {
-            Ok(self.snapshot(update.timestamp))
-        } else {
-            Ok(MboBookOutcome::Pending)
-        }
+        Ok(true)
     }
 
     fn accept_snapshot_level(
@@ -229,6 +243,9 @@ impl MboBookAssembler {
             }
             self.snapshot_sequence = Some(sequence);
         }
+        if self.updates_before_snapshot.is_none() {
+            self.updates_before_snapshot = Some(self.pending_updates.len());
+        }
         let side = match level.side {
             DepthByOrderSide::Bid => BookSide::Bid,
             DepthByOrderSide::Ask => BookSide::Ask,
@@ -267,8 +284,6 @@ impl MboBookAssembler {
         if self.ready || self.disabled {
             return Ok(MboBookOutcome::IgnoredStale);
         }
-        // Without any sequenced baseline, buffered updates cannot be ordered
-        // against the image, so the order-level book cannot be trusted.
         let baseline = match (self.snapshot_sequence, completion_sequence) {
             (Some(snapshot), Some(completion)) if snapshot != completion => {
                 return Err((
@@ -276,26 +291,34 @@ impl MboBookAssembler {
                     RetryDisposition::Transient,
                 ));
             }
-            (Some(snapshot), _) => snapshot,
-            (None, Some(completion)) => completion,
-            (None, None) => {
-                return Err((
-                    ProviderInvalidationReason::SequenceGap,
-                    RetryDisposition::Transient,
-                ));
-            }
+            (Some(snapshot), _) => Some(snapshot),
+            (None, completion) => completion,
         };
+        let updates_before_snapshot = self
+            .updates_before_snapshot
+            .take()
+            .unwrap_or(self.pending_updates.len());
         self.orders = std::mem::take(&mut self.snapshot_orders);
         self.bids = std::mem::take(&mut self.snapshot_bids);
         self.asks = std::mem::take(&mut self.snapshot_asks);
-        self.last_provider_sequence = Some(baseline);
+        self.last_provider_sequence = baseline;
         self.snapshot_sequence = None;
         self.ready = true;
+        self.pending_mutations = 0;
+        let pending_updates = std::mem::take(&mut self.pending_updates);
+        if baseline.is_none() {
+            return self.replay_after_unsequenced_image(
+                pending_updates,
+                updates_before_snapshot,
+                price_scale,
+                quantity_scale,
+            );
+        }
         let mut timestamp = None;
         // An unsequenced buffered update is placeable only after a sequenced
         // update beyond the baseline; before that it may predate the image.
         let mut past_baseline = false;
-        while let Some(update) = self.pending_updates.pop_front() {
+        for update in pending_updates {
             if update.identity != self.identity {
                 return Err(malformed());
             }
@@ -327,7 +350,31 @@ impl MboBookAssembler {
             }
             timestamp = update.timestamp.or(timestamp);
         }
-        self.pending_mutations = 0;
+        Ok(self.snapshot(timestamp))
+    }
+
+    /// Rithmic Test sends order-level snapshots with no sequence on any level
+    /// or on the completion. Updates interleaved with the snapshot levels
+    /// replay in arrival order. One the image already reflects either reapplies
+    /// the same order state or contradicts the image through the order-id
+    /// checks, which requests a resnapshot.
+    fn replay_after_unsequenced_image(
+        &mut self,
+        pending_updates: VecDeque<crate::DepthByOrderUpdate>,
+        updates_before_snapshot: usize,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
+        let mut timestamp = None;
+        for update in pending_updates.into_iter().skip(updates_before_snapshot) {
+            if update.identity != self.identity {
+                return Err(malformed());
+            }
+            let update_timestamp = update.timestamp;
+            if self.apply_live_update(update, price_scale, quantity_scale)? {
+                timestamp = update_timestamp.or(timestamp);
+            }
+        }
         Ok(self.snapshot(timestamp))
     }
 
@@ -346,9 +393,10 @@ impl MboBookAssembler {
             return Ok(MboBookOutcome::IgnoredStale);
         }
         if self.ready {
+            // Without a sequenced baseline the marker carries no evidence of a gap.
             return if event.sequence_number.is_none_or(|sequence| {
                 self.last_provider_sequence
-                    .is_some_and(|last| sequence <= last)
+                    .is_none_or(|last| sequence <= last)
             }) {
                 Ok(MboBookOutcome::IgnoredStale)
             } else {
@@ -1246,14 +1294,14 @@ mod tests {
     }
 
     #[test]
-    fn unsequenced_snapshot_requests_a_bounded_resnapshot_instead_of_failing_the_session() {
+    fn inconsistent_snapshot_requests_a_bounded_resnapshot_instead_of_failing_the_session() {
         let mut assembler = MboBookAssembler::new(identity());
         let mut resnapshots = VecDeque::new();
         for attempt in 0..MAXIMUM_DEPTH_RESNAPSHOTS {
             assembler
-                .accept_snapshot_level(bid_level(None), 2, 2)
-                .expect("unsequenced level contributes orders");
-            let outcome = assembler.finish_snapshot(None, 2, 2);
+                .accept_snapshot_level(bid_level(Some(40)), 2, 2)
+                .expect("sequenced level contributes orders");
+            let outcome = assembler.finish_snapshot(Some(41), 2, 2);
             assert!(matches!(
                 outcome,
                 Err((ProviderInvalidationReason::SequenceGap, _))
@@ -1266,7 +1314,10 @@ mod tests {
             assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
         }
 
-        let exhausted = assembler.finish_snapshot(None, 2, 2);
+        assembler
+            .accept_snapshot_level(bid_level(Some(40)), 2, 2)
+            .expect("sequenced level contributes orders");
+        let exhausted = assembler.finish_snapshot(Some(41), 2, 2);
         assert!(
             order_level_outcome(&mut assembler, exhausted, "instrument", &mut resnapshots)
                 .is_none()
@@ -1305,5 +1356,140 @@ mod tests {
             assembler.finish_snapshot(Some(40), 2, 2),
             Err((ProviderInvalidationReason::SequenceGap, _))
         ));
+    }
+
+    /// Rithmic Test answers a snapshot request with levels and a completion
+    /// that carry no sequence, followed by sequenced live updates.
+    #[test]
+    fn unsequenced_snapshot_installs_and_checks_continuity_from_the_first_live_sequence() {
+        let mut assembler = MboBookAssembler::new(identity());
+        let mut resnapshots = VecDeque::new();
+        // Precedes the snapshot response, so the image already reflects it.
+        assembler
+            .accept_update(
+                bid_update(Some(500), DepthByOrderMutationKind::New, "bid-2"),
+                2,
+                2,
+            )
+            .expect("pre-snapshot update buffers");
+        assembler
+            .accept_snapshot_level(bid_level(None), 2, 2)
+            .expect("unsequenced level contributes orders");
+        assembler
+            .accept_update(
+                bid_update(Some(700), DepthByOrderMutationKind::Change, "bid-1"),
+                2,
+                2,
+            )
+            .expect("interleaved update buffers");
+        let outcome = assembler.finish_snapshot(None, 2, 2);
+        let Some(MboBookOutcome::Snapshot { bids, .. }) =
+            order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
+        else {
+            panic!("an unsequenced snapshot must publish its image");
+        };
+        assert!(resnapshots.is_empty(), "no resnapshot for a valid image");
+        assert!(assembler.ready());
+        assert_eq!(bids[0].quantity, 700);
+        assert_eq!(bids[0].order_count, Some(2));
+
+        assert!(matches!(
+            assembler
+                .finish_initial_image(&DecodedDepthByOrderEndEvent {
+                    identities: vec![identity()],
+                    sequence_number: Some(650),
+                    timestamp: Some(timestamp()),
+                })
+                .expect("a marker at or below the live baseline is stale"),
+            MboBookOutcome::IgnoredStale
+        ));
+        assert!(matches!(
+            assembler
+                .accept_update(
+                    bid_update(Some(700), DepthByOrderMutationKind::Change, "bid-1"),
+                    2,
+                    2
+                )
+                .expect("a replayed sequence is stale"),
+            MboBookOutcome::IgnoredStale
+        ));
+        let MboBookOutcome::Snapshot { bids, .. } = assembler
+            .accept_update(
+                bid_update(Some(701), DepthByOrderMutationKind::Delete, "bid-2"),
+                2,
+                2,
+            )
+            .expect("the next live sequence applies")
+        else {
+            panic!("ready MBO update must publish");
+        };
+        assert_eq!(bids[0].quantity, 400);
+        assert_eq!(bids[0].order_count, Some(1));
+
+        assert!(matches!(
+            assembler.accept_update(
+                bid_update(Some(703), DepthByOrderMutationKind::Change, "bid-1"),
+                2,
+                2
+            ),
+            Err((ProviderInvalidationReason::SequenceGap, _))
+        ));
+    }
+
+    #[test]
+    fn sequenced_end_marker_before_any_live_sequence_is_not_a_gap() {
+        let mut assembler = MboBookAssembler::new(identity());
+        assembler
+            .accept_snapshot_level(bid_level(None), 2, 2)
+            .expect("unsequenced level contributes orders");
+        assembler
+            .finish_snapshot(None, 2, 2)
+            .expect("unsequenced snapshot completes");
+        assert!(matches!(
+            assembler
+                .finish_initial_image(&DecodedDepthByOrderEndEvent {
+                    identities: vec![identity()],
+                    sequence_number: Some(9),
+                    timestamp: Some(timestamp()),
+                })
+                .expect("no baseline means no gap evidence"),
+            MboBookOutcome::IgnoredStale
+        ));
+        assert!(matches!(
+            assembler
+                .accept_update(
+                    bid_update(Some(10), DepthByOrderMutationKind::Change, "bid-1"),
+                    2,
+                    2
+                )
+                .expect("the first live sequence starts continuity"),
+            MboBookOutcome::Snapshot { .. }
+        ));
+    }
+
+    #[test]
+    fn unsequenced_snapshot_contradicted_by_an_interleaved_update_resnapshots() {
+        let mut assembler = MboBookAssembler::new(identity());
+        let mut resnapshots = VecDeque::new();
+        assembler
+            .accept_snapshot_level(bid_level(None), 2, 2)
+            .expect("unsequenced level contributes orders");
+        assembler
+            .accept_update(
+                bid_update(Some(41), DepthByOrderMutationKind::Delete, "bid-9"),
+                2,
+                2,
+            )
+            .expect("interleaved update buffers");
+        let outcome = assembler.finish_snapshot(None, 2, 2);
+        assert!(matches!(
+            outcome,
+            Err((ProviderInvalidationReason::SequenceGap, _))
+        ));
+        assert!(
+            order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots).is_none()
+        );
+        assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
+        assert!(assembler.awaiting_snapshot());
     }
 }

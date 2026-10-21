@@ -104,15 +104,15 @@ pub use provider_runtime::{
     RithmicProviderRuntimeError, RithmicProviderRuntimeState, SessionGeneration,
 };
 pub use provider_session::{
-    AppliedRithmicEvent, MAXIMUM_RITHMIC_SEARCH_RESULTS, RITHMIC_LOGIN_VAULT_KEY,
-    RITHMIC_VAULT_SERVICE, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
-    RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
-    RithmicInstrumentSelection, RithmicProviderCallback, RithmicProviderCommandError,
-    RithmicProviderConfig, RithmicProviderConfigError, RithmicProviderDriver,
-    RithmicProviderDriverError, RithmicProviderEventError, RithmicProviderEvents,
-    RithmicProviderInstrument, RithmicReadOnlySubscription, RithmicRetryScheduler,
-    RithmicRetryTicket, RithmicSessionTiming, RithmicSymbolSearch, apply_rithmic_environment_event,
-    try_recv_rithmic_event,
+    AppliedRithmicEvent, MAXIMUM_RITHMIC_RETAINED_SEARCHES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
+    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicAuthorizedSilenceEvidenceFault,
+    RithmicCallbackLimits, RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCallback,
+    RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderConfigError,
+    RithmicProviderDriver, RithmicProviderDriverError, RithmicProviderEventError,
+    RithmicProviderEvents, RithmicProviderInstrument, RithmicReadOnlySubscription,
+    RithmicRetryScheduler, RithmicRetryTicket, RithmicSessionTiming, RithmicSymbolSearch,
+    apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 pub use session::{
     RithmicApplication, RithmicCredentials, RithmicHistoryConnection, RithmicLoginMetadata,

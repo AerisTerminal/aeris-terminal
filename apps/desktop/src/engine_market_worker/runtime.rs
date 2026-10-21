@@ -8,7 +8,7 @@ use super::{
     process_command,
 };
 use aeris_desktop::market_worker::{
-    MarketWorkerSendError, MarketWorkerSender, ProviderCatalogEvent,
+    MarketWorkerSendError, MarketWorkerSender, ProviderCatalogEvent, verified_terms_supersede,
 };
 use aeris_observability::diagnostic;
 use aeris_trading::market::MarketRoute;
@@ -461,10 +461,7 @@ fn deliver_provider_catalog_event(
     let mut changed = false;
     if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
         && record.role == EndpointRole::Market
-        && record.product.provider == instrument.provider
-        && record.product.instrument_id == instrument.instrument_id
-        && instrument.selection_generation >= record.product.selection_generation
-        && instrument.session_generation >= record.product.session_generation
+        && verified_terms_supersede(&record.product, instrument)
     {
         // Verified Terms supersede the provisional selected descriptor, not
         // a different pane selection. Ticket demand uses the same identity.

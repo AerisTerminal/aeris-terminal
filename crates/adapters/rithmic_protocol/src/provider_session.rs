@@ -49,6 +49,10 @@ pub const RITHMIC_LOGIN_VAULT_KEY: &str = "provider-rithmic-login-v2";
 const MAXIMUM_INSTRUMENTS: usize = 128;
 /// Largest result bound one direct-session symbol search accepts.
 pub const MAXIMUM_RITHMIC_SEARCH_RESULTS: usize = MAXIMUM_INSTRUMENTS;
+/// Completed searches one session retains for later selections. One login
+/// serves every catalog consumer, so a selection may name a search that other
+/// consumers' searches have since followed.
+pub const MAXIMUM_RITHMIC_RETAINED_SEARCHES: usize = 8;
 const MAXIMUM_IDENTITY_BYTES: usize = 256;
 const SESSION_COMMAND_CAPACITY: usize = 8;
 const SESSION_COMMAND_BATCH: usize = 4;
@@ -88,7 +92,7 @@ pub struct RithmicProviderInstrument {
     pub order_book: bool,
 }
 
-/// Bounded, owned symbol-search intent for one UI search generation.
+/// Bounded, owned symbol-search intent for one session-unique search generation.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RithmicSymbolSearch {
     search_generation: NonZeroUsize,
@@ -112,7 +116,7 @@ impl fmt::Debug for RithmicSymbolSearch {
 }
 
 impl RithmicSymbolSearch {
-    /// Returns the UI-owned command generation.
+    /// Returns the generation that fences this search's callbacks.
     #[must_use]
     pub const fn generation(&self) -> NonZeroUsize {
         self.search_generation
@@ -205,7 +209,7 @@ impl RithmicSymbolSearch {
     }
 }
 
-/// Exact selection from the latest completed search.
+/// Exact selection from one retained completed search.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RithmicInstrumentSelection {
     selection_generation: NonZeroUsize,
@@ -284,7 +288,7 @@ impl fmt::Debug for RithmicInstrumentSelection {
 }
 
 impl RithmicInstrumentSelection {
-    /// Returns the UI-owned command generation.
+    /// Returns the generation that fences this selection's callbacks.
     #[must_use]
     pub const fn generation(&self) -> NonZeroUsize {
         self.selection_generation
@@ -943,7 +947,7 @@ impl RithmicProviderEvents {
         self.send_command(generation, RithmicSessionCommand::Search(request))
     }
 
-    /// Enqueues one read-only selection from the latest completed symbol search.
+    /// Enqueues one read-only selection from a retained completed symbol search.
     ///
     /// # Errors
     ///
@@ -2006,13 +2010,50 @@ struct PendingSubscription {
 }
 
 type SymbolKey = (String, String);
-type LatestSymbolSearch = (NonZeroUsize, BTreeMap<SymbolKey, SymbolSearchResult>);
+/// One completed search generation and the `(exchange, symbol)` pairs it returned.
+type RetainedSymbolSearch = (NonZeroUsize, BTreeSet<SymbolKey>);
 
 #[derive(Default)]
 struct CatalogCommandState {
     pending_catalog: Option<PendingCatalogCommand>,
     pending_subscription: Option<PendingSubscription>,
-    latest_search: Option<LatestSymbolSearch>,
+    /// Most recent completed searches, oldest first, at most
+    /// [`MAXIMUM_RITHMIC_RETAINED_SEARCHES`].
+    retained_searches: VecDeque<RetainedSymbolSearch>,
+}
+
+impl CatalogCommandState {
+    fn retain_search(&mut self, generation: NonZeroUsize, symbols: &CollectedSymbols) {
+        self.retained_searches
+            .retain(|(retained, _)| *retained != generation);
+        if self.retained_searches.len() >= MAXIMUM_RITHMIC_RETAINED_SEARCHES {
+            self.retained_searches.pop_front();
+        }
+        self.retained_searches.push_back((
+            generation,
+            symbols
+                .results
+                .iter()
+                .map(|symbol| (symbol.exchange.clone(), symbol.symbol.clone()))
+                .collect(),
+        ));
+    }
+
+    /// Why a selection cannot be served from the retained searches, if it cannot.
+    fn selection_rejection(
+        &self,
+        selection: &RithmicInstrumentSelection,
+    ) -> Option<RithmicCatalogRejection> {
+        let Some((_, symbols)) = self
+            .retained_searches
+            .iter()
+            .find(|(generation, _)| *generation == selection.search_generation)
+        else {
+            return Some(RithmicCatalogRejection::SupersededSearch);
+        };
+        let key = (selection.exchange.clone(), selection.symbol.clone());
+        (!symbols.contains(&key)).then_some(RithmicCatalogRejection::InstrumentUnavailable)
+    }
 }
 
 struct DirectSessionState {
@@ -2474,6 +2515,80 @@ mod tests {
                 .expect("deadline has a preceding instant")
         ));
         assert!(catalog_command_timed_out(&state, deadline));
+    }
+
+    fn searched(symbols: &[(&str, &str)]) -> CollectedSymbols {
+        CollectedSymbols {
+            results: symbols
+                .iter()
+                .map(|(exchange, symbol)| SymbolSearchResult {
+                    symbol: (*symbol).to_string(),
+                    exchange: (*exchange).to_string(),
+                    name: None,
+                    product_code: None,
+                    instrument_type: Some("FUTURE".to_string()),
+                    expiration_date: None,
+                })
+                .collect(),
+            duplicate_count: 0,
+        }
+    }
+
+    fn selection_from(search_generation: usize, symbol: &str) -> RithmicInstrumentSelection {
+        RithmicInstrumentSelection::try_new(
+            nonzero(100),
+            nonzero(search_generation),
+            symbol,
+            "CME",
+            "rithmic-test:CME:selection",
+            RithmicReadOnlySubscription::try_new(true, true, true)
+                .expect("read-only selection validates"),
+        )
+        .expect("selection validates")
+    }
+
+    #[test]
+    fn selection_may_name_an_older_retained_search_after_a_newer_one_completed() {
+        let mut state = CatalogCommandState::default();
+        state.retain_search(nonzero(1), &searched(&[("CME", "MNQZ6")]));
+        state.retain_search(nonzero(2), &searched(&[("CME", "ESZ6")]));
+
+        assert_eq!(state.selection_rejection(&selection_from(1, "MNQZ6")), None);
+        assert_eq!(state.selection_rejection(&selection_from(2, "ESZ6")), None);
+        assert_eq!(
+            state.selection_rejection(&selection_from(1, "ESZ6")),
+            Some(RithmicCatalogRejection::InstrumentUnavailable),
+            "a retained search answers only for the symbols it returned"
+        );
+        assert_eq!(
+            state.selection_rejection(&selection_from(3, "MNQZ6")),
+            Some(RithmicCatalogRejection::SupersededSearch)
+        );
+    }
+
+    #[test]
+    fn searches_beyond_the_retention_bound_evict_the_oldest_as_superseded() {
+        let mut state = CatalogCommandState::default();
+        for generation in 1..=MAXIMUM_RITHMIC_RETAINED_SEARCHES + 1 {
+            state.retain_search(nonzero(generation), &searched(&[("CME", "MNQZ6")]));
+        }
+
+        assert_eq!(
+            state.retained_searches.len(),
+            MAXIMUM_RITHMIC_RETAINED_SEARCHES
+        );
+        assert_eq!(
+            state.selection_rejection(&selection_from(1, "MNQZ6")),
+            Some(RithmicCatalogRejection::SupersededSearch)
+        );
+        assert_eq!(state.selection_rejection(&selection_from(2, "MNQZ6")), None);
+        assert_eq!(
+            state.selection_rejection(&selection_from(
+                MAXIMUM_RITHMIC_RETAINED_SEARCHES + 1,
+                "MNQZ6"
+            )),
+            None
+        );
     }
 
     #[test]

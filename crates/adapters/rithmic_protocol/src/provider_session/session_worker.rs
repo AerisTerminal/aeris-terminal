@@ -555,28 +555,7 @@ fn process_session_commands(
                 return Ok(());
             }
             RithmicSessionCommand::Select(selection) => {
-                let available =
-                    state
-                        .latest_search
-                        .as_ref()
-                        .is_some_and(|(generation, symbols)| {
-                            *generation == selection.search_generation
-                                && symbols.contains_key(&(
-                                    selection.exchange.clone(),
-                                    selection.symbol.clone(),
-                                ))
-                        });
-                if !available {
-                    let reason = state.latest_search.as_ref().map_or(
-                        RithmicCatalogRejection::SupersededSearch,
-                        |(generation, _)| {
-                            if *generation == selection.search_generation {
-                                RithmicCatalogRejection::InstrumentUnavailable
-                            } else {
-                                RithmicCatalogRejection::SupersededSearch
-                            }
-                        },
-                    );
+                if let Some(reason) = state.selection_rejection(&selection) {
                     if !send_rejection(
                         emitter,
                         session_generation,
@@ -647,15 +626,7 @@ fn handle_catalog_message(
             Ok(CollectionProgress::Pending) => Ok(()),
             Ok(CollectionProgress::Complete(symbols)) => {
                 let search_generation = *generation;
-                state.latest_search = Some((
-                    search_generation,
-                    symbols
-                        .results
-                        .iter()
-                        .cloned()
-                        .map(|symbol| ((symbol.exchange.clone(), symbol.symbol.clone()), symbol))
-                        .collect(),
-                ));
+                state.retain_search(search_generation, &symbols);
                 state.pending_catalog = None;
                 if !emitter.send_catalog(RithmicCatalogEvent::SearchCompleted {
                     session_generation,

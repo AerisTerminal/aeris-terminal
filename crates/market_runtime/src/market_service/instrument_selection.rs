@@ -416,6 +416,12 @@ impl Coordinator<'_> {
     }
 
     fn publish_selection_outcome(&mut self, consumer: ConsumerId, outcome: SelectionOutcome) {
+        if let SelectionOutcome::Failed { error, .. } = &outcome {
+            diagnostic!(
+                "Market selection failed for consumer {}: {error:?}",
+                consumer.0.get()
+            );
+        }
         if let Some(events) = self.events.get_mut(&consumer) {
             events
                 .selection_outcomes
@@ -447,6 +453,10 @@ impl Coordinator<'_> {
                 {
                     self.install_provider_instrument(&descriptor.instrument)
                         .map_err(SelectionError::DemandRejected)?;
+                    self.provisional_default = Some((
+                        descriptor.instrument.provider.clone(),
+                        descriptor.instrument.instrument_id.clone(),
+                    ));
                 }
                 let (reply, received) = std::sync::mpsc::sync_channel(1);
                 self.handle_demand(
@@ -731,6 +741,7 @@ impl Coordinator<'_> {
             }
             if instrument.session_generation == installed.session_generation
                 && instrument.selection_generation == installed.selection_generation
+                && self.provisional_default.as_ref() != Some(&key)
             {
                 return (installed == instrument)
                     .then_some(())
@@ -753,6 +764,9 @@ impl Coordinator<'_> {
             .entry(provider.clone())
             .and_modify(|current| *current = (*current).max(instrument.session_generation))
             .or_insert(instrument.session_generation);
+        if self.provisional_default.as_ref() == Some(&key) {
+            self.provisional_default = None;
+        }
         self.catalog.insert(key, instrument.clone());
         self.calendar.resolve(instrument);
         // A chart-free instrument lease (for example trading ticket interest) is
@@ -1089,16 +1103,19 @@ impl Coordinator<'_> {
                     command_generation,
                 })
             }
-            Err(_) => MarketRuntimeEvent::ProviderCatalogRejected {
-                rejection: ProviderCatalogRejected {
-                    consumer_id,
-                    provider,
-                    provider_generation: Some(instrument.session_generation),
-                    command_generation,
-                    reason: ProviderCatalogRejectionReason::SubscriptionRejected,
-                },
-                selection: true,
-            },
+            Err(error) => {
+                diagnostic!("Market catalog selection from {provider} could not install: {error}");
+                MarketRuntimeEvent::ProviderCatalogRejected {
+                    rejection: ProviderCatalogRejected {
+                        consumer_id,
+                        provider,
+                        provider_generation: Some(instrument.session_generation),
+                        command_generation,
+                        reason: ProviderCatalogRejectionReason::SubscriptionRejected,
+                    },
+                    selection: true,
+                }
+            }
         };
         if let Some(events) = self.events.get_mut(&id) {
             *events.catalog_selection_slot(kind) = Some(publication);
@@ -1288,6 +1305,12 @@ impl Coordinator<'_> {
         ) else {
             return;
         };
+        diagnostic!(
+            "Market catalog {} rejected by {}: {:?}",
+            if selection { "selection" } else { "search" },
+            rejection.provider,
+            rejection.reason
+        );
         self.reject_catalog_command(consumer_id, kind, rejection, selection);
     }
 

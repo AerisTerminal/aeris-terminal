@@ -2724,6 +2724,102 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
 }
 
 #[gpui::test]
+fn pane_harness_empty_symbol_query_searches_the_provider_default_listing(cx: &mut TestAppContext) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let commands = harness.commands.as_ref().expect("command receiver");
+    cx.update(|window, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            pane.choose_symbol_provider(TerminalProvider::Rithmic, window, cx);
+        });
+    });
+    let mut searches =
+        std::iter::from_fn(|| commands.try_recv().ok()).filter_map(|command| match command {
+            MarketWorkerCommand::ProviderSearch(request) => Some(request),
+            _ => None,
+        });
+    let listing = searches
+        .next()
+        .expect("provider switch searches its listing");
+    assert_eq!(listing.provider, "rithmic");
+    assert_eq!(listing.query, "MNQ");
+    harness
+        .publications
+        .send(MarketWorkerMessage::ProviderCatalog(
+            ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
+                provider: listing.provider,
+                search_generation: listing.search_generation,
+                ..ProviderInstrumentSearchResult::default()
+            }),
+        ))
+        .expect("fixture search completion enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.update(|window, cx| {
+        let input = harness
+            .pane
+            .read(cx)
+            .symbol_input
+            .clone()
+            .expect("symbol input");
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        harness.pane.update(cx, |pane, cx| {
+            assert!(pane.search_symbol_input(cx));
+        });
+    });
+    cx.run_until_parked();
+    let cleared = std::iter::from_fn(|| commands.try_recv().ok())
+        .find_map(|command| match command {
+            MarketWorkerCommand::ProviderSearch(request) => Some(request),
+            _ => None,
+        })
+        .expect("a cleared field still searches");
+    assert_eq!(
+        cleared.query, "MNQ",
+        "a text-only provider never receives an empty query"
+    );
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_verified_terms_replace_the_provisional_chart_descriptor(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let charted = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("initial instrument")
+    });
+    let mut other = charted.clone();
+    other.instrument_id.push_str(":other");
+    other.price_increment = Some(7);
+    let mut verified = charted;
+    verified.price_increment = Some(25);
+    for instrument in [other, verified.clone()] {
+        harness
+            .publications
+            .send(MarketWorkerMessage::ProviderCatalog(
+                ProviderCatalogEvent::SelectionInstalled {
+                    command_generation: 1,
+                    instrument,
+                },
+            ))
+            .expect("verified terms enter mailbox");
+    }
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 2);
+        assert_eq!(
+            pane.product.as_ref(),
+            Some(&verified),
+            "only the charted instrument's terms replace its descriptor"
+        );
+    });
+}
+
+#[gpui::test]
 fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     cx: &mut TestAppContext,
 ) {
