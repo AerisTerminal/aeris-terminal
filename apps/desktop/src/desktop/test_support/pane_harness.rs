@@ -1386,7 +1386,7 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     let mut epochs = EpochSequence::<ConsumerTag>::default();
     let epoch = epochs.next();
     let readiness = |generation, state, detail: &str| {
-        MarketWorkerMessage::RuntimeSeriesState(Fenced {
+        MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
             epoch,
             value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
                 consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -1457,6 +1457,129 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.chart_state, ChartState::Ready);
+    });
+}
+
+#[gpui::test]
+fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAppContext) {
+    use aeris_contracts::SeriesLoadState;
+    use aeris_market_runtime::{
+        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketSeriesState,
+        fence::{ConsumerTag, EpochSequence, Fenced},
+    };
+    use std::num::NonZeroU64;
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut epochs = EpochSequence::<ConsumerTag>::default();
+    let epoch = epochs.next();
+    let failed = |generation| {
+        MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+            epoch,
+            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+                series: None,
+                state: SeriesLoadState::Failed,
+                detail: Some("market unavailable".into()),
+                presentation: None,
+            }),
+        })
+    };
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    harness.publications.send(failed(sequence)).expect("early");
+    harness.pane.update(cx, |pane, cx| {
+        let previous = pane.chart_state;
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, previous);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .expect("commit");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    harness.publications.send(failed(1)).expect("retired");
+    harness.pane.update(cx, |pane, cx| {
+        let previous = pane.chart_state;
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, previous);
+    });
+    harness
+        .publications
+        .send(failed(sequence))
+        .expect("current");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        // The replacement failed before its covering snapshot: the pane
+        // restores the previous chart rather than failing that displayed chart.
+        assert_eq!(pane.chart_state, ChartState::Ready);
+        assert!(!pane.chart_pane_controller.accept_series_state(sequence));
+    });
+}
+
+#[gpui::test]
+fn pane_harness_runtime_demand_error_projects_only_current_series(cx: &mut TestAppContext) {
+    use aeris_contracts::{EngineFaultCode, FailureStage};
+    use aeris_market_runtime::{
+        MarketConsumerId, MarketDemandError, MarketDemandErrorScope, MarketGenerationId,
+        MarketRuntimeEvent,
+        fence::{ConsumerTag, EpochSequence, Fenced},
+    };
+    use std::num::NonZeroU64;
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut epochs = EpochSequence::<ConsumerTag>::default();
+    let epoch = epochs.next();
+    let error = |generation, scope| {
+        MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+            epoch,
+            value: MarketRuntimeEvent::DemandError(MarketDemandError {
+                consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+                scope,
+                code: EngineFaultCode::Retryable,
+                stage: FailureStage::ProviderHistory,
+                detail: "coverage unavailable".into(),
+                series: None,
+                cause: "fixture".into(),
+                elapsed_millis: None,
+            }),
+        })
+    };
+    harness
+        .publications
+        .send(error(2, MarketDemandErrorScope::Series))
+        .expect("future failure");
+    harness
+        .publications
+        .send(error(1, MarketDemandErrorScope::OlderHistory))
+        .expect("older history failure");
+    harness.pane.update(cx, |pane, cx| {
+        let previous = pane.chart_state;
+        assert_eq!(pane.poll_market_worker(cx), 2);
+        assert_eq!(pane.chart_state, previous);
+    });
+    harness
+        .publications
+        .send(error(1, MarketDemandErrorScope::Series))
+        .expect("current failure");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Recovering);
     });
 }
 

@@ -1598,6 +1598,14 @@ Status: pending
     snapshots plus the accepted tail. Fixture `Update`, the older worker
     conversion tests, synthetic `SeriesState`, `ChartState` and the other
     routes remain until Parts 5d-8; VAL-DSK-021/022 remain open.
+  - Part 5d1: runtime `SeriesState::Failed` and `DemandError` now retain their
+    coordinator consumer envelope through the bounded pane queue. The GPUI
+    pane accepts only the current lifecycle generation before presenting
+    failures, retryable recovery or an older-history diagnostic. Retired
+    generations are dropped and future generations rejected at the bridge.
+    Worker-created endpoint faults, legacy worker bar conversions and their
+    tests, `ChartState`, and the synthetic fixture route remain for Part 5d2;
+    M6.6 and VAL-DSK-021/022 remain open.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2013,6 +2021,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-21 UI feat(desktop): no stabilization item. Pinned Aeris Charts to 7dbd7ad9 (CVD reset and colors, delta colors, in-place depth profile options). CVD, Delta and Order Book on chart each open their own settings window from the legend gear (CVD style, reset and colors; delta colors; order-book levels, width, opacity, sizes and colors); the chart Settings menu no longer carries those controls. The options persist with the pane in new optional workspace fields, and older workspaces restore the defaults. fmt, Clippy, workspace tests and naming_check passed.
 - 2026-10-21 M6.6 Part 5b refactor(desktop): runtime series readiness retains the fenced coordinator envelope through the bounded pane queue and projects at the GPUI consumer after the exact selection/lifecycle fence. The GPUI regression exercises early, retired and current readiness. Bars, synthetic failures and remaining routes still use the old message shape; M6.6 and VAL-DSK-021/022 remain open.
 - 2026-10-21 M6.6 Part 5c refactor(desktop): runtime snapshots/tail updates retain the fenced coordinator event through the bounded pane queue; GPUI projects canonical bars after exact selection acceptance. Bridge and pane regressions cover FIFO, pending/retired rejection, covering snapshot and tail. Legacy fixture/worker conversions, ChartState and other routes still require Parts 5d-8; M6.6 remains unchecked.
+- 2026-10-21 M6.6 Part 5d1 refactor(desktop): coordinator-fenced series failures and demand errors reach the GPUI pane unchanged; the pane rejects pending/retired lifecycle generations, distinguishes older-history diagnostics and retryable recovery, and retains failed-replacement restoration. Focused bridge and GPUI regressions pass. Part 5d2 must remove synthetic worker readiness and old bar conversions, then ChartState; M6.6 stays unchecked.
 
 ## 7. Known gaps / deferred
 

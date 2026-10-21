@@ -3966,8 +3966,8 @@ impl WorkspaceSurface {
     ) {
         match message {
             MarketWorkerMessage::Update(publication) => self.apply_publication(publication, cx),
-            MarketWorkerMessage::RuntimeSeriesState(event) => {
-                self.apply_runtime_series_state(event, cx);
+            MarketWorkerMessage::RuntimeSeriesStatus(event) => {
+                self.apply_runtime_series_status(event, cx);
             }
             MarketWorkerMessage::RuntimeSeriesPublication {
                 event,
@@ -4703,9 +4703,8 @@ impl WorkspaceSurface {
                 ChartState::AwaitingData,
                 "Market has no history for this period yet",
             )),
-            SeriesLoadState::Partial | SeriesLoadState::Superseded | SeriesLoadState::Failed => {
-                None
-            }
+            SeriesLoadState::Failed => Some((ChartState::Error, "Market realtime failed")),
+            SeriesLoadState::Partial | SeriesLoadState::Superseded => None,
         };
         if let Some((chart_state, fallback)) = projected {
             self.apply_market_state_message(
@@ -4714,6 +4713,49 @@ impl WorkspaceSurface {
                 cx,
             );
         }
+    }
+
+    fn apply_runtime_series_status(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match &event.value {
+            aeris_market_runtime::MarketRuntimeEvent::SeriesState(_) => {
+                self.apply_runtime_series_state(event, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::DemandError(_) => {
+                self.apply_runtime_demand_error(event, cx);
+            }
+            _ => diagnostic!("Aeris pane received an unexpected runtime series status"),
+        }
+    }
+
+    fn apply_runtime_demand_error(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let aeris_market_runtime::MarketRuntimeEvent::DemandError(error) = event.value else {
+            diagnostic!("Aeris pane received an unexpected runtime demand error");
+            return;
+        };
+        if !self
+            .chart_pane_controller
+            .accept_series_state(error.generation.0.get())
+        {
+            return;
+        }
+        if error.scope == aeris_market_runtime::MarketDemandErrorScope::OlderHistory {
+            diagnostic!("Aeris chart older history is unavailable");
+            return;
+        }
+        let state = if error.code == aeris_contracts::EngineFaultCode::Retryable {
+            ChartState::Recovering
+        } else {
+            ChartState::Error
+        };
+        self.apply_market_state_message(state, error.detail, cx);
     }
 
     fn apply_market_state_message(

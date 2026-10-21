@@ -473,8 +473,8 @@ fn apply_received_event(
     if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
         return Ok(false);
     }
-    if matches!(&event, MarketRuntimeEvent::SeriesState(_)) {
-        deliver_runtime_series_state(
+    if is_series_status(&event) {
+        deliver_runtime_series_event(
             endpoint,
             aeris_market_runtime::MarketConsumerEvent {
                 epoch: consumer_epoch,
@@ -496,6 +496,13 @@ fn apply_received_event(
     }
     forward_runtime_publication(event, endpoint, &record.product, generation, clock);
     Ok(false)
+}
+
+fn is_series_status(event: &MarketRuntimeEvent) -> bool {
+    matches!(
+        event,
+        MarketRuntimeEvent::SeriesState(_) | MarketRuntimeEvent::DemandError(_)
+    )
 }
 
 fn is_bar_publication(event: &MarketRuntimeEvent) -> bool {
@@ -557,6 +564,17 @@ fn forward_runtime_publication(
     }
 }
 
+fn deliver_runtime_series_event(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    match &event.value {
+        MarketRuntimeEvent::SeriesState(_) => deliver_runtime_series_state(endpoint, event),
+        MarketRuntimeEvent::DemandError(_) => deliver_runtime_demand_error(endpoint, event),
+        _ => Err("unexpected runtime series event".into()),
+    }
+}
+
 fn deliver_runtime_series_state(
     endpoint: &WorkerEndpoint,
     event: aeris_market_runtime::MarketConsumerEvent,
@@ -579,24 +597,34 @@ fn deliver_runtime_series_state(
             error.into(),
         );
     } else if state.generation.0.get() == endpoint.active_generation {
-        if state.state == super::SeriesLoadState::Failed {
-            report_state(
-                &endpoint.messages,
-                Some(endpoint.active_generation),
-                ChartState::Error,
-                state
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| "Market realtime failed".into()),
-            );
-        } else {
-            endpoint
-                .messages
-                .send(MarketWorkerMessage::RuntimeSeriesState(event))
-                .map_err(|error| error.to_string())?;
-        }
+        endpoint
+            .messages
+            .send(MarketWorkerMessage::RuntimeSeriesStatus(event))
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn deliver_runtime_demand_error(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    let MarketRuntimeEvent::DemandError(error) = &event.value else {
+        return Err("unexpected runtime demand error".into());
+    };
+    if error.consumer_id.0.get() != endpoint.consumer_id {
+        return Err("engine demand-error consumer mismatched".into());
+    }
+    if error.generation.0.get() < endpoint.active_generation {
+        return Ok(());
+    }
+    if error.generation.0.get() > endpoint.active_generation {
+        return Err("engine demand-error generation advanced unexpectedly".into());
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeSeriesStatus(event))
+        .map_err(|error| error.to_string())
 }
 
 /// Applies a selection reply, then gives an adopted selection the depth visibility the
@@ -749,8 +777,94 @@ pub(super) fn retire_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_market_runtime::{
+        MarketConsumerId, MarketGenerationId, MarketSeriesState,
+        fence::{ConsumerTag, EpochSequence, Fenced},
+    };
     use aeris_trading_runtime::clock::ManualClock;
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU64, NonZeroUsize};
+
+    #[test]
+    fn failed_runtime_series_keeps_its_consumer_fence_in_the_pane_mailbox() {
+        let (mut pane, record) = super::super::worker_endpoint(
+            1,
+            2,
+            super::super::default_hyperliquid_product(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let epoch = epochs.next();
+        let failed = |generation| Fenced {
+            epoch,
+            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                consumer_id: MarketConsumerId(NonZeroU64::new(41).expect("consumer")),
+                generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+                series: None,
+                state: super::super::SeriesLoadState::Failed,
+                detail: Some("market unavailable".into()),
+                presentation: None,
+            }),
+        };
+        deliver_runtime_series_state(&record.endpoint, failed(6)).expect("retired failure");
+        deliver_runtime_series_state(&record.endpoint, failed(7)).expect("current failure");
+        let (queued, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            queued.as_slice(),
+            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                epoch: received_epoch,
+                value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                    state: super::super::SeriesLoadState::Failed,
+                    detail: Some(detail),
+                    ..
+                }),
+            })] if *received_epoch == epoch && detail == "market unavailable"
+        ));
+    }
+
+    #[test]
+    fn demand_error_keeps_its_consumer_fence_and_drops_retired_generations() {
+        let (mut pane, record) = super::super::worker_endpoint(
+            1,
+            2,
+            super::super::default_hyperliquid_product(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let epoch = epochs.next();
+        let failure = |generation| Fenced {
+            epoch,
+            value: MarketRuntimeEvent::DemandError(super::super::MarketDemandError {
+                consumer_id: MarketConsumerId(NonZeroU64::new(41).expect("consumer")),
+                generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+                scope: super::super::MarketDemandErrorScope::Series,
+                code: super::super::EngineFaultCode::Retryable,
+                stage: super::super::FailureStage::ProviderHistory,
+                detail: "coverage unavailable".into(),
+                series: None,
+                cause: "fixture".into(),
+                elapsed_millis: None,
+            }),
+        };
+        deliver_runtime_demand_error(&record.endpoint, failure(6)).expect("retired");
+        deliver_runtime_demand_error(&record.endpoint, failure(7)).expect("current");
+        assert!(deliver_runtime_demand_error(&record.endpoint, failure(8)).is_err());
+        let (queued, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            queued.as_slice(),
+            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                epoch: received_epoch,
+                value: MarketRuntimeEvent::DemandError(_),
+            })] if *received_epoch == epoch
+        ));
+    }
 
     #[test]
     fn initial_and_replacement_selections_accept_one_exact_reply_each() {
