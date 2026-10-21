@@ -61,6 +61,11 @@ impl<Message> BoundedUiQueue<Message> {
     }
 
     #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.messages.len() >= self.capacity.get()
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }

@@ -1915,13 +1915,25 @@ impl AerisChartView {
 
     /// Enqueues one replay update for the next chart frame.
     ///
+    /// Only a drawn frame drains the bridge, so a chart that is not on screen (a pane
+    /// behind a maximized one, or behind another page) fills it. A full bridge
+    /// is applied to the engine here before the update joins it, which keeps an undrawn
+    /// chart current instead of discarding its updates for a full resnapshot.
+    ///
     /// # Errors
     ///
-    /// Returns the unchanged update if the bounded bridge is full.
+    /// Returns the unchanged update when no market series is installed.
     pub fn try_queue_replay_update(
         &mut self,
         update: ReplayStreamUpdate,
     ) -> Result<(), Box<ReplayStreamUpdate>> {
+        if self
+            .data_bridge
+            .as_ref()
+            .is_some_and(ChartDataBridge::is_full)
+        {
+            let _ = self.apply_pending_data();
+        }
         let Some(bridge) = &mut self.data_bridge else {
             return Err(Box::new(update));
         };
@@ -2041,8 +2053,7 @@ impl AerisChartView {
     /// Applies every replay command the bridge is holding.
     ///
     /// The frame does this before painting. A host that drives the chart without
-    /// a frame — a headless test, for instance — has to call it itself, because
-    /// the bridge queue is bounded and stops accepting once it is full.
+    /// a frame, such as a headless test, calls it to read the queued updates back.
     pub fn apply_queued_replay_updates(&mut self) {
         let _ = self.apply_pending_data();
     }

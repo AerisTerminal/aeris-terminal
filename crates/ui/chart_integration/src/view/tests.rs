@@ -1803,6 +1803,46 @@ fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
 }
 
 #[test]
+fn undrawn_chart_applies_a_full_bridge_instead_of_requesting_a_resnapshot() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+        .expect("embedded replay validates");
+    let mut chart = AerisChartView::with_replay(&replay);
+    let source = replay.bars().last().cloned().expect("tail exists");
+    let mut bar = *source.value();
+    // Several times the bridge capacity, with no frame draining it in between.
+    for revision in 1..=200_u64 {
+        bar.close = bar.close.saturating_add(1);
+        bar.high = bar.high.max(bar.close);
+        let mut provenance = source.provenance().clone();
+        provenance.event_id = format!("revision-{revision}");
+        let update = ReplayTailUpdate::try_new(
+            Provenanced::new(bar, provenance),
+            replay.evidence().publication_generation + revision,
+            true,
+            ReplayTailOperation::Revise,
+        )
+        .expect("revision validates");
+        chart
+            .try_queue_replay_update(ReplayStreamUpdate::Tail(update))
+            .expect("an undrawn chart keeps accepting live updates");
+    }
+
+    let metrics = chart.replay_bridge_metrics();
+    assert_eq!(metrics.queue_overflows, 0);
+    assert_eq!(metrics.resnapshot_requests, 0);
+    assert!(!metrics.recovery_pending);
+    assert!(!metrics.snapshot_required);
+    chart.apply_queued_replay_updates();
+    assert_eq!(
+        chart
+            .latest_market_provenance()
+            .map(|provenance| provenance.event_id.as_str()),
+        Some("revision-200")
+    );
+}
+
+#[test]
 fn live_bars_stay_whitespace_under_a_footprint_and_return_on_candles() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })

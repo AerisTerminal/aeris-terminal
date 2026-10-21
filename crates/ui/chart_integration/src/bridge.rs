@@ -303,6 +303,12 @@ impl ChartDataBridge {
         self.queue.len()
     }
 
+    /// Returns whether the next push would overflow the bounded queue.
+    #[must_use]
+    pub(crate) fn is_full(&self) -> bool {
+        self.queue.is_full()
+    }
+
     /// Returns whether sequence state requires a replacement snapshot.
     #[must_use]
     pub(crate) fn requires_snapshot(&self) -> bool {

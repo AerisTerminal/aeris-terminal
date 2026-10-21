@@ -3637,7 +3637,7 @@ impl WorkspaceSurface {
                     let accepted = chart.try_queue_replay_update(update).is_ok();
                     if !accepted {
                         diagnostic!(
-                            "bounded chart queue overflowed; canonical resnapshot required"
+                            "chart rejected a market update; canonical resnapshot required"
                         );
                     }
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
