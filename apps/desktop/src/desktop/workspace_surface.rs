@@ -3873,32 +3873,20 @@ impl WorkspaceSurface {
         diagnostic!("market worker invalidated the stream");
     }
 
-    /// Reports whether an instrument handoff must keep the chart covered.
+    /// Reports whether a selection handoff must keep the chart covered.
     ///
-    /// Before the replacement snapshot arrives, the pixels belong to the series
-    /// the trader just left. An interval-only switch retains that instrument
-    /// on screen while its replacement history loads; only a different
-    /// instrument needs the neutral cover until its handoff is current.
+    /// Until the replacement's covering snapshot and its readiness have both
+    /// arrived, the pixels belong to the series the trader just left, whether
+    /// the instrument or only the interval changed. Showing them uncovered
+    /// presents the old series as the new selection and then pops the
+    /// replacement in without any loading state.
     pub(super) fn showing_superseded_series(&self) -> bool {
-        let displayed_product = if self.chart_pane_controller.chart_needs_replacement()
-            || (self.rithmic_previous_selection.is_some() && self.chart_state != ChartState::Ready)
-        {
-            self.rithmic_previous_selection
-                .as_ref()
-                .map_or(self.product.as_ref(), |(product, _)| product.as_ref())
-        } else {
-            self.product.as_ref()
-        };
-        let selected_product = self
-            .chart_pane_controller
-            .pending_product()
-            .or(self.product.as_ref());
         super::provider_presentation(self.provider).is_some()
             && self.chart.is_some()
             && (self.chart_pane_controller.has_pending_selection()
                 || self.chart_pane_controller.chart_needs_replacement()
-                || self.rithmic_previous_selection.is_some())
-            && selected_product != displayed_product
+                || (self.rithmic_previous_selection.is_some()
+                    && self.chart_state != ChartState::Ready))
     }
 
     fn set_chart_state(&mut self, state: ChartState, _message: String, cx: &mut Context<Self>) {

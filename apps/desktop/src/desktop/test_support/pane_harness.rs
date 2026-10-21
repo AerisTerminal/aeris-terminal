@@ -861,7 +861,7 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
 }
 
 #[gpui::test]
-fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut TestAppContext) {
+fn pane_harness_interval_switch_covers_chart_until_replacement(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let original = cx.read(|cx| {
@@ -889,7 +889,7 @@ fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut
     cx.read(|cx| {
         let pane = harness.pane.read(cx);
         assert!(
-            !pane.showing_superseded_series(),
+            pane.showing_superseded_series(),
             "pending interval-only switch"
         );
         assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
@@ -904,7 +904,7 @@ fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut
     cx.read(|cx| {
         let pane = harness.pane.read(cx);
         assert!(
-            !pane.showing_superseded_series(),
+            pane.showing_superseded_series(),
             "committed interval-only switch"
         );
         assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
@@ -1972,7 +1972,11 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
     });
 }
 
-fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppContext) {
+fn check_switch_cover_through_ready(
+    interval_only: bool,
+    snapshot_first: bool,
+    cx: &mut TestAppContext,
+) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let mut replacement = cx.read(|cx| {
@@ -1983,11 +1987,20 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
             .clone()
             .expect("original instrument")
     });
-    replacement.instrument_id = "hyperliquid:perp:ETH".into();
-    replacement.provider_symbol = "ETH".into();
-    replacement.display_symbol = "ETH-USDC".into();
+    let replacement_interval = if interval_only {
+        ChartInterval::Minute5
+    } else {
+        replacement.instrument_id = "hyperliquid:perp:ETH".into();
+        replacement.provider_symbol = "ETH".into();
+        replacement.display_symbol = "ETH-USDC".into();
+        ChartInterval::Minute1
+    };
     harness.pane.update(cx, |pane, cx| {
-        assert!(pane.select_installed_instrument(&replacement, cx));
+        if interval_only {
+            assert!(pane.select_interval(replacement_interval, cx));
+        } else {
+            assert!(pane.select_installed_instrument(&replacement, cx));
+        }
     });
     let sequence = harness
         .commands
@@ -1998,7 +2011,7 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
             MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
             _ => None,
         })
-        .expect("instrument selection");
+        .expect("replacement selection");
     harness
         .publications
         .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
@@ -2008,7 +2021,7 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
         assert!(pane.showing_superseded_series());
     });
 
-    let covering = harness.fixture_snapshot(&replacement, ChartInterval::Minute1, sequence, 13);
+    let covering = harness.fixture_snapshot(&replacement, replacement_interval, sequence, 13);
     let ready = harness.fixture_readiness(
         sequence,
         aeris_contracts::SeriesLoadState::Live,
@@ -2026,7 +2039,7 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
             assert_eq!(
                 pane.showing_superseded_series(),
                 step == 0,
-                "cover requires both readiness and covering bars; snapshot_first={snapshot_first}, step={step}"
+                "cover requires both readiness and covering bars; interval_only={interval_only}, snapshot_first={snapshot_first}, step={step}"
             );
             if step == 1 {
                 assert_eq!(pane.chart_state, ChartState::Ready);
@@ -2037,12 +2050,22 @@ fn check_instrument_cover_through_ready(snapshot_first: bool, cx: &mut TestAppCo
 
 #[gpui::test]
 fn pane_harness_instrument_cover_waits_for_snapshot_after_ready(cx: &mut TestAppContext) {
-    check_instrument_cover_through_ready(false, cx);
+    check_switch_cover_through_ready(false, false, cx);
 }
 
 #[gpui::test]
 fn pane_harness_instrument_cover_waits_for_ready_after_snapshot(cx: &mut TestAppContext) {
-    check_instrument_cover_through_ready(true, cx);
+    check_switch_cover_through_ready(false, true, cx);
+}
+
+#[gpui::test]
+fn pane_harness_interval_cover_waits_for_snapshot_after_ready(cx: &mut TestAppContext) {
+    check_switch_cover_through_ready(true, false, cx);
+}
+
+#[gpui::test]
+fn pane_harness_interval_cover_waits_for_ready_after_snapshot(cx: &mut TestAppContext) {
+    check_switch_cover_through_ready(true, true, cx);
 }
 
 fn assert_chart_presentation(
