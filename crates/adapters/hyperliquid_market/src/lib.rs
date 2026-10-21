@@ -13,6 +13,7 @@
 //! depth honestly and never advertises full-depth or order-level data.
 
 mod book;
+mod budget;
 mod candles;
 mod context;
 mod decimal;

@@ -1,9 +1,10 @@
 //! Bounded background HTTP work over the public info endpoint.
 //!
 //! All calls are unauthenticated `POST /info` requests with explicit byte
-//! and time bounds. The engine runs them on bounded background workers with
-//! cancellation. Only the catalog bundle fans out, over a fixed number of
-//! scoped threads, because its independent metadata calls dominate startup.
+//! and time bounds, each spending from the process-wide request weight budget.
+//! The engine runs them on bounded background workers with cancellation. Only
+//! the catalog bundle fans out, over a fixed number of scoped threads, because
+//! its independent metadata calls dominate startup.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -41,8 +42,8 @@ impl Default for HyperliquidHttpConfig {
 ///
 /// # Errors
 ///
-/// Returns an error for oversized requests, transport failures, or
-/// over-bound or unreadable responses.
+/// Returns an error for oversized requests, an exhausted request budget,
+/// transport failures, or over-bound or unreadable responses.
 pub fn post_info(
     body: &serde_json::Value,
     config: HyperliquidHttpConfig,
@@ -52,6 +53,7 @@ pub fn post_info(
     if raw.len() > 64 * 1024 {
         return Err("hyperliquid info request is too large".to_string());
     }
+    crate::budget::spend_info_request(None)?;
     // Catalog requests use the same bounded DNS/transport implementation.
     // This shared agent has no mutable request token; history owns its own client.
     let agent =
@@ -71,7 +73,12 @@ fn post_with_agent(
         .build()
         .header("Content-Type", "application/json")
         .send(raw)
-        .map_err(info_request_error)?;
+        .map_err(|error| {
+            if matches!(error, ureq::Error::StatusCode(429)) {
+                crate::budget::provider_limited();
+            }
+            info_request_error(error)
+        })?;
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -385,6 +392,7 @@ impl HyperliquidHttpClient {
             return Err("hyperliquid candle request is invalid".to_string());
         }
         let interval = hyperliquid_interval_for_period(request.period)?;
+        crate::budget::spend_info_request(Some(stop))?;
         let bytes = post_with_agent(
             self.0.agent(),
             serde_json::json!({
@@ -405,13 +413,15 @@ impl HyperliquidHttpClient {
             .map_err(|_| "hyperliquid info response is malformed".to_string())?;
         let payload = serde_json::value::RawValue::from_string(text)
             .map_err(|_| "hyperliquid info response is malformed".to_string())?;
-        decode_candle_page(
+        let page = decode_candle_page(
             &payload,
             request.period,
             request.price_scale,
             request.quantity_scale,
             request.now_millis,
-        )
+        )?;
+        crate::budget::charge_candles(page.bars.len() + usize::from(page.forming.is_some()));
+        Ok(page)
     }
 }
 

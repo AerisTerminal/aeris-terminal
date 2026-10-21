@@ -212,6 +212,9 @@ the check.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;
   the Rithmic adapter alone retries transport, while its non-transport session replacements
   wait at least one second. Never stack a coordinator transport retry on that adapter.
+- Every Hyperliquid info request spends from the adapter's one process-wide weight budget
+  (`hyperliquid_market/src/budget.rs`: 1,000 of the documented 1,200 weight per minute per address);
+  never send an info request around it.
 - Generic market-service lifecycle, history, calendar, quote, outbox, coordinator, realtime,
   runtime and publication code must not contain provider identity literals. Provider-specific
   capabilities and user-facing presentation metadata are declared with provider registration;
