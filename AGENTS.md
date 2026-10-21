@@ -388,6 +388,14 @@ Production release publication is disabled while the Aeris domain and AWS backen
 
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 
+Mac tester builds are shared by link, not published. After the fix is pushed to `main`, run
+`gh workflow run macos_preview.yml --ref main -f rithmic_kit=true`, check that its smoke launch
+passed, and download the `aeris-terminal-rithmic-macos-arm64-preview` DMG artifact. Upload that
+DMG to WeTransfer in the Factory desktop browser pane, where the maintainer's account is signed in.
+Choose "Create link" instead of "Send email", then give the maintainer the `we.tl` link to forward.
+A free link expires after three days, so each new build gets a new link. If something fails, the
+tester sends back `~/Library/Application Support/Aeris/logs/aeris.log`.
+
 ## Rust and documentation conventions
 
 - Rust edition/toolchain is repository-pinned; dependencies stay pinned to intentional versions.
