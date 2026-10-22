@@ -27,6 +27,8 @@ mod risk_owner;
 pub(crate) use groups::chart_bracket_template;
 #[path = "../venue/broker.rs"]
 mod broker;
+#[path = "../venue/scales.rs"]
+mod scales;
 
 use self::ledger::{CostBasis, FillAccounting, TradeCycle};
 use self::market::feed::{MarketFeedInbox, QuoteBook};

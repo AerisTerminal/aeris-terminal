@@ -1686,3 +1686,65 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
         0
     );
 }
+
+#[test]
+fn venue_reports_are_brought_to_the_owner_scales_exactly() {
+    let (_directory, service, _receiver) = setup("venue-scales");
+    observe_broker(&service);
+    let inbox = service.demo_venue_inbox();
+    // A broker wire carries 90.00 as 90 and one contract at a finer quantity scale.
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Fill(BrokerFill {
+                price: point(90, 0),
+                quantity: point(10, 1),
+                ..fill("d1", "801", 1)
+            }),
+        ))
+        .expect("fill");
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Balance {
+                balance: point(1_000_005, 1),
+            },
+        ))
+        .expect("balance");
+    assert_eq!(service.status().expect("status").venue_error, None);
+    let position = broker_position(&service).expect("position");
+    assert_eq!(
+        (position.net_quantity, position.average_entry_price),
+        (point(1, 0), Some(point(9_000, 2)))
+    );
+    let balance = service
+        .snapshot()
+        .expect("snapshot")
+        .account_pnl
+        .into_iter()
+        .find(|pnl| pnl.account_id == broker().id)
+        .and_then(|pnl| pnl.balance);
+    assert_eq!(balance, Some(point(10_000_050, 2)));
+
+    // A price finer than the instrument's grid is refused, never rounded.
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Fill(BrokerFill {
+                price: point(90_001, 3),
+                ..fill("d2", "802", 1)
+            }),
+        ))
+        .expect("pushed");
+    let error = service.status().expect("status").venue_error;
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("fill price")),
+        "{error:?}"
+    );
+    assert_eq!(
+        broker_position(&service).map(|position| position.net_quantity),
+        Some(point(1, 0))
+    );
+}

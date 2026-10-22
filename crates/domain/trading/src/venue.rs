@@ -3,9 +3,11 @@
 //! The trading owner sends [`VenueRequest`]s and applies [`VenueEvent`]s. The relay owns
 //! the broker connection, translates both to and from one broker's protocol, and holds
 //! no order, fill, position or account state. Accounts are netted: one position per
-//! account and instrument. Prices and quantities are fixed-point at the instrument's
-//! scales and money at the broker's reported scale; broker identifiers are opaque strings
-//! whose ordering carries no meaning.
+//! account and instrument. Requests carry prices and quantities at the instrument's
+//! scales. Reports carry them fixed-point at any scale that holds the broker's value
+//! exactly, and money at the broker's precision; the owner converts both to its own scales
+//! only when the value is preserved. Broker identifiers are opaque strings whose ordering
+//! carries no meaning.
 
 use crate::{
     ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingValidationError,

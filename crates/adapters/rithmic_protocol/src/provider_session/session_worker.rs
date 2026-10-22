@@ -968,10 +968,7 @@ pub(super) fn selected_instrument(
     {
         return Err(malformed());
     }
-    let instrument_id = format!(
-        "instrument:rithmic:{}:{}",
-        reference.exchange, reference.symbol
-    );
+    let instrument_id = crate::rithmic_instrument_id(&reference.exchange, &reference.symbol);
     let price_scale = reference.price_precision.unwrap_or(0);
     let price_increment = reference
         .minimum_price_change

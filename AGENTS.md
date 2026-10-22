@@ -270,6 +270,12 @@ the check.
   data, or raw private payload dumps.
 - Rithmic production credentials never enter source, chat, logs, CI, or environment files. Native vault
   storage is the credential boundary. Live/test provider sessions must respect provider concurrency limits.
+- Broker orders reach Rithmic only through the venue relay in `market_runtime::rithmic_venue`, started
+  once by `MarketService::attach_broker_venue` on its `aeris-broker-venue` worker. It reads the same
+  vault login, routes only demo logins (the Rithmic Test gateway and Rithmic Paper Trading) and refuses a
+  live login before opening an order plant. Each connection attaches a new venue session generation with
+  Rithmic's `VenueCapabilities`, so the owner reconciles every account after a reconnect; the desktop
+  only connects the trading owner's attach and inbox handles to it.
 
 The licensed Rithmic Provider Kit remains outside Git. The canonical local copy is
 `C:\axiusflow-deps\provider-kit`; do not vendor or modify that permanent copy.

@@ -29,6 +29,12 @@ impl fmt::Debug for RithmicAccountKey<'_> {
 pub struct RithmicAccountRef(String);
 
 impl RithmicAccountRef {
+    /// Wraps an account identifier the caller already holds.
+    #[must_use]
+    pub fn new(account_id: impl Into<String>) -> Self {
+        Self(account_id.into())
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

@@ -20,6 +20,7 @@ mod decimal;
 mod endpoint;
 mod history;
 mod history_adapter;
+mod instrument_id;
 mod market;
 mod network;
 mod order_plant;
@@ -63,6 +64,7 @@ pub use history_adapter::{
     collect_rithmic_session_history, collect_rithmic_trade_history, covering_snapshot_from_page,
     decode_rithmic_history_bar, rithmic_chart_aggregation,
 };
+pub use instrument_id::{parse_rithmic_instrument_id, rithmic_instrument_id};
 pub use market::{
     DecodedMarketMessage, DepthByOrderEndEvent, DepthByOrderMutation, DepthByOrderMutationKind,
     DepthByOrderSide, DepthByOrderSnapshotLevel, DepthByOrderSnapshotMessage,

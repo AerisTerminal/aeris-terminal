@@ -56,9 +56,11 @@ pub struct RithmicLoginSummary {
 }
 
 pub(super) struct RithmicLogin {
-    revision: RithmicLoginRevision,
+    pub(super) revision: RithmicLoginRevision,
     discovering: AtomicBool,
     signing_in: AtomicBool,
+    /// Whether the broker venue relay has started; it may start once.
+    pub(super) venue_attached: AtomicBool,
 }
 
 impl RithmicLogin {
@@ -67,6 +69,7 @@ impl RithmicLogin {
             revision,
             discovering: AtomicBool::new(false),
             signing_in: AtomicBool::new(false),
+            venue_attached: AtomicBool::new(false),
         }
     }
 }

@@ -1463,8 +1463,10 @@ impl ProviderRuntimeEvent {
     }
 }
 
+mod broker_venue;
 pub mod calendar;
 mod rithmic_login;
+pub use broker_venue::BrokerVenueLink;
 mod runtime;
 pub use rithmic_login::{RithmicLoginSummary, RithmicServer};
 use runtime::join_runtime_workers;

@@ -16,6 +16,7 @@ mod hyperliquid_realtime;
 pub mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
+mod rithmic_venue;
 pub mod study;
 
 pub use cadence::{
@@ -316,6 +317,6 @@ pub use market_service::descriptors::{
     ProviderDescriptor, ResolvedSeries, SelectionError, SelectionOutcome, SelectionRequest,
 };
 pub use market_service::{
-    MarketService, MarketServiceStatus, QuoteSubscription, RithmicLoginSummary, RithmicServer,
-    built_in_provider_presentations, published_provider_descriptors,
+    BrokerVenueLink, MarketService, MarketServiceStatus, QuoteSubscription, RithmicLoginSummary,
+    RithmicServer, built_in_provider_presentations, published_provider_descriptors,
 };

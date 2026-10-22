@@ -146,7 +146,7 @@ impl RithmicLoginRevision {
         self.0.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn current(&self) -> u64 {
+    pub(crate) fn current(&self) -> u64 {
         self.0.load(Ordering::Acquire)
     }
 }

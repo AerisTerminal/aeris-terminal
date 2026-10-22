@@ -591,7 +591,7 @@ impl TradingCore {
         let Some(account_id) = self.venue_account(&event.broker_account) else {
             return Ok(());
         };
-        match &event.update {
+        match &self.owner_scaled(&account_id, &event.update)? {
             VenueUpdate::AccountObserved(_) => Ok(()),
             VenueUpdate::Order {
                 order,

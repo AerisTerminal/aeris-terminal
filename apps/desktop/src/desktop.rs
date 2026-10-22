@@ -5826,6 +5826,9 @@ pub(super) fn run(
             "The trading market feed could not start.",
         );
     }
+    if let Err(error) = attach_broker_venue(&trading, &services.market) {
+        diagnostic!("Aeris broker venue could not attach: {error}");
+    }
     let lifecycle = DesktopLifecycle::new(services, context, instance_lock);
     #[cfg(debug_assertions)]
     if force_diagnostics_panic {
@@ -5845,6 +5848,20 @@ fn attach_trading_market_feed(
                 diagnostic!("Aeris trading market feed rejected an event: {error}");
             }
         }),
+    })
+}
+
+/// Broker orders route only while the market runtime's venue relay is attached; without
+/// it the trading owner refuses them, so a failed attach is reported, not fatal.
+fn attach_broker_venue(
+    trading: &aeris_trading_runtime::TradingService,
+    market: &aeris_market_runtime::MarketService,
+) -> Result<(), String> {
+    let owner = trading.clone();
+    let inbox = trading.demo_venue_inbox();
+    market.attach_broker_venue(aeris_market_runtime::BrokerVenueLink {
+        attach: Box::new(move |capabilities| owner.attach_demo_venue(capabilities)),
+        events: Box::new(move |event| inbox.push(event)),
     })
 }
 
