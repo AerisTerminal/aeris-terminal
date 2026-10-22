@@ -631,7 +631,7 @@ const THEME_PREVIEW_WINDOW_TOP: f32 = 22.0;
 const THEME_PREVIEW_WINDOW_LEFT: f32 = 16.0;
 const THEME_PREVIEW_BADGE_SIZE: f32 = 18.0;
 
-/// A tile in the previewed mode's own tokens: a `surface-raised` backdrop with one sample
+/// A tile in the previewed mode's own tokens: a `surface-secondary` backdrop with one sample
 /// window on `surface` showing "Aa" in that mode's text color, and a `primary` check badge on
 /// the selected mode. Colors resolve over the mode's `surface` because its dark tints are
 /// translucent and the tile must look the same in either menu. GPUI clips to rectangles, so
@@ -644,7 +644,7 @@ fn theme_preview(
 ) -> Div {
     let colors = preview.colors;
     let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-    let tile = colors.surface_raised.over(colors.surface);
+    let tile = colors.surface_secondary.over(colors.surface);
     let hovered = colors.hover_bg.over(tile);
     let badge = selected.then(|| {
         div()

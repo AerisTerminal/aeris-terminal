@@ -472,8 +472,8 @@ pub(super) fn persisted_chart_appearance(
     }
 }
 
-/// The dashed style Aeris Charts drew the crosshair with by default before it became solid.
-/// Layouts saved without style provenance stored it as a plain number.
+/// The dashed style Aeris Charts drew the crosshair with by default when layouts were saved
+/// without style provenance; those layouts stored it as a plain number.
 const LEGACY_DEFAULT_CROSSHAIR_STYLE: u8 = 2;
 
 /// A style the user chose survives; one that only recorded the chart default, including the

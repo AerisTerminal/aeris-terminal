@@ -59,19 +59,17 @@
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
-  --surface-subtle: #fafafa;
-  /* Raised: the panels inside popup menus, and placeholder bars. */
-  --surface-raised: #f0f0f0;
   /* Floating layers (menus, dialogs, tooltips) */
   --surface-popover: #ffffff;
 
   /* Borders */
-  --border: #0a0a0a1a;
+  --border: #0a0a0a33;
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
   /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
-  --border-popover: #0a0a0a33;
+  --border-popover: var(--border);
   --border-popover-highlight: #ffffffcc;
+  --border-width: 1px;
 
   /* Text */
   --text-default: #0a0a0a;
@@ -184,30 +182,29 @@
 
 .dark {
   /* Surfaces */
-  --surface: #171717;
-  --surface-secondary: #fafafa0f;
-  --surface-subtle: #fafafa0a;
-  --surface-raised: #fafafa14;
-  --surface-popover: #262626;
+  --surface: #000000;
+  --surface-secondary: #fafafa0a;
+  --surface-popover: #010101;
 
   /* Borders */
-  --border: #fafafa1a;
+  --border: #2E2E2E;
   --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
   --border-popover: #000000cc;
   --border-popover-highlight: #ffffff1a;
+  --border-width: 1px;
 
   /* Text */
-  --text-default: #fafafa;
+  --text-default: #ededed;
   --text-secondary: #fafafa8c;
-  --text-muted: #fafafa40;
+  --text-muted: #fafafa59;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
   --text-interactive: #fafafa8c;
-  --text-hover: #fafafa;
-  --text-active: #fafafa;
+  --text-hover: #ededed;
+  --text-active: #ededed;
 
   /* Interaction states */
   --hover-bg: #fafafa13;
@@ -216,7 +213,7 @@
 
   /* Icons */
   --icon: #fafafa8c;
-  --icon-active: #fafafa;
+  --icon-active: #ededed;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;

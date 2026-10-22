@@ -386,8 +386,7 @@ platform_color_registry!(theme_colors);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeDimensions {
     pub app_header_height: f32,
-    /// Width of every control and layer edge. The Theme System draws all borders at 1px and
-    /// declares no border-width token.
+    /// Width of every control and layer edge: the `--border-width` token.
     pub border_width: f32,
     /// Width of the `border-popover-highlight` inner edge. The Theme System states it in
     /// prose ("a 1px outer edge plus a 1px inner highlight") rather than as a token.
@@ -414,7 +413,7 @@ impl AerisTheme {
             },
             dimensions: ThemeDimensions {
                 app_header_height: 44.0,
-                border_width: 1.0,
+                border_width: f32::from(BORDER_WIDTH),
                 popover_highlight_width: 1.0,
             },
         }
@@ -541,24 +540,27 @@ mod tests {
             light.surface_secondary,
             ThemeColor::from_rgb8(250, 250, 250)
         );
-        assert_eq!(light.border_secondary, light.border);
-        assert_eq!(light.border, ThemeColor::from_rgba8(10, 10, 10, 26));
+        assert_eq!(light.border, ThemeColor::from_rgba8(10, 10, 10, 51));
+        assert_eq!(
+            light.border_secondary,
+            ThemeColor::from_rgba8(10, 10, 10, 26)
+        );
         assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(dark.surface, ThemeColor::from_rgb8(23, 23, 23));
+        assert_eq!(dark.surface, ThemeColor::from_rgb8(0, 0, 0));
         assert_eq!(
             dark.surface_secondary,
-            ThemeColor::from_rgba8(250, 250, 250, 15)
+            ThemeColor::from_rgba8(250, 250, 250, 10)
         );
-        assert_eq!(dark.border, ThemeColor::from_rgba8(250, 250, 250, 26));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(46, 46, 46));
         assert_eq!(
             dark.border_secondary,
             ThemeColor::from_rgba8(250, 250, 250, 38)
         );
         assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
-        assert_eq!(dark.text_default, ThemeColor::from_rgb8(250, 250, 250));
+        assert_eq!(dark.text_default, ThemeColor::from_rgb8(237, 237, 237));
         assert_eq!(
             light.text_secondary,
             ThemeColor::from_rgba8(10, 10, 10, 148)
@@ -607,8 +609,8 @@ mod tests {
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
-        assert_eq!(token_source(&light_tokens, "border"), "#0a0a0a1a");
-        assert_eq!(token_source(&dark_tokens, "surface"), "#171717");
+        assert_eq!(token_source(&light_tokens, "border"), "#0a0a0a33");
+        assert_eq!(token_source(&dark_tokens, "surface"), "#000000");
         assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa13");
         assert_eq!(token_source(&light_tokens, "text-muted"), "#0a0a0a40");
         assert_eq!(token_source(&light_tokens, "text-secondary"), "#0a0a0a94");
@@ -680,8 +682,8 @@ mod tests {
         let dark = AerisTheme::dark().colors;
 
         assert_eq!(light.surface_popover, ThemeColor::from_rgb8(255, 255, 255));
-        assert_eq!(dark.surface_popover, ThemeColor::from_rgb8(38, 38, 38));
-        assert_eq!(light.border_popover, ThemeColor::from_rgba8(10, 10, 10, 51));
+        assert_eq!(dark.surface_popover, ThemeColor::from_rgb8(1, 1, 1));
+        assert_eq!(light.border_popover, light.border);
         assert_eq!(dark.border_popover, ThemeColor::from_rgba8(0, 0, 0, 204));
         assert_eq!(
             light.border_popover_highlight,
@@ -697,7 +699,11 @@ mod tests {
             assert!((popover.alpha() - 1.0).abs() < f32::EPSILON);
         }
         let dark_tokens = AerisTheme::dark().color_tokens();
-        assert_eq!(token_source(&dark_tokens, "surface-popover"), "#262626");
+        assert_eq!(token_source(&dark_tokens, "surface-popover"), "#010101");
+        assert_eq!(
+            token_source(&AerisTheme::light().color_tokens(), "border-popover"),
+            "var(--border)"
+        );
     }
 
     /// `--ring-primary` is the only focus style; the retired neutral and per-action rings must
@@ -771,9 +777,9 @@ mod tests {
         assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(255, 172, 191));
         assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(191, 35, 71));
         assert_eq!(light.book_fill_text, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(15, 53, 92));
+        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(0, 39, 77));
         assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(51, 139, 228));
-        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(104, 31, 48));
+        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(89, 16, 33));
         assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 78, 118));
         assert_eq!(dark.book_fill_text, ThemeColor::from_rgb8(255, 255, 255));
 
@@ -852,7 +858,7 @@ mod tests {
         let css = include_str!("../platform.css");
         assert!((AerisTheme::light().dimensions.border_width - 1.0).abs() < f32::EPSILON);
         assert!((AerisTheme::dark().dimensions.border_width - 1.0).abs() < f32::EPSILON);
-        assert!(!css.contains("--border-width"));
+        assert_eq!(css.matches("--border-width: 1px;").count(), 2);
         assert!(css.contains("a 1px outer edge plus a 1px inner highlight"));
     }
 

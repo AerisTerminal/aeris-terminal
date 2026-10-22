@@ -11,7 +11,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   Do not derive a shade with `.with_alpha(..)`; if a state has no token, add one here first.
 - Radii come from `RadiusToken` (`Sm` = `--radius-small`, `Default`, `Medium`, `Compact`, `Full` = `--radius-large`),
   never `rounded(px(N))`.
-- Borders are 1px and use `theme.dimensions.border_width`, never `border_1()` or `px(1.0)`.
+- Borders are 1px and use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
 - Neutral text has three roles: `text-default` for content and labels, `text-secondary` for
   supporting text (AA 4.5:1 on every light and dark surface), and `text-muted` for placeholders and
   disabled text. Interactive items use `text-interactive` / `text-hover` / `text-active`.
@@ -22,8 +22,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
-- Dark `surface-secondary`, `surface-subtle` and `surface-raised` are translucent tints of `surface`.
-  They only appear over an opaque `surface` (the window root) or `surface-popover`; never use them
+- Dark `surface-secondary` is a translucent tint of `surface`.
+  It only appears over an opaque `surface` (the window root) or `surface-popover`; never use it
   as the fill of a layer that floats over other content.
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) use
   `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
@@ -106,10 +106,10 @@ Pass glyphs through `leading_icon` so the row colours them.
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
 committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Primary`.
 
-**`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with
-no border; unselected tabs have no fill and `text-interactive` text, and hover / press change the text
-only (`text-hover` / `text-active`, never `hover-bg`); the selected tab is raised onto `surface` with a
-`border` outline and `text-active`. Use for navigation tabs and one-tap presets such as order quantities;
+**`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: tabs side by side
+(`gap-4`) over a 1px `border` baseline, with no track fill; each tab has no fill, a transparent 2px
+underline and `text-interactive` text, and hover / press change the text only (`text-hover` /
+`text-active`, never `hover-bg`); the selected tab's underline and text turn `primary`. Use for navigation tabs and one-tap presets such as order quantities;
 a single-choice setting in a settings panel or indicator dialog is a dropdown instead. `compact()` on both the
 list and its tabs in dense panel headers (bottom panel, side panels);
 `TabList::sidebar` + `Tab::sidebar` for vertical section navigation.
@@ -133,19 +133,17 @@ while invalid.
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
-  --surface-subtle: #fafafa;
-  /* Raised: the panels inside popup menus, and placeholder bars. */
-  --surface-raised: #f0f0f0;
   /* Floating layers (menus, dialogs, tooltips) */
   --surface-popover: #ffffff;
 
   /* Borders */
-  --border: #0a0a0a1a;
+  --border: #0a0a0a33;
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
   /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
-  --border-popover: #0a0a0a33;
+  --border-popover: var(--border);
   --border-popover-highlight: #ffffffcc;
+  --border-width: 1px;
 
   /* Text */
   --text-default: #0a0a0a;
@@ -258,30 +256,29 @@ while invalid.
 
 .dark {
   /* Surfaces */
-  --surface: #171717;
-  --surface-secondary: #fafafa0f;
-  --surface-subtle: #fafafa0a;
-  --surface-raised: #fafafa14;
-  --surface-popover: #262626;
+  --surface: #000000;
+  --surface-secondary: #fafafa0a;
+  --surface-popover: #010101;
 
   /* Borders */
-  --border: #fafafa1a;
+  --border: #2E2E2E;
   --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
   --border-popover: #000000cc;
   --border-popover-highlight: #ffffff1a;
+  --border-width: 1px;
 
   /* Text */
-  --text-default: #fafafa;
+  --text-default: #ededed;
   --text-secondary: #fafafa8c;
-  --text-muted: #fafafa40;
+  --text-muted: #fafafa59;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
   --text-interactive: #fafafa8c;
-  --text-hover: #fafafa;
-  --text-active: #fafafa;
+  --text-hover: #ededed;
+  --text-active: #ededed;
 
   /* Interaction states */
   --hover-bg: #fafafa13;
@@ -290,7 +287,7 @@ while invalid.
 
   /* Icons */
   --icon: #fafafa8c;
-  --icon-active: #fafafa;
+  --icon-active: #ededed;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;

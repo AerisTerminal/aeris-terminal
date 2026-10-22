@@ -415,7 +415,7 @@ fn table_row(
             .flex_none()
             .px(px(6.0))
             .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-            .bg(gpui_color(colors.surface_raised))
+            .bg(gpui_color(colors.surface_secondary))
             .text_xs()
             .text_color(gpui_color(colors.text_secondary))
             .child(kind.label())

@@ -4188,9 +4188,10 @@ fn saved_crosshair_style_follows_the_chart_default_unless_the_user_chose_one() {
     let restored = restored_chart_appearance(&legacy).expect("legacy pick");
     assert_eq!(restored.crosshair_style, 3);
 
-    // With provenance, an explicit dashed pick survives.
+    // With provenance, an explicit pick other than the default survives.
+    let picked_style = (default_style + 1) % 5;
     let picked = ChartAppearanceSettings {
-        crosshair_style: 2,
+        crosshair_style: picked_style,
         ..ChartAppearanceSettings::default()
     };
     let persisted = persisted_chart_appearance(&picked);
@@ -4199,7 +4200,7 @@ fn saved_crosshair_style_follows_the_chart_default_unless_the_user_chose_one() {
         restored_chart_appearance(&persisted)
             .expect("picked appearance")
             .crosshair_style,
-        2
+        picked_style
     );
 }
 

@@ -18,9 +18,10 @@ platform_color_registry!(color_identifiers);
 
 /// Non-color custom properties the token contract owns outside the color registry.
 fn is_non_color_token(name: &str) -> bool {
-    ["font-", "radius-"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    name == "border-width"
+        || ["font-", "radius-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 fn main() {
@@ -115,6 +116,14 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
         "RADIUS_COMPACT",
         &resolve(&root, "radius-compact")?,
     )?;
+    emit_pixel_u16(
+        &mut output,
+        "BORDER_WIDTH",
+        &resolve(&root, "border-width")?,
+    )?;
+    if resolve(&dark, "border-width")? != resolve(&root, "border-width")? {
+        return Err("--border-width must be the same in light and dark".into());
+    }
 
     let path = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
         .join("platform_tokens.rs");

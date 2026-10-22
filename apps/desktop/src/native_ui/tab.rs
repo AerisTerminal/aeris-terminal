@@ -1,5 +1,5 @@
 //! Shared tab components. [`TabList`] + [`Tab`] are the Theme System `.ui-tabs` / `.ui-tab`
-//! segmented control for navigation and one-tap presets; [`TabList::sidebar`] with
+//! underlined tabs for navigation and one-tap presets; [`TabList::sidebar`] with
 //! [`Tab::sidebar`] is the vertical section navigation of settings panels. Callers add only
 //! layout and spacing, never colors, borders or radii.
 
@@ -19,15 +19,16 @@ use super::{
     theme::{gpui_color, platform_border_width},
 };
 
-/// Theme System tab geometry: the track is `h-7 p-0.5 gap-0.5`, each tab `h-6 px-2 text-xs`.
+/// Theme System tab geometry: the list is `h-7 gap-4` over a `--border` baseline and each
+/// tab is `h-7 text-xs` with a 2px underline that turns `--primary` while selected.
 const TAB_LIST_HEIGHT: Pixels = px(28.0);
-const TAB_LIST_INSET: Pixels = px(2.0);
-const TAB_HEIGHT: Pixels = px(24.0);
-const TAB_PADDING_X: Pixels = px(8.0);
-/// Compact tabs for dense panel headers: the same track inset around a slimmer tab.
+const TAB_GAP: Pixels = px(16.0);
+const TAB_UNDERLINE_WIDTH: Pixels = px(2.0);
+/// Compact tabs for dense panel headers: a shorter list with tighter spacing.
 const COMPACT_TAB_LIST_HEIGHT: Pixels = px(22.0);
-const COMPACT_TAB_HEIGHT: Pixels = px(18.0);
-const COMPACT_TAB_PADDING_X: Pixels = px(6.0);
+const COMPACT_TAB_GAP: Pixels = px(12.0);
+/// Sidebar sections are spaced like the former segmented track inset.
+const SIDEBAR_TAB_GAP: Pixels = px(2.0);
 /// Sidebar sections are a comfortable 36 px click target that grows with a scaled panel.
 const SIDEBAR_TAB_HEIGHT: f32 = 36.0;
 
@@ -39,7 +40,7 @@ fn sidebar_tab_radius() -> Pixels {
     px(f32::from(RadiusToken::Default.logical_pixels()))
 }
 
-/// The `.ui-tabs` track: a `surface-raised` pill with no border that holds [`Tab`]s.
+/// The `.ui-tabs` list: [`Tab`]s side by side over a 1px `border` baseline.
 #[derive(IntoElement)]
 pub(crate) struct TabList {
     base: Stateful<Div>,
@@ -58,12 +59,11 @@ impl TabList {
                 .aria_label(label)
                 .flex()
                 .flex_none()
-                .items_center()
+                .items_end()
                 .h(TAB_LIST_HEIGHT)
-                .p(TAB_LIST_INSET)
-                .gap(TAB_LIST_INSET)
-                .rounded(tab_radius())
-                .bg(gpui_color(theme.colors.surface_raised)),
+                .gap(TAB_GAP)
+                .border_b(platform_border_width(theme))
+                .border_color(gpui_color(theme.colors.border)),
         }
     }
 
@@ -77,13 +77,13 @@ impl TabList {
                 .aria_orientation(Orientation::Vertical)
                 .flex()
                 .flex_col()
-                .gap(TAB_LIST_INSET),
+                .gap(SIDEBAR_TAB_GAP),
         }
     }
 
-    /// The slim track for dense panel headers; pair it with [`Tab::compact`] tabs.
+    /// The short list for dense panel headers; pair it with [`Tab::compact`] tabs.
     pub(crate) fn compact(mut self) -> Self {
-        self.base = self.base.h(COMPACT_TAB_LIST_HEIGHT);
+        self.base = self.base.h(COMPACT_TAB_LIST_HEIGHT).gap(COMPACT_TAB_GAP);
         self
     }
 }
@@ -119,9 +119,8 @@ enum TabSurface {
     Sidebar,
 }
 
-/// Theme System tab colors for one selection state. Unselected tabs have no fill and a
-/// transparent border so selecting one never shifts the layout; hover and press change the
-/// text only.
+/// Theme System tab colors for one selection state. Unselected tabs keep a transparent
+/// underline so selecting one never shifts the layout; hover and press change the text only.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SegmentedTabColors {
     fill: Option<ThemeColor>,
@@ -135,11 +134,11 @@ fn segmented_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColor
     let colors = theme.colors;
     if selected {
         SegmentedTabColors {
-            fill: Some(colors.surface),
-            border: Some(colors.border),
-            text: colors.text_active,
-            hover_text: colors.text_active,
-            active_text: colors.text_active,
+            fill: None,
+            border: Some(colors.primary),
+            text: colors.primary,
+            hover_text: colors.primary,
+            active_text: colors.primary,
         }
     } else {
         SegmentedTabColors {
@@ -249,28 +248,32 @@ impl RenderOnce for Tab {
             .occlude()
             .role(gpui::Role::Tab)
             .aria_selected(selected)
-            .border(platform_border_width(&self.theme))
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .cursor_pointer();
+        let border_width = platform_border_width(&self.theme);
         let radius = match self.surface {
+            TabSurface::Segmented => px(0.0),
             TabSurface::Sidebar => sidebar_tab_radius(),
-            TabSurface::Segmented | TabSurface::Chrome { .. } => tab_radius(),
+            TabSurface::Chrome { .. } => tab_radius(),
         };
         let mut tab = match self.surface {
             TabSurface::Segmented => {
                 let state = segmented_tab_colors(&self.theme, selected);
-                let (height, padding) = if self.compact {
-                    (COMPACT_TAB_HEIGHT, COMPACT_TAB_PADDING_X)
+                let height = if self.compact {
+                    COMPACT_TAB_LIST_HEIGHT
                 } else {
-                    (TAB_HEIGHT, TAB_PADDING_X)
+                    TAB_LIST_HEIGHT
                 };
+                // The underline covers the list's baseline, as the Theme System's inset
+                // baseline shadow sits under the tab's own bottom border.
                 tab.flex()
                     .flex_none()
                     .items_center()
                     .justify_center()
                     .h(height)
-                    .px(padding)
+                    .mb(-border_width)
+                    .border_b(TAB_UNDERLINE_WIDTH)
                     .text_xs()
                     .whitespace_nowrap()
                     .border_color(
@@ -294,6 +297,7 @@ impl RenderOnce for Tab {
                     .h(design_rems(SIDEBAR_TAB_HEIGHT))
                     .px_3()
                     .text_sm()
+                    .border(border_width)
                     .border_color(gpui::transparent_black())
                     .when_some(state.fill, |tab, fill| tab.bg(gpui_color(fill)))
                     .text_color(gpui_color(state.text))
@@ -309,6 +313,7 @@ impl RenderOnce for Tab {
                 resting,
                 selected: selected_fill,
             } => tab
+                .border(border_width)
                 .border_color(gpui_color(if selected { colors.border } else { resting }))
                 .bg(gpui_color(if selected { selected_fill } else { resting }))
                 .text_color(gpui_color(if selected {
@@ -326,8 +331,9 @@ impl RenderOnce for Tab {
         }
         .children(self.children);
         tab.style().refine(&self.style);
-        // Radius is component-owned: callers can size and lay out a tab, but a segmented or
-        // chrome tab stays the canonical 999px pill and a sidebar section `--radius-default`.
+        // Radius is component-owned: callers can size and lay out a tab, but an underlined tab
+        // stays square, a chrome tab the canonical 999px pill and a sidebar section
+        // `--radius-default`.
         tab.rounded(radius)
     }
 }
@@ -359,9 +365,9 @@ mod tests {
             assert_eq!(resting.active_text, colors.text_active);
 
             let selected = segmented_tab_colors(&theme, true);
-            assert_eq!(selected.fill, Some(colors.surface));
-            assert_eq!(selected.border, Some(colors.border));
-            assert_eq!(selected.text, colors.text_active);
+            assert_eq!(selected.fill, None);
+            assert_eq!(selected.border, Some(colors.primary));
+            assert_eq!(selected.text, colors.primary);
         }
     }
 

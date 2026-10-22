@@ -394,7 +394,7 @@ fn field_frame(theme: &AerisTheme) -> Div {
         .border(platform_border_width(theme))
         .border_color(gpui_color(colors.border))
         .rounded(radius(RadiusToken::Compact))
-        .bg(gpui_color(colors.surface_subtle))
+        .bg(gpui_color(colors.surface_secondary))
 }
 
 /// A field inside the switched-off bracket section: no edge, the disabled fill, muted text.
