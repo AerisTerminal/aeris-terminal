@@ -27,6 +27,12 @@ pub(super) fn accounts_panel_content(
         .child(section_label("Data connections", theme))
         .child(rithmic_card(&connections.rithmic, theme))
         .child(rithmic_login::rithmic_marks(theme))
+        .child(
+            div()
+                .flex_none()
+                .h(platform_border_width(theme))
+                .bg(gpui_color(colors.border)),
+        )
         .child(section_label("Trading accounts", theme))
         .child(practice_accounts(app_state, app, theme))
         .children(broker_accounts(app_state, app, theme))
@@ -48,19 +54,32 @@ pub(super) fn environment_badge(
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let (label, background, text) = match environment {
-        aeris_trading::AccountEnvironment::Simulated => {
-            ("Simulated", colors.surface_secondary, colors.text_muted)
+    // The neutral badge is the Theme System's `surface-secondary` pill with a `border-subtle`
+    // edge, so it stays visible on the `surface-secondary` panels it sits in.
+    let (label, background, text, edge) = match environment {
+        aeris_trading::AccountEnvironment::Simulated => (
+            "Simulated",
+            colors.surface_secondary,
+            colors.text_secondary,
+            Some(colors.border_subtle),
+        ),
+        aeris_trading::AccountEnvironment::Demo => {
+            ("Demo", colors.indigo_subtle, colors.indigo, None)
         }
-        aeris_trading::AccountEnvironment::Demo => ("Demo", colors.indigo_subtle, colors.indigo),
         aeris_trading::AccountEnvironment::Live => (
             "Live · data only",
             colors.warning_subtle,
             colors.text_warning,
+            None,
         ),
     };
     div()
         .flex_none()
+        .when_some(edge, |badge, edge| {
+            badge
+                .border(platform_border_width(theme))
+                .border_color(gpui_color(edge))
+        })
         .h(px(20.0))
         .px(px(8.0))
         .flex()
@@ -132,16 +151,9 @@ fn section_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
         .child(label.to_uppercase())
 }
 
-/// A borderless `surface-secondary` card on the panel's `surface`.
-fn card(id: &'static str, theme: &AerisTheme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_2()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .bg(gpui_color(theme.colors.surface_secondary))
+/// A connection block on the panel, inset to line up with the account rows below it.
+fn card(id: &'static str) -> Stateful<Div> {
+    div().id(id).flex().flex_col().gap_2().px_2()
 }
 
 fn status_dot(active: bool, theme: &AerisTheme) -> impl IntoElement {
@@ -234,7 +246,7 @@ fn rithmic_card(view: &rithmic_login::RithmicLoginView, theme: &AerisTheme) -> i
                 }),
         )
     };
-    card("accounts_rithmic", theme)
+    card("accounts_rithmic")
         .child(
             div()
                 .flex()

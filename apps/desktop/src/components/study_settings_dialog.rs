@@ -1,5 +1,5 @@
 use super::big_trades_dialog::{
-    DropdownChoice, SettingDropdown, setting_row as described_row, settings_group,
+    DropdownChoice, SettingDropdown, setting_row as described_row, settings_group, settings_groups,
 };
 use super::*;
 
@@ -367,7 +367,7 @@ fn study_settings_body(
     let colors = theme.colors;
     // The dialog body owns padding and scrolling; this column only spaces the setting groups.
     let mut body = div().flex().flex_col().gap_3();
-    // Consecutive settings that share a presentation group form one card; ungrouped settings
+    // Consecutive settings that share a presentation group form one group; ungrouped settings
     // are the study's inputs.
     let mut groups: Vec<(SharedString, Vec<AnyElement>)> = Vec::new();
     let mut last_group: Option<Option<&str>> = None;
@@ -388,12 +388,15 @@ fn study_settings_body(
         }
         last_group = Some(group);
     }
-    for (title, rows) in groups {
-        body = body.child(settings_group(title, rows, theme));
-    }
     let style_rows = std::iter::once(line_thickness_row(app, dialog, theme))
         .chain((!dialog.output_colors.is_empty()).then(|| output_colors_row(app, dialog, theme)));
-    body = body.child(settings_group("Style", style_rows, theme));
+    body = body.child(settings_groups(
+        groups
+            .into_iter()
+            .map(|(title, rows)| settings_group(title, rows, theme))
+            .chain(std::iter::once(settings_group("Style", style_rows, theme))),
+        theme,
+    ));
     if let Some(message) = &dialog.message {
         body = body.child(
             div()
@@ -431,7 +434,6 @@ pub(super) fn study_settings_dialog_layer(
     )
     .title("Study settings")
     .subtitle(dialog.title.clone())
-    .panel_surface()
     .max_height(px(640.0))
     .child(study_settings_body(app, dialog, theme, cx))
     .footer_leading(

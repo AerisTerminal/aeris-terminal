@@ -2,7 +2,9 @@
 //! and the order book on the chart. Each dialog edits a draft of one indicator's settings; only
 //! Apply hands them to the chart's order-flow settings owner.
 
-use super::big_trades_dialog::{SettingDropdown, dropdown_choices, setting_row, settings_group};
+use super::big_trades_dialog::{
+    SettingDropdown, dropdown_choices, setting_row, settings_group, settings_groups,
+};
 use super::*;
 
 const STYLE_CHOICES: [(&str, CumulativeDeltaStyle); 2] = [
@@ -829,9 +831,11 @@ pub(super) fn order_flow_dialog_layer(
     })
     .title("Indicator settings")
     .subtitle(dialog.draft.indicator().title())
-    .panel_surface()
     .max_height(px(680.0))
-    .children(order_flow_dialog_groups(app, dialog, theme))
+    .child(settings_groups(
+        order_flow_dialog_groups(app, dialog, theme),
+        theme,
+    ))
     .children(dialog.message.as_ref().map(|message| {
         div()
             .text_sm()

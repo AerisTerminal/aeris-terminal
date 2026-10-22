@@ -58,23 +58,15 @@ pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
     px(theme.dimensions.border_width)
 }
 
-/// Floating-layer chrome (menus, dialogs, popovers, toasts, hints): the Theme System
-/// `.ui-popover` `surface-secondary` fill and `border-secondary` hairline.
+/// Floating-layer chrome (menus, dialogs, popovers, toasts, hints and the large workspace
+/// panels): the Theme System `.ui-popover` `surface-secondary` fill and `border-secondary`
+/// hairline.
 pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
-    popover_edge(element, theme, radius).bg(gpui_color(theme.colors.surface_secondary))
-}
-
-/// A floating workspace panel (the symbol, indicator and chart settings panels and the account
-/// menu): the popover edge around the main `surface`. Cards inside it use `surface-secondary`.
-pub(crate) fn surface_panel<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
-    popover_edge(element, theme, radius).bg(gpui_color(theme.colors.surface))
-}
-
-fn popover_edge<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
     element
         .rounded(radius)
         .border(platform_border_width(theme))
         .border_color(gpui_color(theme.colors.border_secondary))
+        .bg(gpui_color(theme.colors.surface_secondary))
 }
 
 /// Projects `Aeris`'s semantic design contract into the unstyled Base

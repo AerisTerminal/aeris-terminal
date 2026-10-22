@@ -1,3 +1,4 @@
+use super::big_trades_dialog::{settings_group, settings_groups};
 use super::*;
 use drawing_context_toolbar::{choice_glyph, width_glyph};
 
@@ -985,7 +986,7 @@ fn chart_settings_panel(
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
     let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
-    surface_panel(div().id("chart_settings_menu"), theme, radius)
+    popover_surface(div().id("chart_settings_menu"), theme, radius)
         .absolute()
         .left(bounds.origin.x)
         .top(bounds.origin.y)
@@ -1619,7 +1620,7 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
         ],
         ChartType::Baseline => vec![baseline_group(ui, title, appearance, colors)],
     };
-    settings_section(groups)
+    settings_groups(groups, ui.theme)
 }
 
 fn candle_group(
@@ -1917,11 +1918,14 @@ fn line_style_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> A
 }
 
 fn chart_canvas_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
-    settings_section(vec![
-        canvas_surface_group(ui, &snapshot.appearance),
-        canvas_grid_group(ui, &snapshot.appearance),
-        canvas_crosshair_group(ui, snapshot),
-    ])
+    settings_groups(
+        [
+            canvas_surface_group(ui, &snapshot.appearance),
+            canvas_grid_group(ui, &snapshot.appearance),
+            canvas_crosshair_group(ui, snapshot),
+        ],
+        ui.theme,
+    )
 }
 
 fn canvas_surface_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
@@ -2074,7 +2078,7 @@ fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
 
 fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
     let legend = snapshot.legend;
-    settings_section(vec![
+    let groups = [
         settings_group(
             "Symbol",
             [settings_switch_with_option(
@@ -2107,12 +2111,13 @@ fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
             )],
             ui.theme,
         ),
-    ])
+    ];
+    settings_groups(groups, ui.theme)
 }
 
 fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
     let visibility = snapshot.trading_visibility;
-    settings_section(vec![
+    let groups = [
         settings_group(
             "Orders and positions",
             [settings_switch_with_option(
@@ -2151,48 +2156,8 @@ fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
             )],
             ui.theme,
         ),
-    ])
-}
-
-/// A settings section: its groups stacked with even spacing.
-fn settings_section(groups: Vec<AnyElement>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_5()
-        .children(groups)
-        .into_any_element()
-}
-
-/// A titled group of related rows on one borderless `surface-secondary` card, with no lines
-/// between its rows.
-fn settings_group(
-    title: &'static str,
-    rows: impl IntoIterator<Item = AnyElement>,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let colors = theme.colors;
-    let block = div()
-        .flex()
-        .flex_col()
-        .px_3()
-        .py_1()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .bg(gpui_color(colors.surface_secondary))
-        .children(rows);
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_secondary))
-                .child(title),
-        )
-        .child(block)
-        .into_any_element()
+    ];
+    settings_groups(groups, ui.theme)
 }
 
 /// A row's label, with an optional muted hint below it. A locked row mutes its label too.

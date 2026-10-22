@@ -246,9 +246,7 @@ use native_ui::{
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     switch::{Switch, SwitchRow},
     tab::{Tab, TabList},
-    theme::{
-        base_theme, field_border, gpui_color, platform_border_width, popover_surface, surface_panel,
-    },
+    theme::{base_theme, field_border, gpui_color, platform_border_width, popover_surface},
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;

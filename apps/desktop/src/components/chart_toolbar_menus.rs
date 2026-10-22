@@ -80,7 +80,6 @@ pub(super) fn chrome_overlay_layer(
                 ChromeOverlayPanelStyle {
                     interval_popup: compact_panel,
                     frameless: menu_overlay,
-                    on_surface: overlay == ChromeOverlay::Accounts,
                     radius: if matches!(
                         overlay,
                         ChromeOverlay::Instrument | ChromeOverlay::Indicator
@@ -314,9 +313,6 @@ pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     /// The content is one or more `MenuPanel`s that draw their own surface.
     frameless: bool,
-    /// A large workspace panel, such as Accounts, rests on the main `surface`; see
-    /// [`surface_panel`].
-    on_surface: bool,
     radius: RadiusToken,
 }
 
@@ -335,10 +331,7 @@ pub(super) fn chrome_overlay_panel(
         .id("chrome_overlay_panel")
         .relative()
         .flex_none()
-        .when(!style.frameless && style.on_surface, |panel| {
-            surface_panel(panel, theme, radius)
-        })
-        .when(!style.frameless && !style.on_surface, |panel| {
+        .when(!style.frameless, |panel| {
             popover_surface(panel, theme, radius)
         })
         .when(style.frameless, Styled::max_h_full)

@@ -62,7 +62,7 @@
 
   /* Borders */
   --border: #0a0a0a33;
-  --border-secondary: #0a0a0a1a;
+  --border-secondary: #0a0a0a33;
   --border-subtle: #0a0a0a12;
   --border-width: 1px;
 
@@ -83,8 +83,8 @@
   --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #0a0a0a0d;
-  --active-bg: #0a0a0a0d;
+  --hover-bg: #0a0a0a14;
+  --active-bg: #0a0a0a1f;
   --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */

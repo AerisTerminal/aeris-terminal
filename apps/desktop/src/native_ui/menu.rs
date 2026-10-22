@@ -17,7 +17,7 @@ use super::{
     platform_font_weight,
     popup_fit::fit_to_window,
     rem_scale::ROOT_REM_PX,
-    theme::{gpui_color, platform_border_width, popover_surface, surface_panel},
+    theme::{gpui_color, platform_border_width, popover_surface},
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -613,8 +613,6 @@ pub(crate) struct MenuPanel {
     animation: Option<PopupAnimationOrigin>,
     /// Set by [`MenuAnchor`]: closes an anchored menu on a press outside it and its trigger.
     on_dismiss: Option<Dismiss>,
-    /// Fills the panel with the main `surface` instead of `surface-secondary`.
-    on_surface: bool,
     children: Vec<AnyElement>,
 }
 
@@ -635,16 +633,8 @@ impl MenuPanel {
             scroll: None,
             animation: None,
             on_dismiss: None,
-            on_surface: false,
             children: Vec::new(),
         }
-    }
-
-    /// A large workspace panel built from menu parts, such as the account menu, rests on the
-    /// main `surface` like the other workspace panels; see [`surface_panel`].
-    pub(crate) fn on_surface(mut self) -> Self {
-        self.on_surface = true;
-        self
     }
 
     /// Grows the inset with a screen-aware menu whose rows use the same scale.
@@ -741,35 +731,31 @@ impl RenderOnce for MenuPanel {
             .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
         let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
         let frame = div().id(self.id.clone()).occlude().flex().flex_col();
-        let panel = if self.on_surface {
-            surface_panel(frame, &self.theme, radius)
-        } else {
-            popover_surface(frame, &self.theme, radius)
-        }
-        .font_family(platform_font_family())
-        .font_weight(platform_font_weight(TypographyRole::Normal))
-        .text_color(gpui_color(colors.text_default))
-        .when_some(self.width, Styled::w)
-        .when_some(self.max_height, Styled::max_h)
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .on_click(|_, _, cx| cx.stop_propagation())
-        .map(|panel| match self.placement {
-            MenuPlacement::At(origin) => panel.absolute().left(origin.x).top(origin.y),
-            MenuPlacement::Anchored { side, align } => {
-                let panel = match side {
-                    MenuSide::Below => panel.absolute().top_full().mt(ANCHOR_GAP),
-                    MenuSide::Above => panel.absolute().bottom_full().mb(ANCHOR_GAP),
-                };
-                match align {
-                    MenuAlign::Start => panel.left_0(),
-                    MenuAlign::End => panel.right_0(),
-                    MenuAlign::Stretch => panel.left_0().right_0(),
+        let panel = popover_surface(frame, &self.theme, radius)
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
+            .text_color(gpui_color(colors.text_default))
+            .when_some(self.width, Styled::w)
+            .when_some(self.max_height, Styled::max_h)
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .map(|panel| match self.placement {
+                MenuPlacement::At(origin) => panel.absolute().left(origin.x).top(origin.y),
+                MenuPlacement::Anchored { side, align } => {
+                    let panel = match side {
+                        MenuSide::Below => panel.absolute().top_full().mt(ANCHOR_GAP),
+                        MenuSide::Above => panel.absolute().bottom_full().mb(ANCHOR_GAP),
+                    };
+                    match align {
+                        MenuAlign::Start => panel.left_0(),
+                        MenuAlign::End => panel.right_0(),
+                        MenuAlign::Stretch => panel.left_0().right_0(),
+                    }
                 }
-            }
-            MenuPlacement::InFlow => panel,
-        })
-        .children(self.header)
-        .child(body);
+                MenuPlacement::InFlow => panel,
+            })
+            .children(self.header)
+            .child(body);
         let panel = match self.animation {
             Some(origin) => animate_popup_from_origin(
                 panel,

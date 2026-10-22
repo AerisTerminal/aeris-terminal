@@ -22,20 +22,23 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
-- Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) use
-  `popover_surface` from `native_ui/theme.rs`, the Theme System `.ui-popover`: an opaque
-  `surface-secondary` fill and a 1px `border-secondary` edge, with no inner highlight.
+- Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars and the large
+  workspace panels) use `popover_surface` from `native_ui/theme.rs`, the Theme System
+  `.ui-popover`: an opaque `surface-secondary` fill and a 1px `border-secondary` edge, with no
+  inner highlight.
 - Tooltips (`terminal_ui::tooltip`) use the same popover look: `surface-secondary`, a 1px
   `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
   opens beside its trigger on the caller's side (bottom by default, toward the content for edge
   sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
   and slides in from the trigger side and fades out when the pointer leaves, presses or scrolls.
-- Large workspace panels (the symbol, indicator and chart settings panels, the indicator settings
-  dialogs and the header account menu) keep the popover edge but fill with the main
-  `surface` (`surface_panel`, `MenuPanel::on_surface`, or `Dialog::panel_surface`). Their content
-  sits on titled, borderless `surface-secondary` group cards: no outlined blocks and no hairlines
-  between rows. Size and style settings are dropdowns, not tab groups.
+- Large workspace panels (the symbol, indicator, chart settings and accounts panels, the indicator
+  settings dialogs and the header account menu) are popover layers too. Their settings sit in
+  titled groups with no card fill, no outlined blocks and no hairlines between rows; consecutive
+  groups are split by a 1px `border` divider (`settings_groups`), as the Theme System splits
+  grouped popup content. Size and style settings are dropdowns, not tab groups.
+- A neutral badge is a `radius-large` `surface-secondary` pill with a 1px `border-subtle` edge and
+  `text-secondary`; tinted badges pair a `-subtle` fill with its text color.
 - Nothing inside a popover layer rests on plain `surface` in dark mode. Fields and setting rows use
   `field_surface` (`surface`, `surface-secondary` in dark) with `field_border` (`border`,
   `border-secondary` in dark, as the Theme System inputs and trade-ticket fields), and buttons use
@@ -98,8 +101,7 @@ keeps the shared neutral row fills and colours only its label and glyph: `text-d
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.
 
-**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer;
-`panel_surface` fills an indicator settings dialog with `surface` instead. Sizes `Sm` (420), `Md` (480), `Lg`
+**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
 committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Primary`.
 
@@ -133,7 +135,7 @@ while invalid.
 
   /* Borders */
   --border: #0a0a0a33;
-  --border-secondary: #0a0a0a1a;
+  --border-secondary: #0a0a0a33;
   --border-subtle: #0a0a0a12;
   --border-width: 1px;
 
@@ -154,8 +156,8 @@ while invalid.
   --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #0a0a0a0d;
-  --active-bg: #0a0a0a0d;
+  --hover-bg: #0a0a0a14;
+  --active-bg: #0a0a0a1f;
   --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */

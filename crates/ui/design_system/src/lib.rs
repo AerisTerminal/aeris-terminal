@@ -536,10 +536,7 @@ mod tests {
             ThemeColor::from_rgb8(250, 250, 250)
         );
         assert_eq!(light.border, ThemeColor::from_rgba8(10, 10, 10, 51));
-        assert_eq!(
-            light.border_secondary,
-            ThemeColor::from_rgba8(10, 10, 10, 26)
-        );
+        assert_eq!(light.border_secondary, light.border);
         assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
@@ -575,8 +572,13 @@ mod tests {
         assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.bullish, light.bullish);
         assert_eq!(dark.bearish, light.bearish);
-        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 13));
+        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 20));
+        assert_eq!(light.active_bg, ThemeColor::from_rgba8(10, 10, 10, 31));
         assert_eq!(dark.active_bg, ThemeColor::from_rgba8(250, 250, 250, 38));
+        // Pressed reads a step above hover in both modes.
+        for colors in [light, dark] {
+            assert!(colors.active_bg.alpha() > colors.hover_bg.alpha());
+        }
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
 

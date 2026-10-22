@@ -13,14 +13,14 @@ const SIZE_CHOICES: [(&str, BigTradesSize); 3] = [
     ("Large", BigTradesSize::Large),
 ];
 
-/// A titled group of indicator settings on one borderless `surface-secondary` card with no
-/// lines between its rows, matching the chart settings panel's groups.
+/// A titled group of related settings with no lines between its rows. Stack groups with
+/// [`settings_groups`], which divides them; the chart settings panel and the indicator
+/// dialogs share both.
 pub(super) fn settings_group(
     title: impl Into<SharedString>,
     rows: impl IntoIterator<Item = AnyElement>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     div()
         .flex()
         .flex_col()
@@ -29,20 +29,32 @@ pub(super) fn settings_group(
             div()
                 .text_xs()
                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_secondary))
+                .text_color(gpui_color(theme.colors.text_secondary))
                 .child(title.into()),
         )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .px_3()
-                .py_1()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .bg(gpui_color(colors.surface_secondary))
-                .children(rows),
-        )
+        .child(div().flex().flex_col().children(rows))
         .into_any_element()
+}
+
+/// Settings groups stacked on the popover surface with a `border` divider between each pair,
+/// the Theme System's way of splitting grouped content inside a popup.
+pub(super) fn settings_groups(
+    groups: impl IntoIterator<Item = AnyElement>,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let mut stack = div().flex().flex_col().gap_3();
+    for (index, group) in groups.into_iter().enumerate() {
+        if index > 0 {
+            stack = stack.child(
+                div()
+                    .flex_none()
+                    .h(platform_border_width(theme))
+                    .bg(gpui_color(theme.colors.border)),
+            );
+        }
+        stack = stack.child(group);
+    }
+    stack.into_any_element()
 }
 
 /// One setting inside a [`settings_group`] card: label and description above its control.
@@ -289,23 +301,27 @@ pub(super) fn big_trades_dialog_layer(
     })
     .title("Indicator settings")
     .subtitle("Big Trades")
-    .panel_surface()
     .max_height(px(640.0))
-    .child(settings_group(
-        "Filter",
-        std::iter::once(filter_row(app, dialog, theme)).chain(
-            dialog
-                .intensity
-                .is_none()
-                .then(|| minimum_volume_row(dialog, theme)),
-        ),
-        theme,
-    ))
-    .child(settings_group(
-        "Bubbles",
+    .child(settings_groups(
         [
-            size_row(app, dialog, theme),
-            show_volume_row(app, dialog, theme),
+            settings_group(
+                "Filter",
+                std::iter::once(filter_row(app, dialog, theme)).chain(
+                    dialog
+                        .intensity
+                        .is_none()
+                        .then(|| minimum_volume_row(dialog, theme)),
+                ),
+                theme,
+            ),
+            settings_group(
+                "Bubbles",
+                [
+                    size_row(app, dialog, theme),
+                    show_volume_row(app, dialog, theme),
+                ],
+                theme,
+            ),
         ],
         theme,
     ))

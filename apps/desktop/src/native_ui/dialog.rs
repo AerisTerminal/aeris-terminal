@@ -24,7 +24,7 @@ use gpui::{
 use super::{
     button::{Button, ButtonVariant, close_button},
     platform_font_weight,
-    theme::{gpui_color, platform_border_width, popover_surface, surface_panel},
+    theme::{gpui_color, platform_border_width, popover_surface},
 };
 
 type DialogHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -130,7 +130,6 @@ pub(crate) struct Dialog {
     align: DialogAlign,
     body: DialogBody,
     max_height: Option<Pixels>,
-    panel_surface: bool,
     theme: AerisTheme,
     on_dismiss: DialogHandler,
     header: Option<DialogHeader>,
@@ -154,7 +153,6 @@ impl Dialog {
             align: DialogAlign::default(),
             body: DialogBody::default(),
             max_height: None,
-            panel_surface: false,
             theme: *theme,
             on_dismiss: Rc::new(on_dismiss),
             header: None,
@@ -218,13 +216,6 @@ impl Dialog {
     /// Lays the body out as a list of rows instead of a padded form.
     pub(crate) fn list_body(mut self) -> Self {
         self.body = DialogBody::List;
-        self
-    }
-
-    /// Fills the panel with the main `surface` instead of `surface-secondary`, as the chart
-    /// settings panel does, for settings dialogs whose groups sit on `surface-secondary` cards.
-    pub(crate) fn panel_surface(mut self) -> Self {
-        self.panel_surface = true;
         self
     }
 
@@ -368,12 +359,7 @@ impl RenderOnce for Dialog {
             .children(self.children);
         let movable = self.movable;
         let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
-        let panel = if self.panel_surface {
-            surface_panel(div().id("dialog_panel"), &theme, radius)
-        } else {
-            popover_surface(div().id("dialog_panel"), &theme, radius)
-        };
-        let panel = panel
+        let panel = popover_surface(div().id("dialog_panel"), &theme, radius)
             .w(self.size.width())
             .map(|panel| match (self.max_height, movable.is_some()) {
                 (Some(height), _) => panel.max_h(height),
