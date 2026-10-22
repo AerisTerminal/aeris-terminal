@@ -32,14 +32,31 @@ fn refusal(outcome: &RithmicRequestOutcome) -> Option<String> {
     )
 }
 
-/// The broker's explanation, kept only for states that need one.
+/// The broker's explanation for an order that was refused or ended without filling, the
+/// first non-blank text in order of preference.
 fn state_reason(state: BrokerOrderState, texts: [Option<&String>; 2]) -> Option<String> {
+    if !matches!(
+        state,
+        BrokerOrderState::Rejected
+            | BrokerOrderState::CancelRejected
+            | BrokerOrderState::Cancelled
+            | BrokerOrderState::Expired
+    ) {
+        return None;
+    }
+    texts
+        .into_iter()
+        .flatten()
+        .map(|text| text.trim())
+        .find(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+const fn is_refusal(state: BrokerOrderState) -> bool {
     matches!(
         state,
         BrokerOrderState::Rejected | BrokerOrderState::CancelRejected
     )
-    .then(|| texts.into_iter().flatten().next().cloned())
-    .flatten()
 }
 
 impl Session<'_> {
@@ -154,8 +171,8 @@ impl Session<'_> {
         let reason = state_reason(
             state,
             [
-                notification.completion_reason.as_ref(),
                 notification.order.text.as_ref(),
+                notification.completion_reason.as_ref(),
             ],
         );
         self.emit_order(
@@ -202,7 +219,11 @@ impl Session<'_> {
             state,
             [
                 notification.order.text.as_ref(),
-                notification.report_type.as_ref(),
+                // The report type only names the state; it explains nothing about a cancel.
+                notification
+                    .report_type
+                    .as_ref()
+                    .filter(|_| is_refusal(state)),
             ],
         );
         self.emit_order(
@@ -420,14 +441,29 @@ mod tests {
     }
 
     #[test]
-    fn only_refused_states_keep_the_brokers_explanation() {
+    fn refused_and_ended_orders_keep_the_brokers_explanation() {
         let text = "insufficient margin".to_string();
+        let blank = "  ".to_string();
         assert_eq!(
             state_reason(BrokerOrderState::Rejected, [None, Some(&text)]).as_deref(),
             Some("insufficient margin")
         );
+        let cancelled = "cancelled by the risk system".to_string();
         assert_eq!(
-            state_reason(BrokerOrderState::Cancelled, [Some(&text), None]),
+            state_reason(
+                BrokerOrderState::Cancelled,
+                [Some(&blank), Some(&cancelled)]
+            )
+            .as_deref(),
+            Some("cancelled by the risk system"),
+            "a blank text gives way to the next explanation"
+        );
+        assert_eq!(
+            state_reason(BrokerOrderState::Expired, [Some(&text), None]).as_deref(),
+            Some("insufficient margin")
+        );
+        assert_eq!(
+            state_reason(BrokerOrderState::Accepted, [Some(&text), None]),
             None
         );
     }

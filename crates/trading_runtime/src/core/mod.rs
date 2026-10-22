@@ -934,7 +934,8 @@ impl TradingService {
         self.request(|reply| Command::PlaceBracketFromMarket(bracket, reply))
     }
 
-    /// Submits an inline bracket using the owner's quote.
+    /// Submits an inline bracket stamped with the owner's quote. The entry keeps its own order
+    /// type and explicit prices; a market entry carries none.
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or rejected bracket.

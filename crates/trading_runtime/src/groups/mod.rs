@@ -91,7 +91,7 @@ impl TradingCore {
         &mut self,
         bracket: PlaceInlineBracket,
     ) -> Result<PlacementOutcome, String> {
-        let entry = self.market_resting_bracket_entry(bracket.entry)?;
+        let entry = self.market_order(bracket.entry, false)?;
         self.place_bracket_with_template(&entry, &bracket.template)
     }
 

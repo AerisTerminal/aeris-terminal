@@ -325,7 +325,7 @@ pub fn dispatch_simulated_order(
         selection.time_in_force,
     ) else {
         feedback.record(Err(
-            "Practice order requires a current bid, ask, and valid instrument".to_string(),
+            "Order requires a current bid, ask, and valid instrument".to_string(),
         ));
         return;
     };
@@ -333,7 +333,7 @@ pub fn dispatch_simulated_order(
         .spawn(async move {
             let result = service
                 .place_order_from_market(command, true)
-                .map(|order| placement_outcome(&order));
+                .map(|order| order_outcome(&order, OrderOutcome::Placed));
             feedback.record(result);
         })
         .detach();
@@ -373,24 +373,21 @@ pub fn dispatch_simulated_selected_order(
         selection.time_in_force,
     ) else {
         feedback.record(Err(
-            "Practice order requires a current bid, ask, and valid instrument".to_string(),
+            "Order requires a current bid, ask, and valid instrument".to_string(),
         ));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            let accepted = if let Some(template_id) = selection.template_id {
+            let result = if let Some(template_id) = selection.template_id {
                 service
                     .place_bracket_from_market(PlaceBracket { entry, template_id })
-                    .map(|placement| placement.entry_client_order_id().clone())
+                    .map(|placement| bracket_outcome(&placement))
             } else {
                 service
                     .place_order_from_market(entry, true)
-                    .map(|order| order.client_order_id)
+                    .map(|order| order_outcome(&order, OrderOutcome::Placed))
             };
-            let result = accepted.map(|client_order_id| {
-                format!("Practice order {} accepted", client_order_id.as_str())
-            });
             feedback.record(result);
         })
         .detach();
@@ -405,8 +402,55 @@ fn order_type_requires_price(order_type: aeris_trading::OrderType) -> bool {
     )
 }
 
-fn placement_outcome(order: &aeris_trading::Order) -> String {
-    format!("Practice order {} accepted", order.client_order_id.as_str())
+/// What a command did to one order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderOutcome {
+    Placed,
+    ProtectionPlaced,
+    Modified,
+    Cancelled,
+}
+
+/// Feedback for one accepted order command, worded for the venue holding the order: a
+/// practice order changes at once, while a broker order changes only when the broker
+/// reports it.
+#[must_use]
+pub fn order_outcome(order: &aeris_trading::Order, outcome: OrderOutcome) -> String {
+    let id = order.client_order_id.as_str();
+    if is_broker_order(order) {
+        match outcome {
+            OrderOutcome::Placed => format!("Order {id} sent to the broker"),
+            OrderOutcome::ProtectionPlaced => format!("Protective order {id} sent to the broker"),
+            OrderOutcome::Modified => format!("Change to order {id} sent to the broker"),
+            OrderOutcome::Cancelled => format!("Cancel of order {id} sent to the broker"),
+        }
+    } else {
+        match outcome {
+            OrderOutcome::Placed => format!("Practice order {id} accepted"),
+            OrderOutcome::ProtectionPlaced => format!("Practice protective order {id} placed"),
+            OrderOutcome::Modified => format!("Practice order {id} modified"),
+            OrderOutcome::Cancelled => format!("Practice order {id} cancelled"),
+        }
+    }
+}
+
+fn is_broker_order(order: &aeris_trading::Order) -> bool {
+    order.provenance.venue_id == aeris_trading::venue::BROKER_VENUE_ID
+}
+
+/// Feedback for a cancel-all: practice orders are cancelled at once, broker orders are
+/// cancel requests until the broker confirms them.
+fn cancel_all_outcome(orders: &[aeris_trading::Order]) -> String {
+    let broker = orders.iter().filter(|order| is_broker_order(order)).count();
+    let practice = orders.len() - broker;
+    match (practice, broker) {
+        (0, 0) => "No working orders to cancel".to_string(),
+        (practice, 0) => format!("Cancelled {practice} practice order(s)"),
+        (0, broker) => format!("Cancel sent to the broker for {broker} order(s)"),
+        (practice, broker) => format!(
+            "Cancelled {practice} practice order(s) · cancel sent to the broker for {broker} order(s)"
+        ),
+    }
 }
 
 /// Applies an exact price to the price field(s) that the order type uses.
@@ -457,12 +501,12 @@ pub fn dispatch_simulated_order_at_price(
         order.time_in_force,
     ) else {
         feedback.record(Err(
-            "Practice order requires a current bid, ask, and valid instrument".to_string(),
+            "Order requires a current bid, ask, and valid instrument".to_string(),
         ));
         return;
     };
     let Ok(price) = aeris_trading::FixedPoint::try_new(order.price_units, frame.price_scale) else {
-        feedback.record(Err("Practice order price is invalid".to_string()));
+        feedback.record(Err("Order price is invalid".to_string()));
         return;
     };
     (command.limit_price, command.stop_price) = price_fields(order.order_type, price);
@@ -470,10 +514,112 @@ pub fn dispatch_simulated_order_at_price(
         .spawn(async move {
             let result = service
                 .place_order_from_market(command, false)
-                .map(|order| placement_outcome(&order));
+                .map(|order| order_outcome(&order, OrderOutcome::Placed));
             feedback.record(result);
         })
         .detach();
+}
+
+/// A stop and target the order ticket attaches to its entry, in ticks from the entry price.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TicketBracket {
+    pub stop_ticks: u32,
+    pub target_ticks: u32,
+}
+
+impl TicketBracket {
+    fn template(self, entry: &PlaceOrder) -> aeris_trading_runtime::BracketStrategyTemplate {
+        aeris_trading_runtime::BracketStrategyTemplate {
+            template_id: format!("ticket-bracket-{}", entry.client_order_id.as_str()),
+            revision: 1,
+            name: "Order ticket bracket".to_string(),
+            stop_offset_ticks: self.stop_ticks,
+            targets: vec![aeris_trading_runtime::BracketTarget {
+                offset_ticks: self.target_ticks,
+                quantity_percent: 100,
+            }],
+            trailing_stop: None,
+            break_even: None,
+            enabled: true,
+        }
+    }
+}
+
+/// One order-ticket instruction. A market order carries no price; a resting order carries
+/// its exact price on the instrument's grid.
+pub struct TicketOrder {
+    pub side: aeris_trading::OrderSide,
+    pub order_type: aeris_trading::OrderType,
+    pub account_key: Option<String>,
+    pub quantity: u64,
+    pub price_units: Option<i64>,
+    pub bracket: Option<TicketBracket>,
+}
+
+/// Dispatches an order-ticket entry, with its bracket when one is set, off the UI thread.
+pub fn dispatch_ticket_order(
+    service: &TradingService,
+    feedback: &TradingFeedback,
+    frame: &aeris_market_data::OrderBookFrame,
+    order: TicketOrder,
+    cx: &mut gpui::App,
+) {
+    let service = service.clone();
+    let feedback = feedback.clone();
+    let Some(mut entry) = prepare_simulated_order(
+        feedback.now(),
+        frame,
+        order.side,
+        order.account_key,
+        order.quantity,
+        order.order_type,
+        aeris_trading::TimeInForce::Day,
+    ) else {
+        feedback.record(Err(
+            "Order requires a current bid, ask, and valid instrument".to_string(),
+        ));
+        return;
+    };
+    if let Some(price_units) = order.price_units {
+        let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, frame.price_scale) else {
+            feedback.record(Err("Order price is invalid".to_string()));
+            return;
+        };
+        (entry.limit_price, entry.stop_price) = price_fields(order.order_type, price);
+    }
+    let at_touch = order.price_units.is_none();
+    cx.background_executor()
+        .spawn(async move {
+            let result = match order.bracket {
+                Some(bracket) => {
+                    let template = bracket.template(&entry);
+                    service
+                        .place_inline_bracket_from_market(
+                            aeris_trading_runtime::PlaceInlineBracket { entry, template },
+                        )
+                        .map(|placement| bracket_outcome(&placement))
+                }
+                None => service
+                    .place_order_from_market(entry, at_touch)
+                    .map(|order| order_outcome(&order, OrderOutcome::Placed)),
+            };
+            feedback.record(result);
+        })
+        .detach();
+}
+
+/// Feedback for an accepted bracket, worded for the venue that holds its stop and target.
+fn bracket_outcome(placement: &aeris_trading_runtime::PlacementOutcome) -> String {
+    match placement {
+        aeris_trading_runtime::PlacementOutcome::Managed(bracket) => format!(
+            "Practice order {} accepted with its stop and target",
+            bracket.entry_client_order_id.as_str()
+        ),
+        aeris_trading_runtime::PlacementOutcome::BrokerProtected(order) => format!(
+            "Order {} sent to the broker with its stop and target",
+            order.client_order_id.as_str()
+        ),
+    }
 }
 
 /// Cancels working orders for the selected simulated account off the UI thread.
@@ -492,7 +638,7 @@ pub fn cancel_simulated_account(
             feedback.record(
                 service
                     .cancel_all(account)
-                    .map(|orders| format!("Cancelled {} practice order(s)", orders.len())),
+                    .map(|orders| cancel_all_outcome(&orders)),
             );
         })
         .detach();
@@ -508,15 +654,15 @@ pub fn cancel_simulated_order(
     let service = service.clone();
     let feedback = feedback.clone();
     let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
-        feedback.record(Err("Practice order identifier is invalid".to_string()));
+        feedback.record(Err("Order identifier is invalid".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            record_outcome(
-                &feedback,
-                service.cancel_order(client_order_id),
-                "Practice order cancelled",
+            feedback.record(
+                service
+                    .cancel_order(client_order_id)
+                    .map(|order| order_outcome(&order, OrderOutcome::Cancelled)),
             );
         })
         .detach();
@@ -594,8 +740,7 @@ pub fn modify_simulated_order_at_price(
     };
     cx.background_executor()
         .spawn(async move {
-            record_outcome(
-                &feedback,
+            feedback.record(
                 service
                     .modify_order_from_market_checked(
                         aeris_trading_runtime::RevisionedModifyOrder {
@@ -603,8 +748,8 @@ pub fn modify_simulated_order_at_price(
                             expected_revision: Some(expected_revision),
                         },
                     )
+                    .map(|order| order_outcome(&order, OrderOutcome::Modified))
                     .map_err(|error| error.to_string()),
-                "Practice order modified",
             );
         })
         .detach();
@@ -623,7 +768,7 @@ pub fn cancel_simulated_accounts(
             feedback.record(
                 service
                     .cancel_all(None)
-                    .map(|orders| format!("Cancelled {} practice order(s)", orders.len())),
+                    .map(|orders| cancel_all_outcome(&orders)),
             );
         })
         .detach();
@@ -663,7 +808,7 @@ pub fn unlock_simulated_account(
     let Some(account) =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
     else {
-        feedback.record(Err("Select a practice account to unlock".to_string()));
+        feedback.record(Err("Select an account to unlock".to_string()));
         return;
     };
     cx.background_executor()
@@ -671,7 +816,7 @@ pub fn unlock_simulated_account(
             record_outcome(
                 &feedback,
                 service.unlock_account(account),
-                "Practice account unlocked",
+                "Account unlocked",
             );
         })
         .detach();
@@ -829,50 +974,6 @@ pub fn flatten_simulated_account_for(
                     account: Some(account_id),
                     instrument: Some(instrument),
                 }),
-            ));
-        })
-        .detach();
-}
-
-/// Closes and reverses the selected practice position at the current BBO.
-pub fn reverse_simulated_position(
-    service: &TradingService,
-    feedback: &TradingFeedback,
-    frame: &aeris_market_data::OrderBookFrame,
-    account_key: Option<String>,
-    cx: &mut gpui::App,
-) {
-    let service = service.clone();
-    let feedback = feedback.clone();
-    let Some((account_id, instrument)) = prepare_flatten_for(frame, account_key) else {
-        feedback.record(Err(
-            "Reverse requires a selected account and current bid and ask".to_string(),
-        ));
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            feedback.record(flatten_feedback(
-                "Reversed",
-                service.reverse_position_at(account_id, instrument),
-            ));
-        })
-        .detach();
-}
-
-/// Flattens every simulated account at the runtime's verified quotes off the UI thread.
-pub fn flatten_simulated_accounts(
-    service: &TradingService,
-    feedback: &TradingFeedback,
-    cx: &mut gpui::App,
-) {
-    let service = service.clone();
-    let feedback = feedback.clone();
-    cx.background_executor()
-        .spawn(async move {
-            feedback.record(flatten_feedback(
-                "Flattened all accounts",
-                service.flatten(aeris_trading_runtime::FlattenScope::default()),
             ));
         })
         .detach();
@@ -1076,6 +1177,73 @@ mod tests {
                 aeris_trading::TimeInForce::Day,
             )
             .is_none()
+        );
+    }
+
+    fn working_order(venue_id: &str, client_order_id: &str) -> aeris_trading::Order {
+        let quantity = aeris_trading::FixedPoint::try_new(1, 0).expect("quantity");
+        aeris_trading::Order {
+            id: aeris_trading::OrderId::try_new(format!("order-{client_order_id}")).expect("id"),
+            client_order_id: aeris_trading::ClientOrderId::try_new(client_order_id)
+                .expect("client order id"),
+            account_id: aeris_trading::TradingAccountId::try_new("account").expect("account"),
+            instrument_id: aeris_instruments::InstrumentId::try_new("instrument:fixture:CME:ESZ6")
+                .expect("instrument"),
+            side: aeris_trading::OrderSide::Buy,
+            order_type: aeris_trading::OrderType::Market,
+            time_in_force: aeris_trading::TimeInForce::Day,
+            quantity,
+            filled_quantity: aeris_trading::FixedPoint::try_new(0, 0).expect("filled"),
+            limit_price: None,
+            stop_price: None,
+            status: aeris_trading::OrderStatus::Working,
+            submitted_unix_nanos: 1,
+            revision: 1,
+            accepted_unix_nanos: 1,
+            updated_unix_nanos: 1,
+            eligible_after_unix_nanos: 1,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
+            terminal_unix_nanos: None,
+            provenance: aeris_trading::TradingProvenance {
+                venue_id: venue_id.to_string(),
+                provider_id: "test-provider".to_string(),
+                session_generation: 1,
+                source_sequence: 1,
+                observed_unix_nanos: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn order_feedback_names_the_venue_that_holds_the_order() {
+        use super::{OrderOutcome, cancel_all_outcome, order_outcome};
+        let broker = working_order(aeris_trading::venue::BROKER_VENUE_ID, "b1");
+        let practice = working_order("aeris-sim", "p1");
+        assert_eq!(
+            order_outcome(&broker, OrderOutcome::Placed),
+            "Order b1 sent to the broker"
+        );
+        assert_eq!(
+            order_outcome(&broker, OrderOutcome::Cancelled),
+            "Cancel of order b1 sent to the broker"
+        );
+        assert_eq!(
+            order_outcome(&practice, OrderOutcome::Placed),
+            "Practice order p1 accepted"
+        );
+        assert_eq!(
+            order_outcome(&practice, OrderOutcome::Modified),
+            "Practice order p1 modified"
+        );
+        assert_eq!(cancel_all_outcome(&[]), "No working orders to cancel");
+        assert_eq!(
+            cancel_all_outcome(std::slice::from_ref(&broker)),
+            "Cancel sent to the broker for 1 order(s)"
+        );
+        assert_eq!(
+            cancel_all_outcome(&[practice, broker]),
+            "Cancelled 1 practice order(s) · cancel sent to the broker for 1 order(s)"
         );
     }
 

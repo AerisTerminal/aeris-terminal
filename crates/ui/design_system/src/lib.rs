@@ -386,9 +386,11 @@ platform_color_registry!(theme_colors);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeDimensions {
     pub app_header_height: f32,
+    /// Width of every control and layer edge. The Theme System draws all borders at 1px and
+    /// declares no border-width token.
     pub border_width: f32,
     /// Width of the `border-popover-highlight` inner edge. The Theme System states it in
-    /// prose ("a 0.5px outer hairline plus a 1px inner highlight") rather than as a token.
+    /// prose ("a 1px outer edge plus a 1px inner highlight") rather than as a token.
     pub popover_highlight_width: f32,
 }
 
@@ -412,7 +414,7 @@ impl AerisTheme {
             },
             dimensions: ThemeDimensions {
                 app_header_height: 44.0,
-                border_width: BORDER_WIDTH,
+                border_width: 1.0,
                 popover_highlight_width: 1.0,
             },
         }
@@ -848,9 +850,10 @@ mod tests {
     #[test]
     fn border_width_matches_the_platform_contract() {
         let css = include_str!("../platform.css");
-        assert!((AerisTheme::light().dimensions.border_width - 0.5).abs() < f32::EPSILON);
-        assert!((AerisTheme::dark().dimensions.border_width - 0.5).abs() < f32::EPSILON);
-        assert_eq!(css.matches("--border-width: 0.5px;").count(), 2);
+        assert!((AerisTheme::light().dimensions.border_width - 1.0).abs() < f32::EPSILON);
+        assert!((AerisTheme::dark().dimensions.border_width - 1.0).abs() < f32::EPSILON);
+        assert!(!css.contains("--border-width"));
+        assert!(css.contains("a 1px outer edge plus a 1px inner highlight"));
     }
 
     #[test]
@@ -970,8 +973,8 @@ mod tests {
             "-webkit-font-smoothing: antialiased;",
             "font-synthesis: none;",
             "transition: background-color 150ms ease, color 150ms ease;",
-            "outline: var(--border-width) solid var(--ring-primary);",
-            "outline-offset: calc(var(--border-width) * -1);",
+            "outline: 1px solid var(--ring-primary);",
+            "outline-offset: -1px;",
             "input:focus-visible",
             "outline-color: var(--ring-primary);",
             "cursor: not-allowed;",

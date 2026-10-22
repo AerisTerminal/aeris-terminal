@@ -50,7 +50,7 @@ fn checkbox_ink(theme: &AerisTheme, checked: bool, disabled: bool) -> CheckboxIn
         },
         (false, false) => CheckboxInk {
             fill: colors.surface,
-            border: colors.border_strong,
+            border: colors.border,
             hover_fill: Some(colors.hover_bg),
             tick: None,
             label: colors.text_default,
@@ -72,6 +72,7 @@ pub(crate) struct CheckboxRow {
     label: SharedString,
     checked: bool,
     disabled: bool,
+    compact: bool,
     theme: AerisTheme,
     on_change: Option<ChangeHandler>,
 }
@@ -88,9 +89,17 @@ impl CheckboxRow {
             label: label.into(),
             checked,
             disabled: false,
+            compact: false,
             theme: *theme,
             on_change: None,
         }
+    }
+
+    /// The dense size for a label inside a compact form field: a smaller box and
+    /// secondary label text, with no minimum row height.
+    pub(crate) fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     /// A checkbox that shows its value but cannot be changed.
@@ -114,6 +123,13 @@ impl RenderOnce for CheckboxRow {
         let ink = checkbox_ink(&self.theme, self.checked, self.disabled);
         let checked = self.checked;
         let disabled = self.disabled;
+        let compact = self.compact;
+        let (box_size, tick_size) = if compact { (12.0, 10.0) } else { (16.0, 12.0) };
+        let label_color = if compact && !disabled {
+            self.theme.colors.text_secondary
+        } else {
+            ink.label
+        };
         let focus_ring = self.theme.colors.ring_primary;
         let focus_handle = window
             .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
@@ -122,7 +138,7 @@ impl RenderOnce for CheckboxRow {
         let radius = px(f32::from(RadiusToken::Sm.logical_pixels()));
         let check_box = div()
             .flex_none()
-            .size(design_rems(16.0))
+            .size(design_rems(box_size))
             .flex()
             .items_center()
             .justify_center()
@@ -137,7 +153,7 @@ impl RenderOnce for CheckboxRow {
             })
             .children(ink.tick.map(|tick| {
                 Icon::new(UiIcon::Tick.path())
-                    .with_size(px(12.0))
+                    .with_size(px(tick_size))
                     .color(gpui_color(tick))
             }));
         div()
@@ -150,10 +166,10 @@ impl RenderOnce for CheckboxRow {
                 Toggled::False
             })
             .aria_label(self.label.clone())
-            .min_h(design_rems(30.0))
+            .when(!compact, |row| row.min_h(design_rems(30.0)))
             .flex()
             .items_center()
-            .gap_2()
+            .map(|row| if compact { row.gap_1p5() } else { row.gap_2() })
             .rounded(radius)
             .border(platform_border_width(&self.theme))
             .border_color(gpui::transparent_black())
@@ -178,8 +194,14 @@ impl RenderOnce for CheckboxRow {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_sm()
-                    .text_color(gpui_color(ink.label))
+                    .map(|label| {
+                        if compact {
+                            label.text_xs()
+                        } else {
+                            label.text_sm()
+                        }
+                    })
+                    .text_color(gpui_color(label_color))
                     .child(self.label),
             )
     }

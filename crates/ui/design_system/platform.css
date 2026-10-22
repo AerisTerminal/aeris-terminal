@@ -60,9 +60,8 @@
   --surface: #ffffff;
   --surface-secondary: #fafafa;
   --surface-subtle: #fafafa;
+  /* Raised: the panels inside popup menus, and placeholder bars. */
   --surface-raised: #f0f0f0;
-  --surface-overlay: color-mix(in srgb, #000000 50%, transparent);
-  --surface-inverse: #222222;
   /* Floating layers (menus, dialogs, tooltips) */
   --surface-popover: #ffffff;
 
@@ -70,13 +69,9 @@
   --border: #0a0a0a1a;
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
-  --border-softer: #0a0a0a0d;
-  --border-strong: #0a0a0a26;
-  --border-inverse: #222222;
-  /* Floating-layer edge: a 0.5px outer hairline plus a 1px inner highlight. */
+  /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
   --border-popover: #0a0a0a33;
   --border-popover-highlight: #ffffffcc;
-  --border-width: 0.5px;
 
   /* Text */
   --text-default: #0a0a0a;
@@ -129,6 +124,8 @@
   --danger-disabled-foreground: #ffa2a2;
   --danger-ring: #ffc9c9;
   --danger-foreground: #ffffff;
+  --warning-hover: #e05c00;
+  --warning-foreground: #ffffff;
 
   /* Buttons — neutral default button */
   --button-fill: #0a0a0af2;
@@ -150,6 +147,15 @@
   --sell-disabled: #ffc9c9;
   --sell-disabled-foreground: #ffa2a2;
   --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 12%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 20%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 28%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #000000);
+  --sell-subtle: color-mix(in srgb, var(--sell) 12%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 20%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 28%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #000000);
 
   /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
   --book-bid-fill: color-mix(in srgb, var(--primary) 40%, var(--surface));
@@ -162,17 +168,11 @@
   --ring-primary: var(--primary);
 
   /* Radius */
+  --radius-small: 4px;
+  --radius-compact: 6px;
   --radius-default: 8px;
   --radius-medium: 14px;
-  --radius-small: 4px;
   --radius-large: 999px;
-  --radius-compact: 6px;
-
-  /* Shadows */
-  --shadow-1: 0 0 1px 0 color-mix(in srgb, #000000 20%, transparent), 0 1px 2px 0 color-mix(in srgb, #000000 5%, transparent), 0 1px 1px 0 color-mix(in srgb, #000000 1%, transparent);
-  --shadow-2: 0 1px 6px 0 color-mix(in srgb, #000000 10%, transparent);
-  --shadow-3: 0 2.75px 5.5px 0 color-mix(in srgb, #000000 10%, transparent);
-  --shadow-dialog: 0 4px 6px -4px color-mix(in srgb, #101828 10%, transparent), 0 10px 15px -3px color-mix(in srgb, #000000 10%, transparent);
 
   /* Chart */
   --bullish: var(--positive);
@@ -188,20 +188,14 @@
   --surface-secondary: #fafafa0f;
   --surface-subtle: #fafafa0a;
   --surface-raised: #fafafa14;
-  --surface-overlay: color-mix(in srgb, #000000 60%, transparent);
-  --surface-inverse: #ffffff;
   --surface-popover: #262626;
 
   /* Borders */
   --border: #fafafa1a;
   --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
-  --border-softer: #fafafa0d;
-  --border-strong: #fafafa33;
-  --border-inverse: #ffffff;
   --border-popover: #000000cc;
   --border-popover-highlight: #ffffff1a;
-  --border-width: 0.5px;
 
   /* Text */
   --text-default: #fafafa;
@@ -250,6 +244,8 @@
   --danger-disabled-foreground: #d0646c;
   --danger-ring: #c10007;
   --danger-foreground: #ffffff;
+  --warning-hover: #ff7b1f;
+  --warning-foreground: #ffffff;
 
   /* Buttons — neutral default button */
   --button-fill: #fafafad9;
@@ -271,6 +267,15 @@
   --sell-disabled: #6b3135;
   --sell-disabled-foreground: #ae8e90;
   --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 18%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 26%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 34%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #ffffff);
+  --sell-subtle: color-mix(in srgb, var(--sell) 18%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 26%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 34%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #ffffff);
 
   /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
   --book-bid-fill: color-mix(in srgb, var(--primary) 35%, var(--surface));
@@ -282,6 +287,9 @@
   /* Focus */
   --ring-primary: var(--primary);
 
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
   --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
@@ -331,8 +339,8 @@ button,
 }
 
 :focus-visible {
-  outline: var(--border-width) solid var(--ring-primary);
-  outline-offset: calc(var(--border-width) * -1);
+  outline: 1px solid var(--ring-primary);
+  outline-offset: -1px;
 }
 
 ::selection {
@@ -347,7 +355,7 @@ button,
 }
 
 .button-primary {
-  border: var(--border-width) solid transparent;
+  border: 1px solid transparent;
   background: var(--button-fill);
   color: var(--button-fill-foreground);
 }
@@ -361,7 +369,7 @@ button,
 }
 
 .button-outline {
-  border: var(--border-width) solid var(--border-secondary);
+  border: 1px solid var(--border-secondary);
   background: var(--surface-secondary);
   color: var(--text-default);
 }
@@ -375,7 +383,7 @@ button,
 }
 
 .button-ghost {
-  border: var(--border-width) solid transparent;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
 }
@@ -405,7 +413,7 @@ button:disabled,
 input,
 select,
 textarea {
-  border: var(--border-width) solid var(--border-secondary);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-default);
   background: var(--surface-secondary);
   color: var(--text-default);

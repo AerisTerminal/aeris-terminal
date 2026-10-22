@@ -194,14 +194,6 @@ pub(crate) fn parse_color(value: &str) -> Result<[u8; 4], String> {
     Ok([channel(0)?, channel(1)?, channel(2)?, alpha])
 }
 
-pub(crate) fn parse_pixels(value: &str) -> Result<f32, String> {
-    value
-        .strip_suffix("px")
-        .ok_or_else(|| format!("expected px dimension, found `{value}`"))?
-        .parse::<f32>()
-        .map_err(|_| format!("invalid px dimension `{value}`"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,7 +223,6 @@ mod tests {
                 .unwrap();
         assert!(resolve(&root, "a").is_err());
         assert!(resolve(&root, "missing").is_err());
-        assert!(parse_pixels("1rem").is_err());
         assert!(parse_hex("red").is_err());
         assert!(parse_color("color-mix(in srgb, red 50%, transparent)").is_err());
     }

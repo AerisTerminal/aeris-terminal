@@ -757,6 +757,84 @@ fn a_report_for_another_account_never_moves_an_order() {
 }
 
 #[test]
+fn a_broker_cancel_keeps_its_reason_and_a_requested_cancel_is_marked() {
+    let (_directory, service, _receiver) = setup("venue-cancel-reason");
+    let inbox = service.demo_venue_inbox();
+    let ended = service
+        .place_order(limit_request("broker-ended", 9_000))
+        .expect("pending");
+    inbox
+        .push(venue(
+            1,
+            order_update(report(&ended, "901", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("accepted");
+    let explanation = format!("cancelled by the risk system {}", "é".repeat(200));
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Order {
+                order: report(&ended, "901", 0),
+                state: BrokerOrderState::Cancelled,
+                reason: Some(explanation.clone()),
+            },
+        ))
+        .expect("cancelled");
+    let snapshot = service.snapshot().expect("snapshot");
+    let event = snapshot
+        .order_events
+        .iter()
+        .find(|event| event.order_id == ended.id)
+        .expect("newest event");
+    assert_eq!(event.kind, aeris_trading::OrderEventKind::Cancelled);
+    assert_eq!(event.reason, None, "the broker decided this cancel");
+    let detail = event.detail.as_deref().expect("detail");
+    assert!(detail.starts_with("cancelled by the risk system"));
+    assert!(
+        detail.len() <= aeris_trading::MAXIMUM_TRADING_FIELD_BYTES
+            && explanation.starts_with(detail),
+        "an over-long explanation is cut on a character boundary"
+    );
+
+    let asked = service
+        .place_order(limit_request("user-ended", 9_000))
+        .expect("pending");
+    inbox
+        .push(venue(
+            1,
+            order_update(report(&asked, "902", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("accepted");
+    service
+        .cancel_order(asked.client_order_id.clone())
+        .expect("cancel requested");
+    inbox
+        .push(venue(
+            1,
+            order_update(report(&asked, "902", 0), BrokerOrderState::Cancelled),
+        ))
+        .expect("cancel confirmed");
+    let snapshot = service.snapshot().expect("snapshot");
+    let cancels: Vec<_> = snapshot
+        .order_events
+        .iter()
+        .filter(|event| {
+            event.order_id == asked.id && event.kind == aeris_trading::OrderEventKind::Cancelled
+        })
+        .collect();
+    assert_eq!(cancels.len(), 2, "the request and the confirmation");
+    assert!(
+        cancels
+            .iter()
+            .all(|event| event.reason == Some(aeris_trading::OrderEventReason::UserCancel))
+    );
+    assert_eq!(
+        order_status(&service, &asked.client_order_id),
+        OrderStatus::Cancelled
+    );
+}
+
+#[test]
 fn deals_record_once_and_closing_deals_mirror_broker_orders() {
     let (directory, service, _receiver) = setup("venue-fills");
     let mut place = request("filled");

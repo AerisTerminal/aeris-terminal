@@ -361,10 +361,7 @@ fn account_row(
                 })
                 .on_click(move |_, _, cx| {
                     select.update(cx, |surface, surface_cx| {
-                        surface.trading_pnl.order_entry.selected_account_id =
-                            Some(account_id.clone());
-                        surface.trading_pnl.current = None;
-                        surface_cx.notify();
+                        surface.select_trading_account(account_id.clone(), surface_cx);
                     });
                 })
         })

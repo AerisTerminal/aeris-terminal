@@ -837,7 +837,7 @@ struct WorkspaceSurface {
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPnlState,
     order_quantity: order_quantity::OrderQuantityControls,
-    order_price: Entity<InputState>,
+    order_ticket: order_ticket::OrderTicketControls,
     chart_trading_visibility: ChartTradingVisibilitySettings,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     market_state: WorkspaceMarketState,
@@ -929,6 +929,7 @@ struct TradingPnlState {
     connected_broker_accounts: std::collections::BTreeSet<aeris_trading::TradingAccountId>,
     risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
     risk_locks: Vec<aeris_trading_runtime::RiskLock>,
+    risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     market_error: Option<String>,
     order_entry: TradingOrderEntryState,
@@ -1061,6 +1062,7 @@ impl Default for TradingPnlState {
             connected_broker_accounts: std::collections::BTreeSet::new(),
             risk_profiles: Vec::new(),
             risk_locks: Vec::new(),
+            risk_meters: Vec::new(),
             feedback: None,
             market_error: None,
             order_entry: TradingOrderEntryState::default(),
@@ -1108,6 +1110,7 @@ fn selected_account_lock_reason(state: &TradingPnlState) -> Option<&str> {
 struct TradingOrderEntryState {
     quantity: u64,
     selected_account_id: Option<aeris_trading::TradingAccountId>,
+    ticket: order_ticket::TicketSettings,
 }
 
 impl Default for TradingOrderEntryState {
@@ -1115,6 +1118,7 @@ impl Default for TradingOrderEntryState {
         Self {
             quantity: 1,
             selected_account_id: None,
+            ticket: order_ticket::TicketSettings::default(),
         }
     }
 }
@@ -2360,15 +2364,20 @@ fn dispatch_chart_cancel(
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let task = cx.background_executor().spawn(async move {
-        aeris_desktop::trading::record_outcome(
+        aeris_desktop::trading::record_result(
             &feedback,
             service
                 .cancel_order_checked(aeris_trading_runtime::RevisionedCancelOrder {
                     client_order_id,
                     expected_revision: Some(expected_revision),
                 })
+                .map(|order| {
+                    aeris_desktop::trading::order_outcome(
+                        &order,
+                        aeris_desktop::trading::OrderOutcome::Cancelled,
+                    )
+                })
                 .map_err(|error| error.to_string()),
-            "Practice order cancelled",
         )
     });
     cx.spawn(async move |_, cx| {
@@ -2507,10 +2516,14 @@ fn dispatch_chart_create_protection(
             let result = service.place_protective_order_from_market(
                 aeris_trading_runtime::PlaceProtection { order, role },
             );
-            aeris_desktop::trading::record_outcome(
+            aeris_desktop::trading::record_result(
                 &feedback,
-                result,
-                "Practice protective order placed",
+                result.map(|order| {
+                    aeris_desktop::trading::order_outcome(
+                        &order,
+                        aeris_desktop::trading::OrderOutcome::ProtectionPlaced,
+                    )
+                }),
             )
         });
     cx.spawn(async move |_, cx| {
@@ -2548,15 +2561,20 @@ fn dispatch_chart_modify(
     };
     let feedback = app.lifecycle.trading_feedback().clone();
     let task = cx.background_executor().spawn(async move {
-        aeris_desktop::trading::record_outcome(
+        aeris_desktop::trading::record_result(
             &feedback,
             service
                 .modify_order_from_market_checked(aeris_trading_runtime::RevisionedModifyOrder {
                     order: command,
                     expected_revision: Some(order_revision),
                 })
+                .map(|order| {
+                    aeris_desktop::trading::order_outcome(
+                        &order,
+                        aeris_desktop::trading::OrderOutcome::Modified,
+                    )
+                })
                 .map_err(|error| error.to_string()),
-            "Practice order modified",
         )
     });
     cx.spawn(async move |_, cx| {
@@ -4841,7 +4859,11 @@ fn workspace_surface_entity(
         window,
         cx,
     );
-    let order_price = cx.new(|cx| InputState::new(window, cx).placeholder("Order price"));
+    let order_ticket = order_ticket::OrderTicketControls::new(
+        TradingOrderEntryState::default().ticket,
+        window,
+        cx,
+    );
     let workspace_lifecycle = lifecycle.clone();
     let workspace = cx.new(move |cx| {
         WorkspaceSurface::new(
@@ -4854,7 +4876,7 @@ fn workspace_surface_entity(
             timeframe_input,
             time_zone_input,
             order_quantity,
-            order_price,
+            order_ticket,
             chart_chrome,
             restored.chart,
         )
@@ -4883,6 +4905,7 @@ fn workspace_surface_entity(
     subscribe_timeframe_input(&timeframe_search_input, &workspace, window, cx);
     subscribe_time_zone_input(&time_zone_search_input, &workspace, window, cx);
     order_quantity::subscribe_order_quantity_inputs(&workspace, window, cx);
+    order_ticket::subscribe_order_ticket_inputs(&workspace, window, cx);
     workspace
 }
 

@@ -41,7 +41,7 @@ impl OrderQuantityControls {
     pub(super) fn new(quantity: u64, window: &mut Window, cx: &mut App) -> Self {
         let ticket_input = cx.new(|input_cx| InputState::new(window, input_cx));
         ticket_input.update(cx, |input, input_cx| {
-            input.set_text_align(gpui::TextAlign::Center, input_cx);
+            input.set_text_align(gpui::TextAlign::Right, input_cx);
             input.set_value(quantity.to_string(), window, input_cx);
         });
         let menu_input =
@@ -55,6 +55,11 @@ impl OrderQuantityControls {
             menu_trigger: None,
         }
     }
+
+    /// The ticket field holds text that is not a valid quantity.
+    pub(super) const fn ticket_invalid(&self) -> bool {
+        self.ticket_invalid
+    }
 }
 
 #[cfg(test)]
@@ -65,10 +70,6 @@ impl OrderQuantityControls {
 
     pub(super) const fn menu_input(&self) -> &Entity<InputState> {
         &self.menu_input
-    }
-
-    pub(super) const fn ticket_invalid(&self) -> bool {
-        self.ticket_invalid
     }
 
     pub(super) const fn menu_invalid(&self) -> bool {
@@ -233,17 +234,12 @@ impl WorkspaceSurface {
     }
 }
 
-/// The order ticket's editable quantity.
-pub(super) fn ticket_quantity_field(
-    controls: &OrderQuantityControls,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    div().h_full().w(px(64.0)).flex().child(
-        Input::new(&controls.ticket_input)
-            .platform(theme)
-            .invalid(controls.ticket_invalid)
-            .flex_1(),
-    )
+/// The order ticket's editable quantity, drawn inside the ticket's own field frame.
+pub(super) fn ticket_quantity_field(controls: &OrderQuantityControls) -> impl IntoElement + use<> {
+    Input::new(&controls.ticket_input)
+        .appearance(false)
+        .bordered(false)
+        .flex_1()
 }
 
 /// The Buy / quantity / Sell bar the chart shows under its symbol legend. It reads the

@@ -2520,6 +2520,67 @@ fn assert_ticket_interest(service: &TradingService, published: &impl Fn(Vec<Mark
     published(vec![]);
 }
 
+#[test]
+fn an_inline_bracket_from_the_market_keeps_its_entry_type() {
+    let directory = TestDirectory::new("inline-market-bracket");
+    let (service, _clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let placed = service
+        .place_inline_bracket_from_market(PlaceInlineBracket {
+            entry: market_order("inline-market", OrderSide::Buy, 9, 1_000),
+            template: super::fixed_stop_bracket_template(),
+        })
+        .unwrap();
+    let PlacementOutcome::Managed(bracket) = placed else {
+        panic!("a practice bracket is managed locally");
+    };
+    let snapshot = service.snapshot().unwrap();
+    let entry = snapshot
+        .orders
+        .iter()
+        .find(|order| order.client_order_id == bracket.entry_client_order_id)
+        .unwrap();
+    assert_eq!(
+        entry.order_type,
+        OrderType::Market,
+        "a market entry stays a market order"
+    );
+    assert_eq!(entry.limit_price, None);
+    assert!(entry.status.is_open());
+
+    let mut stop = market_order("inline-stop", OrderSide::Buy, 9, 1_000);
+    stop.order_type = OrderType::Stop;
+    stop.time_in_force = TimeInForce::GoodTillCancelled;
+    stop.stop_price = Some(FixedPoint::try_new(10_100, 2).unwrap());
+    let PlacementOutcome::Managed(bracket) = service
+        .place_inline_bracket_from_market(PlaceInlineBracket {
+            entry: stop,
+            template: super::fixed_stop_bracket_template(),
+        })
+        .unwrap()
+    else {
+        panic!("a practice bracket is managed locally");
+    };
+    let snapshot = service.snapshot().unwrap();
+    let entry = snapshot
+        .orders
+        .iter()
+        .find(|order| order.client_order_id == bracket.entry_client_order_id)
+        .unwrap();
+    assert_eq!(entry.order_type, OrderType::Stop);
+    assert_eq!(entry.status, OrderStatus::Working);
+    service.shutdown(Duration::from_secs(2)).unwrap();
+}
+
 fn assert_group_only_interest(directory: &TestDirectory) {
     // A real pending group is the only interest source on its instrument: placing it
     // publishes the route and cancelling its entry releases the lease through the cascade.

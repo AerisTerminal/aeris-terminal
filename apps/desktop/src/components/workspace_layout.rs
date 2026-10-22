@@ -428,7 +428,6 @@ pub(super) fn workspace_market_area(
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
     let order_book_frame = surface.order_book.read(cx).frame().cloned();
-    let has_open_position = has_selected_open_position(surface, order_book_frame.as_ref());
     let side_panel = surface.side_panels.any().then(|| {
         workspace_side_panel(WorkspaceSidePanelState {
             app: active_surface.clone(),
@@ -444,13 +443,15 @@ pub(super) fn workspace_market_area(
                 columns: surface.order_book.read(cx).columns(),
                 theme,
             },
-            order_entry: ticket_controls_state(
-                active_surface,
-                surface,
-                order_book_frame.as_ref(),
-                has_open_position,
+            order_entry: TradingOrderControlsState {
+                app: active_surface,
+                frame: order_book_frame.as_ref(),
+                product: surface.product.as_ref(),
+                trading: &surface.trading_pnl,
+                quantity: &surface.order_quantity,
+                controls: &surface.order_ticket,
                 theme,
-            ),
+            },
             time_sales: TimeSalesPanelState {
                 app: active_surface.clone(),
                 tape: surface.trade_tape.as_ref(),
@@ -498,50 +499,6 @@ pub(super) fn workspace_market_area(
             ))
         })
         .children(price_alert_dialog)
-}
-
-fn ticket_controls_state<'a>(
-    app: &'a Entity<WorkspaceSurface>,
-    surface: &'a WorkspaceSurface,
-    frame: Option<&'a aeris_market_data::OrderBookFrame>,
-    has_open_position: bool,
-    theme: &'a AerisTheme,
-) -> TradingOrderControlsState<'a> {
-    TradingOrderControlsState {
-        app,
-        frame,
-        trading_pnl: surface.trading_pnl.current.as_ref(),
-        has_open_position,
-        accounts: &surface.trading_pnl.accounts,
-        risk_locks: &surface.trading_pnl.risk_locks,
-        feedback: surface.trading_pnl.feedback.as_ref(),
-        market_error: surface.trading_pnl.market_error.as_deref(),
-        order_entry: &surface.trading_pnl.order_entry,
-        quantity: &surface.order_quantity,
-        price: &surface.order_price,
-        price_scale: surface.product.as_ref().map(|product| product.price_scale),
-        theme,
-    }
-}
-
-fn has_selected_open_position(
-    surface: &WorkspaceSurface,
-    frame: Option<&aeris_market_data::OrderBookFrame>,
-) -> bool {
-    frame.is_some_and(|frame| {
-        surface
-            .trading_pnl
-            .order_entry
-            .selected_account_id
-            .as_ref()
-            .is_some_and(|account_id| {
-                surface.trading_pnl.positions.iter().any(|position| {
-                    &position.position.account_id == account_id
-                        && position.position.instrument_id.as_str() == frame.instrument_id
-                        && position.position.net_quantity.units() != 0
-                })
-            })
-    })
 }
 
 /// Chart grid plus the bottom context panel, inset past the drawing toolbar.
@@ -726,7 +683,7 @@ fn refresh_trading_pnl(
                 if terminal.bottom_panel.apply_snapshot(snapshot) {
                     terminal_cx.notify();
                 }
-                terminal.announce_fills(snapshot, terminal_cx);
+                terminal.announce_trading(snapshot, terminal_cx);
             })
             && terminal.upgrade().is_some()
         {
@@ -765,8 +722,7 @@ fn apply_trading_refresh(
     match result {
         Ok(snapshot) => apply_trading_snapshot(state, snapshot.clone(), state_cx),
         Err(error) => {
-            state.trading_pnl.market_error =
-                Some(format!("Practice trading is unavailable: {error}"));
+            state.trading_pnl.market_error = Some(format!("Trading is unavailable: {error}"));
             state_cx.notify();
         }
     }
@@ -799,7 +755,7 @@ fn apply_trading_snapshot(
     state.trading_pnl.market_error = snapshot
         .market_observation_error
         .as_ref()
-        .map(|error| format!("Practice market update failed: {error}"));
+        .map(|error| format!("Trading market update failed: {error}"));
     let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
     let chart_snapshot = crate::desktop::chart_trading_snapshot(
         &snapshot,
@@ -822,6 +778,7 @@ fn apply_trading_snapshot(
     state.trading_pnl.connected_broker_accounts = snapshot.connected_broker_accounts;
     state.trading_pnl.risk_profiles = snapshot.risk_profiles;
     state.trading_pnl.risk_locks = snapshot.risk_locks;
+    state.trading_pnl.risk_meters = snapshot.risk_meters;
     state.trading_pnl.accounts = accounts;
     if state
         .trading_pnl

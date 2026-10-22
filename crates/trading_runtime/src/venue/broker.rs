@@ -13,8 +13,8 @@ use crate::{
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
     AccountEnvironment, ClientOrderId, Fill, FillId, FixedPoint, Liquidity, Order, OrderEvent,
-    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
-    TimeInForce, TradingAccount, TradingAccountId,
+    OrderEventId, OrderEventKind, OrderEventReason, OrderId, OrderSide, OrderStatus, OrderType,
+    Position, TimeInForce, TradingAccount, TradingAccountId,
     venue::{
         BROKER_VENUE_ID, BracketLevel, BracketSide, BrokerFill, BrokerOrder, BrokerOrderKind,
         BrokerOrderState, ObservedAccount, ServerBracket, VenueAmendment, VenueOrder,
@@ -369,6 +369,7 @@ impl TradingCore {
             &pending,
             OrderEventKind::Modified,
             "modify requested",
+            Some(OrderEventReason::UserModify),
             request,
         )?;
         Ok(pending)
@@ -397,6 +398,7 @@ impl TradingCore {
             &pending,
             OrderEventKind::Cancelled,
             "cancel requested",
+            Some(OrderEventReason::UserCancel),
             request,
         )?;
         Ok(pending)
@@ -1098,7 +1100,7 @@ impl TradingCore {
                     .map_err(|error| error.to_string())?;
             updated.provenance = self.venue_provenance();
             let provenance = updated.provenance.clone();
-            self.record_broker_transition(updated, kind, detail, provenance, None)?;
+            self.record_broker_transition(updated, kind, detail, None, provenance, None)?;
         }
         self.rebase_positions(account_id, &snapshot.positions)
     }
@@ -1323,6 +1325,11 @@ impl TradingCore {
         else {
             return Ok(());
         };
+        // A cancel the broker confirms while Aeris's own cancel request is pending answers
+        // that request; any other end is the broker's decision.
+        let requested = (current.status == OrderStatus::PendingCancel
+            && state == BrokerOrderState::Cancelled)
+            .then_some(OrderEventReason::UserCancel);
         updated.provenance = self.venue_provenance();
         let provenance = updated.provenance.clone();
         let detail = reason.unwrap_or(broker_report_detail(state));
@@ -1330,6 +1337,7 @@ impl TradingCore {
             updated,
             kind,
             detail,
+            requested,
             provenance,
             binding.then_some(report.broker_order_id.as_str()),
         )
@@ -1359,7 +1367,14 @@ impl TradingCore {
         };
         updated.provenance = self.venue_provenance();
         let provenance = updated.provenance.clone();
-        self.record_broker_transition(updated, OrderEventKind::Rejected, reason, provenance, None)
+        self.record_broker_transition(
+            updated,
+            OrderEventKind::Rejected,
+            reason,
+            None,
+            provenance,
+            None,
+        )
     }
 
     fn venue_provenance(&self) -> TradingProvenance {
@@ -1377,6 +1392,7 @@ impl TradingCore {
         updated: &Order,
         kind: OrderEventKind,
         detail: &str,
+        reason: Option<OrderEventReason>,
         request: VenueRequest,
     ) -> Result<(), String> {
         updated.validate().map_err(|error| error.to_string())?;
@@ -1387,7 +1403,8 @@ impl TradingCore {
         }
         let sequence = self.state.next_sequence;
         let provenance = self.broker_provenance(self.command_now, sequence);
-        let event = Self::broker_event(updated, sequence, kind, detail, provenance)?;
+        let mut event = Self::broker_event(updated, sequence, kind, detail, provenance)?;
+        event.reason = reason;
         let reservation = outbound
             .try_reserve(request)
             .map_err(|error| outbound_error(&error))?;
@@ -1442,12 +1459,15 @@ impl TradingCore {
         updated: Order,
         kind: OrderEventKind,
         detail: &str,
+        reason: Option<OrderEventReason>,
         provenance: TradingProvenance,
         binding: Option<&str>,
     ) -> Result<(), String> {
         updated.validate().map_err(|error| error.to_string())?;
         let sequence = self.state.next_sequence;
-        let event = Self::broker_event(&updated, sequence, kind, detail, provenance)?;
+        let mut event =
+            Self::broker_event(&updated, sequence, kind, bounded_detail(detail), provenance)?;
+        event.reason = reason;
         let released = if updated.status.is_open() {
             Vec::new()
         } else {
@@ -1533,6 +1553,16 @@ fn venue_basis(average: FixedPoint, net: FixedPoint, scale: u8) -> Result<CostBa
             .map_err(|error| error.to_string())?,
         scale,
     })
+}
+
+/// The broker's free text cut to the longest event detail the contract stores, on a
+/// character boundary, so an explanation can never block the transition it explains.
+fn bounded_detail(detail: &str) -> &str {
+    let mut end = detail.len().min(aeris_trading::MAXIMUM_TRADING_FIELD_BYTES);
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    &detail[..end]
 }
 
 fn broker_report_detail(state: BrokerOrderState) -> &'static str {

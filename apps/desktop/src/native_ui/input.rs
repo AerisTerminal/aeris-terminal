@@ -116,7 +116,7 @@ impl RenderOnce for Input {
         let invalid = self.has_presentation(Self::INVALID);
         let focus_shown = focused && self.has_presentation(Self::FOCUS_BORDERED);
         let resting_border = self.border_color.unwrap_or_else(|| color.opacity(0.25));
-        // Focus recolours the border itself, so the focus outline is exactly `--border-width`.
+        // Focus recolours the border itself, so the focus outline is exactly the 1px border.
         let border_color = if invalid {
             self.invalid_border_color.unwrap_or(resting_border)
         } else if focus_shown {

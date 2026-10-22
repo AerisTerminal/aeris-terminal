@@ -11,9 +11,10 @@
 //! - Swiping right dismisses a toast past a distance or with enough momentum; a swipe the wrong
 //!   way meets friction, a short one springs back, and a click dismisses.
 //!
-//! Chart status toasts stay while their condition holds. Fill toasts announce new executions;
-//! the trading owner stays authoritative for fills, and this module only remembers which fills
-//! it has already announced.
+//! Chart status toasts stay while their condition holds. Fill toasts announce new executions
+//! and order toasts announce broker orders the broker ended on its own, with its reason; the
+//! trading owner stays authoritative for both, and this module only remembers what it has
+//! already announced.
 
 use super::notification_center::{
     NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, RetryTarget,
@@ -54,9 +55,10 @@ const SWIPE_VELOCITY: f32 = 0.11;
 /// A press that travels less than this is a click.
 const CLICK_SLOP: f32 = 3.0;
 const ICON_SIZE: f32 = 16.0;
-/// A fill first reported this long after it executed is history the owner caught up on after a
-/// reconnect or restart, not news.
-const FILL_FRESHNESS_NANOS: i64 = 60_000_000_000;
+/// A fill or order event first reported this long after it happened is history the owner
+/// caught up on after a reconnect or restart, not news.
+const NEWS_FRESHNESS_NANOS: i64 = 60_000_000_000;
+const ORDER_END_LIFETIME: Duration = Duration::from_secs(10);
 
 /// Targets closer than this, in logical pixels or opacity, are the same place.
 const TWEEN_PRECISION: f32 = 0.001;
@@ -278,39 +280,49 @@ struct Swipe {
     started: Instant,
 }
 
-/// Which fills the owner has reported, so each new execution is announced once.
-#[derive(Debug, Default)]
-struct FillWatch {
+/// Which facts of one kind the owner has reported, so each new one is announced once.
+#[derive(Debug)]
+struct NewsWatch<K> {
     revision: Option<u64>,
-    /// `None` until the first snapshot, whose fills are history.
-    seen: Option<BTreeSet<aeris_trading::FillId>>,
+    /// `None` until the first snapshot, whose facts are history.
+    seen: Option<BTreeSet<K>>,
 }
 
-impl FillWatch {
-    /// The fills that are news in this snapshot, oldest first.
-    fn fresh<'a>(
+impl<K> Default for NewsWatch<K> {
+    fn default() -> Self {
+        Self {
+            revision: None,
+            seen: None,
+        }
+    }
+}
+
+impl<K: Ord + Clone> NewsWatch<K> {
+    /// The items that are news in this snapshot, oldest first by `happened`.
+    fn fresh<'a, T>(
         &mut self,
         revision: u64,
-        fills: &'a [aeris_trading::Fill],
+        items: &'a [T],
+        key: impl Fn(&T) -> &K,
+        happened: impl Fn(&T) -> i64,
         now_unix_nanos: i64,
-    ) -> Vec<&'a aeris_trading::Fill> {
+    ) -> Vec<&'a T> {
         if self.revision == Some(revision) {
             return Vec::new();
         }
         self.revision = Some(revision);
-        let current = fills.iter().map(|fill| fill.id.clone()).collect();
+        let current = items.iter().map(|item| key(item).clone()).collect();
         let Some(seen) = self.seen.replace(current) else {
             return Vec::new();
         };
-        let mut fresh: Vec<_> = fills
+        let mut fresh: Vec<_> = items
             .iter()
-            .filter(|fill| {
-                !seen.contains(&fill.id)
-                    && now_unix_nanos.saturating_sub(fill.execution_unix_nanos)
-                        <= FILL_FRESHNESS_NANOS
+            .filter(|item| {
+                !seen.contains(key(item))
+                    && now_unix_nanos.saturating_sub(happened(item)) <= NEWS_FRESHNESS_NANOS
             })
             .collect();
-        fresh.sort_by_key(|fill| fill.execution_unix_nanos);
+        fresh.sort_by_key(|item| happened(item));
         fresh
     }
 }
@@ -328,7 +340,8 @@ pub(super) struct Toaster {
     reduce_motion: bool,
     /// A chart condition the trader dismissed stays dismissed until it changes or clears.
     dismissed_status: BTreeMap<ToastStack, &'static str>,
-    fills: FillWatch,
+    fills: NewsWatch<aeris_trading::FillId>,
+    order_ends: NewsWatch<aeris_trading::OrderEventId>,
     /// The timer expiry a wake-up is already scheduled for.
     wake: Option<Instant>,
 }
@@ -794,27 +807,65 @@ impl Toaster {
         );
     }
 
-    /// Announces the fills in a trading snapshot that are news, on the given stack. Returns
-    /// whether any toast was added.
-    fn announce_fills(
+    /// Announces the fills and broker order ends in a trading snapshot that are news, on the
+    /// given stack. Returns whether any toast was added.
+    fn announce_trading(
         &mut self,
         snapshot: &aeris_trading_runtime::TradingSnapshot,
         host: Option<ToastStack>,
         now_unix_nanos: i64,
         now: Instant,
     ) -> bool {
-        let fresh = self
-            .fills
-            .fresh(snapshot.revision, &snapshot.fills, now_unix_nanos);
+        let fills = self.fills.fresh(
+            snapshot.revision,
+            &snapshot.fills,
+            |fill| &fill.id,
+            |fill| fill.execution_unix_nanos,
+            now_unix_nanos,
+        );
+        let ends: Vec<_> = self
+            .order_ends
+            .fresh(
+                snapshot.revision,
+                &snapshot.order_events,
+                |event| &event.id,
+                |event| event.event_unix_nanos,
+                now_unix_nanos,
+            )
+            .into_iter()
+            .filter_map(|event| {
+                order_end_notice(
+                    event,
+                    &snapshot.orders,
+                    &snapshot.instruments,
+                    &snapshot.accounts,
+                )
+            })
+            .collect();
         let Some(host) = host else {
             return false;
         };
-        for fill in &fresh {
+        for fill in &fills {
             let (title, description) =
                 fill_notice_text(fill, &snapshot.instruments, &snapshot.accounts);
             self.push_fill(host, fill.side, title, description, now);
         }
-        !fresh.is_empty()
+        let announced = !fills.is_empty() || !ends.is_empty();
+        for (tone, title, description) in ends {
+            self.push(
+                host,
+                ToastContent {
+                    kind: ToastKind::Notice,
+                    notice_key: None,
+                    tone,
+                    title: title.into(),
+                    description: Some(description.into()),
+                    lifetime: Some(ORDER_END_LIFETIME),
+                },
+                now,
+            );
+        }
+        announced
     }
 
     fn push_fill(
@@ -1011,6 +1062,63 @@ fn fill_notice_text(
         format!("{verb} {quantity} {symbol}"),
         format!("at {price} · {account}"),
     )
+}
+
+/// "Broker cancelled Buy 1 ESZ5" over the broker's reason and the account, for a broker order
+/// the broker cancelled, expired or refused on its own; `None` for every other event,
+/// including the cancels Aeris requested.
+fn order_end_notice(
+    event: &aeris_trading::OrderEvent,
+    orders: &[aeris_trading::Order],
+    instruments: &[aeris_trading_runtime::TradingInstrument],
+    accounts: &[aeris_trading::TradingAccount],
+) -> Option<(ToastTone, String, String)> {
+    if event.provenance.venue_id != aeris_trading::venue::BROKER_VENUE_ID
+        || event.reason == Some(aeris_trading::OrderEventReason::UserCancel)
+    {
+        return None;
+    }
+    let (verb, tone) = match event.kind {
+        aeris_trading::OrderEventKind::Cancelled => ("cancelled", ToastTone::Warning),
+        aeris_trading::OrderEventKind::Expired => ("expired", ToastTone::Warning),
+        aeris_trading::OrderEventKind::Rejected => ("rejected", ToastTone::Loss),
+        _ => return None,
+    };
+    let order = orders.iter().find(|order| order.id == event.order_id);
+    let title = order.map_or_else(
+        || format!("Broker {verb} an order"),
+        |order| {
+            let side = match order.side {
+                aeris_trading::OrderSide::Buy => "Buy",
+                aeris_trading::OrderSide::Sell => "Sell",
+            };
+            let symbol = instruments
+                .iter()
+                .find(|instrument| instrument.instrument_id == order.instrument_id)
+                .map_or(order.instrument_id.as_str(), |instrument| {
+                    instrument.contract.provenance.display_symbol.as_str()
+                });
+            let quantity =
+                market_price_text(order.quantity.units(), u32::from(order.quantity.scale()));
+            format!("Broker {verb} {side} {quantity} {symbol}")
+        },
+    );
+    // The owner stores the bare state name when the broker gave no explanation.
+    let reason = event
+        .detail
+        .as_deref()
+        .filter(|detail| *detail != verb && *detail != "cancel rejected")
+        .unwrap_or("The broker gave no reason");
+    let account = order.and_then(|order| {
+        accounts
+            .iter()
+            .find(|account| account.id == order.account_id)
+    });
+    let description = account.map_or_else(
+        || reason.to_string(),
+        |account| format!("{reason} · {}", account.display_name),
+    );
+    Some((tone, title, description))
 }
 
 /// The view that owns the toaster its stacks render and update.
@@ -1331,13 +1439,13 @@ impl ToastHost for TerminalApp {
 }
 
 impl TerminalApp {
-    pub(super) fn announce_fills(
+    pub(super) fn announce_trading(
         &mut self,
         snapshot: &aeris_trading_runtime::TradingSnapshot,
         cx: &mut Context<Self>,
     ) {
         let host = toast_host(&self.workspaces[self.active]);
-        if self.toaster.announce_fills(
+        if self.toaster.announce_trading(
             snapshot,
             host,
             self.lifecycle.clock().wall_unix_nanos(),
@@ -1447,12 +1555,18 @@ mod tests {
     }
 
     fn fresh_ids(
-        watch: &mut FillWatch,
+        watch: &mut NewsWatch<aeris_trading::FillId>,
         revision: u64,
         fills: &[aeris_trading::Fill],
     ) -> Vec<String> {
         watch
-            .fresh(revision, fills, NOW_UNIX)
+            .fresh(
+                revision,
+                fills,
+                |fill| &fill.id,
+                |fill| fill.execution_unix_nanos,
+                NOW_UNIX,
+            )
             .into_iter()
             .map(|fill| fill.id.as_str().to_string())
             .collect()
@@ -1551,7 +1665,7 @@ mod tests {
 
     #[test]
     fn only_fills_that_arrive_after_the_first_snapshot_are_news() {
-        let mut watch = FillWatch::default();
+        let mut watch = NewsWatch::default();
         let history = fill(
             "old",
             aeris_trading::OrderSide::Buy,
@@ -1582,7 +1696,7 @@ mod tests {
 
     #[test]
     fn fills_caught_up_after_a_reconnect_are_not_news() {
-        let mut watch = FillWatch::default();
+        let mut watch = NewsWatch::default();
         fresh_ids(&mut watch, 1, &[]);
         let backfilled = fill(
             "backfilled",
@@ -1592,6 +1706,81 @@ mod tests {
         assert_eq!(
             fresh_ids(&mut watch, 2, &[backfilled]),
             Vec::<String>::new()
+        );
+    }
+
+    fn order_event(
+        kind: aeris_trading::OrderEventKind,
+        reason: Option<aeris_trading::OrderEventReason>,
+        venue_id: &str,
+        detail: &str,
+    ) -> aeris_trading::OrderEvent {
+        aeris_trading::OrderEvent {
+            id: aeris_trading::OrderEventId::try_new("event-1").expect("event id"),
+            order_id: aeris_trading::OrderId::try_new("order-1").expect("order id"),
+            sequence: 1,
+            kind,
+            reason,
+            event_unix_nanos: NOW_UNIX,
+            detail: Some(detail.to_string()),
+            provenance: aeris_trading::TradingProvenance {
+                venue_id: venue_id.to_string(),
+                provider_id: venue_id.to_string(),
+                session_generation: 1,
+                source_sequence: 1,
+                observed_unix_nanos: NOW_UNIX,
+            },
+        }
+    }
+
+    #[test]
+    fn only_orders_the_broker_ended_itself_are_announced_with_its_reason() {
+        use aeris_trading::{OrderEventKind as Kind, OrderEventReason as Reason};
+        let broker = aeris_trading::venue::BROKER_VENUE_ID;
+        let notice = |event: &aeris_trading::OrderEvent| order_end_notice(event, &[], &[], &[]);
+        assert_eq!(
+            notice(&order_event(
+                Kind::Cancelled,
+                None,
+                broker,
+                "margin exceeded"
+            )),
+            Some((
+                ToastTone::Warning,
+                "Broker cancelled an order".to_string(),
+                "margin exceeded".to_string()
+            ))
+        );
+        assert_eq!(
+            notice(&order_event(Kind::Rejected, None, broker, "rejected")),
+            Some((
+                ToastTone::Loss,
+                "Broker rejected an order".to_string(),
+                "The broker gave no reason".to_string()
+            ))
+        );
+        assert_eq!(
+            notice(&order_event(
+                Kind::Cancelled,
+                Some(Reason::UserCancel),
+                broker,
+                "cancelled"
+            )),
+            None,
+            "a cancel Aeris asked for is not news"
+        );
+        assert_eq!(
+            notice(&order_event(
+                Kind::Cancelled,
+                None,
+                "aeris-sim",
+                "cancelled"
+            )),
+            None
+        );
+        assert_eq!(
+            notice(&order_event(Kind::Accepted, None, broker, "accepted")),
+            None
         );
     }
 

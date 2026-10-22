@@ -14,7 +14,9 @@
 //! | `Outline`     | `surface` + `border`, `text-default`    | Cancel, triggers, steppers, filters    |
 //! | `Ghost`       | no fill or border, `text-default`       | toolbar, header and icon actions       |
 //! | `Destructive` | `danger` fill                           | irreversible actions                   |
-//! | `Buy`/`Sell`  | `buy`/`sell` fill                       | trade orders only                      |
+//! | `Buy`/`Sell`  | `buy`/`sell` fill                       | market trade orders only               |
+//! | `BuySubtle`/`SellSubtle` | `buy-subtle`/`sell-subtle` tint | resting trade orders (limit, stop) |
+//! | `Warning`     | `warning` fill                          | flattening a position                  |
 //!
 //! Aeris adds states the Theme System page has no example of, all from the same tokens:
 //! `selected` (a toggle that is on), `open` (a trigger whose menu is open), `danger_on_hover`
@@ -73,6 +75,12 @@ pub(crate) enum ButtonVariant {
     Buy,
     /// `sell`: the `sell` trade ramp. Trade orders only.
     Sell,
+    /// `buy-subtle`: the tinted buy ramp for resting buy orders.
+    BuySubtle,
+    /// `sell-subtle`: the tinted sell ramp for resting sell orders.
+    SellSubtle,
+    /// `warning`: the warning ramp, for an action that closes positions.
+    Warning,
 }
 
 /// The Theme System `Button` sizes. An icon-only button is square at its size's height, which at
@@ -231,6 +239,32 @@ fn button_appearance(
             colors.sell_active,
             colors.sell_disabled,
             colors.sell_disabled_foreground,
+        ),
+        // The subtle and warning ramps have no disabled step of their own; a disabled one
+        // takes the shared disabled fill, as the ticket design paints it.
+        ButtonVariant::BuySubtle => ramp(
+            colors.buy_subtle,
+            colors.buy_subtle_foreground,
+            colors.buy_subtle_hover,
+            colors.buy_subtle_active,
+            colors.disabled_bg,
+            colors.text_muted,
+        ),
+        ButtonVariant::SellSubtle => ramp(
+            colors.sell_subtle,
+            colors.sell_subtle_foreground,
+            colors.sell_subtle_hover,
+            colors.sell_subtle_active,
+            colors.disabled_bg,
+            colors.text_muted,
+        ),
+        ButtonVariant::Warning => ramp(
+            colors.warning,
+            colors.warning_foreground,
+            colors.warning_hover,
+            colors.warning_hover,
+            colors.disabled_bg,
+            colors.text_muted,
         ),
     };
     if danger_on_hover {
@@ -403,7 +437,6 @@ pub(crate) struct Button {
     leading: Option<AnyElement>,
     label: Option<SharedString>,
     children: Vec<AnyElement>,
-    trailing: Option<AnyElement>,
     caret: Option<Icon>,
     loading_icon: Option<Icon>,
     tooltip: Option<TooltipSpec>,
@@ -427,7 +460,6 @@ impl Button {
             leading: None,
             label: None,
             children: Vec::new(),
-            trailing: None,
             caret: None,
             loading_icon: None,
             tooltip: None,
@@ -459,8 +491,7 @@ impl Button {
         self
     }
 
-    /// Select-trigger layout: the label and leading content on the left, the trailing slot and
-    /// caret on the right.
+    /// Select-trigger layout: the label and leading content on the left, the caret on the right.
     pub(crate) fn trigger(mut self) -> Self {
         self.flags.set(ButtonFlags::TRIGGER, true);
         self
@@ -492,12 +523,6 @@ impl Button {
 
     pub(crate) fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
-        self
-    }
-
-    /// Content after the label, such as a badge; pushed to the far edge by [`Button::trigger`].
-    pub(crate) fn trailing(mut self, element: impl IntoElement) -> Self {
-        self.trailing = Some(element.into_any_element());
         self
     }
 
@@ -606,11 +631,10 @@ impl Button {
         px(f32::from(token.logical_pixels()))
     }
 
-    /// Only a lone glyph makes a square button; any text, trailing content or caret pads it.
+    /// Only a lone glyph makes a square button; any text or caret pads it.
     fn is_square(&self) -> bool {
         self.label.is_none()
             && self.children.is_empty()
-            && self.trailing.is_none()
             && self.caret.is_none()
             && !self.flags.has(ButtonFlags::TRIGGER)
     }
@@ -658,7 +682,6 @@ struct ButtonContent {
     leading: Option<AnyElement>,
     label: Option<SharedString>,
     children: Vec<AnyElement>,
-    trailing: Option<AnyElement>,
     caret: Option<AnyElement>,
 }
 
@@ -670,7 +693,6 @@ impl ButtonContent {
                 .children(self.leading)
                 .children(self.label)
                 .children(self.children)
-                .children(self.trailing)
                 .children(self.caret);
         }
         button
@@ -689,15 +711,7 @@ impl ButtonContent {
                     )
                     .children(self.children),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .children(self.trailing)
-                    .children(self.caret),
-            )
+            .children(self.caret)
     }
 }
 
@@ -759,7 +773,7 @@ fn paint_states(
     accepts_input: bool,
 ) -> BaseButton {
     let drop_border = appearance.border_rests_only;
-    // Every variant keeps a border of `--border-width`, transparent unless it is outlined, so a
+    // Every variant keeps a 1px border, transparent unless it is outlined, so a
     // state change never shifts the layout. A press paints nothing of its own: the hover look
     // holds until the click changes the button's state, so a click never flashes a second fill.
     button
@@ -786,7 +800,7 @@ fn paint_states(
                 }
             })
         })
-        // The Theme System focus style for every variant: the `--border-width` border in
+        // The Theme System focus style for every variant: the 1px border in
         // `ring-primary`.
         .focus_visible(move |style| style.border_color(gpui_color(focus_ring)))
 }
@@ -834,7 +848,6 @@ impl RenderOnce for Button {
             leading: self.leading,
             label: self.label.clone(),
             children: self.children,
-            trailing: self.trailing,
             caret: self
                 .caret
                 .map(|caret| caret.with_size(caret_size).into_any_element()),
@@ -890,7 +903,7 @@ pub(crate) fn close_button(
 
 #[cfg(test)]
 mod tests {
-    use aeris_design_system::AerisTheme;
+    use aeris_design_system::{AerisTheme, ThemeColor};
     use gpui::px;
 
     use aeris_design_system::RadiusToken;
@@ -1097,22 +1110,82 @@ mod tests {
                     ),
                 ),
             ] {
-                let appearance = button_appearance(&theme, variant, false);
-                assert_eq!(
-                    (
-                        appearance.fill,
-                        appearance.foreground,
-                        appearance.hover_fill,
-                        appearance.selected_fill,
-                        appearance.disabled_fill,
-                        appearance.disabled_foreground,
-                    ),
-                    (Some(ramp.0), ramp.1, ramp.2, ramp.3, Some(ramp.4), ramp.5),
-                    "{variant:?}"
-                );
-                assert_eq!(appearance.border, None, "{variant:?} has no outline");
+                assert_filled_ramp(&theme, variant, ramp);
             }
         }
+    }
+
+    /// The tinted trade and warning variants share the neutral disabled ramp.
+    #[test]
+    fn tinted_variants_match_the_theme_system_button() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let c = theme.colors;
+            for (variant, ramp) in [
+                (
+                    ButtonVariant::BuySubtle,
+                    (
+                        c.buy_subtle,
+                        c.buy_subtle_foreground,
+                        c.buy_subtle_hover,
+                        c.buy_subtle_active,
+                        c.disabled_bg,
+                        c.text_muted,
+                    ),
+                ),
+                (
+                    ButtonVariant::SellSubtle,
+                    (
+                        c.sell_subtle,
+                        c.sell_subtle_foreground,
+                        c.sell_subtle_hover,
+                        c.sell_subtle_active,
+                        c.disabled_bg,
+                        c.text_muted,
+                    ),
+                ),
+                (
+                    ButtonVariant::Warning,
+                    (
+                        c.warning,
+                        c.warning_foreground,
+                        c.warning_hover,
+                        c.warning_hover,
+                        c.disabled_bg,
+                        c.text_muted,
+                    ),
+                ),
+            ] {
+                assert_filled_ramp(&theme, variant, ramp);
+            }
+        }
+    }
+
+    fn assert_filled_ramp(
+        theme: &AerisTheme,
+        variant: ButtonVariant,
+        ramp: (
+            ThemeColor,
+            ThemeColor,
+            ThemeColor,
+            ThemeColor,
+            ThemeColor,
+            ThemeColor,
+        ),
+    ) {
+        let appearance = button_appearance(theme, variant, false);
+        assert_eq!(
+            (
+                appearance.fill,
+                appearance.foreground,
+                appearance.hover_fill,
+                appearance.selected_fill,
+                appearance.disabled_fill,
+                appearance.disabled_foreground,
+            ),
+            (Some(ramp.0), ramp.1, ramp.2, ramp.3, Some(ramp.4), ramp.5),
+            "{variant:?}"
+        );
+        assert_eq!(appearance.border, None, "{variant:?} has no outline");
     }
 
     #[test]

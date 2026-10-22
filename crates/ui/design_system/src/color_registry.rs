@@ -11,17 +11,12 @@ macro_rules! platform_color_registry {
             surface_secondary => "surface-secondary",
             surface_subtle => "surface-subtle",
             surface_raised => "surface-raised",
-            surface_overlay => "surface-overlay",
-            surface_inverse => "surface-inverse",
             /// Opaque fill for floating layers: menus, dialogs, tooltips and toasts.
             surface_popover => "surface-popover",
             border => "border",
             border_secondary => "border-secondary",
             border_subtle => "border-subtle",
-            border_softer => "border-softer",
-            border_strong => "border-strong",
-            border_inverse => "border-inverse",
-            /// Floating-layer outer hairline, drawn at `--border-width`.
+            /// Floating-layer outer edge, drawn at the 1px border width.
             border_popover => "border-popover",
             /// Floating-layer inner highlight, drawn just inside `border_popover`.
             border_popover_highlight => "border-popover-highlight",
@@ -63,6 +58,8 @@ macro_rules! platform_color_registry {
             danger_disabled_foreground => "danger-disabled-foreground",
             danger_ring => "danger-ring",
             danger_foreground => "danger-foreground",
+            warning_hover => "warning-hover",
+            warning_foreground => "warning-foreground",
             button_fill => "button-fill",
             button_fill_hover => "button-fill-hover",
             button_fill_active => "button-fill-active",
@@ -80,6 +77,16 @@ macro_rules! platform_color_registry {
             sell_disabled => "sell-disabled",
             sell_disabled_foreground => "sell-disabled-foreground",
             sell_foreground => "sell-foreground",
+            /// Tinted buy fill for resting order types (limit, stop). Pair with `buy_subtle_foreground`.
+            buy_subtle => "buy-subtle",
+            buy_subtle_hover => "buy-subtle-hover",
+            buy_subtle_active => "buy-subtle-active",
+            buy_subtle_foreground => "buy-subtle-foreground",
+            /// Tinted sell fill for resting order types (limit, stop). Pair with `sell_subtle_foreground`.
+            sell_subtle => "sell-subtle",
+            sell_subtle_hover => "sell-subtle-hover",
+            sell_subtle_active => "sell-subtle-active",
+            sell_subtle_foreground => "sell-subtle-foreground",
             /// Order-book bid depth bar. Pair only with `book_bid_text`.
             book_bid_fill => "book-bid-fill",
             /// Order-book bid price and quantity text, on and beside `book_bid_fill`.

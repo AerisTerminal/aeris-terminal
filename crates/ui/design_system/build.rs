@@ -2,7 +2,7 @@
 mod token_compiler;
 
 use std::{env, fmt::Write as _, fs, path::PathBuf};
-use token_compiler::{cascade, parse_color, parse_pixels, parse_theme_blocks, resolve, source};
+use token_compiler::{cascade, parse_color, parse_theme_blocks, resolve, source};
 
 #[macro_use]
 #[path = "src/color_registry.rs"]
@@ -18,10 +18,9 @@ platform_color_registry!(color_identifiers);
 
 /// Non-color custom properties the token contract owns outside the color registry.
 fn is_non_color_token(name: &str) -> bool {
-    name == "border-width"
-        || ["font-", "radius-", "shadow-"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
+    ["font-", "radius-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 fn main() {
@@ -91,11 +90,6 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
     emit_colors(&mut output, "DARK_COLORS", &dark)?;
     emit_sources(&mut output, "LIGHT_COLOR_SOURCES", &root)?;
     emit_sources(&mut output, "DARK_COLOR_SOURCES", &dark)?;
-    emit_f32(
-        &mut output,
-        "BORDER_WIDTH",
-        parse_pixels(&resolve(&root, "border-width")?)?,
-    );
     emit_pixel_u16(
         &mut output,
         "RADIUS_SMALL",
@@ -158,11 +152,6 @@ fn emit_u16(output: &mut String, name: &str, value: &str) -> Result<(), String> 
     writeln!(output, "pub(crate) const {name}: u16 = {value};")
         .expect("writing generated tokens to a String cannot fail");
     Ok(())
-}
-
-fn emit_f32(output: &mut String, name: &str, value: f32) {
-    writeln!(output, "pub(crate) const {name}: f32 = {value:?};")
-        .expect("writing generated tokens to a String cannot fail");
 }
 
 fn emit_pixel_u16(output: &mut String, name: &str, value: &str) -> Result<(), String> {

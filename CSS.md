@@ -11,12 +11,14 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   Do not derive a shade with `.with_alpha(..)`; if a state has no token, add one here first.
 - Radii come from `RadiusToken` (`Sm` = `--radius-small`, `Default`, `Medium`, `Compact`, `Full` = `--radius-large`),
   never `rounded(px(N))`.
-- Borders use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
+- Borders are 1px and use `theme.dimensions.border_width`, never `border_1()` or `px(1.0)`.
 - Neutral text has three roles: `text-default` for content and labels, `text-secondary` for
   supporting text (AA 4.5:1 on every light and dark surface), and `text-muted` for placeholders and
   disabled text. Interactive items use `text-interactive` / `text-hover` / `text-active`.
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
-  `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
+  `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for market-order buttons, `buy-subtle-*` / `sell-subtle-*` (with their
+  `-foreground` text) for resting-order buttons and long / short position fills, `warning` +
+  `warning-foreground` for the flatten action, `buy-bubble` /
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
@@ -25,10 +27,10 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   as the fill of a layer that floats over other content.
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) use
   `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
-  fill, a `--border-width` `border-popover` hairline, and a 1px `border-popover-highlight` inner edge
+  fill, a 1px `border-popover` outer edge, and a 1px `border-popover-highlight` inner edge
   painted above the content.
 - Tooltips (`terminal_ui::tooltip`) use the secondary surface: `surface-secondary` resolved over
-  `surface-popover`, a `--border-width` `border-secondary` edge and `text-default`. A one-line
+  `surface-popover`, a 1px `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
   opens beside its trigger on the caller's side (bottom by default, toward the content for edge
   sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
@@ -47,7 +49,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Menus, dialogs and popovers never dim, tint or blur what is behind them: their dismiss scrims
   paint nothing. A popover stays inside the window, flipping to the other side of its trigger
   when there is no room.
-- Focus is one style everywhere: the control's `--border-width` border turns `ring-primary` (no
+- Focus is one style everywhere: the control's 1px border turns `ring-primary` (no
   thicker ring, glow or background change).
 - Typography uses the bundled Inter faces (Regular 400, Medium 500, Bold 700) for platform text and
   the bundled Faculty Glyphic Regular face only for brand/display text. The normal platform weight
@@ -116,7 +118,7 @@ list and its tabs in dense panel headers (bottom panel, side panels);
 
 **`CheckboxRow`** (`checkbox.rs`): an option that refines the setting above it (a legend's values
 under its switch), never a setting of its own. A 16px `--radius-small` box: `surface` with a
-`border-strong` outline when clear, `primary` with a `primary-foreground` tick when checked; hover
+`border` outline when clear, `primary` with a `primary-foreground` tick when checked; hover
 fills `hover-bg` / `primary-hover`; disabled uses `disabled-bg` / `primary-disabled` and `text-muted`.
 The whole row toggles, and focus uses the shared ring.
 
@@ -132,9 +134,8 @@ while invalid.
   --surface: #ffffff;
   --surface-secondary: #fafafa;
   --surface-subtle: #fafafa;
+  /* Raised: the panels inside popup menus, and placeholder bars. */
   --surface-raised: #f0f0f0;
-  --surface-overlay: color-mix(in srgb, #000000 50%, transparent);
-  --surface-inverse: #222222;
   /* Floating layers (menus, dialogs, tooltips) */
   --surface-popover: #ffffff;
 
@@ -142,13 +143,9 @@ while invalid.
   --border: #0a0a0a1a;
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
-  --border-softer: #0a0a0a0d;
-  --border-strong: #0a0a0a26;
-  --border-inverse: #222222;
-  /* Floating-layer edge: a 0.5px outer hairline plus a 1px inner highlight. */
+  /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
   --border-popover: #0a0a0a33;
   --border-popover-highlight: #ffffffcc;
-  --border-width: 0.5px;
 
   /* Text */
   --text-default: #0a0a0a;
@@ -201,6 +198,8 @@ while invalid.
   --danger-disabled-foreground: #ffa2a2;
   --danger-ring: #ffc9c9;
   --danger-foreground: #ffffff;
+  --warning-hover: #e05c00;
+  --warning-foreground: #ffffff;
 
   /* Buttons — neutral default button */
   --button-fill: #0a0a0af2;
@@ -222,6 +221,15 @@ while invalid.
   --sell-disabled: #ffc9c9;
   --sell-disabled-foreground: #ffa2a2;
   --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 12%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 20%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 28%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #000000);
+  --sell-subtle: color-mix(in srgb, var(--sell) 12%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 20%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 28%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #000000);
 
   /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
   --book-bid-fill: color-mix(in srgb, var(--primary) 40%, var(--surface));
@@ -234,17 +242,11 @@ while invalid.
   --ring-primary: var(--primary);
 
   /* Radius */
+  --radius-small: 4px;
+  --radius-compact: 6px;
   --radius-default: 8px;
   --radius-medium: 14px;
-  --radius-small: 4px;
   --radius-large: 999px;
-  --radius-compact: 6px;
-
-  /* Shadows */
-  --shadow-1: 0 0 1px 0 color-mix(in srgb, #000000 20%, transparent), 0 1px 2px 0 color-mix(in srgb, #000000 5%, transparent), 0 1px 1px 0 color-mix(in srgb, #000000 1%, transparent);
-  --shadow-2: 0 1px 6px 0 color-mix(in srgb, #000000 10%, transparent);
-  --shadow-3: 0 2.75px 5.5px 0 color-mix(in srgb, #000000 10%, transparent);
-  --shadow-dialog: 0 4px 6px -4px color-mix(in srgb, #101828 10%, transparent), 0 10px 15px -3px color-mix(in srgb, #000000 10%, transparent);
 
   /* Chart */
   --bullish: var(--positive);
@@ -260,20 +262,14 @@ while invalid.
   --surface-secondary: #fafafa0f;
   --surface-subtle: #fafafa0a;
   --surface-raised: #fafafa14;
-  --surface-overlay: color-mix(in srgb, #000000 60%, transparent);
-  --surface-inverse: #ffffff;
   --surface-popover: #262626;
 
   /* Borders */
   --border: #fafafa1a;
   --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
-  --border-softer: #fafafa0d;
-  --border-strong: #fafafa33;
-  --border-inverse: #ffffff;
   --border-popover: #000000cc;
   --border-popover-highlight: #ffffff1a;
-  --border-width: 0.5px;
 
   /* Text */
   --text-default: #fafafa;
@@ -322,6 +318,8 @@ while invalid.
   --danger-disabled-foreground: #d0646c;
   --danger-ring: #c10007;
   --danger-foreground: #ffffff;
+  --warning-hover: #ff7b1f;
+  --warning-foreground: #ffffff;
 
   /* Buttons — neutral default button */
   --button-fill: #fafafad9;
@@ -343,6 +341,15 @@ while invalid.
   --sell-disabled: #6b3135;
   --sell-disabled-foreground: #ae8e90;
   --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 18%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 26%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 34%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #ffffff);
+  --sell-subtle: color-mix(in srgb, var(--sell) 18%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 26%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 34%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #ffffff);
 
   /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
   --book-bid-fill: color-mix(in srgb, var(--primary) 35%, var(--surface));
@@ -354,6 +361,9 @@ while invalid.
   /* Focus */
   --ring-primary: var(--primary);
 
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
   --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
