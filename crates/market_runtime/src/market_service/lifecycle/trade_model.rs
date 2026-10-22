@@ -36,6 +36,9 @@ pub(in crate::market_service) struct TradeModel {
     pub(in crate::market_service) last_trade_at: Option<Instant>,
     /// Stall recoveries since the last trade; the watchdog waits longer after each.
     pub(in crate::market_service) quiet_stall_recoveries: u32,
+    /// Covering history exhausted its retry budget, so the trade stream alone
+    /// builds bars until a covering snapshot rejoins and clears this flag.
+    pub(in crate::market_service) live_only: bool,
 }
 
 enum TradeLiveCadence {
@@ -135,6 +138,7 @@ impl TradeModel {
             history_boundary_unix_nanos: i64::MIN,
             last_trade_at: None,
             quiet_stall_recoveries: 0,
+            live_only: false,
         })
     }
 
@@ -152,6 +156,7 @@ impl TradeModel {
         self.last_publication_at = self.clock.monotonic();
         self.last_trade_at = None;
         self.quiet_stall_recoveries = 0;
+        self.live_only = false;
         if let TradeLiveCadence::Tick { trades, forming } = &mut self.cadence {
             *forming = *trades;
         }
@@ -170,6 +175,10 @@ impl TradeModel {
     }
 
     pub(in crate::market_service) fn cancel_history_reseed(&mut self) -> Result<(), String> {
+        self.replay_buffered()
+    }
+
+    pub(in crate::market_service) fn replay_buffered(&mut self) -> Result<(), String> {
         let buffered = std::mem::take(&mut self.buffered);
         for trade in &buffered {
             if self.apply_trade(trade)? {
@@ -177,6 +186,27 @@ impl TradeModel {
             }
         }
         Ok(())
+    }
+
+    /// Opens the live edge without covering history. The first trade anchors
+    /// the first bar; a later covering snapshot reseeds and clears the flag.
+    pub(in crate::market_service) fn seed_live_only(
+        &mut self,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<(), String> {
+        self.pending_publications.clear();
+        self.price_scale = price_scale;
+        self.quantity_scale = quantity_scale;
+        self.forming_tail_sequence = None;
+        self.bars.clear();
+        self.history_boundary_unix_nanos = i64::MIN;
+        self.live_session_generation = None;
+        self.last_trade_sequence = None;
+        self.last_publication_at = self.clock.monotonic();
+        self.last_trade_at = None;
+        self.live_only = true;
+        self.replay_buffered()
     }
 
     /// Closes the history/live seam.
@@ -245,13 +275,7 @@ impl TradeModel {
             )?;
         }
         self.dirty = !self.pending_publications.is_empty();
-        let buffered = std::mem::take(&mut self.buffered);
-        for trade in &buffered {
-            if self.apply_trade(trade)? {
-                self.dirty = true;
-            }
-        }
-        Ok(())
+        self.replay_buffered()
     }
 
     pub(in crate::market_service) fn take_publication(&mut self) -> Option<Vec<MarketBar>> {
@@ -343,7 +367,7 @@ impl TradeModel {
             return Ok(false);
         }
         let Some(last) = self.bars.last().copied() else {
-            return Err("Trade-built live handoff has no history".to_string());
+            return self.start_live_only_bar(trade, exchange_nanos);
         };
         let next = match self.cadence {
             TradeLiveCadence::Fixed { seconds } => {
@@ -411,6 +435,70 @@ impl TradeModel {
             }
         };
         self.commit_trade_bar(last, next, trade)?;
+        Ok(true)
+    }
+
+    /// Anchors the first bar of a live-only series; every later bar follows
+    /// the normal cadence transition from it.
+    fn start_live_only_bar(
+        &mut self,
+        trade: &MarketTrade,
+        exchange_nanos: i64,
+    ) -> Result<bool, String> {
+        if !self.live_only {
+            return Err("Trade-built live handoff has no history".to_string());
+        }
+        let open_nanos = match self.cadence {
+            TradeLiveCadence::Fixed { seconds } => {
+                let trade_seconds = exchange_nanos.div_euclid(1_000_000_000);
+                trade_seconds
+                    .div_euclid(seconds)
+                    .checked_mul(seconds)
+                    .and_then(|open| open.checked_mul(1_000_000_000))
+                    .ok_or_else(|| "Trade-built live timestamp overflowed".to_string())?
+            }
+            TradeLiveCadence::Tick {
+                ref mut forming, ..
+            } => {
+                *forming = 1;
+                exchange_nanos
+            }
+            TradeLiveCadence::Calendar { period } => {
+                if self
+                    .calendar
+                    .bar_bucket(
+                        &self.series.instrument_id,
+                        exchange_nanos.div_euclid(1_000_000),
+                        period,
+                    )
+                    .is_none()
+                {
+                    return Ok(false);
+                }
+                self.calendar_bar_open(exchange_nanos, period)
+            }
+        };
+        let bar = MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: open_nanos.div_euclid(1_000_000_000),
+            exchange_timestamp_unix_nanos: open_nanos,
+            open: trade.price,
+            high: trade.price,
+            low: trade.price,
+            close: trade.price,
+            volume: trade.quantity,
+        };
+        bar.validate().map_err(|error| error.to_string())?;
+        self.bars.push(bar);
+        self.forming_tail_sequence = Some(bar.source_sequence);
+        self.live_session_generation = Some(trade.metadata.session_generation);
+        self.last_trade_sequence = Some(trade.metadata.source_sequence);
+        enqueue_bar_transition(
+            &mut self.pending_publications,
+            bar,
+            "Trade-built live publication buffer overflowed",
+        )?;
+        self.dirty = true;
         Ok(true)
     }
 

@@ -3907,7 +3907,10 @@ impl WorkspaceSurface {
         if state == ChartState::Error {
             self.chart_failure = Some(ChartFailure::Market);
             Self::post_chart_failure(ChartFailure::Market, cx);
-        } else if matches!(state, ChartState::Ready | ChartState::AwaitingData) {
+        } else if matches!(
+            state,
+            ChartState::Ready | ChartState::AwaitingData | ChartState::HistoryUnavailable
+        ) {
             self.clear_chart_failure(cx);
             Self::clear_indicator_failure("series_selection", cx);
         }
@@ -4701,6 +4704,20 @@ impl WorkspaceSurface {
         {
             return;
         }
+        if state.presentation
+            == Some(aeris_market_runtime::SeriesPresentationStatus::HistoryUnavailable)
+        {
+            // The runtime owns this phase: bars come from the live trade
+            // stream while one slow covering-history probe stays armed.
+            self.apply_market_state_message(
+                ChartState::HistoryUnavailable,
+                state
+                    .detail
+                    .unwrap_or_else(|| "History unavailable; showing live bars".to_string()),
+                cx,
+            );
+            return;
+        }
         let projected = match state.state {
             SeriesLoadState::Live => {
                 Some((ChartState::Ready, "Market history/live handoff is current"))
@@ -4818,6 +4835,10 @@ impl WorkspaceSurface {
             if !self.chart_pane_controller.chart_needs_replacement() {
                 self.rithmic_previous_selection = None;
             }
+            self.market_state.symbol_selection_pending = false;
+        } else if engine_provider && state == ChartState::HistoryUnavailable {
+            // The selection is installed and live; only covering history is
+            // still catching up, so the instrument handoff is covered.
             self.market_state.symbol_selection_pending = false;
         } else if engine_provider && state == ChartState::AwaitingData {
             // Coverage may arrive before readiness; keep the instrument handoff

@@ -138,6 +138,27 @@ impl FixtureMarketEvents {
     }
 
     #[must_use]
+    pub fn readiness_with_presentation(
+        &self,
+        selection: u64,
+        state: SeriesLoadState,
+        detail: impl Into<String>,
+        presentation: aeris_market_runtime::SeriesPresentationStatus,
+    ) -> MarketConsumerEvent {
+        Fenced {
+            epoch: self.envelope.epoch,
+            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                consumer_id: self.consumer_id,
+                generation: Self::generation(selection),
+                series: None,
+                state,
+                detail: Some(detail.into()),
+                presentation: Some(presentation),
+            }),
+        }
+    }
+
+    #[must_use]
     pub fn demand_error(
         &self,
         selection: u64,

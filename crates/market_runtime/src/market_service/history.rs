@@ -594,7 +594,17 @@ impl Coordinator<'_> {
         // An older-range page sits behind the published series; retrying it
         // leaves the current series state untouched.
         if retry && range.is_none() {
-            self.broadcast_series_recovery_for(series, "Current market history is retrying");
+            if self
+                .series
+                .trade(series)
+                .is_some_and(|model| model.live_only)
+            {
+                // A live-only series keeps its unavailable notice; the slow
+                // probe must not look like a fresh recovery to consumers.
+                self.broadcast_series_history_unavailable(series);
+            } else {
+                self.broadcast_series_recovery_for(series, "Current market history is retrying");
+            }
         }
         retry
     }
@@ -623,11 +633,19 @@ impl Coordinator<'_> {
         if let Err(error) = self.enqueue_history_request(&series, generation, range) {
             self.schedule_history_retry(&series, generation, range, error);
             if range.is_none() {
-                self.broadcast_series_resolution_for(
-                    &series,
-                    SeriesLoadState::Partial,
-                    Some("Current market history is unavailable; recovery will retry"),
-                );
+                if self
+                    .series
+                    .trade(&series)
+                    .is_some_and(|model| model.live_only)
+                {
+                    self.broadcast_series_history_unavailable(&series);
+                } else {
+                    self.broadcast_series_resolution_for(
+                        &series,
+                        SeriesLoadState::Partial,
+                        Some("Current market history is unavailable; recovery will retry"),
+                    );
+                }
             }
         }
     }
@@ -961,8 +979,10 @@ impl Coordinator<'_> {
                 self.history.retarget_retry(series, epoch, kind, range);
                 return false;
             }
-            if attempts > MAXIMUM_HISTORY_RETRIES {
+            if attempts > MAXIMUM_HISTORY_RETRIES && kind == LaneKind::Backfill {
                 // The failed cooldown expired; start with a fresh retry budget.
+                // An exhausted current lane instead keeps the slow live-only
+                // probe cadence the tracker armed for it.
                 self.history.clear_retry(series, epoch, kind);
             }
         }
@@ -1035,6 +1055,60 @@ impl Coordinator<'_> {
             );
         }
     }
+    /// Covering history exhausted its retry budget for a trade-built series:
+    /// the live edge opens from the trade stream alone while the tracker
+    /// keeps one slow probe armed for the recovered provider.
+    fn install_live_only_trade_series(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        let scales = self
+            .catalog
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+            .and_then(|instrument| {
+                Some((
+                    u8::try_from(instrument.price_scale).ok()?,
+                    u8::try_from(instrument.quantity_scale).ok()?,
+                ))
+            });
+        let installed = match scales {
+            Some((price_scale, quantity_scale)) => self
+                .ensure_realtime(series)
+                .and_then(|()| {
+                    self.series
+                        .trade_lifecycle_mut(series)
+                        .ok_or_else(|| "Trade-built lifecycle is unavailable".to_string())?
+                        .mark_trade_live_only(price_scale, quantity_scale)
+                })
+                .map_err(|error| {
+                    diagnostic!(
+                        "Aeris market live-only series for {} failed to open: {error}",
+                        series.instrument_id
+                    );
+                    error
+                })
+                .is_ok(),
+            None => false,
+        };
+        if !installed
+            || !self
+                .series
+                .trade(series)
+                .is_some_and(|model| model.live_only)
+        {
+            self.history_failed(series, generation);
+            return;
+        }
+        self.pending.remove(series);
+        diagnostic!(
+            "Aeris market covering history for {} generation={} stays unavailable; the series is live-only from the trade stream",
+            series.instrument_id,
+            generation.0.get()
+        );
+        self.broadcast_series_history_unavailable(series);
+    }
+
     pub(super) fn accept_history_completion(
         &mut self,
         ticket: &HistoryTicket,
@@ -1094,9 +1168,12 @@ impl Coordinator<'_> {
                                 series,
                                 super::lifecycle::SeriesInput::HistoryRetryExhausted,
                             );
+                            let _ = self.cancel_live_history_reseed(series);
+                            self.history_failed(series, generation);
+                        } else {
+                            let _ = self.cancel_live_history_reseed(series);
+                            self.install_live_only_trade_series(series, generation);
                         }
-                        let _ = self.cancel_live_history_reseed(series);
-                        self.history_failed(series, generation);
                     } else {
                         self.broadcast_older_history_error_for(
                             series,
@@ -1137,6 +1214,13 @@ impl Coordinator<'_> {
                 })
         });
         let replacing_existing = self.engine.series_bar_count(series).is_some();
+        // A live-only series merges its trade-built bars with the recovered
+        // covering history; the canonical result reseeds the live handoff.
+        let live_only_rejoin = range.is_none()
+            && self
+                .series
+                .trade(series)
+                .is_some_and(|model| model.live_only);
         let Some(prepared) = self.prepare_history_repair(series, generation, range, snapshot)
         else {
             if range.is_none() {
@@ -1146,7 +1230,10 @@ impl Coordinator<'_> {
             return;
         };
         let detached_from_live = prepared.detached_from_live;
-        let reseed_live = range.is_none() && !detached_from_live;
+        // The merge result reseeds the live handoff from canonical instead of
+        // the provider-forming seed, so retained trade-built bars survive.
+        let reseed_live =
+            range.is_none() && !detached_from_live && !(live_only_rejoin && replacing_existing);
         let install = if prepared.replace_window {
             CompletedHistoryInstall::Window { reseed_live }
         } else if replacing_existing {
@@ -1170,20 +1257,14 @@ impl Coordinator<'_> {
             self.history
                 .set_detached(series, ticket.provider, false, self.clock.as_ref());
         }
-        if range.is_some() && !detached_from_live {
-            let Some(canonical) = self.engine.series_snapshot(series) else {
-                self.history_failed(series, generation);
-                return;
-            };
-            let realigned = if self.provider_uses_candles(&series.provider_id) {
-                self.restore_candle_from_snapshot(series, &canonical)
-            } else {
-                self.restore_trade_from_snapshot(series, &canonical)
-            };
-            if realigned.is_err() {
-                self.history_failed(series, generation);
-                return;
-            }
+        if !self.realign_live_after_history_install(
+            series,
+            generation,
+            range,
+            live_only_rejoin && replacing_existing,
+            detached_from_live,
+        ) {
+            return;
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
@@ -1211,6 +1292,39 @@ impl Coordinator<'_> {
         self.dispatch_deferred_history(ticket, generation);
     }
 
+    /// Realigns the live handoff onto the canonical snapshot after an install
+    /// that merged into existing bars, and clears the live-only phase once the
+    /// covering history rejoins. Returns false when the series failed instead.
+    fn realign_live_after_history_install(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        live_only_merge: bool,
+        detached_from_live: bool,
+    ) -> bool {
+        let realign_live = range.is_some() || live_only_merge;
+        if realign_live && !detached_from_live {
+            let Some(canonical) = self.engine.series_snapshot(series) else {
+                self.history_failed(series, generation);
+                return false;
+            };
+            let realigned = if self.provider_uses_candles(&series.provider_id) {
+                self.restore_candle_from_snapshot(series, &canonical)
+            } else {
+                self.restore_trade_from_snapshot(series, &canonical)
+            };
+            if realigned.is_err() {
+                self.history_failed(series, generation);
+                return false;
+            }
+        }
+        if live_only_merge && let Some(model) = self.series.trade_mut(series) {
+            model.live_only = false;
+        }
+        true
+    }
+
     fn handle_empty_history(
         &mut self,
         ticket: &HistoryTicket,
@@ -1235,6 +1349,18 @@ impl Coordinator<'_> {
         }
         let _ = self.cancel_live_history_reseed(series);
         if self.live_history_ready(series) {
+            if self
+                .series
+                .trade(series)
+                .is_some_and(|model| model.live_only)
+            {
+                // A live-only probe answered empty; the trade stream stays
+                // authoritative and the unavailable notice stands.
+                self.pending.remove(series);
+                self.broadcast_series_history_unavailable(series);
+                self.dispatch_deferred_history(ticket, generation);
+                return;
+            }
             // A live edge is already installed; this was only a refill of a
             // detached window and the live handoff remains authoritative.
             self.history_failed(series, generation);

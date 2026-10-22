@@ -3595,6 +3595,19 @@ fn chart_surface_notice(
             placement,
             tone: ChartNoticeTone::Warning,
         }),
+        ChartState::HistoryUnavailable => Some(ChartSurfaceNotice {
+            label: state.label(),
+            detail: Some(
+                if has_market_data {
+                    "Showing live bars; history will backfill when the provider answers."
+                } else {
+                    "Waiting for live trades; history will backfill when the provider answers."
+                }
+                .to_string(),
+            ),
+            placement,
+            tone: ChartNoticeTone::Warning,
+        }),
         ChartState::Error => Some(ChartSurfaceNotice {
             label: state.label(),
             detail,
@@ -3663,6 +3676,10 @@ fn chart_status_detail(
                 "Waiting for a covering market snapshot.".to_string()
             }
             ChartState::AwaitingData => "Waiting for market data.".to_string(),
+            ChartState::HistoryUnavailable => {
+                "Waiting for live trades; history will backfill when the provider answers."
+                    .to_string()
+            }
             ChartState::Error => "Market chart could not be loaded. Try again.".to_string(),
             ChartState::Ready => String::new(),
         },

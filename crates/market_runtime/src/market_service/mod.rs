@@ -86,6 +86,10 @@ const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// After the bounded automatic retry budget is exhausted, keep the identical
 /// ranged request in a failed cooldown like Flowsurface's `RequestHandler`.
 const HISTORY_FAILED_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+/// An exhausted covering request belongs to a series that has gone live-only
+/// from the trade stream; it keeps one slow probe so a recovered provider
+/// rejoins without restarting the fast retry budget.
+const HISTORY_UNAVAILABLE_RETRY_DELAY: Duration = Duration::from_secs(300);
 const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporarily exhausted";
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const MAXIMUM_CONSUMERS: usize = 256;
@@ -494,6 +498,8 @@ impl EmptyCurrentHistory {
     }
 }
 
+const HISTORY_UNAVAILABLE_LIVE_DETAIL: &str = "History unavailable; showing live bars";
+const HISTORY_UNAVAILABLE_WAITING_DETAIL: &str = "History unavailable; waiting for live trades";
 const EMPTY_CURRENT_HISTORY_DETAIL: &str =
     "No market history is available for this period yet; waiting for live trades";
 const EMPTY_CURRENT_HISTORY_RETAINED_DETAIL: &str =

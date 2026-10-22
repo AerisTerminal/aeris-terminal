@@ -254,6 +254,12 @@ the check.
 - `HistoryTracker` alone owns per-series current/backfill lanes, retry deadlines, empty coverage,
   detached windows and cancellation. History requests and completions carry the same exact
   provider/demand/sequence ticket; retirement prunes the tracker, never parallel coordinator maps.
+  When a trade-built series' covering request exhausts its bounded retry budget, the runtime opens
+  a live-only series from the trade stream with the provider-neutral `HistoryUnavailable`
+  presentation and keeps one slow probe (`HISTORY_UNAVAILABLE_RETRY_DELAY`) armed instead of
+  restarting the fast retry budget; a later covering snapshot merges under the trade-built bars and
+  reseeds the live handoff from canonical. An exhausted backfill lane keeps its failed cooldown
+  until fresh demand.
 - Candle series control and the single forming bar belong to `market_service::lifecycle::SeriesLifecycles`.
   Retired candle handlers must not return, and lifecycle transitions use the injected clock rather than system time.
 - Stall recovery considers every live candle and trade series while its calendar is open;

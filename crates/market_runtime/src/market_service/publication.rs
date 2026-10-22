@@ -1,8 +1,9 @@
 use super::{
     BTreeMap, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, ClientId, ConsumerEvents, ConsumerId,
     Coordinator, DemandWaiter, EngineError, EngineFaultCode, FailureStage, GenerationId,
-    ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply, SeriesLoadState,
-    SeriesTailOperation, authorize_consumer,
+    HISTORY_UNAVAILABLE_LIVE_DETAIL, HISTORY_UNAVAILABLE_WAITING_DETAIL, ProviderGeneration,
+    ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply, SeriesLoadState, SeriesTailOperation,
+    authorize_consumer,
 };
 use crate::{
     MarketConsumerEvent, MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot,
@@ -503,10 +504,55 @@ impl Coordinator<'_> {
     ) {
         let state =
             self.canonical_series_load_state(publication.consumer_id, &publication.snapshot.series);
+        let live_only = self
+            .series
+            .trade(&publication.snapshot.series)
+            .is_some_and(|model| model.live_only);
         let Some(events) = self.events.get_mut(&publication.consumer_id) else {
             return;
         };
         publish_state(events, publication, state, None);
+        if live_only
+            && let Some(super::MarketRuntimeEvent::SeriesState(published)) =
+                events.series_state.as_mut()
+        {
+            published.presentation = Some(crate::SeriesPresentationStatus::HistoryUnavailable);
+        }
+    }
+
+    /// A live-only series reports one provider-neutral state: bars when the
+    /// trade stream has produced some, otherwise a waiting notice.
+    pub(super) fn broadcast_series_history_unavailable(&mut self, series: &BarSeriesKey) {
+        let (state, detail) = if self.engine.series_bar_count(series).is_some() {
+            (SeriesLoadState::Live, HISTORY_UNAVAILABLE_LIVE_DETAIL)
+        } else {
+            (SeriesLoadState::Partial, HISTORY_UNAVAILABLE_WAITING_DETAIL)
+        };
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(demand_series)) =
+                (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            if demand_series != series {
+                continue;
+            }
+            events.series_state = Some(series_state_payload(
+                *consumer_id,
+                generation,
+                series.clone(),
+                state,
+                Some(detail.to_string()),
+            ));
+            if let Some(super::MarketRuntimeEvent::SeriesState(published)) =
+                events.series_state.as_mut()
+            {
+                published.presentation = Some(crate::SeriesPresentationStatus::HistoryUnavailable);
+            }
+        }
     }
 
     pub(super) fn handle_attach(&mut self, client_id: ClientId, reply: &Reply<()>) {

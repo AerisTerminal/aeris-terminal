@@ -741,8 +741,36 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         price_scale: u8,
         quantity_scale: u8,
-        bars: Vec<MarketBar>,
+        mut bars: Vec<MarketBar>,
     ) -> Result<(), String> {
+        if !bars.is_empty()
+            && self.engine.series_bar_count(series).is_none()
+            && self
+                .series
+                .trade(series)
+                .is_some_and(|model| model.live_only)
+        {
+            // The first live-only bars open the canonical series; a recovered
+            // covering history merges into them instead of replacing them.
+            let installed_at = bars.last().map(|bar| bar.exchange_timestamp_unix_nanos);
+            let publications = self
+                .engine
+                .install_realtime(
+                    generation,
+                    series,
+                    price_scale,
+                    quantity_scale,
+                    std::mem::take(&mut bars),
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+            for publication in publications {
+                self.publish_current_snapshot(&publication);
+            }
+            if let Some(exchange_timestamp_unix_nanos) = installed_at {
+                self.publish_live_study_change(series, exchange_timestamp_unix_nanos);
+            }
+        }
         for bar in bars {
             if self.compact_live_series_if_needed(series, generation)? {
                 // `take_publication` already drained the provider-owned handoff;
@@ -776,23 +804,30 @@ impl Coordinator<'_> {
                     events.publish_series_update(series_update_message(&publication));
                 }
             }
-            match self.execute_study_change(StudyChange::Bar(series, exchange_timestamp_unix_nanos))
-            {
-                Ok(batch) => {
-                    self.publish_study_outputs(&batch.executed);
-                    for error in batch.errors {
-                        diagnostic!("Aeris live study execution failed: {error}");
-                    }
-                }
-                Err(error) => {
-                    // Study failure is isolated from canonical market publication.
-                    // A user calculation must never force provider recovery or make
-                    // an accepted market tail look discontinuous.
+            self.publish_live_study_change(series, exchange_timestamp_unix_nanos);
+        }
+        Ok(())
+    }
+
+    fn publish_live_study_change(
+        &mut self,
+        series: &BarSeriesKey,
+        exchange_timestamp_unix_nanos: i64,
+    ) {
+        match self.execute_study_change(StudyChange::Bar(series, exchange_timestamp_unix_nanos)) {
+            Ok(batch) => {
+                self.publish_study_outputs(&batch.executed);
+                for error in batch.errors {
                     diagnostic!("Aeris live study execution failed: {error}");
                 }
             }
+            Err(error) => {
+                // Study failure is isolated from canonical market publication.
+                // A user calculation must never force provider recovery or make
+                // an accepted market tail look discontinuous.
+                diagnostic!("Aeris live study execution failed: {error}");
+            }
         }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -1926,10 +1961,13 @@ impl Coordinator<'_> {
             .series
             .trade_lifecycle_iter_mut()
             .filter_map(|(series, live)| {
-                let progress =
-                    trade_series_progress(&self.order_books, series, live.trade_model()?);
+                let model = live.trade_model()?;
+                let progress = trade_series_progress(&self.order_books, series, model);
+                // A live-only series is already at its degraded floor; a stall
+                // recovery must not reseed it back to a loading series.
                 (live.connected
                     && live.history_ready()
+                    && !model.live_only
                     && now.saturating_duration_since(progress)
                         >= super::watchdog::OPEN_STALL_THRESHOLD)
                     .then(|| (series.clone(), live.generation, progress, false))
@@ -2053,6 +2091,17 @@ impl Coordinator<'_> {
                 .candle(series)
                 .is_some_and(|live| live.connected && live.history_ready());
         if ready {
+            if self
+                .series
+                .trade(series)
+                .is_some_and(|model| model.live_only)
+            {
+                // The trade stream keeps the series live; covering history
+                // still has an armed probe, so the unavailable notice remains
+                // the canonical presentation until a snapshot rejoins.
+                self.broadcast_series_history_unavailable(series);
+                return true;
+            }
             let presentation = self
                 .series
                 .candle(series)

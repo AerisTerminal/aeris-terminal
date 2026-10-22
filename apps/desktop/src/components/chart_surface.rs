@@ -103,6 +103,12 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AerisTheme) -> AnyElement {
         return opaque_status_overlay("chart_awaiting_data_status", notice, None, theme)
             .into_any_element();
     }
+    if notice.label == ChartState::HistoryUnavailable.label() {
+        // Live trades have not arrived yet, so there is no chart to read; a
+        // corner toast carries the notice once live bars exist.
+        return opaque_status_overlay("chart_history_unavailable_status", notice, None, theme)
+            .into_any_element();
+    }
     let card = chart_status_card(notice, theme);
     div()
         .absolute()

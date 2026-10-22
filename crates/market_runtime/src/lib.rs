@@ -156,6 +156,9 @@ pub enum SeriesPresentationStatus {
     Live,
     Recovering,
     AwaitingData,
+    /// Covering history exhausted its retry budget; the series is built from
+    /// the live trade stream alone while one slow history probe stays armed.
+    HistoryUnavailable,
 }
 
 /// Direct generation-fenced readiness state for one canonical series.

@@ -12,6 +12,10 @@ pub(super) enum ChartState {
     /// The provider answered the demand with no market history; the live
     /// subscription stays up and nothing is wrong or retrying.
     AwaitingData,
+    /// Covering history exhausted its retry budget; the chart shows bars
+    /// built from the live trade stream while one slow history probe stays
+    /// armed in the runtime.
+    HistoryUnavailable,
     Error,
 }
 
@@ -23,6 +27,7 @@ impl ChartState {
             Self::Stale => "Chart stale",
             Self::Recovering => "Reconnecting chart",
             Self::AwaitingData => "Waiting for market data",
+            Self::HistoryUnavailable => "History unavailable",
             Self::Error => "Chart unavailable",
         }
     }
@@ -30,7 +35,10 @@ impl ChartState {
     /// States that only an engine readiness report may leave; a bar
     /// publication alone does not make the chart current.
     pub(super) const fn awaits_engine_readiness(self) -> bool {
-        matches!(self, Self::Loading | Self::AwaitingData)
+        matches!(
+            self,
+            Self::Loading | Self::AwaitingData | Self::HistoryUnavailable
+        )
     }
 }
 
@@ -193,9 +201,14 @@ mod tests {
         assert_eq!(ChartState::Stale.label(), "Chart stale");
         assert_eq!(ChartState::Recovering.label(), "Reconnecting chart");
         assert_eq!(ChartState::AwaitingData.label(), "Waiting for market data");
+        assert_eq!(
+            ChartState::HistoryUnavailable.label(),
+            "History unavailable"
+        );
         assert_eq!(ChartState::Error.label(), "Chart unavailable");
         assert!(ChartState::Loading.awaits_engine_readiness());
         assert!(ChartState::AwaitingData.awaits_engine_readiness());
+        assert!(ChartState::HistoryUnavailable.awaits_engine_readiness());
         for state in [
             ChartState::Ready,
             ChartState::Stale,

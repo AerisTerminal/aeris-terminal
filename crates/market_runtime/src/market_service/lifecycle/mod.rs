@@ -369,6 +369,31 @@ impl SeriesLifecycle {
         Ok(())
     }
 
+    /// Opens the live edge without covering history after its retry budget
+    /// exhausted. Bars the stream already accumulated stay in place; a later
+    /// covering snapshot reseeds and the coordinator clears the flag.
+    pub(super) fn mark_trade_live_only(
+        &mut self,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<(), String> {
+        let Some(trade) = self.trade_model_mut() else {
+            return Err("Trade-built lifecycle is unavailable".into());
+        };
+        if trade.live_only {
+            // Already announced; re-arm the live edge after a recovery attempt
+            // and fold in the trades it buffered.
+            trade.replay_buffered()?;
+        } else {
+            trade.seed_live_only(price_scale, quantity_scale)?;
+        }
+        self.state = SeriesState::Live {
+            last_progress: self.clock.monotonic(),
+            observed_live: false,
+        };
+        Ok(())
+    }
+
     pub(super) fn recover_trade(&mut self, reason: RecoveryReason) {
         let reason = if self.dormant_session_rolled(self.clock.as_ref()) {
             RecoveryReason::SessionRolled
@@ -809,7 +834,8 @@ impl Coordinator<'_> {
                                 SeriesLoadState::Resolving
                             }
                             PresentationStatus::Live => SeriesLoadState::Live,
-                            PresentationStatus::Recovering => SeriesLoadState::Partial,
+                            PresentationStatus::Recovering
+                            | PresentationStatus::HistoryUnavailable => SeriesLoadState::Partial,
                             PresentationStatus::AwaitingData => SeriesLoadState::Empty,
                         }
                     };

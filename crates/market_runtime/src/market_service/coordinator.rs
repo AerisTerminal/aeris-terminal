@@ -3677,26 +3677,46 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_current_history_keeps_one_cooldown_recovery_ticket() {
+    fn exhausted_current_history_keeps_one_slow_probe() {
+        use super::super::clock::Clock;
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(1_000_000_000));
         let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
         let selected = series();
         let generation = ProviderGeneration(nonzero(1));
         let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
-        for _ in 0..super::super::MAXIMUM_HISTORY_RETRIES {
+        for _ in 0..MAXIMUM_HISTORY_RETRIES {
             assert!(coordinator.schedule_history_retry(&selected, generation, None, "transient"));
         }
         assert!(!coordinator.schedule_history_retry(&selected, generation, None, "transient"));
-        let ticket = coordinator
+        let (deadline, range, attempts) = coordinator
             .history
             .pending(
                 &selected,
                 epoch,
                 super::super::history::tracker::LaneKind::Current,
             )
-            .unwrap();
-        assert_eq!(ticket.2, 0);
-        assert!(ticket.1.is_none());
-        assert!(ticket.0 > Instant::now());
+            .expect("the exhausted covering request keeps one slow probe");
+        assert_eq!(attempts, MAXIMUM_HISTORY_RETRIES + 1);
+        assert!(range.is_none());
+        assert_eq!(
+            deadline,
+            clock.monotonic() + super::super::HISTORY_UNAVAILABLE_RETRY_DELAY
+        );
+        assert!(
+            coordinator.history.retry_due(clock.monotonic()).is_none(),
+            "the probe never restarts the fast retry cycle"
+        );
+        clock.advance(super::super::HISTORY_UNAVAILABLE_RETRY_DELAY);
+        assert_eq!(
+            coordinator.history.retry_due(clock.monotonic()),
+            Some((
+                selected.clone(),
+                epoch,
+                super::super::history::tracker::LaneKind::Current,
+                None
+            ))
+        );
         assert_eq!(coordinator.history.count(), 1);
     }
 
@@ -4466,6 +4486,349 @@ mod tests {
         );
     }
 
+    struct LiveOnlyRithmicFixture {
+        coordinator: Coordinator<'static>,
+        history: std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        _controls: std::sync::mpsc::Receiver<super::super::RithmicRealtimeControl>,
+        clock: Arc<super::super::clock::ScriptedClock>,
+        consumer_id: ConsumerId,
+        series: BarSeriesKey,
+        generation: ProviderGeneration,
+        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+    }
+
+    /// Every covering attempt ends in the observed `Session(Deadline)` timeout;
+    /// the exhausted budget installs a live-only series instead of a failure.
+    fn live_only_rithmic_fixture() -> LiveOnlyRithmicFixture {
+        use super::super::clock::Clock;
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(1_000_000_000));
+        let (mut coordinator, history, events, controls) =
+            scripted_rithmic_coordinator(clock.clone());
+        coordinator
+            .install_provider_instrument(&instrument())
+            .expect("catalog instrument installs");
+        assert!(coordinator.ensure_provider_connection("rithmic"));
+        for event in [
+            RithmicRealtimeEvent::Connecting(1),
+            RithmicRealtimeEvent::Connected(1),
+        ] {
+            events.send(event).expect("scripted adapter event");
+            let Some(ProviderRuntimeEvent::BoundRealtime(bound)) =
+                coordinator.providers.take_event(0)
+            else {
+                panic!("adapter event must bind to the reserved epoch");
+            };
+            coordinator.handle_bound_provider_event(bound);
+        }
+        let series = series();
+        let consumer_id = consumer(41);
+        register(&mut coordinator, consumer_id);
+        coordinator
+            .events
+            .insert(consumer_id, ConsumerEvents::default());
+        demand_series(&mut coordinator, consumer_id, 1, &series);
+        let generation = ProviderGeneration(nonzero(1));
+        let epoch = history_epoch(&mut coordinator, &series.provider_id, generation);
+        for attempt in 1..=MAXIMUM_HISTORY_RETRIES + 1 {
+            finish_history(
+                &mut coordinator,
+                &series,
+                generation,
+                None,
+                Err("Session(Deadline)".to_string()),
+            );
+            if attempt <= MAXIMUM_HISTORY_RETRIES {
+                let Some((deadline, _, _)) = coordinator.history.pending(
+                    &series,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Current,
+                ) else {
+                    panic!("a failed covering attempt keeps a retry ticket");
+                };
+                clock.advance(deadline.saturating_duration_since(clock.monotonic()));
+                coordinator.retry_history();
+                // Drain the dispatched attempt so the bounded channel never
+                // turns the next probe into a capacity retry.
+                while history.try_recv().is_ok() {}
+            }
+        }
+        LiveOnlyRithmicFixture {
+            coordinator,
+            history,
+            _controls: controls,
+            clock,
+            consumer_id,
+            series,
+            generation,
+            epoch,
+        }
+    }
+
+    #[test]
+    fn failed_current_history_installs_live_only_series_and_reports_unavailable() {
+        use super::super::clock::Clock;
+        let LiveOnlyRithmicFixture {
+            mut coordinator,
+            consumer_id,
+            series,
+            epoch,
+            clock,
+            ..
+        } = live_only_rithmic_fixture();
+        let state = take_series_state(&mut coordinator, consumer_id)
+            .expect("the live-only install broadcasts its status");
+        assert_eq!(state.state, SeriesLoadState::Partial);
+        assert_eq!(
+            state.presentation,
+            Some(crate::SeriesPresentationStatus::HistoryUnavailable)
+        );
+        assert_eq!(
+            state.detail.as_deref(),
+            Some("History unavailable; waiting for live trades")
+        );
+        assert!(
+            coordinator
+                .events
+                .get(&consumer_id)
+                .is_some_and(|events| events.demand_error.is_none()),
+            "a live-only fallback is not a demand failure"
+        );
+        assert!(
+            coordinator.engine.series_snapshot(&series).is_none(),
+            "no bars exist until the first live trade"
+        );
+        let (deadline, range, attempts) = coordinator
+            .history
+            .pending(
+                &series,
+                epoch,
+                super::super::history::tracker::LaneKind::Current,
+            )
+            .expect("the exhausted covering request keeps one slow probe");
+        assert_eq!(attempts, MAXIMUM_HISTORY_RETRIES + 1);
+        assert!(range.is_none());
+        assert_eq!(
+            deadline,
+            clock.monotonic() + super::super::HISTORY_UNAVAILABLE_RETRY_DELAY
+        );
+        assert!(
+            coordinator.history.retry_due(clock.monotonic()).is_none(),
+            "the probe never restarts the fast retry cycle"
+        );
+        clock.advance(
+            super::super::HISTORY_UNAVAILABLE_RETRY_DELAY.saturating_sub(Duration::from_secs(1)),
+        );
+        assert!(
+            coordinator.history.retry_due(clock.monotonic()).is_none(),
+            "the probe waits for its own deadline"
+        );
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            coordinator.history.retry_due(clock.monotonic()),
+            Some((
+                series.clone(),
+                epoch,
+                super::super::history::tracker::LaneKind::Current,
+                None
+            ))
+        );
+    }
+
+    #[test]
+    fn live_only_trade_bars_publish_with_the_unavailable_notice() {
+        let LiveOnlyRithmicFixture {
+            mut coordinator,
+            consumer_id,
+            series,
+            ..
+        } = live_only_rithmic_fixture();
+        send_fixture_trade(&mut coordinator, &series, 1, 120_000_000_000);
+        coordinator.publish_lifecycle_live();
+        let snapshot = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("the first live trade opens the live-only series");
+        assert!(snapshot.forming, "the first live-only bar is forming");
+        assert_eq!(snapshot.bars.len(), 1);
+        assert_eq!(
+            snapshot.bars[0].exchange_timestamp_unix_nanos,
+            120_000_000_000
+        );
+        assert_eq!(snapshot.bars[0].open, 102);
+        let state = take_series_state(&mut coordinator, consumer_id)
+            .expect("live bars keep reporting their status");
+        assert_eq!(state.state, SeriesLoadState::Live);
+        assert_eq!(
+            state.presentation,
+            Some(crate::SeriesPresentationStatus::HistoryUnavailable),
+            "live bars do not clear the history-unavailable phase"
+        );
+        send_fixture_trade(&mut coordinator, &series, 2, 125_000_000_000);
+        coordinator.publish_lifecycle_live();
+        let snapshot = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("same-minute trades revise the forming bar");
+        assert_eq!(snapshot.bars.len(), 1);
+        assert_eq!(snapshot.bars[0].source_sequence, 1);
+        send_fixture_trade(&mut coordinator, &series, 3, 180_000_000_000);
+        coordinator.publish_lifecycle_live();
+        let snapshot = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("a minute-crossing trade appends a bar");
+        assert_eq!(snapshot.bars.len(), 2);
+        assert_eq!(
+            snapshot.bars[1].exchange_timestamp_unix_nanos,
+            180_000_000_000
+        );
+        assert_eq!(snapshot.bars[1].source_sequence, 2);
+        assert!(snapshot.forming);
+    }
+
+    #[test]
+    fn covering_history_success_after_live_only_merges_and_clears_the_notice() {
+        let LiveOnlyRithmicFixture {
+            mut coordinator,
+            consumer_id,
+            series,
+            generation,
+            epoch,
+            clock,
+            ..
+        } = live_only_rithmic_fixture();
+        send_fixture_trade(&mut coordinator, &series, 1, 120_000_000_000);
+        send_fixture_trade(&mut coordinator, &series, 2, 180_000_000_000);
+        coordinator.publish_lifecycle_live();
+        clock.advance(super::super::HISTORY_UNAVAILABLE_RETRY_DELAY);
+        coordinator.retry_history();
+        finish_history(
+            &mut coordinator,
+            &series,
+            generation,
+            None,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: minute_bars(0, 2),
+                forming: None,
+                handoff_boundary_unix_nanos: None,
+                backwards_exhausted: false,
+            }),
+        );
+        coordinator.publish_lifecycle_live();
+        let snapshot = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("the recovered covering history merges into the series");
+        assert!(
+            snapshot.forming,
+            "the canonical forming candle survives the merge"
+        );
+        assert_eq!(snapshot.bars.len(), 4);
+        assert!(
+            snapshot
+                .bars
+                .windows(2)
+                .all(|pair| pair[0].exchange_timestamp_unix_nanos
+                    < pair[1].exchange_timestamp_unix_nanos
+                    && pair[0].source_sequence + 1 == pair[1].source_sequence),
+            "merged history stays contiguous and strictly ordered"
+        );
+        assert_eq!(
+            snapshot.bars[2].exchange_timestamp_unix_nanos,
+            120_000_000_000
+        );
+        assert_eq!(
+            snapshot.bars[2].open, 102,
+            "the trade-built bar survives where the provider has no coverage"
+        );
+        assert_eq!(snapshot.bars[3].source_sequence, 4);
+        assert!(
+            !coordinator
+                .series
+                .trade(&series)
+                .expect("trade model")
+                .live_only,
+            "the reseeded handoff is no longer live-only"
+        );
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &series,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .is_none(),
+            "the slow probe retires once covering history lands"
+        );
+        let state = take_series_state(&mut coordinator, consumer_id)
+            .expect("the rejoin publishes the recovered state");
+        assert_eq!(state.state, SeriesLoadState::Live);
+        assert_ne!(
+            state.presentation,
+            Some(crate::SeriesPresentationStatus::HistoryUnavailable),
+            "the unavailable phase clears on rejoin"
+        );
+    }
+
+    #[test]
+    fn retired_generation_completion_never_touches_the_live_only_series() {
+        let LiveOnlyRithmicFixture {
+            mut coordinator,
+            history,
+            consumer_id,
+            series,
+            generation,
+            epoch,
+            clock,
+            ..
+        } = live_only_rithmic_fixture();
+        send_fixture_trade(&mut coordinator, &series, 1, 120_000_000_000);
+        coordinator.publish_lifecycle_live();
+        let before = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("live-only bars installed");
+        clock.advance(super::super::HISTORY_UNAVAILABLE_RETRY_DELAY);
+        coordinator.retry_history();
+        let (ticket, _) = coordinator
+            .history
+            .inflight(&series, epoch)
+            .expect("the slow probe is in flight");
+        let ticket = ticket.clone();
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", ProviderGeneration(nonzero(2)))
+            .expect("the replacement provider session begins");
+        while history.try_recv().is_ok() {}
+        let _ = take_series_state(&mut coordinator, consumer_id);
+        coordinator.history_completed(
+            &ticket,
+            generation,
+            None,
+            Err("late Session(Deadline)".to_string()),
+        );
+        let after = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("the live-only series survives the retired completion");
+        assert_eq!(after.bars, before.bars);
+        assert!(
+            coordinator
+                .series
+                .trade(&series)
+                .expect("trade model")
+                .live_only,
+            "a retired completion must not reseed the live-only handoff"
+        );
+        assert!(
+            take_series_state(&mut coordinator, consumer_id).is_none(),
+            "a retired completion publishes nothing"
+        );
+        assert_no_history_request(&history, "a retired completion never re-arms history");
+    }
     #[test]
     fn stale_history_completion_is_discarded_without_restarting_retired_generation() {
         let mut coordinator = coordinator();

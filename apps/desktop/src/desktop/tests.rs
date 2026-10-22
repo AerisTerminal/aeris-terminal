@@ -3998,6 +3998,48 @@ fn chart_error_and_stale_notices_use_truthful_severity() {
 }
 
 #[test]
+fn history_unavailable_notice_distinguishes_live_bars_from_waiting() {
+    let waiting = chart_surface_notice(
+        ChartState::HistoryUnavailable,
+        false,
+        false,
+        "Waiting for live trades; history will backfill when the provider answers.",
+    )
+    .expect("waiting notice");
+    assert_eq!(waiting.label, "History unavailable");
+    assert_eq!(
+        waiting.detail.as_deref(),
+        Some("Waiting for live trades; history will backfill when the provider answers.")
+    );
+    assert_eq!(waiting.placement, ChartNoticePlacement::Center);
+    assert_eq!(waiting.tone, ChartNoticeTone::Warning);
+
+    let live = chart_surface_notice(ChartState::HistoryUnavailable, true, false, "ignored")
+        .expect("live-bars notice");
+    assert_eq!(live.label, "History unavailable");
+    assert_eq!(
+        live.detail.as_deref(),
+        Some("Showing live bars; history will backfill when the provider answers.")
+    );
+    assert_eq!(live.placement, ChartNoticePlacement::Corner);
+    assert_eq!(live.tone, ChartNoticeTone::Warning);
+
+    assert_eq!(
+        chart_status_detail(
+            ChartState::HistoryUnavailable,
+            FeedConnectionState::Streaming,
+            None,
+            None,
+        ),
+        "Waiting for live trades; history will backfill when the provider answers."
+    );
+    assert!(
+        ChartState::HistoryUnavailable.awaits_engine_readiness(),
+        "a live-only bar publication alone must not clear the notice"
+    );
+}
+
+#[test]
 fn contextual_labels_keep_contract_and_pending_series_truthful() {
     assert_eq!(instrument_selector_label(None), "Contract");
     assert_eq!(

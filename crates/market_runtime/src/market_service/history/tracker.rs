@@ -76,12 +76,23 @@ impl Lane {
         self.state = LaneState::InFlight(ticket);
     }
 
-    fn fail(&mut self, now: Instant, range: Option<HistoryRange>, capacity: bool) -> bool {
+    fn fail(
+        &mut self,
+        now: Instant,
+        range: Option<HistoryRange>,
+        capacity: bool,
+        kind: LaneKind,
+    ) -> bool {
         if !capacity {
             self.attempts = self.attempts.saturating_add(1);
         }
         let delay = if self.attempts > super::super::MAXIMUM_HISTORY_RETRIES {
-            super::super::HISTORY_FAILED_RETRY_COOLDOWN
+            match kind {
+                // A live-only series probes its covering history on one slow
+                // cadence instead of restarting the fast retry budget.
+                LaneKind::Current => super::super::HISTORY_UNAVAILABLE_RETRY_DELAY,
+                LaneKind::Backfill => super::super::HISTORY_FAILED_RETRY_COOLDOWN,
+            }
         } else if capacity {
             super::super::HISTORY_RETRY_DELAY
         } else {
@@ -93,6 +104,12 @@ impl Lane {
 
     fn cancel(&mut self) {
         self.cancel.store(true, Ordering::Release);
+    }
+
+    /// An exhausted backfill lane waits for fresh demand; an exhausted current
+    /// lane belongs to a live-only series and keeps its slow probe actionable.
+    fn retryable(&self, kind: LaneKind) -> bool {
+        self.attempts <= super::super::MAXIMUM_HISTORY_RETRIES || kind == LaneKind::Current
     }
 }
 
@@ -379,7 +396,7 @@ impl HistoryTracker {
                     match lane.state {
                         LaneState::RetryAt(at, range)
                             if now >= at
-                                && lane.attempts <= super::super::MAXIMUM_HISTORY_RETRIES
+                                && lane.retryable(kind)
                                 && self.inflight(series, *epoch).is_none() =>
                         {
                             Some((series.clone(), *epoch, kind, range))
@@ -403,7 +420,7 @@ impl HistoryTracker {
                         let lane = entry.lane(kind);
                         match lane.state {
                             LaneState::RetryAt(at, _)
-                                if lane.attempts <= super::super::MAXIMUM_HISTORY_RETRIES
+                                if lane.retryable(kind)
                                     && self.inflight(series, *epoch).is_none() =>
                             {
                                 Some(at)
@@ -428,11 +445,7 @@ impl HistoryTracker {
             SeriesHistory::new(clock, provider.get().get(), self.demands.next())
         });
         let lane = entry.lane_mut(kind);
-        let retry = lane.fail(clock.monotonic(), range, capacity);
-        if !retry && kind == LaneKind::Current {
-            lane.attempts = 0;
-        }
-        retry
+        lane.fail(clock.monotonic(), range, capacity, kind)
     }
 
     pub(crate) fn clear_retry(
@@ -534,7 +547,7 @@ impl HistoryTracker {
         {
             return false;
         }
-        lane.fail(now, range, capacity)
+        lane.fail(now, range, capacity, ticket.lane)
     }
 
     #[cfg(test)]
@@ -598,6 +611,49 @@ mod tests {
             Some(&LaneState::InFlight(current.clone()))
         );
         assert_eq!(tracker.count(), 1);
+    }
+
+    #[test]
+    fn history_tracker_exhausted_current_lane_keeps_one_slow_probe() {
+        let clock = ScriptedClock::new(1_000_000_000);
+        let provider = EpochSequence::<ProviderTag>::default().next();
+        let mut tracker = HistoryTracker::default();
+        for attempt in 1..=super::super::MAXIMUM_HISTORY_RETRIES {
+            let ticket = tracker.begin(series(), provider, LaneKind::Current, None, &clock);
+            assert!(
+                tracker.fail(&ticket, clock.monotonic(), None, false),
+                "attempt {attempt} stays within the fast retry budget"
+            );
+        }
+        let ticket = tracker.begin(series(), provider, LaneKind::Current, None, &clock);
+        assert!(
+            !tracker.fail(&ticket, clock.monotonic(), None, false),
+            "the exhausted current lane reports no fast retry"
+        );
+        let Some((retry_at, None, attempts)) =
+            tracker.pending(&series(), provider, LaneKind::Current)
+        else {
+            panic!("the exhausted current lane keeps one pending probe");
+        };
+        assert_eq!(attempts, super::super::MAXIMUM_HISTORY_RETRIES + 1);
+        assert_eq!(
+            retry_at,
+            clock.monotonic() + super::super::super::HISTORY_UNAVAILABLE_RETRY_DELAY
+        );
+        assert!(
+            tracker.retry_due(clock.monotonic()).is_none(),
+            "the slow probe is not due before its deadline"
+        );
+        assert_eq!(
+            tracker.next_retry_deadline(),
+            Some(retry_at),
+            "the coordinator timer still wakes for the live-only probe"
+        );
+        assert_eq!(
+            tracker.retry_due(retry_at),
+            Some((series(), provider, LaneKind::Current, None)),
+            "the exhausted current lane retries once per slow interval"
+        );
     }
 
     #[test]

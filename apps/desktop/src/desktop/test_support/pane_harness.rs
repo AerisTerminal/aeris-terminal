@@ -1656,6 +1656,56 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn pane_harness_history_unavailable_holds_until_the_runtime_clears_it(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness.pane.update(cx, |pane, _| {
+        assert_eq!(pane.chart_state, ChartState::Ready);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::RuntimeSeriesStatus(
+            harness.market_events.readiness_with_presentation(
+                1,
+                aeris_contracts::SeriesLoadState::Live,
+                "History unavailable; showing live bars",
+                aeris_market_runtime::SeriesPresentationStatus::HistoryUnavailable,
+            ),
+        ))
+        .expect("live-only status");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::HistoryUnavailable);
+    });
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let bars_only = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 13);
+    harness
+        .publications
+        .send(bars_only)
+        .expect("bar publication enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            pane.chart_state,
+            ChartState::HistoryUnavailable,
+            "a bar publication alone must not clear the unavailable phase"
+        );
+    });
+    harness
+        .publications
+        .send(harness.fixture_readiness(
+            1,
+            aeris_contracts::SeriesLoadState::Live,
+            "Market history/live handoff is current",
+        ))
+        .expect("recovered live status");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Ready);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
