@@ -1,14 +1,17 @@
 #![cfg(rithmic_kit)]
 
 use crate::{
-    DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage, DecodedOrderMessage,
-    DecodedPnlMessage, DecodedTimeBar, DecodedTimeBarType, HistorySource, ProviderSessionDriver,
+    BracketLevelUpdateRequest, BracketOrderRequest, DecodedControlMessage, DecodedHistoryMessage,
+    DecodedMarketMessage, DecodedOrderMessage, DecodedPnlMessage, DecodedTimeBar,
+    DecodedTimeBarType, ExitPositionRequest, HistorySource, NewOrderRequest, ProviderSessionDriver,
     ProviderSessionEvent, RITHMIC_APPLICATION_NAME, ReplayKind, RetryDisposition,
-    RithmicAccountKey, RithmicApplication, RithmicCallbackLimits, RithmicCredentialBytes,
-    RithmicCredentials, RithmicGateway, RithmicOrderPlantMessage, RithmicPnlPlantMessage,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicRequestKind,
-    RithmicRequestOutcome, RithmicSession, RithmicSessionError, RithmicSessionLimits,
-    RithmicSessionMessage, SessionGeneration, TimeBarReplayRequest, TimeBarType,
+    RithmicAccountKey, RithmicApplication, RithmicBracketLevel, RithmicBracketSide,
+    RithmicCallbackLimits, RithmicCredentialBytes, RithmicCredentials, RithmicGateway,
+    RithmicOrderConnection, RithmicOrderDuration, RithmicOrderPlacement, RithmicOrderPlantMessage,
+    RithmicOrderSide, RithmicOrderType, RithmicPnlPlantMessage, RithmicProviderConfig,
+    RithmicProviderDriver, RithmicProviderEvents, RithmicRequestKind, RithmicRequestOutcome,
+    RithmicSession, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
+    RithmicUserType, SessionGeneration, TimeBarReplayRequest, TimeBarType,
     endpoint::RithmicEndpoint, generated::rti, session::STOPPING_LOGOUT_TIMEOUT,
 };
 use prost::Message as _;
@@ -494,23 +497,11 @@ fn order_stream_subscribes_before_snapshot_over_tls() {
     let server = thread::Builder::new()
         .name("rithmic-order-plant-fixture".to_string())
         .spawn(move || -> Result<(), String> {
-            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
-            assert_system_discovery_request(&read_binary(&mut discovery)?);
-            discovery
-                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
-                .map_err(|error| error.to_string())?;
-            discovery.close(None).map_err(|error| error.to_string())?;
-            finish_server_close(&mut discovery)?;
-            drop(discovery);
-
-            let (mut order, _) = accept_websocket(&listener, &server_config)?;
-            assert_trading_login_request(
-                &read_binary(&mut order)?,
+            let mut order = accept_trading_login(
+                &listener,
+                &server_config,
                 rti::request_login::SysInfraType::OrderPlant,
             )?;
-            order
-                .send(Message::binary(login_response(true, &[])))
-                .map_err(|error| error.to_string())?;
             let subscribe =
                 rti::RequestSubscribeForOrderUpdates::decode(read_binary(&mut order)?.as_slice())
                     .map_err(|error| error.to_string())?;
@@ -585,6 +576,304 @@ fn order_stream_subscribes_before_snapshot_over_tls() {
 }
 
 #[test]
+fn bracket_stream_and_commands_keep_one_reply_per_lane_over_tls() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-bracket-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let mut order = accept_trading_login(
+                &listener,
+                &server_config,
+                rti::request_login::SysInfraType::OrderPlant,
+            )?;
+            serve_bracket_stream(&mut order)?;
+            serve_bracket_commands(&mut order)?;
+            assert_logout_request(&read_binary(&mut order)?);
+            send_frame(&mut order, logout_response())?;
+            require_close(&mut order)?;
+            finish_server_close(&mut order)
+        })
+        .expect("spawn local bracket TLS server");
+
+    let mut connection = RithmicSession::connect_order_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        client_config,
+    )
+    .expect("discover and log in to the order plant");
+    assert_eq!(
+        connection.request_bracket_snapshot(FIXTURE_ACCOUNT),
+        Err(RithmicSessionError::RequestNotPermitted)
+    );
+    connection
+        .start_bracket_stream(FIXTURE_ACCOUNT, Instant::now() + Duration::from_secs(3))
+        .expect("subscribe, then request both bracket snapshots");
+    assert_eq!(
+        connection.request_bracket_snapshot(FIXTURE_ACCOUNT),
+        Err(RithmicSessionError::RequestInFlight)
+    );
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the retained bracket update")),
+        DecodedOrderMessage::BracketUpdate(update)
+            if update.basket_id == "fixture-basket" && update.stop.is_none()
+    ));
+    for (side, request) in [
+        (RithmicBracketSide::Target, RithmicRequestKind::ShowBrackets),
+        (
+            RithmicBracketSide::Stop,
+            RithmicRequestKind::ShowBracketStops,
+        ),
+    ] {
+        assert!(matches!(
+            order_payload(connection.read_next().expect("read a bracket row")),
+            DecodedOrderMessage::BracketLevel(row) if row.side == side
+        ));
+        assert!(matches!(
+            order_payload(connection.read_next().expect("read a bracket snapshot completion")),
+            DecodedOrderMessage::RequestComplete(completion)
+                if completion.request == request && completion.outcome.is_accepted()
+        ));
+    }
+    exercise_bracket_commands(&mut connection);
+    connection.close().expect("close order-plant connection");
+    server
+        .join()
+        .expect("local bracket TLS server did not panic")
+        .expect("local bracket TLS lifecycle completed");
+}
+
+/// Submits a bracket, moves its stop, and flattens, checking that the shared
+/// level lane and the exit lane each admit one outstanding request.
+fn exercise_bracket_commands(connection: &mut RithmicOrderConnection) {
+    connection
+        .submit_bracket_order(BracketOrderRequest {
+            entry: NewOrderRequest {
+                account: FIXTURE_ACCOUNT,
+                user_tag: "fixture-bracket-1",
+                symbol: "ESM7",
+                exchange: "CME",
+                trade_route: "fixture-route",
+                side: RithmicOrderSide::Buy,
+                quantity: 2,
+                duration: RithmicOrderDuration::Day,
+                order_type: RithmicOrderType::Market,
+                placement: RithmicOrderPlacement::Manual,
+            },
+            user_type: RithmicUserType::Trader,
+            targets: &[RithmicBracketLevel {
+                quantity: 2,
+                ticks: 8,
+            }],
+            stops: &[RithmicBracketLevel {
+                quantity: 2,
+                ticks: 12,
+            }],
+        })
+        .expect("submit the bracket");
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the bracket acknowledgement")),
+        DecodedOrderMessage::OrderCommand(reply)
+            if reply.request == RithmicRequestKind::BracketOrder
+                && reply.basket_id.as_deref() == Some("fixture-basket")
+    ));
+    let stop_move = BracketLevelUpdateRequest {
+        account: FIXTURE_ACCOUNT,
+        basket_id: "fixture-basket",
+        current_ticks: 12,
+        new_ticks: 10,
+    };
+    connection
+        .update_stop_level(stop_move)
+        .expect("move the stop");
+    assert_eq!(
+        connection.update_target_level(BracketLevelUpdateRequest {
+            current_ticks: 8,
+            new_ticks: 6,
+            ..stop_move
+        }),
+        Err(RithmicSessionError::RequestInFlight),
+        "target and stop moves share one lane"
+    );
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the stop-move completion")),
+        DecodedOrderMessage::RequestComplete(completion)
+            if completion.request == RithmicRequestKind::UpdateStopLevel
+    ));
+    let exit = ExitPositionRequest {
+        account: FIXTURE_ACCOUNT,
+        symbol: "ESM7",
+        exchange: "CME",
+        placement: RithmicOrderPlacement::Manual,
+    };
+    connection
+        .exit_position(exit)
+        .expect("flatten the position");
+    assert_eq!(
+        connection.exit_position(exit),
+        Err(RithmicSessionError::RequestInFlight)
+    );
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the exit acknowledgement")),
+        DecodedOrderMessage::PositionExit(reply) if reply.outcome.is_accepted()
+    ));
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the exit completion")),
+        DecodedOrderMessage::RequestComplete(completion)
+            if completion.request == RithmicRequestKind::ExitPosition
+    ));
+}
+
+/// Acknowledges the bracket subscription after one pushed update, then serves
+/// the target and stop snapshots.
+fn serve_bracket_stream(order: &mut ServerWebSocket) -> Result<(), String> {
+    let subscribe = rti::RequestSubscribeToBracketUpdates::decode(read_binary(order)?.as_slice())
+        .map_err(|error| error.to_string())?;
+    if subscribe.template_id != 336
+        || subscribe.account_id.as_deref() != Some(FIXTURE_ACCOUNT.account_id)
+    {
+        return Err("expected the bracket-update subscription first".to_string());
+    }
+    send_frame(
+        order,
+        rti::BracketUpdates {
+            template_id: 353,
+            account_id: Some(FIXTURE_ACCOUNT.account_id.to_string()),
+            basket_id: Some("fixture-basket".to_string()),
+            target_ticks: Some(8),
+            target_quantity: Some(2),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    send_frame(
+        order,
+        rti::ResponseSubscribeToBracketUpdates {
+            template_id: 337,
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    let targets = rti::RequestShowBrackets::decode(read_binary(order)?.as_slice())
+        .map_err(|error| error.to_string())?;
+    let stops = rti::RequestShowBracketStops::decode(read_binary(order)?.as_slice())
+        .map_err(|error| error.to_string())?;
+    if targets.template_id != 338 || stops.template_id != 340 {
+        return Err("expected both bracket snapshots after the acknowledgement".to_string());
+    }
+    send_frame(
+        order,
+        rti::ResponseShowBrackets {
+            template_id: 339,
+            rq_handler_rp_code: vec!["0".to_string()],
+            basket_id: Some("fixture-basket".to_string()),
+            target_ticks: Some("8".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    send_frame(
+        order,
+        rti::ResponseShowBrackets {
+            template_id: 339,
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    send_frame(
+        order,
+        rti::ResponseShowBracketStops {
+            template_id: 341,
+            rq_handler_rp_code: vec!["0".to_string()],
+            basket_id: Some("fixture-basket".to_string()),
+            stop_ticks: Some("12".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    send_frame(
+        order,
+        rti::ResponseShowBracketStops {
+            template_id: 341,
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// Acknowledges the bracket entry, the stop move, and the exit.
+fn serve_bracket_commands(order: &mut ServerWebSocket) -> Result<(), String> {
+    let bracket = rti::RequestBracketOrder::decode(read_binary(order)?.as_slice())
+        .map_err(|error| error.to_string())?;
+    if bracket.template_id != 330
+        || bracket.bracket_type
+            != Some(rti::request_bracket_order::BracketType::TargetAndStopStatic.into())
+        || bracket.target_ticks != [8]
+        || bracket.stop_ticks != [12]
+    {
+        return Err("expected one static bracket with the entry".to_string());
+    }
+    send_frame(
+        order,
+        rti::ResponseBracketOrder {
+            template_id: 331,
+            user_tag: bracket.user_tag,
+            rq_handler_rp_code: vec!["0".to_string()],
+            basket_id: Some("fixture-basket".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    let stop_move = rti::RequestUpdateStopBracketLevel::decode(read_binary(order)?.as_slice())
+        .map_err(|error| error.to_string())?;
+    if stop_move.template_id != 334
+        || stop_move.level != Some(12)
+        || stop_move.stop_ticks != Some(10)
+    {
+        return Err("expected the stop move to address the current level".to_string());
+    }
+    send_frame(
+        order,
+        rti::ResponseUpdateStopBracketLevel {
+            template_id: 335,
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    )?;
+    let exit = rti::RequestExitPosition::decode(read_binary(order)?.as_slice())
+        .map_err(|error| error.to_string())?;
+    if exit.template_id != 3504 || exit.symbol.as_deref() != Some("ESM7") {
+        return Err("expected one exit after the stop move".to_string());
+    }
+    for reply in [
+        rti::ResponseExitPosition {
+            template_id: 3505,
+            rq_handler_rp_code: vec!["0".to_string()],
+            symbol: exit.symbol,
+            exchange: exit.exchange,
+            ..Default::default()
+        },
+        rti::ResponseExitPosition {
+            template_id: 3505,
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        },
+    ] {
+        send_frame(order, reply.encode_to_vec())?;
+    }
+    Ok(())
+}
+
+#[test]
 fn pnl_stream_subscribes_before_snapshot_over_tls() {
     let fixture = LocalTlsFixture::bind();
     let endpoint = fixture.endpoint;
@@ -594,22 +883,11 @@ fn pnl_stream_subscribes_before_snapshot_over_tls() {
     let server = thread::Builder::new()
         .name("rithmic-pnl-plant-fixture".to_string())
         .spawn(move || -> Result<(), String> {
-            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
-            assert_system_discovery_request(&read_binary(&mut discovery)?);
-            discovery
-                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
-                .map_err(|error| error.to_string())?;
-            discovery.close(None).map_err(|error| error.to_string())?;
-            finish_server_close(&mut discovery)?;
-            drop(discovery);
-
-            let (mut pnl, _) = accept_websocket(&listener, &server_config)?;
-            assert_trading_login_request(
-                &read_binary(&mut pnl)?,
+            let mut pnl = accept_trading_login(
+                &listener,
+                &server_config,
                 rti::request_login::SysInfraType::PnlPlant,
             )?;
-            pnl.send(Message::binary(login_response(true, &[])))
-                .map_err(|error| error.to_string())?;
             let subscribe =
                 rti::RequestPnLPositionUpdates::decode(read_binary(&mut pnl)?.as_slice())
                     .map_err(|error| error.to_string())?;
@@ -945,6 +1223,31 @@ fn accept_ticker_login(
         .send(Message::binary(login_response(true, &[])))
         .map_err(|error| error.to_string())?;
     Ok(ticker)
+}
+
+/// Serves system discovery, then accepts a fresh order- or PnL-plant login.
+fn accept_trading_login(
+    listener: &TcpListener,
+    server_config: &Arc<ServerConfig>,
+    plant: rti::request_login::SysInfraType,
+) -> Result<ServerWebSocket, String> {
+    let (mut discovery, _) = accept_websocket(listener, server_config)?;
+    assert_system_discovery_request(&read_binary(&mut discovery)?);
+    send_frame(&mut discovery, system_info_response(&[TEST_SYSTEM], &[]))?;
+    discovery.close(None).map_err(|error| error.to_string())?;
+    finish_server_close(&mut discovery)?;
+    drop(discovery);
+
+    let (mut plant_socket, _) = accept_websocket(listener, server_config)?;
+    assert_trading_login_request(&read_binary(&mut plant_socket)?, plant)?;
+    send_frame(&mut plant_socket, login_response(true, &[]))?;
+    Ok(plant_socket)
+}
+
+fn send_frame(socket: &mut ServerWebSocket, frame: Vec<u8>) -> Result<(), String> {
+    socket
+        .send(Message::binary(frame))
+        .map_err(|error| error.to_string())
 }
 
 /// Production ticker session driver whose login targets the local fixture.

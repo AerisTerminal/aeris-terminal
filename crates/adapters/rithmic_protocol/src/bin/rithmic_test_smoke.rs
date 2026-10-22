@@ -25,6 +25,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod order_bracket_smoke;
 mod provider_silence_evidence;
 
 use provider_silence_evidence::{
@@ -53,6 +54,9 @@ enum RunMode {
     Smoke,
     HistoryOnly,
     MboOnly,
+    OrderBracketSmoke {
+        product: String,
+    },
     AuthorizedClientLocalSilence,
     ProviderObservedSilence {
         expected: ExpectedSilence,
@@ -93,37 +97,11 @@ fn main() -> Result<(), String> {
             run_authorized_silence_recovery(&credentials)?;
             return Ok(());
         }
-        RunMode::HistoryOnly => {
-            let (ticker, selected) = login_and_select(&credentials, application())?;
-            ticker
-                .close()
-                .map_err(|error| format!("ticker_close_failed={error}"))?;
-            println!("rithmic_ticker_close=passed");
-            run_history(&credentials, application(), &selected)?;
-            println!(
-                "rithmic_history_only=passed symbol={} exchange={}",
-                selected.symbol, selected.exchange
-            );
-            return Ok(());
+        RunMode::OrderBracketSmoke { product } => {
+            return order_bracket_smoke::run(&credentials, &product);
         }
-        RunMode::MboOnly => {
-            let (mut ticker, selected) = login_and_select(&credentials, application())?;
-            let probe = test_depth_by_order(&mut ticker, &selected);
-            let close = ticker
-                .close()
-                .map_err(|error| format!("ticker_close_failed={error}"));
-            match (probe, close) {
-                (Ok(()), Ok(())) => {}
-                (Err(probe), Ok(())) => return Err(probe),
-                (Ok(()), Err(close)) => return Err(close),
-                (Err(probe), Err(close)) => return Err(format!("{probe}; {close}")),
-            }
-            println!(
-                "rithmic_mbo_only=passed symbol={} exchange={}",
-                selected.symbol, selected.exchange
-            );
-            return Ok(());
-        }
+        RunMode::HistoryOnly => return run_history_only(&credentials),
+        RunMode::MboOnly => return run_mbo_only(&credentials),
         RunMode::ProviderObservedSilence {
             expected,
             observation_seconds,
@@ -168,6 +146,39 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
+fn run_history_only(credentials: &RithmicCredentialBytes) -> Result<(), String> {
+    let (ticker, selected) = login_and_select(credentials, application(), SYMBOL)?;
+    ticker
+        .close()
+        .map_err(|error| format!("ticker_close_failed={error}"))?;
+    println!("rithmic_ticker_close=passed");
+    run_history(credentials, application(), &selected)?;
+    println!(
+        "rithmic_history_only=passed symbol={} exchange={}",
+        selected.symbol, selected.exchange
+    );
+    Ok(())
+}
+
+fn run_mbo_only(credentials: &RithmicCredentialBytes) -> Result<(), String> {
+    let (mut ticker, selected) = login_and_select(credentials, application(), SYMBOL)?;
+    let probe = test_depth_by_order(&mut ticker, &selected);
+    let close = ticker
+        .close()
+        .map_err(|error| format!("ticker_close_failed={error}"));
+    match (probe, close) {
+        (Ok(()), Ok(())) => {}
+        (Err(probe), Ok(())) => return Err(probe),
+        (Ok(()), Err(close)) => return Err(close),
+        (Err(probe), Err(close)) => return Err(format!("{probe}; {close}")),
+    }
+    println!(
+        "rithmic_mbo_only=passed symbol={} exchange={}",
+        selected.symbol, selected.exchange
+    );
+    Ok(())
+}
+
 fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode, String> {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     match arguments.as_slice() {
@@ -177,6 +188,11 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
         }
         [argument] if argument == "--history-only" => Ok(RunMode::HistoryOnly),
         [argument] if argument == "--mbo-only" => Ok(RunMode::MboOnly),
+        [flag, product] if flag == "--order-bracket-smoke" && is_product_code(product) => {
+            Ok(RunMode::OrderBracketSmoke {
+                product: product.clone(),
+            })
+        }
         [
             flag,
             expected,
@@ -220,7 +236,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
 }
 
 fn usage() -> String {
-    "usage: rithmic_test_smoke [--history-only | --mbo-only | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
+    "usage: rithmic_test_smoke [--history-only | --mbo-only | --order-bracket-smoke <product-code> | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
 }
 
 #[derive(Clone)]
@@ -240,7 +256,7 @@ fn run_ticker(
     credentials: &RithmicCredentialBytes,
     application: RithmicApplication<'_>,
 ) -> Result<(SelectedInstrument, bool), String> {
-    let (mut ticker, selected) = login_and_select(credentials, application)?;
+    let (mut ticker, selected) = login_and_select(credentials, application, SYMBOL)?;
     let rejected = test_subscription(&mut ticker, &selected)?;
     test_heartbeat(&mut ticker)?;
     ticker
@@ -250,9 +266,17 @@ fn run_ticker(
     Ok((selected, rejected))
 }
 
+fn is_product_code(value: &str) -> bool {
+    (1..=8).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
 fn login_and_select(
     credentials: &RithmicCredentialBytes,
     application: RithmicApplication<'_>,
+    product: &str,
 ) -> Result<
     (
         aeris_rithmic_protocol_adapter::RithmicTickerConnection,
@@ -271,7 +295,7 @@ fn login_and_select(
     )
     .map_err(|error| format!("ticker_login_failed={error}"))?;
     println!("rithmic_ticker_login=passed");
-    let selected = search_and_reference(&mut ticker)?;
+    let selected = search_and_reference(&mut ticker, product)?;
     Ok((ticker, selected))
 }
 
@@ -299,10 +323,11 @@ fn test_heartbeat(
 
 fn search_and_reference(
     ticker: &mut aeris_rithmic_protocol_adapter::RithmicTickerConnection,
+    product: &str,
 ) -> Result<SelectedInstrument, String> {
     ticker
         .search_symbols(SymbolSearchRequest {
-            search_text: SYMBOL,
+            search_text: product,
             exchange: None,
             product_code: None,
             instrument_type: Some(InstrumentType::Future),
@@ -334,7 +359,7 @@ fn search_and_reference(
         .iter()
         .filter(|result| {
             result.expiration_date.is_some()
-                && result.symbol != SYMBOL
+                && result.symbol != product
                 && !result.symbol.contains('-')
         })
         .min_by_key(|result| result.expiration_date.as_deref())
@@ -1278,6 +1303,12 @@ mod tests {
             Ok(RunMode::MboOnly)
         );
         assert_eq!(
+            parse_run_mode(vec!["--order-bracket-smoke".to_string(), "ES".to_string()]),
+            Ok(RunMode::OrderBracketSmoke {
+                product: "ES".to_string()
+            })
+        );
+        assert_eq!(
             parse_run_mode(vec!["--authorized-silence-recovery".to_string()]),
             Ok(RunMode::AuthorizedClientLocalSilence)
         );
@@ -1312,6 +1343,9 @@ mod tests {
         );
         for rejected in [
             vec!["--unknown".to_string()],
+            vec!["--order-bracket-smoke".to_string()],
+            vec!["--order-bracket-smoke".to_string(), "es".to_string()],
+            vec!["--order-bracket-smoke".to_string(), "NQ ES".to_string()],
             vec![
                 "--authorized-silence-recovery".to_string(),
                 "extra".to_string(),

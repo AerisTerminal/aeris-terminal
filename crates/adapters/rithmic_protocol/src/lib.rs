@@ -71,14 +71,18 @@ pub use market::{
     QuoteUpdate, TradeAggressor, TradeUpdate,
 };
 pub use order_plant::{
-    AccountListRequest, CancelAllOrdersRequest, CancelOrderRequest, DecodedOrderMessage,
-    ExecutionReplayRequest, FillHistoryRequest, MAXIMUM_FILL_HISTORY_RECORDS,
+    AccountListRequest, BracketLevelUpdateRequest, BracketOrderRequest, CancelAllOrdersRequest,
+    CancelOrderRequest, DecodedOrderMessage, ExecutionReplayRequest, ExitPositionRequest,
+    FillHistoryRequest, MAXIMUM_BRACKET_LEVELS, MAXIMUM_FILL_HISTORY_RECORDS,
     MAXIMUM_FILL_HISTORY_WINDOW_SECONDS, ModifyOrderRequest, NewOrderRequest, OrderPlantRequest,
-    RithmicAccount, RithmicExchangeNotifyType, RithmicExchangeOrderNotification, RithmicFill,
-    RithmicFillHistoryRow, RithmicLoginInfo, RithmicOrderCommandReply, RithmicOrderDetails,
-    RithmicOrderDuration, RithmicOrderNotification, RithmicOrderNotifyType, RithmicOrderPlacement,
-    RithmicOrderSide, RithmicOrderType, RithmicReportedPriceType, RithmicReportedSide,
-    RithmicRequestCompletion, RithmicTradeRoute, RithmicUserType, TradeRoutesRequest,
+    RithmicAccount, RithmicBracketLevel, RithmicBracketLevelRow, RithmicBracketLevelState,
+    RithmicBracketSide, RithmicBracketUpdate, RithmicExchangeNotifyType,
+    RithmicExchangeOrderNotification, RithmicFill, RithmicFillHistoryRow, RithmicLoginInfo,
+    RithmicOrderCommandReply, RithmicOrderDetails, RithmicOrderDuration, RithmicOrderNotification,
+    RithmicOrderNotifyType, RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType,
+    RithmicPositionExitReply, RithmicReportedBracketType, RithmicReportedPriceType,
+    RithmicReportedSide, RithmicRequestCompletion, RithmicTradeRoute, RithmicUserType,
+    TradeRoutesRequest,
 };
 pub use order_session::{
     MAXIMUM_STREAM_START_MESSAGES, MAXIMUM_TRACKED_RITHMIC_ACCOUNTS, RithmicOrderConnection,

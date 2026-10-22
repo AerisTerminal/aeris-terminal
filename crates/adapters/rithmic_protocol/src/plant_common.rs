@@ -50,10 +50,17 @@ pub enum RithmicRequestKind {
     OrderUpdates,
     TradeRoutes,
     NewOrder,
+    BracketOrder,
     ModifyOrder,
     CancelOrder,
     CancelAllOrders,
     ShowOrders,
+    BracketUpdates,
+    ShowBrackets,
+    ShowBracketStops,
+    UpdateTargetLevel,
+    UpdateStopLevel,
+    ExitPosition,
     ReplayExecutions,
     FillHistory,
     PnlUpdates,
@@ -241,12 +248,30 @@ pub(crate) mod wire {
             .transpose()
     }
 
+    /// Parses an optional decimal sent as text. Rithmic sends empty text for a
+    /// value it does not compute for the account (Rithmic Test leaves the
+    /// margin balance empty), so empty text is absent rather than malformed.
     pub(crate) fn optional_decimal_text(
         field: &'static str,
         value: Option<&str>,
     ) -> Result<Option<RithmicDecimal>, ProtocolError> {
         value
+            .filter(|value| !value.is_empty())
             .map(|value| RithmicDecimal::from_wire_str(field, value))
+            .transpose()
+    }
+
+    /// Parses an integer that the provider sends as text.
+    pub(crate) fn optional_text_integer<T: core::str::FromStr>(
+        field: &'static str,
+        value: Option<String>,
+    ) -> Result<Option<T>, ProtocolError> {
+        optional_string(field, value)?
+            .map(|value| {
+                value
+                    .parse::<T>()
+                    .map_err(|_| ProtocolError::InvalidNumber(field))
+            })
             .transpose()
     }
 

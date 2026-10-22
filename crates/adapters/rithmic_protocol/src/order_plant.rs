@@ -12,6 +12,8 @@ use core::fmt;
 pub const MAXIMUM_FILL_HISTORY_WINDOW_SECONDS: i32 = 30 * 86_400;
 /// Largest record count Rithmic accepts for one fill-history request.
 pub const MAXIMUM_FILL_HISTORY_RECORDS: u16 = 10_000;
+/// Most target or stop levels Aeris sends on one side of a bracket order.
+pub const MAXIMUM_BRACKET_LEVELS: usize = 4;
 
 /// Direction of a new order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +110,9 @@ pub struct CancelOrderRequest<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CancelAllOrdersRequest<'a> {
     pub account: RithmicAccountKey<'a>,
+    /// Role reported by `response_login_info`; Rithmic refuses a cancel-all
+    /// without it.
+    pub user_type: RithmicUserType,
     pub placement: RithmicOrderPlacement,
 }
 
@@ -129,6 +134,46 @@ pub struct FillHistoryRequest<'a> {
     pub maximum_records: Option<u16>,
 }
 
+/// One target or stop level of a bracket: `quantity` contracts placed `ticks`
+/// minimum price increments away from the entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RithmicBracketLevel {
+    pub quantity: u32,
+    pub ticks: u32,
+}
+
+/// Submits an entry with exit levels that Rithmic holds on its servers and
+/// releases as the entry fills, so the exits keep working without a connected
+/// client. Each side with levels must cover the entry quantity exactly, with
+/// distinct tick distances, because a level is later addressed by its ticks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BracketOrderRequest<'a> {
+    pub entry: NewOrderRequest<'a>,
+    /// Role reported by `response_login_info` for the logged-in user.
+    pub user_type: RithmicUserType,
+    pub targets: &'a [RithmicBracketLevel],
+    pub stops: &'a [RithmicBracketLevel],
+}
+
+/// Moves one level of a working bracket. The level is identified by the
+/// entry's basket id and its current tick distance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BracketLevelUpdateRequest<'a> {
+    pub account: RithmicAccountKey<'a>,
+    pub basket_id: &'a str,
+    pub current_ticks: i32,
+    pub new_ticks: i32,
+}
+
+/// Flattens one instrument's position through Rithmic's server-side exit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExitPositionRequest<'a> {
+    pub account: RithmicAccountKey<'a>,
+    pub symbol: &'a str,
+    pub exchange: &'a str,
+    pub placement: RithmicOrderPlacement,
+}
+
 /// Outbound request accepted only on an authenticated order-plant session.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum OrderPlantRequest<'a> {
@@ -137,10 +182,17 @@ pub enum OrderPlantRequest<'a> {
     SubscribeOrderUpdates(RithmicAccountKey<'a>),
     TradeRoutes(TradeRoutesRequest),
     NewOrder(NewOrderRequest<'a>),
+    BracketOrder(BracketOrderRequest<'a>),
     ModifyOrder(ModifyOrderRequest<'a>),
     CancelOrder(CancelOrderRequest<'a>),
     CancelAllOrders(CancelAllOrdersRequest<'a>),
     ShowOrders(RithmicAccountKey<'a>),
+    SubscribeBracketUpdates(RithmicAccountKey<'a>),
+    ShowBrackets(RithmicAccountKey<'a>),
+    ShowBracketStops(RithmicAccountKey<'a>),
+    UpdateTargetLevel(BracketLevelUpdateRequest<'a>),
+    UpdateStopLevel(BracketLevelUpdateRequest<'a>),
+    ExitPosition(ExitPositionRequest<'a>),
     ReplayExecutions(ExecutionReplayRequest<'a>),
     ShowFillHistory(FillHistoryRequest<'a>),
 }
@@ -154,10 +206,17 @@ impl OrderPlantRequest<'_> {
             Self::SubscribeOrderUpdates(_) => RithmicRequestKind::OrderUpdates,
             Self::TradeRoutes(_) => RithmicRequestKind::TradeRoutes,
             Self::NewOrder(_) => RithmicRequestKind::NewOrder,
+            Self::BracketOrder(_) => RithmicRequestKind::BracketOrder,
             Self::ModifyOrder(_) => RithmicRequestKind::ModifyOrder,
             Self::CancelOrder(_) => RithmicRequestKind::CancelOrder,
             Self::CancelAllOrders(_) => RithmicRequestKind::CancelAllOrders,
             Self::ShowOrders(_) => RithmicRequestKind::ShowOrders,
+            Self::SubscribeBracketUpdates(_) => RithmicRequestKind::BracketUpdates,
+            Self::ShowBrackets(_) => RithmicRequestKind::ShowBrackets,
+            Self::ShowBracketStops(_) => RithmicRequestKind::ShowBracketStops,
+            Self::UpdateTargetLevel(_) => RithmicRequestKind::UpdateTargetLevel,
+            Self::UpdateStopLevel(_) => RithmicRequestKind::UpdateStopLevel,
+            Self::ExitPosition(_) => RithmicRequestKind::ExitPosition,
             Self::ReplayExecutions(_) => RithmicRequestKind::ReplayExecutions,
             Self::ShowFillHistory(_) => RithmicRequestKind::FillHistory,
         }
@@ -261,6 +320,18 @@ pub enum RithmicReportedPriceType {
     StopMarket,
 }
 
+/// Bracket configuration reported on an entry or exit order. Aeris sends only
+/// the static variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RithmicReportedBracketType {
+    StopOnly,
+    TargetOnly,
+    TargetAndStop,
+    StopOnlyStatic,
+    TargetOnlyStatic,
+    TargetAndStopStatic,
+}
+
 /// Rithmic-side order lifecycle step from `rithmic_order_notification`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RithmicOrderNotifyType {
@@ -308,6 +379,12 @@ pub struct RithmicOrderDetails {
     /// rather than a live change.
     pub is_snapshot: bool,
     pub basket_id: String,
+    /// Basket of the order this one derives from, such as a bracket exit's entry.
+    pub original_basket_id: Option<String>,
+    /// Provider list of linked orders, kept verbatim because its delimiter is
+    /// not documented.
+    pub linked_basket_ids: Option<String>,
+    pub bracket_type: Option<RithmicReportedBracketType>,
     pub account_id: RithmicAccountRef,
     pub symbol: String,
     pub exchange: String,
@@ -373,6 +450,49 @@ pub struct RithmicFillHistoryRow {
     pub timestamp: Option<ProviderTimestamp>,
 }
 
+/// Exit side of a bracket level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RithmicBracketSide {
+    Target,
+    Stop,
+}
+
+/// Server-held state of one bracket level; Rithmic reports each field
+/// independently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RithmicBracketLevelState {
+    pub ticks: Option<i32>,
+    pub quantity: Option<u32>,
+    pub quantity_released: Option<u32>,
+}
+
+/// One row of `response_show_brackets` (targets) or
+/// `response_show_bracket_stops` (stops), keyed by the entry's basket id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RithmicBracketLevelRow {
+    pub basket_id: String,
+    pub side: RithmicBracketSide,
+    pub level: RithmicBracketLevelState,
+}
+
+/// Decoded `bracket_updates` (template 353) for one bracketed entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RithmicBracketUpdate {
+    pub account_id: RithmicAccountRef,
+    pub basket_id: String,
+    pub target: Option<RithmicBracketLevelState>,
+    pub stop: Option<RithmicBracketLevelState>,
+}
+
+/// Per-request acknowledgement (`rq_handler_rp_code`) of an exit-position
+/// command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RithmicPositionExitReply {
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub outcome: RithmicRequestOutcome,
+}
+
 /// Sanitized order-plant message decoded from one provider WebSocket message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodedOrderMessage {
@@ -383,6 +503,9 @@ pub enum DecodedOrderMessage {
     OrderCommand(RithmicOrderCommandReply),
     OrderNotification(RithmicOrderNotification),
     ExchangeOrderNotification(RithmicExchangeOrderNotification),
+    BracketLevel(RithmicBracketLevelRow),
+    BracketUpdate(RithmicBracketUpdate),
+    PositionExit(RithmicPositionExitReply),
     FillHistory(RithmicFillHistoryRow),
     RequestComplete(RithmicRequestCompletion),
 }
@@ -400,23 +523,26 @@ pub(crate) const fn decode(
 #[cfg(rithmic_kit)]
 mod kit {
     use super::{
-        AccountListRequest, CancelAllOrdersRequest, CancelOrderRequest, DecodedOrderMessage,
-        ExecutionReplayRequest, FillHistoryRequest, MAXIMUM_FILL_HISTORY_RECORDS,
+        AccountListRequest, BracketLevelUpdateRequest, BracketOrderRequest, CancelAllOrdersRequest,
+        CancelOrderRequest, DecodedOrderMessage, ExecutionReplayRequest, ExitPositionRequest,
+        FillHistoryRequest, MAXIMUM_BRACKET_LEVELS, MAXIMUM_FILL_HISTORY_RECORDS,
         MAXIMUM_FILL_HISTORY_WINDOW_SECONDS, ModifyOrderRequest, NewOrderRequest,
-        OrderPlantRequest, RithmicAccount, RithmicExchangeNotifyType,
-        RithmicExchangeOrderNotification, RithmicFill, RithmicFillHistoryRow, RithmicLoginInfo,
-        RithmicOrderCommandReply, RithmicOrderDetails, RithmicOrderDuration,
-        RithmicOrderNotification, RithmicOrderNotifyType, RithmicOrderPlacement, RithmicOrderSide,
-        RithmicOrderType, RithmicReportedPriceType, RithmicReportedSide, RithmicRequestCompletion,
-        RithmicTradeRoute, RithmicUserType,
+        OrderPlantRequest, RithmicAccount, RithmicBracketLevel, RithmicBracketLevelRow,
+        RithmicBracketLevelState, RithmicBracketSide, RithmicBracketUpdate,
+        RithmicExchangeNotifyType, RithmicExchangeOrderNotification, RithmicFill,
+        RithmicFillHistoryRow, RithmicLoginInfo, RithmicOrderCommandReply, RithmicOrderDetails,
+        RithmicOrderDuration, RithmicOrderNotification, RithmicOrderNotifyType,
+        RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType, RithmicPositionExitReply,
+        RithmicReportedBracketType, RithmicReportedPriceType, RithmicReportedSide,
+        RithmicRequestCompletion, RithmicTradeRoute, RithmicUserType,
     };
     use crate::{
         ProtocolError, RithmicRequestKind, RithmicRequestOutcome,
         generated::rti,
         plant_common::wire::{
             ResponseFrame, account_ref, bound_frame, optional_count, optional_price,
-            optional_string, optional_timestamp, optional_wide_count, required_string,
-            response_frame, terminal_outcome, validate_account, validate_string,
+            optional_string, optional_text_integer, optional_timestamp, optional_wide_count,
+            required_string, response_frame, terminal_outcome, validate_account, validate_string,
         },
     };
     use prost::Message;
@@ -437,11 +563,29 @@ mod kit {
     const CANCEL_ORDER_RESPONSE: i32 = 317;
     const SHOW_ORDERS_REQUEST: i32 = 320;
     const SHOW_ORDERS_RESPONSE: i32 = 321;
+    const BRACKET_ORDER_REQUEST: i32 = 330;
+    const BRACKET_ORDER_RESPONSE: i32 = 331;
+    const UPDATE_TARGET_LEVEL_REQUEST: i32 = 332;
+    const UPDATE_TARGET_LEVEL_RESPONSE: i32 = 333;
+    const UPDATE_STOP_LEVEL_REQUEST: i32 = 334;
+    const UPDATE_STOP_LEVEL_RESPONSE: i32 = 335;
+    const BRACKET_UPDATES_REQUEST: i32 = 336;
+    const BRACKET_UPDATES_RESPONSE: i32 = 337;
+    const SHOW_BRACKETS_REQUEST: i32 = 338;
+    const SHOW_BRACKETS_RESPONSE: i32 = 339;
+    const SHOW_BRACKET_STOPS_REQUEST: i32 = 340;
+    const SHOW_BRACKET_STOPS_RESPONSE: i32 = 341;
     const CANCEL_ALL_ORDERS_REQUEST: i32 = 346;
     const CANCEL_ALL_ORDERS_RESPONSE: i32 = 347;
     const TRADE_ROUTE_UPDATE: i32 = 350;
     const RITHMIC_ORDER_NOTIFICATION: i32 = 351;
     const EXCHANGE_ORDER_NOTIFICATION: i32 = 352;
+    const BRACKET_UPDATE: i32 = 353;
+    /// Account risk-limit push, observed on Rithmic Test right after a
+    /// position exit.
+    const ACCOUNT_RMS_UPDATE: i32 = 358;
+    const EXIT_POSITION_REQUEST: i32 = 3504;
+    const EXIT_POSITION_RESPONSE: i32 = 3505;
     const REPLAY_EXECUTIONS_REQUEST: i32 = 3506;
     const REPLAY_EXECUTIONS_RESPONSE: i32 = 3507;
     const SHOW_FILL_HISTORY_REQUEST: i32 = 3512;
@@ -457,10 +601,33 @@ mod kit {
         MODIFY_ORDER_REQUEST,
         CANCEL_ORDER_REQUEST,
         SHOW_ORDERS_REQUEST,
+        BRACKET_ORDER_REQUEST,
+        UPDATE_TARGET_LEVEL_REQUEST,
+        UPDATE_STOP_LEVEL_REQUEST,
+        BRACKET_UPDATES_REQUEST,
+        SHOW_BRACKETS_REQUEST,
+        SHOW_BRACKET_STOPS_REQUEST,
         CANCEL_ALL_ORDERS_REQUEST,
+        EXIT_POSITION_REQUEST,
         REPLAY_EXECUTIONS_REQUEST,
         SHOW_FILL_HISTORY_REQUEST,
     ];
+
+    /// Encodes a request whose only payload is the account routing identity.
+    macro_rules! account_request {
+        ($message:ident, $template:expr, $account:expr) => {{
+            let account = $account;
+            validate_account(account)?;
+            Ok(rti::$message {
+                template_id: $template,
+                user_msg: Vec::new(),
+                fcm_id: Some(account.fcm_id.to_string()),
+                ib_id: Some(account.ib_id.to_string()),
+                account_id: Some(account.account_id.to_string()),
+            }
+            .encode_to_vec())
+        }};
+    }
 
     pub(crate) fn encode(request: OrderPlantRequest<'_>) -> Result<Vec<u8>, ProtocolError> {
         match request {
@@ -470,17 +637,11 @@ mod kit {
             }
             .encode_to_vec()),
             OrderPlantRequest::AccountList(request) => encode_account_list(request),
-            OrderPlantRequest::SubscribeOrderUpdates(account) => {
-                validate_account(account)?;
-                Ok(rti::RequestSubscribeForOrderUpdates {
-                    template_id: ORDER_UPDATES_REQUEST,
-                    user_msg: Vec::new(),
-                    fcm_id: Some(account.fcm_id.to_string()),
-                    ib_id: Some(account.ib_id.to_string()),
-                    account_id: Some(account.account_id.to_string()),
-                }
-                .encode_to_vec())
-            }
+            OrderPlantRequest::SubscribeOrderUpdates(account) => account_request!(
+                RequestSubscribeForOrderUpdates,
+                ORDER_UPDATES_REQUEST,
+                account
+            ),
             OrderPlantRequest::TradeRoutes(request) => Ok(rti::RequestTradeRoutes {
                 template_id: TRADE_ROUTES_REQUEST,
                 user_msg: Vec::new(),
@@ -488,20 +649,27 @@ mod kit {
             }
             .encode_to_vec()),
             OrderPlantRequest::NewOrder(request) => encode_new_order(request),
+            OrderPlantRequest::BracketOrder(request) => encode_bracket_order(request),
             OrderPlantRequest::ModifyOrder(request) => encode_modify_order(request),
             OrderPlantRequest::CancelOrder(request) => encode_cancel_order(request),
             OrderPlantRequest::CancelAllOrders(request) => encode_cancel_all_orders(request),
             OrderPlantRequest::ShowOrders(account) => {
-                validate_account(account)?;
-                Ok(rti::RequestShowOrders {
-                    template_id: SHOW_ORDERS_REQUEST,
-                    user_msg: Vec::new(),
-                    fcm_id: Some(account.fcm_id.to_string()),
-                    ib_id: Some(account.ib_id.to_string()),
-                    account_id: Some(account.account_id.to_string()),
-                }
-                .encode_to_vec())
+                account_request!(RequestShowOrders, SHOW_ORDERS_REQUEST, account)
             }
+            OrderPlantRequest::SubscribeBracketUpdates(account) => account_request!(
+                RequestSubscribeToBracketUpdates,
+                BRACKET_UPDATES_REQUEST,
+                account
+            ),
+            OrderPlantRequest::ShowBrackets(account) => {
+                account_request!(RequestShowBrackets, SHOW_BRACKETS_REQUEST, account)
+            }
+            OrderPlantRequest::ShowBracketStops(account) => {
+                account_request!(RequestShowBracketStops, SHOW_BRACKET_STOPS_REQUEST, account)
+            }
+            OrderPlantRequest::UpdateTargetLevel(request) => encode_target_level(request),
+            OrderPlantRequest::UpdateStopLevel(request) => encode_stop_level(request),
+            OrderPlantRequest::ExitPosition(request) => encode_exit_position(request),
             OrderPlantRequest::ReplayExecutions(request) => encode_replay_executions(request),
             OrderPlantRequest::ShowFillHistory(request) => encode_fill_history(request),
         }
@@ -575,39 +743,77 @@ mod kit {
             .ok_or(ProtocolError::InvalidQuantity)
     }
 
-    fn new_order_placement(
-        placement: RithmicOrderPlacement,
-    ) -> rti::request_new_order::OrderPlacement {
-        match placement {
-            RithmicOrderPlacement::Manual => rti::request_new_order::OrderPlacement::Manual,
-            RithmicOrderPlacement::Automated => rti::request_new_order::OrderPlacement::Auto,
-        }
+    /// Wire enums shared by the two entry templates: new order and bracket order.
+    macro_rules! entry_enums {
+        ($module:ident) => {
+            pub(super) fn price_type(code: OrderTypeCode) -> i32 {
+                match code {
+                    OrderTypeCode::Limit => rti::$module::PriceType::Limit,
+                    OrderTypeCode::Market => rti::$module::PriceType::Market,
+                    OrderTypeCode::StopLimit => rti::$module::PriceType::StopLimit,
+                    OrderTypeCode::StopMarket => rti::$module::PriceType::StopMarket,
+                }
+                .into()
+            }
+
+            pub(super) fn transaction_type(side: RithmicOrderSide) -> i32 {
+                match side {
+                    RithmicOrderSide::Buy => rti::$module::TransactionType::Buy,
+                    RithmicOrderSide::Sell => rti::$module::TransactionType::Sell,
+                }
+                .into()
+            }
+
+            pub(super) fn duration(duration: RithmicOrderDuration) -> i32 {
+                match duration {
+                    RithmicOrderDuration::Day => rti::$module::Duration::Day,
+                    RithmicOrderDuration::GoodTillCancelled => rti::$module::Duration::Gtc,
+                    RithmicOrderDuration::ImmediateOrCancel => rti::$module::Duration::Ioc,
+                    RithmicOrderDuration::FillOrKill => rti::$module::Duration::Fok,
+                }
+                .into()
+            }
+
+            pub(super) fn placement(placement: RithmicOrderPlacement) -> i32 {
+                match placement {
+                    RithmicOrderPlacement::Manual => rti::$module::OrderPlacement::Manual,
+                    RithmicOrderPlacement::Automated => rti::$module::OrderPlacement::Auto,
+                }
+                .into()
+            }
+        };
+    }
+
+    mod new_order_enums {
+        use super::{
+            OrderTypeCode, RithmicOrderDuration, RithmicOrderPlacement, RithmicOrderSide, rti,
+        };
+        entry_enums!(request_new_order);
+    }
+
+    mod bracket_order_enums {
+        use super::{
+            OrderTypeCode, RithmicOrderDuration, RithmicOrderPlacement, RithmicOrderSide, rti,
+        };
+        entry_enums!(request_bracket_order);
+    }
+
+    /// Validates an entry and returns its wire quantity and price fields.
+    fn entry_fields(entry: &NewOrderRequest<'_>) -> Result<(i32, OrderTypeFields), ProtocolError> {
+        validate_account(entry.account)?;
+        validate_string("user_tag", entry.user_tag)?;
+        validate_string("symbol", entry.symbol)?;
+        validate_string("exchange", entry.exchange)?;
+        validate_string("trade_route", entry.trade_route)?;
+        Ok((
+            wire_quantity(entry.quantity)?,
+            order_type_fields(entry.order_type)?,
+        ))
     }
 
     fn encode_new_order(request: NewOrderRequest<'_>) -> Result<Vec<u8>, ProtocolError> {
-        validate_account(request.account)?;
-        validate_string("user_tag", request.user_tag)?;
-        validate_string("symbol", request.symbol)?;
-        validate_string("exchange", request.exchange)?;
-        validate_string("trade_route", request.trade_route)?;
-        let quantity = wire_quantity(request.quantity)?;
-        let fields = order_type_fields(request.order_type)?;
-        let price_type = match fields.code {
-            OrderTypeCode::Limit => rti::request_new_order::PriceType::Limit,
-            OrderTypeCode::Market => rti::request_new_order::PriceType::Market,
-            OrderTypeCode::StopLimit => rti::request_new_order::PriceType::StopLimit,
-            OrderTypeCode::StopMarket => rti::request_new_order::PriceType::StopMarket,
-        };
-        let transaction_type = match request.side {
-            RithmicOrderSide::Buy => rti::request_new_order::TransactionType::Buy,
-            RithmicOrderSide::Sell => rti::request_new_order::TransactionType::Sell,
-        };
-        let duration = match request.duration {
-            RithmicOrderDuration::Day => rti::request_new_order::Duration::Day,
-            RithmicOrderDuration::GoodTillCancelled => rti::request_new_order::Duration::Gtc,
-            RithmicOrderDuration::ImmediateOrCancel => rti::request_new_order::Duration::Ioc,
-            RithmicOrderDuration::FillOrKill => rti::request_new_order::Duration::Fok,
-        };
+        use new_order_enums::{duration, placement, price_type, transaction_type};
+        let (quantity, fields) = entry_fields(&request)?;
         Ok(rti::RequestNewOrder {
             template_id: NEW_ORDER_REQUEST,
             user_tag: Some(request.user_tag.to_string()),
@@ -619,12 +825,158 @@ mod kit {
             quantity: Some(quantity),
             price: fields.price,
             trigger_price: fields.trigger_price,
-            transaction_type: Some(transaction_type.into()),
-            duration: Some(duration.into()),
-            price_type: Some(price_type.into()),
+            transaction_type: Some(transaction_type(request.side)),
+            duration: Some(duration(request.duration)),
+            price_type: Some(price_type(fields.code)),
             trade_route: Some(request.trade_route.to_string()),
-            manual_or_auto: Some(new_order_placement(request.placement).into()),
+            manual_or_auto: Some(placement(request.placement)),
             ..Default::default()
+        }
+        .encode_to_vec())
+    }
+
+    fn encode_bracket_order(request: BracketOrderRequest<'_>) -> Result<Vec<u8>, ProtocolError> {
+        use bracket_order_enums::{duration, placement, price_type, transaction_type};
+        use rti::request_bracket_order::{BracketType, UserType};
+        let entry = request.entry;
+        let (quantity, fields) = entry_fields(&entry)?;
+        let targets = bracket_side(
+            request.targets,
+            entry.quantity,
+            "target_quantity",
+            "target_ticks",
+        )?;
+        let stops = bracket_side(request.stops, entry.quantity, "stop_quantity", "stop_ticks")?;
+        // Only the static variants are sent; the dynamic variants' behavior is
+        // not verified.
+        let bracket_type = match (targets.ticks.is_empty(), stops.ticks.is_empty()) {
+            (false, false) => BracketType::TargetAndStopStatic,
+            (false, true) => BracketType::TargetOnlyStatic,
+            (true, false) => BracketType::StopOnlyStatic,
+            (true, true) => return Err(ProtocolError::InvalidBracket("bracket_type")),
+        };
+        let user_type = match request.user_type {
+            RithmicUserType::Admin => UserType::Admin,
+            RithmicUserType::Fcm => UserType::Fcm,
+            RithmicUserType::Ib => UserType::Ib,
+            RithmicUserType::Trader => UserType::Trader,
+        };
+        Ok(rti::RequestBracketOrder {
+            template_id: BRACKET_ORDER_REQUEST,
+            user_tag: Some(entry.user_tag.to_string()),
+            fcm_id: Some(entry.account.fcm_id.to_string()),
+            ib_id: Some(entry.account.ib_id.to_string()),
+            account_id: Some(entry.account.account_id.to_string()),
+            symbol: Some(entry.symbol.to_string()),
+            exchange: Some(entry.exchange.to_string()),
+            quantity: Some(quantity),
+            price: fields.price,
+            trigger_price: fields.trigger_price,
+            transaction_type: Some(transaction_type(entry.side)),
+            duration: Some(duration(entry.duration)),
+            price_type: Some(price_type(fields.code)),
+            trade_route: Some(entry.trade_route.to_string()),
+            manual_or_auto: Some(placement(entry.placement)),
+            user_type: Some(user_type.into()),
+            bracket_type: Some(bracket_type.into()),
+            target_quantity: targets.quantities,
+            target_ticks: targets.ticks,
+            stop_quantity: stops.quantities,
+            stop_ticks: stops.ticks,
+            ..Default::default()
+        }
+        .encode_to_vec())
+    }
+
+    /// Parallel wire columns of one bracket side.
+    #[derive(Default)]
+    struct BracketColumns {
+        quantities: Vec<i32>,
+        ticks: Vec<i32>,
+    }
+
+    fn bracket_side(
+        levels: &[RithmicBracketLevel],
+        entry_quantity: u32,
+        quantity_field: &'static str,
+        ticks_field: &'static str,
+    ) -> Result<BracketColumns, ProtocolError> {
+        if levels.len() > MAXIMUM_BRACKET_LEVELS {
+            return Err(ProtocolError::RepeatedFieldLimitExceeded {
+                field: ticks_field,
+                maximum: MAXIMUM_BRACKET_LEVELS,
+            });
+        }
+        let mut columns = BracketColumns::default();
+        let mut covered = 0_u64;
+        for level in levels {
+            let ticks = i32::try_from(level.ticks)
+                .ok()
+                .filter(|ticks| *ticks > 0 && !columns.ticks.contains(ticks))
+                .ok_or(ProtocolError::InvalidBracket(ticks_field))?;
+            columns.quantities.push(wire_quantity(level.quantity)?);
+            columns.ticks.push(ticks);
+            covered += u64::from(level.quantity);
+        }
+        if !levels.is_empty() && covered != u64::from(entry_quantity) {
+            return Err(ProtocolError::InvalidBracket(quantity_field));
+        }
+        Ok(columns)
+    }
+
+    fn encode_target_level(
+        request: BracketLevelUpdateRequest<'_>,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        validate_account(request.account)?;
+        validate_string("basket_id", request.basket_id)?;
+        Ok(rti::RequestUpdateTargetBracketLevel {
+            template_id: UPDATE_TARGET_LEVEL_REQUEST,
+            user_msg: Vec::new(),
+            fcm_id: Some(request.account.fcm_id.to_string()),
+            ib_id: Some(request.account.ib_id.to_string()),
+            account_id: Some(request.account.account_id.to_string()),
+            basket_id: Some(request.basket_id.to_string()),
+            level: Some(request.current_ticks),
+            target_ticks: Some(request.new_ticks),
+        }
+        .encode_to_vec())
+    }
+
+    fn encode_stop_level(request: BracketLevelUpdateRequest<'_>) -> Result<Vec<u8>, ProtocolError> {
+        validate_account(request.account)?;
+        validate_string("basket_id", request.basket_id)?;
+        Ok(rti::RequestUpdateStopBracketLevel {
+            template_id: UPDATE_STOP_LEVEL_REQUEST,
+            user_msg: Vec::new(),
+            fcm_id: Some(request.account.fcm_id.to_string()),
+            ib_id: Some(request.account.ib_id.to_string()),
+            account_id: Some(request.account.account_id.to_string()),
+            basket_id: Some(request.basket_id.to_string()),
+            level: Some(request.current_ticks),
+            stop_ticks: Some(request.new_ticks),
+        }
+        .encode_to_vec())
+    }
+
+    fn encode_exit_position(request: ExitPositionRequest<'_>) -> Result<Vec<u8>, ProtocolError> {
+        validate_account(request.account)?;
+        validate_string("symbol", request.symbol)?;
+        validate_string("exchange", request.exchange)?;
+        let placement = match request.placement {
+            RithmicOrderPlacement::Manual => rti::request_exit_position::OrderPlacement::Manual,
+            RithmicOrderPlacement::Automated => rti::request_exit_position::OrderPlacement::Auto,
+        };
+        Ok(rti::RequestExitPosition {
+            template_id: EXIT_POSITION_REQUEST,
+            user_msg: Vec::new(),
+            window_name: None,
+            fcm_id: Some(request.account.fcm_id.to_string()),
+            ib_id: Some(request.account.ib_id.to_string()),
+            account_id: Some(request.account.account_id.to_string()),
+            symbol: Some(request.symbol.to_string()),
+            exchange: Some(request.exchange.to_string()),
+            trading_algorithm: None,
+            manual_or_auto: Some(placement.into()),
         }
         .encode_to_vec())
     }
@@ -687,12 +1039,18 @@ mod kit {
     fn encode_cancel_all_orders(
         request: CancelAllOrdersRequest<'_>,
     ) -> Result<Vec<u8>, ProtocolError> {
+        use rti::request_cancel_all_orders::{OrderPlacement, UserType};
+
         validate_account(request.account)?;
         let placement = match request.placement {
-            RithmicOrderPlacement::Manual => rti::request_cancel_all_orders::OrderPlacement::Manual,
-            RithmicOrderPlacement::Automated => {
-                rti::request_cancel_all_orders::OrderPlacement::Auto
-            }
+            RithmicOrderPlacement::Manual => OrderPlacement::Manual,
+            RithmicOrderPlacement::Automated => OrderPlacement::Auto,
+        };
+        let user_type = match request.user_type {
+            RithmicUserType::Admin => UserType::Admin,
+            RithmicUserType::Fcm => UserType::Fcm,
+            RithmicUserType::Ib => UserType::Ib,
+            RithmicUserType::Trader => UserType::Trader,
         };
         Ok(rti::RequestCancelAllOrders {
             template_id: CANCEL_ALL_ORDERS_REQUEST,
@@ -700,7 +1058,7 @@ mod kit {
             fcm_id: Some(request.account.fcm_id.to_string()),
             ib_id: Some(request.account.ib_id.to_string()),
             account_id: Some(request.account.account_id.to_string()),
-            user_type: None,
+            user_type: Some(user_type.into()),
             manual_or_auto: Some(placement.into()),
         }
         .encode_to_vec())
@@ -791,6 +1149,7 @@ mod kit {
                 )?)))
             }
             NEW_ORDER_RESPONSE => decode_new_order_reply(frame),
+            BRACKET_ORDER_RESPONSE => decode_bracket_order_reply(frame),
             MODIFY_ORDER_RESPONSE => decode_modify_order_reply(frame),
             CANCEL_ORDER_RESPONSE => decode_cancel_order_reply(frame),
             SHOW_ORDERS_RESPONSE => terminal_reply(
@@ -798,6 +1157,29 @@ mod kit {
                 RithmicRequestKind::ShowOrders,
                 |message: &rti::ResponseShowOrders| (&message.user_msg, &message.rp_code),
             ),
+            UPDATE_TARGET_LEVEL_RESPONSE => terminal_reply(
+                frame,
+                RithmicRequestKind::UpdateTargetLevel,
+                |message: &rti::ResponseUpdateTargetBracketLevel| {
+                    (&message.user_msg, &message.rp_code)
+                },
+            ),
+            UPDATE_STOP_LEVEL_RESPONSE => terminal_reply(
+                frame,
+                RithmicRequestKind::UpdateStopLevel,
+                |message: &rti::ResponseUpdateStopBracketLevel| {
+                    (&message.user_msg, &message.rp_code)
+                },
+            ),
+            BRACKET_UPDATES_RESPONSE => terminal_reply(
+                frame,
+                RithmicRequestKind::BracketUpdates,
+                |message: &rti::ResponseSubscribeToBracketUpdates| {
+                    (&message.user_msg, &message.rp_code)
+                },
+            ),
+            SHOW_BRACKETS_RESPONSE => decode_show_brackets(frame),
+            SHOW_BRACKET_STOPS_RESPONSE => decode_show_bracket_stops(frame),
             CANCEL_ALL_ORDERS_RESPONSE => terminal_reply(
                 frame,
                 RithmicRequestKind::CancelAllOrders,
@@ -805,12 +1187,17 @@ mod kit {
             ),
             RITHMIC_ORDER_NOTIFICATION => decode_rithmic_order(frame).map(Some),
             EXCHANGE_ORDER_NOTIFICATION => decode_exchange_order(frame).map(Some),
+            BRACKET_UPDATE => decode_bracket_update(frame).map(Some),
+            EXIT_POSITION_RESPONSE => decode_exit_position(frame),
             REPLAY_EXECUTIONS_RESPONSE => terminal_reply(
                 frame,
                 RithmicRequestKind::ReplayExecutions,
                 |message: &rti::ResponseReplayExecutions| (&message.user_msg, &message.rp_code),
             ),
             SHOW_FILL_HISTORY_RESPONSE => decode_fill_history(frame),
+            // Aeris reads no account risk limits yet; the push must not end
+            // the order session.
+            ACCOUNT_RMS_UPDATE => Ok(None),
             template => Err(ProtocolError::UnsupportedTemplate(template)),
         }
     }
@@ -845,6 +1232,26 @@ mod kit {
         let message = rti::ResponseNewOrder::decode(frame).map_err(|_| ProtocolError::Decode)?;
         let reply = CommandReply {
             request: RithmicRequestKind::NewOrder,
+            user_tag: message.user_tag,
+            basket_id: message.basket_id,
+            seconds: message.ssboe,
+            microseconds: message.usecs,
+        };
+        decode_command(
+            &message.user_msg,
+            &message.rq_handler_rp_code,
+            &message.rp_code,
+            reply,
+        )
+    }
+
+    fn decode_bracket_order_reply(
+        frame: &[u8],
+    ) -> Result<Option<DecodedOrderMessage>, ProtocolError> {
+        let message =
+            rti::ResponseBracketOrder::decode(frame).map_err(|_| ProtocolError::Decode)?;
+        let reply = CommandReply {
+            request: RithmicRequestKind::BracketOrder,
             user_tag: message.user_tag,
             basket_id: message.basket_id,
             seconds: message.ssboe,
@@ -1055,6 +1462,9 @@ mod kit {
         user_tag: Option<String>,
         is_snapshot: Option<bool>,
         basket_id: Option<String>,
+        original_basket_id: Option<String>,
+        linked_basket_ids: Option<String>,
+        bracket_type: Option<RithmicReportedBracketType>,
         account_id: Option<String>,
         symbol: Option<String>,
         exchange: Option<String>,
@@ -1082,6 +1492,12 @@ mod kit {
             // `is_snapshot` is only set on snapshot replays; absence marks a live change.
             is_snapshot: wire.is_snapshot == Some(true),
             basket_id: required_string("order.basket_id", wire.basket_id)?,
+            original_basket_id: optional_string(
+                "order.original_basket_id",
+                wire.original_basket_id,
+            )?,
+            linked_basket_ids: optional_string("order.linked_basket_ids", wire.linked_basket_ids)?,
+            bracket_type: wire.bracket_type,
             account_id: account_ref("order.account_id", wire.account_id)?,
             symbol: required_string("order.symbol", wire.symbol)?,
             exchange: required_string("order.exchange", wire.exchange)?,
@@ -1166,6 +1582,34 @@ mod kit {
                     .transpose()
             }
 
+            pub(super) fn bracket_type(
+                value: Option<i32>,
+            ) -> Result<Option<RithmicReportedBracketType>, ProtocolError> {
+                use rti::$module::BracketType;
+                value
+                    .map(|value| match BracketType::try_from(value) {
+                        Ok(BracketType::StopOnly) => Ok(RithmicReportedBracketType::StopOnly),
+                        Ok(BracketType::TargetOnly) => Ok(RithmicReportedBracketType::TargetOnly),
+                        Ok(BracketType::TargetAndStop) => {
+                            Ok(RithmicReportedBracketType::TargetAndStop)
+                        }
+                        Ok(BracketType::StopOnlyStatic) => {
+                            Ok(RithmicReportedBracketType::StopOnlyStatic)
+                        }
+                        Ok(BracketType::TargetOnlyStatic) => {
+                            Ok(RithmicReportedBracketType::TargetOnlyStatic)
+                        }
+                        Ok(BracketType::TargetAndStopStatic) => {
+                            Ok(RithmicReportedBracketType::TargetAndStopStatic)
+                        }
+                        Err(_) => Err(ProtocolError::UnknownEnum(concat!(
+                            $prefix,
+                            ".bracket_type"
+                        ))),
+                    })
+                    .transpose()
+            }
+
             pub(super) fn placement(
                 value: Option<i32>,
             ) -> Result<Option<RithmicOrderPlacement>, ProtocolError> {
@@ -1191,22 +1635,22 @@ mod kit {
 
     mod rithmic_order_enums {
         use super::{
-            ProtocolError, RithmicOrderDuration, RithmicOrderPlacement, RithmicReportedPriceType,
-            RithmicReportedSide, rti,
+            ProtocolError, RithmicOrderDuration, RithmicOrderPlacement, RithmicReportedBracketType,
+            RithmicReportedPriceType, RithmicReportedSide, rti,
         };
         reported_enums!(rithmic_order_notification, "rithmic_order_notification");
     }
 
     mod exchange_order_enums {
         use super::{
-            ProtocolError, RithmicOrderDuration, RithmicOrderPlacement, RithmicReportedPriceType,
-            RithmicReportedSide, rti,
+            ProtocolError, RithmicOrderDuration, RithmicOrderPlacement, RithmicReportedBracketType,
+            RithmicReportedPriceType, RithmicReportedSide, rti,
         };
         reported_enums!(exchange_order_notification, "exchange_order_notification");
     }
 
     fn decode_rithmic_order(frame: &[u8]) -> Result<DecodedOrderMessage, ProtocolError> {
-        use rithmic_order_enums::{duration, placement, price_type, side};
+        use rithmic_order_enums::{bracket_type, duration, placement, price_type, side};
         use rti::rithmic_order_notification::NotifyType;
 
         let message =
@@ -1259,6 +1703,9 @@ mod kit {
             user_tag: message.user_tag,
             is_snapshot: message.is_snapshot,
             basket_id: message.basket_id,
+            original_basket_id: message.original_basket_id,
+            linked_basket_ids: message.linked_basket_ids,
+            bracket_type: bracket_type(message.bracket_type)?,
             account_id: message.account_id,
             symbol: message.symbol,
             exchange: message.exchange,
@@ -1289,7 +1736,7 @@ mod kit {
     }
 
     fn decode_exchange_order(frame: &[u8]) -> Result<DecodedOrderMessage, ProtocolError> {
-        use exchange_order_enums::{duration, placement, price_type, side};
+        use exchange_order_enums::{bracket_type, duration, placement, price_type, side};
         use rti::exchange_order_notification::NotifyType;
 
         let message =
@@ -1353,6 +1800,9 @@ mod kit {
             user_tag: message.user_tag,
             is_snapshot: message.is_snapshot,
             basket_id: message.basket_id,
+            original_basket_id: message.original_basket_id,
+            linked_basket_ids: message.linked_basket_ids,
+            bracket_type: bracket_type(message.bracket_type)?,
             account_id: message.account_id,
             symbol: message.symbol,
             exchange: message.exchange,
@@ -1426,16 +1876,158 @@ mod kit {
             ResponseFrame::Handler(_) => Err(ProtocolError::RejectedDataFrame),
         }
     }
+
+    /// Wire fields of one show-brackets or show-bracket-stops reply.
+    struct BracketRowWire {
+        request: RithmicRequestKind,
+        side: RithmicBracketSide,
+        basket_id: Option<String>,
+        ticks: Option<String>,
+        quantity: Option<String>,
+        quantity_released: Option<String>,
+    }
+
+    fn decode_bracket_row(
+        user_messages: &[String],
+        handler_codes: &[String],
+        terminal_codes: &[String],
+        wire: BracketRowWire,
+    ) -> Result<Option<DecodedOrderMessage>, ProtocolError> {
+        match response_frame(user_messages, handler_codes, terminal_codes)? {
+            ResponseFrame::Terminal(outcome) => Ok(Some(completion(wire.request, outcome))),
+            ResponseFrame::Handler(RithmicRequestOutcome::NoData) if wire.basket_id.is_none() => {
+                Ok(None)
+            }
+            ResponseFrame::Handler(RithmicRequestOutcome::Accepted) => Ok(Some(
+                DecodedOrderMessage::BracketLevel(RithmicBracketLevelRow {
+                    basket_id: required_string("bracket_level.basket_id", wire.basket_id)?,
+                    side: wire.side,
+                    level: RithmicBracketLevelState {
+                        ticks: optional_text_integer("bracket_level.ticks", wire.ticks)?,
+                        quantity: optional_text_integer("bracket_level.quantity", wire.quantity)?,
+                        quantity_released: optional_text_integer(
+                            "bracket_level.quantity_released",
+                            wire.quantity_released,
+                        )?,
+                    },
+                }),
+            )),
+            ResponseFrame::Handler(_) => Err(ProtocolError::RejectedDataFrame),
+        }
+    }
+
+    fn decode_show_brackets(frame: &[u8]) -> Result<Option<DecodedOrderMessage>, ProtocolError> {
+        let message =
+            rti::ResponseShowBrackets::decode(frame).map_err(|_| ProtocolError::Decode)?;
+        decode_bracket_row(
+            &message.user_msg,
+            &message.rq_handler_rp_code,
+            &message.rp_code,
+            BracketRowWire {
+                request: RithmicRequestKind::ShowBrackets,
+                side: RithmicBracketSide::Target,
+                basket_id: message.basket_id,
+                ticks: message.target_ticks,
+                quantity: message.target_quantity,
+                quantity_released: message.target_quantity_released,
+            },
+        )
+    }
+
+    fn decode_show_bracket_stops(
+        frame: &[u8],
+    ) -> Result<Option<DecodedOrderMessage>, ProtocolError> {
+        let message =
+            rti::ResponseShowBracketStops::decode(frame).map_err(|_| ProtocolError::Decode)?;
+        decode_bracket_row(
+            &message.user_msg,
+            &message.rq_handler_rp_code,
+            &message.rp_code,
+            BracketRowWire {
+                request: RithmicRequestKind::ShowBracketStops,
+                side: RithmicBracketSide::Stop,
+                basket_id: message.basket_id,
+                ticks: message.stop_ticks,
+                quantity: message.stop_quantity,
+                quantity_released: message.stop_quantity_released,
+            },
+        )
+    }
+
+    /// One side of a pushed bracket update; absent when Rithmic sent none of
+    /// its fields.
+    fn bracket_level_state(
+        ticks: Option<i32>,
+        quantity: (&'static str, Option<i32>),
+        quantity_released: (&'static str, Option<i32>),
+    ) -> Result<Option<RithmicBracketLevelState>, ProtocolError> {
+        if ticks.is_none() && quantity.1.is_none() && quantity_released.1.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(RithmicBracketLevelState {
+            ticks,
+            quantity: optional_count(quantity.0, quantity.1)?,
+            quantity_released: optional_count(quantity_released.0, quantity_released.1)?,
+        }))
+    }
+
+    fn decode_bracket_update(frame: &[u8]) -> Result<DecodedOrderMessage, ProtocolError> {
+        let message = rti::BracketUpdates::decode(frame).map_err(|_| ProtocolError::Decode)?;
+        Ok(DecodedOrderMessage::BracketUpdate(RithmicBracketUpdate {
+            account_id: account_ref("bracket_updates.account_id", message.account_id)?,
+            basket_id: required_string("bracket_updates.basket_id", message.basket_id)?,
+            target: bracket_level_state(
+                message.target_ticks,
+                ("bracket_updates.target_quantity", message.target_quantity),
+                (
+                    "bracket_updates.target_quantity_released",
+                    message.target_quantity_released,
+                ),
+            )?,
+            stop: bracket_level_state(
+                message.stop_ticks,
+                ("bracket_updates.stop_quantity", message.stop_quantity),
+                (
+                    "bracket_updates.stop_quantity_released",
+                    message.stop_quantity_released,
+                ),
+            )?,
+        }))
+    }
+
+    fn decode_exit_position(frame: &[u8]) -> Result<Option<DecodedOrderMessage>, ProtocolError> {
+        let message =
+            rti::ResponseExitPosition::decode(frame).map_err(|_| ProtocolError::Decode)?;
+        match response_frame(
+            &message.user_msg,
+            &message.rq_handler_rp_code,
+            &message.rp_code,
+        )? {
+            ResponseFrame::Terminal(outcome) => {
+                Ok(Some(completion(RithmicRequestKind::ExitPosition, outcome)))
+            }
+            ResponseFrame::Handler(outcome) => Ok(Some(DecodedOrderMessage::PositionExit(
+                RithmicPositionExitReply {
+                    symbol: optional_string("exit_position.symbol", message.symbol)?,
+                    exchange: optional_string("exit_position.exchange", message.exchange)?,
+                    outcome,
+                },
+            ))),
+        }
+    }
 }
 
 #[cfg(all(test, rithmic_kit))]
 mod tests {
     use super::{
-        DecodedOrderMessage, FillHistoryRequest, MAXIMUM_FILL_HISTORY_RECORDS,
-        MAXIMUM_FILL_HISTORY_WINDOW_SECONDS, NewOrderRequest, OrderPlantRequest,
-        RithmicExchangeNotifyType, RithmicOrderDuration, RithmicOrderNotifyType,
-        RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType, RithmicReportedPriceType,
-        RithmicReportedSide, decode, encode,
+        BracketLevelUpdateRequest, BracketOrderRequest, CancelAllOrdersRequest,
+        DecodedOrderMessage, ExitPositionRequest, FillHistoryRequest, MAXIMUM_BRACKET_LEVELS,
+        MAXIMUM_FILL_HISTORY_RECORDS, MAXIMUM_FILL_HISTORY_WINDOW_SECONDS, NewOrderRequest,
+        OrderPlantRequest, RithmicBracketLevel, RithmicBracketLevelRow, RithmicBracketLevelState,
+        RithmicBracketSide, RithmicExchangeNotifyType, RithmicOrderDuration,
+        RithmicOrderNotifyType, RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType,
+        RithmicPositionExitReply, RithmicReportedBracketType, RithmicReportedPriceType,
+        RithmicReportedSide, RithmicUserType, decode, encode,
     };
     use crate::{
         ProtocolError, RithmicAccountKey, RithmicDecimal, RithmicRequestKind,
@@ -1474,6 +2066,30 @@ mod tests {
             start_seconds: start,
             finish_seconds: finish,
             maximum_records: records,
+        })
+    }
+
+    const ONE_AT_8: RithmicBracketLevel = RithmicBracketLevel {
+        quantity: 1,
+        ticks: 8,
+    };
+    const TWO_AT_12: RithmicBracketLevel = RithmicBracketLevel {
+        quantity: 2,
+        ticks: 12,
+    };
+
+    /// Bracket on the two-lot fixture entry.
+    fn bracket<'a>(
+        targets: &'a [RithmicBracketLevel],
+        stops: &'a [RithmicBracketLevel],
+    ) -> OrderPlantRequest<'a> {
+        OrderPlantRequest::BracketOrder(BracketOrderRequest {
+            entry: new_order(RithmicOrderType::Limit {
+                price: price(510_025, 2),
+            }),
+            user_type: RithmicUserType::Trader,
+            targets,
+            stops,
         })
     }
 
@@ -1578,6 +2194,418 @@ mod tests {
         assert_eq!(
             encode(OrderPlantRequest::NewOrder(untagged)),
             Err(ProtocolError::EmptyField("user_tag"))
+        );
+    }
+
+    #[test]
+    fn bracket_orders_send_static_levels_with_the_entry() {
+        let frame = encode(bracket(
+            &[
+                ONE_AT_8,
+                RithmicBracketLevel {
+                    quantity: 1,
+                    ticks: 16,
+                },
+            ],
+            &[TWO_AT_12],
+        ))
+        .expect("encode bracket order");
+        let request =
+            rti::RequestBracketOrder::decode(frame.as_slice()).expect("decode bracket order");
+        assert_eq!(request.template_id, 330);
+        assert_eq!(request.user_tag.as_deref(), Some("client-order-1"));
+        assert_eq!(request.account_id.as_deref(), Some("fixture-account"));
+        assert_eq!(request.quantity, Some(2));
+        assert_eq!(request.price, Some(5_100.25));
+        assert_eq!(
+            request.duration,
+            Some(rti::request_bracket_order::Duration::Day.into())
+        );
+        assert_eq!(
+            request.user_type,
+            Some(rti::request_bracket_order::UserType::Trader.into())
+        );
+        assert_eq!(
+            request.bracket_type,
+            Some(rti::request_bracket_order::BracketType::TargetAndStopStatic.into())
+        );
+        assert_eq!(request.target_quantity, [1, 1]);
+        assert_eq!(request.target_ticks, [8, 16]);
+        assert_eq!(request.stop_quantity, [2]);
+        assert_eq!(request.stop_ticks, [12]);
+
+        for (targets, stops, expected) in [
+            (
+                &[][..],
+                &[TWO_AT_12][..],
+                rti::request_bracket_order::BracketType::StopOnlyStatic,
+            ),
+            (
+                &[TWO_AT_12][..],
+                &[][..],
+                rti::request_bracket_order::BracketType::TargetOnlyStatic,
+            ),
+        ] {
+            let frame = encode(bracket(targets, stops)).expect("encode one-sided bracket");
+            let request =
+                rti::RequestBracketOrder::decode(frame.as_slice()).expect("decode bracket order");
+            assert_eq!(request.bracket_type, Some(expected.into()));
+        }
+    }
+
+    #[test]
+    fn bracket_levels_must_cover_the_entry_with_distinct_ticks() {
+        assert_eq!(
+            encode(bracket(&[], &[])),
+            Err(ProtocolError::InvalidBracket("bracket_type"))
+        );
+        assert_eq!(
+            encode(bracket(&[ONE_AT_8], &[TWO_AT_12])),
+            Err(ProtocolError::InvalidBracket("target_quantity"))
+        );
+        assert_eq!(
+            encode(bracket(&[ONE_AT_8, ONE_AT_8], &[TWO_AT_12])),
+            Err(ProtocolError::InvalidBracket("target_ticks"))
+        );
+        for ticks in [0, u32::MAX] {
+            assert_eq!(
+                encode(bracket(&[], &[RithmicBracketLevel { quantity: 2, ticks }])),
+                Err(ProtocolError::InvalidBracket("stop_ticks"))
+            );
+        }
+        assert_eq!(
+            encode(bracket(
+                &[],
+                &[
+                    RithmicBracketLevel {
+                        quantity: 0,
+                        ticks: 8,
+                    },
+                    TWO_AT_12,
+                ],
+            )),
+            Err(ProtocolError::InvalidQuantity)
+        );
+        assert_eq!(
+            encode(bracket(&[ONE_AT_8; MAXIMUM_BRACKET_LEVELS + 1], &[])),
+            Err(ProtocolError::RepeatedFieldLimitExceeded {
+                field: "target_ticks",
+                maximum: MAXIMUM_BRACKET_LEVELS,
+            })
+        );
+    }
+
+    #[test]
+    fn level_updates_address_the_current_level_and_exits_name_the_instrument() {
+        let update = BracketLevelUpdateRequest {
+            account: ACCOUNT,
+            basket_id: "fixture-basket",
+            current_ticks: 8,
+            new_ticks: 12,
+        };
+        let target = encode(OrderPlantRequest::UpdateTargetLevel(update)).expect("encode target");
+        let target = rti::RequestUpdateTargetBracketLevel::decode(target.as_slice())
+            .expect("decode target level");
+        assert_eq!(
+            (target.template_id, target.level, target.target_ticks),
+            (332, Some(8), Some(12))
+        );
+        assert_eq!(target.basket_id.as_deref(), Some("fixture-basket"));
+        let stop = encode(OrderPlantRequest::UpdateStopLevel(update)).expect("encode stop");
+        let stop =
+            rti::RequestUpdateStopBracketLevel::decode(stop.as_slice()).expect("decode stop level");
+        assert_eq!(
+            (stop.template_id, stop.level, stop.stop_ticks),
+            (334, Some(8), Some(12))
+        );
+        assert_eq!(
+            encode(OrderPlantRequest::UpdateStopLevel(
+                BracketLevelUpdateRequest {
+                    basket_id: "",
+                    ..update
+                }
+            )),
+            Err(ProtocolError::EmptyField("basket_id"))
+        );
+
+        let exit = encode(OrderPlantRequest::ExitPosition(ExitPositionRequest {
+            account: ACCOUNT,
+            symbol: "ESM7",
+            exchange: "CME",
+            placement: RithmicOrderPlacement::Automated,
+        }))
+        .expect("encode exit position");
+        let exit = rti::RequestExitPosition::decode(exit.as_slice()).expect("decode exit");
+        assert_eq!(exit.template_id, 3504);
+        assert_eq!(exit.account_id.as_deref(), Some("fixture-account"));
+        assert_eq!(exit.symbol.as_deref(), Some("ESM7"));
+        assert_eq!(exit.exchange.as_deref(), Some("CME"));
+        assert_eq!(
+            exit.manual_or_auto,
+            Some(rti::request_exit_position::OrderPlacement::Auto.into())
+        );
+    }
+
+    #[test]
+    fn cancel_all_names_the_user_and_risk_pushes_are_dropped() {
+        let cancel = encode(OrderPlantRequest::CancelAllOrders(CancelAllOrdersRequest {
+            account: ACCOUNT,
+            user_type: RithmicUserType::Trader,
+            placement: RithmicOrderPlacement::Manual,
+        }))
+        .expect("encode cancel all");
+        let cancel =
+            rti::RequestCancelAllOrders::decode(cancel.as_slice()).expect("decode cancel all");
+        assert_eq!(cancel.template_id, 346);
+        assert_eq!(
+            cancel.user_type,
+            Some(rti::request_cancel_all_orders::UserType::Trader.into())
+        );
+
+        let risk = rti::AccountRmsUpdates {
+            template_id: 358,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(decode(&risk), Ok(None)));
+    }
+
+    #[test]
+    fn bracket_replies_decode_acknowledgements_and_rows() {
+        let acknowledgement = rti::ResponseBracketOrder {
+            template_id: 331,
+            user_tag: Some("client-order-1".to_string()),
+            rq_handler_rp_code: vec!["0".to_string()],
+            basket_id: Some("fixture-basket".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            decode(&acknowledgement),
+            Ok(Some(DecodedOrderMessage::OrderCommand(reply)))
+                if reply.request == RithmicRequestKind::BracketOrder
+                    && reply.basket_id.as_deref() == Some("fixture-basket")
+        ));
+
+        let target_row = rti::ResponseShowBrackets {
+            template_id: 339,
+            rq_handler_rp_code: vec!["0".to_string()],
+            basket_id: Some("fixture-basket".to_string()),
+            target_ticks: Some("8".to_string()),
+            target_quantity: Some("1".to_string()),
+            target_quantity_released: Some("0".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            decode(&target_row.encode_to_vec()),
+            Ok(Some(DecodedOrderMessage::BracketLevel(
+                RithmicBracketLevelRow {
+                    basket_id: "fixture-basket".to_string(),
+                    side: RithmicBracketSide::Target,
+                    level: RithmicBracketLevelState {
+                        ticks: Some(8),
+                        quantity: Some(1),
+                        quantity_released: Some(0),
+                    },
+                }
+            )))
+        );
+        let mut garbled = target_row;
+        garbled.target_ticks = Some("eight".to_string());
+        assert_eq!(
+            decode(&garbled.encode_to_vec()),
+            Err(ProtocolError::InvalidNumber("bracket_level.ticks"))
+        );
+        let stop_row = rti::ResponseShowBracketStops {
+            template_id: 341,
+            rq_handler_rp_code: vec!["0".to_string()],
+            basket_id: Some("fixture-basket".to_string()),
+            stop_ticks: Some("12".to_string()),
+            stop_quantity: Some("2".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            decode(&stop_row),
+            Ok(Some(DecodedOrderMessage::BracketLevel(row)))
+                if row.side == RithmicBracketSide::Stop
+                    && row.level.ticks == Some(12)
+                    && row.level.quantity_released.is_none()
+        ));
+    }
+
+    #[test]
+    fn bracket_terminal_replies_complete_their_requests() {
+        let accepted = || vec!["0".to_string()];
+        for (frame, request) in [
+            (
+                rti::ResponseShowBrackets {
+                    template_id: 339,
+                    rp_code: accepted(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RithmicRequestKind::ShowBrackets,
+            ),
+            (
+                rti::ResponseShowBracketStops {
+                    template_id: 341,
+                    rp_code: accepted(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RithmicRequestKind::ShowBracketStops,
+            ),
+            (
+                rti::ResponseUpdateTargetBracketLevel {
+                    template_id: 333,
+                    rp_code: accepted(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RithmicRequestKind::UpdateTargetLevel,
+            ),
+            (
+                rti::ResponseUpdateStopBracketLevel {
+                    template_id: 335,
+                    rp_code: accepted(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RithmicRequestKind::UpdateStopLevel,
+            ),
+            (
+                rti::ResponseSubscribeToBracketUpdates {
+                    template_id: 337,
+                    rp_code: accepted(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RithmicRequestKind::BracketUpdates,
+            ),
+            (
+                rti::ResponseExitPosition {
+                    template_id: 3505,
+                    rp_code: accepted(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RithmicRequestKind::ExitPosition,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    decode(&frame),
+                    Ok(Some(DecodedOrderMessage::RequestComplete(completion)))
+                        if completion.request == request && completion.outcome.is_accepted()
+                ),
+                "{request:?} completes"
+            );
+        }
+    }
+
+    #[test]
+    fn pushed_bracket_updates_and_exit_acknowledgements_decode() {
+        let update = rti::BracketUpdates {
+            template_id: 353,
+            account_id: Some("fixture-account".to_string()),
+            basket_id: Some("fixture-basket".to_string()),
+            target_ticks: Some(8),
+            target_quantity: Some(1),
+            target_quantity_released: Some(1),
+            ..Default::default()
+        };
+        let Ok(Some(DecodedOrderMessage::BracketUpdate(decoded))) = decode(&update.encode_to_vec())
+        else {
+            panic!("bracket update decodes");
+        };
+        assert_eq!(decoded.basket_id, "fixture-basket");
+        assert_eq!(
+            decoded.target,
+            Some(RithmicBracketLevelState {
+                ticks: Some(8),
+                quantity: Some(1),
+                quantity_released: Some(1),
+            })
+        );
+        assert_eq!(decoded.stop, None, "no stop field was sent");
+        let mut unbasketed = update.clone();
+        unbasketed.basket_id = None;
+        assert_eq!(
+            decode(&unbasketed.encode_to_vec()),
+            Err(ProtocolError::MissingField("bracket_updates.basket_id"))
+        );
+        let mut negative = update;
+        negative.stop_quantity = Some(-1);
+        assert_eq!(
+            decode(&negative.encode_to_vec()),
+            Err(ProtocolError::InvalidNumber(
+                "bracket_updates.stop_quantity"
+            ))
+        );
+
+        let exit = rti::ResponseExitPosition {
+            template_id: 3505,
+            rq_handler_rp_code: vec!["0".to_string()],
+            symbol: Some("ESM7".to_string()),
+            exchange: Some("CME".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            decode(&exit),
+            Ok(Some(DecodedOrderMessage::PositionExit(
+                RithmicPositionExitReply {
+                    symbol: Some("ESM7".to_string()),
+                    exchange: Some("CME".to_string()),
+                    outcome: RithmicRequestOutcome::Accepted,
+                }
+            )))
+        );
+    }
+
+    #[test]
+    fn order_notifications_carry_bracket_links() {
+        let mut exit_leg = notification(None);
+        exit_leg.original_basket_id = Some("fixture-entry".to_string());
+        exit_leg.linked_basket_ids = Some("fixture-sibling".to_string());
+        exit_leg.bracket_type =
+            Some(rti::rithmic_order_notification::BracketType::TargetAndStopStatic.into());
+        let Ok(Some(DecodedOrderMessage::OrderNotification(decoded))) =
+            decode(&exit_leg.encode_to_vec())
+        else {
+            panic!("bracket exit notification decodes");
+        };
+        assert_eq!(
+            decoded.order.original_basket_id.as_deref(),
+            Some("fixture-entry")
+        );
+        assert_eq!(
+            decoded.order.linked_basket_ids.as_deref(),
+            Some("fixture-sibling")
+        );
+        assert_eq!(
+            decoded.order.bracket_type,
+            Some(RithmicReportedBracketType::TargetAndStopStatic)
+        );
+
+        let mut fill = exchange_fill();
+        fill.original_basket_id = Some("fixture-entry".to_string());
+        fill.bracket_type = Some(rti::exchange_order_notification::BracketType::StopOnly.into());
+        assert!(matches!(
+            decode(&fill.encode_to_vec()),
+            Ok(Some(DecodedOrderMessage::ExchangeOrderNotification(update)))
+                if update.order.bracket_type == Some(RithmicReportedBracketType::StopOnly)
+                    && update.order.original_basket_id.as_deref() == Some("fixture-entry")
+        ));
+
+        let mut unknown = notification(None);
+        unknown.bracket_type = Some(999);
+        assert_eq!(
+            decode(&unknown.encode_to_vec()),
+            Err(ProtocolError::UnknownEnum(
+                "rithmic_order_notification.bracket_type"
+            ))
         );
     }
 

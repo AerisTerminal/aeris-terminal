@@ -521,18 +521,30 @@ impl RithmicProtocolCodec {
 pub enum ProtocolError {
     KitUnavailable,
     EmptyField(&'static str),
-    FieldTooLong { field: &'static str, maximum: usize },
+    FieldTooLong {
+        field: &'static str,
+        maximum: usize,
+    },
     ControlCharacter(&'static str),
     InvalidHeartbeat,
     TemplateVersionMismatch,
     EmptyMarketDataSelection,
     InvalidRange,
-    RangeTooLong { maximum_seconds: i32 },
+    RangeTooLong {
+        maximum_seconds: i32,
+    },
     InvalidQuantity,
+    /// A bracket order breaks the named field's rule: it needs at least one
+    /// level, positive and distinct tick distances per side, and each side's
+    /// quantities must cover the entry exactly.
+    InvalidBracket(&'static str),
     UnrepresentableDecimal(&'static str),
     InvalidPeriod,
     InvalidMaximumBars,
-    FrameTooLarge { requested: usize, maximum: usize },
+    FrameTooLarge {
+        requested: usize,
+        maximum: usize,
+    },
     Decode,
     MissingField(&'static str),
     InvalidNumber(&'static str),
@@ -544,7 +556,10 @@ pub enum ProtocolError {
     RejectedDataFrame,
     ForbiddenOutboundTemplate(i32),
     UnsupportedTemplate(i32),
-    RepeatedFieldLimitExceeded { field: &'static str, maximum: usize },
+    RepeatedFieldLimitExceeded {
+        field: &'static str,
+        maximum: usize,
+    },
 }
 
 impl fmt::Display for ProtocolError {
@@ -1222,10 +1237,32 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn every_outbound_request() -> Vec<OutboundRequest<'static>> {
         use crate::{
-            AccountListRequest, CancelAllOrdersRequest, CancelOrderRequest, ExecutionReplayRequest,
-            FillHistoryRequest, ModifyOrderRequest, NewOrderRequest, OrderPlantRequest,
-            PnlPlantRequest, PnlPositionUpdatesRequest, RithmicOrderDuration,
-            RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType, TradeRoutesRequest,
+            AccountListRequest, BracketLevelUpdateRequest, BracketOrderRequest,
+            CancelAllOrdersRequest, CancelOrderRequest, ExecutionReplayRequest,
+            ExitPositionRequest, FillHistoryRequest, ModifyOrderRequest, NewOrderRequest,
+            OrderPlantRequest, PnlPlantRequest, PnlPositionUpdatesRequest, RithmicBracketLevel,
+            RithmicOrderDuration, RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType,
+            RithmicUserType, TradeRoutesRequest,
+        };
+        let entry = NewOrderRequest {
+            account: FIXTURE_ACCOUNT,
+            user_tag: "fixture-client-order-1",
+            symbol: "ESM7",
+            exchange: "CME",
+            trade_route: "fixture-route",
+            side: RithmicOrderSide::Buy,
+            quantity: 1,
+            duration: RithmicOrderDuration::Day,
+            order_type: RithmicOrderType::Limit {
+                price: fixture_price(510_025),
+            },
+            placement: RithmicOrderPlacement::Manual,
+        };
+        let level_update = BracketLevelUpdateRequest {
+            account: FIXTURE_ACCOUNT,
+            basket_id: "fixture-basket",
+            current_ticks: 8,
+            new_ticks: 12,
         };
         let mut requests = vec![
             OutboundRequest::DiscoverSystems,
@@ -1308,20 +1345,7 @@ mod tests {
             OrderPlantRequest::TradeRoutes(TradeRoutesRequest {
                 subscribe_for_updates: true,
             }),
-            OrderPlantRequest::NewOrder(NewOrderRequest {
-                account: FIXTURE_ACCOUNT,
-                user_tag: "fixture-client-order-1",
-                symbol: "ESM7",
-                exchange: "CME",
-                trade_route: "fixture-route",
-                side: RithmicOrderSide::Buy,
-                quantity: 1,
-                duration: RithmicOrderDuration::Day,
-                order_type: RithmicOrderType::Limit {
-                    price: fixture_price(510_025),
-                },
-                placement: RithmicOrderPlacement::Manual,
-            }),
+            OrderPlantRequest::NewOrder(entry),
             OrderPlantRequest::ModifyOrder(ModifyOrderRequest {
                 account: FIXTURE_ACCOUNT,
                 basket_id: "fixture-basket",
@@ -1339,8 +1363,32 @@ mod tests {
                 placement: RithmicOrderPlacement::Manual,
             }),
             OrderPlantRequest::ShowOrders(FIXTURE_ACCOUNT),
+            OrderPlantRequest::BracketOrder(BracketOrderRequest {
+                entry,
+                user_type: RithmicUserType::Trader,
+                targets: &[RithmicBracketLevel {
+                    quantity: 1,
+                    ticks: 8,
+                }],
+                stops: &[RithmicBracketLevel {
+                    quantity: 1,
+                    ticks: 12,
+                }],
+            }),
+            OrderPlantRequest::UpdateTargetLevel(level_update),
+            OrderPlantRequest::UpdateStopLevel(level_update),
+            OrderPlantRequest::SubscribeBracketUpdates(FIXTURE_ACCOUNT),
+            OrderPlantRequest::ShowBrackets(FIXTURE_ACCOUNT),
+            OrderPlantRequest::ShowBracketStops(FIXTURE_ACCOUNT),
             OrderPlantRequest::CancelAllOrders(CancelAllOrdersRequest {
                 account: FIXTURE_ACCOUNT,
+                user_type: RithmicUserType::Trader,
+                placement: RithmicOrderPlacement::Manual,
+            }),
+            OrderPlantRequest::ExitPosition(ExitPositionRequest {
+                account: FIXTURE_ACCOUNT,
+                symbol: "ESM7",
+                exchange: "CME",
                 placement: RithmicOrderPlacement::Manual,
             }),
             OrderPlantRequest::ReplayExecutions(ExecutionReplayRequest {
@@ -1384,7 +1432,7 @@ mod tests {
             emitted,
             [
                 16, 10, 12, 18, 100, 117, 115, 109, 14, 200, 202, 204, 206, 300, 302, 308, 310,
-                312, 314, 316, 320, 346, 3506, 3512, 400, 402
+                312, 314, 316, 320, 330, 332, 334, 336, 338, 340, 346, 3504, 3506, 3512, 400, 402
             ]
         );
         assert_eq!(
@@ -1399,7 +1447,7 @@ mod tests {
                 .iter()
                 .all(|template| kit::is_outbound_template(*template))
         );
-        for unsupported in [330, 332, 3500, 3502, 3504] {
+        for unsupported in [328, 344, 3500, 3502] {
             assert!(
                 !kit::is_outbound_template(unsupported),
                 "template {unsupported} is not part of the supported surface"

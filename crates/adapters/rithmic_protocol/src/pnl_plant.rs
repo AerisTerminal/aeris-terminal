@@ -42,8 +42,11 @@ pub struct RithmicPositionQuantities {
     pub net_quantity: Option<i32>,
     pub open_position_quantity: Option<u32>,
     pub closed_position_quantity: Option<u32>,
-    pub buy_quantity: Option<u32>,
-    pub sell_quantity: Option<u32>,
+    /// Rithmic's signed buy and sell exposure. Rithmic Test reported a negative
+    /// `sell_qty` while the account was long one contract with no working
+    /// sell order, so neither is a count.
+    pub buy_quantity: Option<i32>,
+    pub sell_quantity: Option<i32>,
     pub fill_buy_quantity: Option<u32>,
     pub fill_sell_quantity: Option<u32>,
     pub order_buy_quantity: Option<u32>,
@@ -223,8 +226,8 @@ mod kit {
                 "pnl.closed_position_quantity",
                 wire.closed_position_quantity,
             )?,
-            buy_quantity: optional_count("pnl.buy_qty", wire.buy_qty)?,
-            sell_quantity: optional_count("pnl.sell_qty", wire.sell_qty)?,
+            buy_quantity: wire.buy_qty,
+            sell_quantity: wire.sell_qty,
             fill_buy_quantity: optional_count("pnl.fill_buy_qty", wire.fill_buy_qty)?,
             fill_sell_quantity: optional_count("pnl.fill_sell_qty", wire.fill_sell_qty)?,
             order_buy_quantity: optional_count("pnl.order_buy_qty", wire.order_buy_qty)?,
@@ -441,11 +444,25 @@ mod tests {
             decode(&unidentified.encode_to_vec()),
             Err(ProtocolError::MissingField("instrument_pnl.symbol"))
         );
-        let mut negative_open = update;
+        let mut negative_open = update.clone();
         negative_open.open_position_quantity = Some(-1);
         assert_eq!(
             decode(&negative_open.encode_to_vec()),
             Err(ProtocolError::InvalidNumber("pnl.open_position_quantity"))
+        );
+
+        let mut long_without_working_sells = update;
+        long_without_working_sells.net_quantity = Some(1);
+        long_without_working_sells.buy_qty = Some(1);
+        long_without_working_sells.sell_qty = Some(-1);
+        let Ok(DecodedPnlMessage::Instrument(pnl)) =
+            decode(&long_without_working_sells.encode_to_vec())
+        else {
+            panic!("negative sell exposure decodes");
+        };
+        assert_eq!(
+            (pnl.quantities.buy_quantity, pnl.quantities.sell_quantity),
+            (Some(1), Some(-1))
         );
     }
 
@@ -477,5 +494,23 @@ mod tests {
             decode(&malformed.encode_to_vec()),
             Err(ProtocolError::InvalidNumber("account_pnl.cash_on_hand"))
         ));
+    }
+
+    #[test]
+    fn empty_account_pnl_text_is_absent() {
+        let update = rti::AccountPnLPositionUpdate {
+            template_id: 451,
+            account_id: Some("fixture-account".to_string()),
+            account_balance: Some("100000".to_string()),
+            margin_balance: Some(String::new()),
+            day_pnl: Some(String::new()),
+            ..Default::default()
+        };
+        let Ok(DecodedPnlMessage::Account(pnl)) = decode(&update.encode_to_vec()) else {
+            panic!("account PnL with empty text decodes");
+        };
+        assert!(pnl.account_balance.is_some());
+        assert_eq!(pnl.margin_balance, None);
+        assert_eq!(pnl.day_pnl, None);
     }
 }

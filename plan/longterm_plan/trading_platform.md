@@ -41,8 +41,10 @@ any Aeris Charts batch first, then pin only the `aeris_charts_*` revisions here.
 - [~] Order plant and PnL plant sessions in `rithmic_protocol` (`11625ca7`): login info, account
       list, trade routes, order updates and snapshot, submit, modify, cancel, cancel all, execution
       replay, fill history, and position snapshot and updates, with allowlisted outbound templates
-      and fixed-point decimals. Verification against the licensed Provider Kit and a live Rithmic
-      Test exchange is not recorded.
+      and fixed-point decimals. Server-held static brackets (entry with target and stop levels),
+      level updates, bracket snapshots and updates, and exit position. A live Rithmic Test run
+      (ESZ6, 2026-10-22) verified a bracket whose exits Rithmic held across a logout, cancel all and
+      exit position; the other requests are not verified live.
 - [ ] Production endpoints and a system/gateway picker from Rithmic's system list; the adapter
       connects only to the hardcoded Rithmic Test endpoint (`endpoint.rs`).
 - [ ] **PF1** Order routing with idempotent client order IDs, as a `trading_runtime` venue on PF11.

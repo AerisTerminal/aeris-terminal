@@ -5,12 +5,13 @@
 //! polled, and historical execution requests run one at a time.
 
 use crate::{
-    CancelAllOrdersRequest, CancelOrderRequest, DecodedControlMessage, DecodedOrderMessage,
-    DecodedPnlMessage, ExecutionReplayRequest, FillHistoryRequest, ModifyOrderRequest,
-    NewOrderRequest, OrderPlantRequest, OutboundRequest, PnlPlantRequest,
-    PnlPositionUpdatesRequest, ProtocolError, RithmicAccountKey, RithmicLoginMetadata,
-    RithmicProtocolCodec, RithmicRequestCompletion, RithmicRequestKind, RithmicRequestOutcome,
-    RithmicSessionError, SubscriptionAction, TradeRoutesRequest,
+    BracketLevelUpdateRequest, BracketOrderRequest, CancelAllOrdersRequest, CancelOrderRequest,
+    DecodedControlMessage, DecodedOrderMessage, DecodedPnlMessage, ExecutionReplayRequest,
+    ExitPositionRequest, FillHistoryRequest, ModifyOrderRequest, NewOrderRequest,
+    OrderPlantRequest, OutboundRequest, PnlPlantRequest, PnlPositionUpdatesRequest, ProtocolError,
+    RithmicAccountKey, RithmicLoginMetadata, RithmicProtocolCodec, RithmicRequestCompletion,
+    RithmicRequestKind, RithmicRequestOutcome, RithmicSessionError, SubscriptionAction,
+    TradeRoutesRequest,
     session::{AuthenticatedConnection, map_protocol_error},
 };
 use std::{
@@ -135,6 +136,60 @@ impl AccountStreams {
     }
 }
 
+/// Account update streams of the order plant.
+#[derive(Clone, Copy)]
+enum OrderStream {
+    Orders,
+    Brackets,
+}
+
+impl OrderStream {
+    const fn acknowledgement(self) -> RithmicRequestKind {
+        match self {
+            Self::Orders => RithmicRequestKind::OrderUpdates,
+            Self::Brackets => RithmicRequestKind::BracketUpdates,
+        }
+    }
+}
+
+/// Order-plant requests whose replies carry no request identity. One request
+/// per lane is outstanding, so each reply is attributed to that request.
+#[derive(Debug, Default)]
+struct ExclusiveRequests {
+    in_flight: Vec<RithmicRequestKind>,
+}
+
+impl ExclusiveRequests {
+    /// Requests that share one lane; the other kinds each form their own.
+    const fn lane(kind: RithmicRequestKind) -> RithmicRequestKind {
+        match kind {
+            RithmicRequestKind::UpdateStopLevel => RithmicRequestKind::UpdateTargetLevel,
+            RithmicRequestKind::FillHistory => RithmicRequestKind::ReplayExecutions,
+            other => other,
+        }
+    }
+
+    fn check(&self, kind: RithmicRequestKind) -> Result<(), RithmicSessionError> {
+        let lane = Self::lane(kind);
+        if self
+            .in_flight
+            .iter()
+            .any(|pending| Self::lane(*pending) == lane)
+        {
+            return Err(RithmicSessionError::RequestInFlight);
+        }
+        Ok(())
+    }
+
+    fn sent(&mut self, kind: RithmicRequestKind) {
+        self.in_flight.push(kind);
+    }
+
+    fn replied(&mut self, kind: RithmicRequestKind) {
+        self.in_flight.retain(|pending| *pending != kind);
+    }
+}
+
 /// Bounded queue of messages read while a helper waited for one reply.
 #[derive(Debug)]
 struct Deferred<M> {
@@ -167,9 +222,9 @@ impl<M> Deferred<M> {
 pub struct RithmicOrderConnection {
     connection: AuthenticatedConnection,
     order_updates: AccountStreams,
-    account_list_in_flight: bool,
-    trade_routes_in_flight: bool,
-    history_in_flight: Option<RithmicRequestKind>,
+    /// Tracks the target snapshot; the stop snapshot is an exclusive request.
+    bracket_updates: AccountStreams,
+    exclusive: ExclusiveRequests,
     deferred: Deferred<RithmicOrderPlantMessage>,
 }
 
@@ -188,9 +243,8 @@ impl RithmicOrderConnection {
         Self {
             connection,
             order_updates: AccountStreams::default(),
-            account_list_in_flight: false,
-            trade_routes_in_flight: false,
-            history_in_flight: None,
+            bracket_updates: AccountStreams::default(),
+            exclusive: ExclusiveRequests::default(),
             deferred: Deferred::default(),
         }
     }
@@ -234,12 +288,10 @@ impl RithmicOrderConnection {
         &mut self,
         request: crate::AccountListRequest<'_>,
     ) -> Result<(), RithmicSessionError> {
-        if self.account_list_in_flight {
-            return Err(RithmicSessionError::RequestInFlight);
-        }
-        self.send(OrderPlantRequest::AccountList(request))?;
-        self.account_list_in_flight = true;
-        Ok(())
+        self.start_exclusive(
+            RithmicRequestKind::AccountList,
+            OrderPlantRequest::AccountList(request),
+        )
     }
 
     /// Lists trade routes, optionally subscribing to pushed route updates.
@@ -252,12 +304,10 @@ impl RithmicOrderConnection {
         &mut self,
         request: TradeRoutesRequest,
     ) -> Result<(), RithmicSessionError> {
-        if self.trade_routes_in_flight {
-            return Err(RithmicSessionError::RequestInFlight);
-        }
-        self.send(OrderPlantRequest::TradeRoutes(request))?;
-        self.trade_routes_in_flight = true;
-        Ok(())
+        self.start_exclusive(
+            RithmicRequestKind::TradeRoutes,
+            OrderPlantRequest::TradeRoutes(request),
+        )
     }
 
     /// Subscribes to one account's order notifications. The acknowledgement is
@@ -316,30 +366,72 @@ impl RithmicOrderConnection {
         deadline: Instant,
     ) -> Result<(), RithmicSessionError> {
         self.subscribe_order_updates(account)?;
-        loop {
-            let message = self.read_from_wire(deadline)?;
-            if let Some(completion) = message.completion()
-                && completion.request == RithmicRequestKind::OrderUpdates
-            {
-                if !completion.outcome.is_accepted() {
-                    return Err(RithmicSessionError::RequestRejected);
-                }
-                break;
-            }
-            match &message {
-                RithmicOrderPlantMessage::Control(DecodedControlMessage::Reject) => {
-                    self.order_updates.change_replied(false);
-                    self.deferred.push(message)?;
-                    return Err(RithmicSessionError::RequestRejected);
-                }
-                RithmicOrderPlantMessage::Control(DecodedControlMessage::ForcedLogout) => {
-                    self.deferred.push(message)?;
-                    return Err(RithmicSessionError::UnexpectedMessage);
-                }
-                _ => self.deferred.push(message)?,
-            }
-        }
+        self.await_subscription(OrderStream::Orders, deadline)?;
         self.request_order_snapshot(account)
+    }
+
+    /// Subscribes to one account's pushed bracket updates. The acknowledgement
+    /// is observed by [`Self::read_next`] or [`Self::read_next_until`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RithmicSessionError::RequestInFlight`] while another
+    /// subscription is unacknowledged, [`RithmicSessionError::RequestNotPermitted`]
+    /// for a duplicate or untracked account, or a protocol or transport failure.
+    pub fn subscribe_bracket_updates(
+        &mut self,
+        account: RithmicAccountKey<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.bracket_updates
+            .check_change(account.account_id, SubscriptionAction::Subscribe)?;
+        self.send(OrderPlantRequest::SubscribeBracketUpdates(account))?;
+        self.bracket_updates
+            .change_sent(account.account_id, SubscriptionAction::Subscribe);
+        Ok(())
+    }
+
+    /// Requests one account's working bracket targets and stops. Permitted only
+    /// after the account's bracket-update subscription was acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RithmicSessionError::RequestNotPermitted`] before the
+    /// subscription is acknowledged, [`RithmicSessionError::RequestInFlight`]
+    /// while another bracket snapshot is outstanding, or a protocol or
+    /// transport failure.
+    pub fn request_bracket_snapshot(
+        &mut self,
+        account: RithmicAccountKey<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.bracket_updates.check_snapshot(account.account_id)?;
+        self.exclusive.check(RithmicRequestKind::ShowBracketStops)?;
+        self.send(OrderPlantRequest::ShowBrackets(account))?;
+        self.bracket_updates.snapshot_in_flight = true;
+        self.start_exclusive(
+            RithmicRequestKind::ShowBracketStops,
+            OrderPlantRequest::ShowBracketStops(account),
+        )
+    }
+
+    /// Subscribes to one account's bracket updates, waits until `deadline` for
+    /// the acknowledgement, then requests the bracket snapshot.
+    ///
+    /// Messages read while waiting are returned by subsequent reads in arrival
+    /// order; at most [`MAXIMUM_STREAM_START_MESSAGES`] are retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RithmicSessionError::RequestRejected`] when the provider refuses
+    /// the subscription, [`RithmicSessionError::Protocol`] when the retention
+    /// bound is exceeded, or a deadline, protocol, or transport failure.
+    pub fn start_bracket_stream(
+        &mut self,
+        account: RithmicAccountKey<'_>,
+        deadline: Instant,
+    ) -> Result<(), RithmicSessionError> {
+        self.subscribe_bracket_updates(account)?;
+        self.await_subscription(OrderStream::Brackets, deadline)?;
+        self.request_bracket_snapshot(account)
     }
 
     /// Submits one order.
@@ -352,6 +444,70 @@ impl RithmicOrderConnection {
         request: NewOrderRequest<'_>,
     ) -> Result<(), RithmicSessionError> {
         self.send(OrderPlantRequest::NewOrder(request))
+    }
+
+    /// Submits an entry whose target and stop levels Rithmic holds on its
+    /// servers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted validation, protocol, or transport failure.
+    pub fn submit_bracket_order(
+        &mut self,
+        request: BracketOrderRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.send(OrderPlantRequest::BracketOrder(request))
+    }
+
+    /// Moves one target level of a working bracket. Level replies carry no
+    /// request identity, so one level update is outstanding at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RithmicSessionError::RequestInFlight`] while a level update is
+    /// outstanding, or a validation, protocol, or transport failure.
+    pub fn update_target_level(
+        &mut self,
+        request: BracketLevelUpdateRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.start_exclusive(
+            RithmicRequestKind::UpdateTargetLevel,
+            OrderPlantRequest::UpdateTargetLevel(request),
+        )
+    }
+
+    /// Moves one stop level of a working bracket. Level replies carry no
+    /// request identity, so one level update is outstanding at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RithmicSessionError::RequestInFlight`] while a level update is
+    /// outstanding, or a validation, protocol, or transport failure.
+    pub fn update_stop_level(
+        &mut self,
+        request: BracketLevelUpdateRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.start_exclusive(
+            RithmicRequestKind::UpdateStopLevel,
+            OrderPlantRequest::UpdateStopLevel(request),
+        )
+    }
+
+    /// Flattens one instrument's position. Exit replies carry no request
+    /// identity, so one exit is outstanding at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RithmicSessionError::RequestInFlight`] while an exit is
+    /// outstanding, or a validation, protocol, or transport failure.
+    pub fn exit_position(
+        &mut self,
+        request: ExitPositionRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.start_exclusive(
+            RithmicRequestKind::ExitPosition,
+            OrderPlantRequest::ExitPosition(request),
+        )
     }
 
     /// Modifies one working order.
@@ -400,7 +556,7 @@ impl RithmicOrderConnection {
         &mut self,
         request: ExecutionReplayRequest<'_>,
     ) -> Result<(), RithmicSessionError> {
-        self.start_history(
+        self.start_exclusive(
             RithmicRequestKind::ReplayExecutions,
             OrderPlantRequest::ReplayExecutions(request),
         )
@@ -417,7 +573,7 @@ impl RithmicOrderConnection {
         &mut self,
         request: FillHistoryRequest<'_>,
     ) -> Result<(), RithmicSessionError> {
-        self.start_history(
+        self.start_exclusive(
             RithmicRequestKind::FillHistory,
             OrderPlantRequest::ShowFillHistory(request),
         )
@@ -460,16 +616,53 @@ impl RithmicOrderConnection {
         self.connection.send(OutboundRequest::Order(request))
     }
 
-    fn start_history(
+    fn streams(&mut self, stream: OrderStream) -> &mut AccountStreams {
+        match stream {
+            OrderStream::Orders => &mut self.order_updates,
+            OrderStream::Brackets => &mut self.bracket_updates,
+        }
+    }
+
+    /// Waits until `deadline` for the acknowledgement of `stream`'s pending
+    /// subscription, retaining every other message for later reads.
+    fn await_subscription(
+        &mut self,
+        stream: OrderStream,
+        deadline: Instant,
+    ) -> Result<(), RithmicSessionError> {
+        loop {
+            let message = self.read_from_wire(deadline)?;
+            if let Some(completion) = message.completion()
+                && completion.request == stream.acknowledgement()
+            {
+                if !completion.outcome.is_accepted() {
+                    return Err(RithmicSessionError::RequestRejected);
+                }
+                return Ok(());
+            }
+            match &message {
+                RithmicOrderPlantMessage::Control(DecodedControlMessage::Reject) => {
+                    self.streams(stream).change_replied(false);
+                    self.deferred.push(message)?;
+                    return Err(RithmicSessionError::RequestRejected);
+                }
+                RithmicOrderPlantMessage::Control(DecodedControlMessage::ForcedLogout) => {
+                    self.deferred.push(message)?;
+                    return Err(RithmicSessionError::UnexpectedMessage);
+                }
+                _ => self.deferred.push(message)?,
+            }
+        }
+    }
+
+    fn start_exclusive(
         &mut self,
         kind: RithmicRequestKind,
         request: OrderPlantRequest<'_>,
     ) -> Result<(), RithmicSessionError> {
-        if self.history_in_flight.is_some() {
-            return Err(RithmicSessionError::RequestInFlight);
-        }
+        self.exclusive.check(kind)?;
         self.send(request)?;
-        self.history_in_flight = Some(kind);
+        self.exclusive.sent(kind);
         Ok(())
     }
 
@@ -490,25 +683,13 @@ impl RithmicOrderConnection {
         let Some(completion) = message.completion() else {
             return;
         };
+        let accepted = completion.outcome.is_accepted();
         match completion.request {
-            RithmicRequestKind::OrderUpdates => self
-                .order_updates
-                .change_replied(completion.outcome.is_accepted()),
+            RithmicRequestKind::OrderUpdates => self.order_updates.change_replied(accepted),
+            RithmicRequestKind::BracketUpdates => self.bracket_updates.change_replied(accepted),
             RithmicRequestKind::ShowOrders => self.order_updates.snapshot_in_flight = false,
-            RithmicRequestKind::AccountList => self.account_list_in_flight = false,
-            RithmicRequestKind::TradeRoutes => self.trade_routes_in_flight = false,
-            kind @ (RithmicRequestKind::ReplayExecutions | RithmicRequestKind::FillHistory) => {
-                if self.history_in_flight == Some(kind) {
-                    self.history_in_flight = None;
-                }
-            }
-            RithmicRequestKind::LoginInfo
-            | RithmicRequestKind::NewOrder
-            | RithmicRequestKind::ModifyOrder
-            | RithmicRequestKind::CancelOrder
-            | RithmicRequestKind::CancelAllOrders
-            | RithmicRequestKind::PnlUpdates
-            | RithmicRequestKind::PnlSnapshot => {}
+            RithmicRequestKind::ShowBrackets => self.bracket_updates.snapshot_in_flight = false,
+            kind => self.exclusive.replied(kind),
         }
     }
 }
@@ -781,6 +962,33 @@ mod tests {
         streams.change_sent("fixture-account", SubscriptionAction::Unsubscribe);
         streams.change_replied(true);
         assert!(!streams.is_subscribed("fixture-account"));
+    }
+
+    #[test]
+    fn exclusive_requests_allow_one_request_per_lane() {
+        let mut exclusive = ExclusiveRequests::default();
+        exclusive
+            .check(RithmicRequestKind::UpdateTargetLevel)
+            .expect("idle lane");
+        exclusive.sent(RithmicRequestKind::UpdateTargetLevel);
+        assert_eq!(
+            exclusive.check(RithmicRequestKind::UpdateStopLevel),
+            Err(RithmicSessionError::RequestInFlight),
+            "target and stop level updates share one lane"
+        );
+        exclusive
+            .check(RithmicRequestKind::ExitPosition)
+            .expect("other lanes stay free");
+        exclusive.replied(RithmicRequestKind::UpdateStopLevel);
+        assert_eq!(
+            exclusive.check(RithmicRequestKind::UpdateTargetLevel),
+            Err(RithmicSessionError::RequestInFlight),
+            "a reply of another kind does not release the lane"
+        );
+        exclusive.replied(RithmicRequestKind::UpdateTargetLevel);
+        exclusive
+            .check(RithmicRequestKind::UpdateStopLevel)
+            .expect("the reply released the lane");
     }
 
     #[test]
