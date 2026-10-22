@@ -1,15 +1,14 @@
-//! The sole trading thread waits for commands or the next broker refresh deadline.
+//! The sole trading thread waits for commands or the next timer deadline.
 
 use super::Command;
 use crate::core::RETENTION_INTERVAL;
 use crate::publication::TradingEventCause;
-use crate::{EQUITY_SAMPLE_INTERVAL, TradingCore, UNREALIZED_PNL_INTERVAL};
+use crate::{EQUITY_SAMPLE_INTERVAL, TradingCore};
 use std::sync::mpsc::{self, Receiver};
 
 pub(crate) const OWNER_THREAD_NAME: &str = "aeris-trading-owner";
 
 pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
-    let mut next_refresh = core.clock.monotonic();
     // Retention is due at startup and then hourly.
     let mut next_retention = core.clock.monotonic();
     // The equity timer samples every 60 s, starting one interval after open so a restart
@@ -17,18 +16,14 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
     let mut next_equity = core.clock.monotonic() + EQUITY_SAMPLE_INTERVAL;
     loop {
         let now = core.clock.monotonic();
-        let refresh_due = core.wants_unrealized_pnl() && now >= next_refresh;
         let retention_due = now >= next_retention;
         let equity_due = now >= next_equity;
         let wall_now = core.clock.wall_unix_nanos();
         let order_due = core
             .next_order_deadline_unix_nanos()
             .is_some_and(|deadline| wall_now >= deadline);
-        if refresh_due || retention_due || equity_due || order_due {
+        if retention_due || equity_due || order_due {
             core.on_timer(core.clock.wall_unix_nanos());
-            if refresh_due {
-                next_refresh = now + UNREALIZED_PNL_INTERVAL;
-            }
             if retention_due {
                 next_retention = now + RETENTION_INTERVAL;
             }
@@ -38,11 +33,7 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         }
         // Publishes the timer's changes and any coalesced mark flush that fell due.
         core.publish_changes(TradingEventCause::Timer);
-        let mut deadline = if core.wants_unrealized_pnl() {
-            next_refresh.min(next_retention).min(next_equity)
-        } else {
-            next_retention.min(next_equity)
-        };
+        let mut deadline = next_retention.min(next_equity);
         if let Some(flush) = core.next_publication_flush() {
             deadline = deadline.min(flush);
         }

@@ -188,7 +188,7 @@ impl TradingCore {
         }
         if self.route(&entry_command.account_id)? != VenueRoute::Simulated {
             if template.trailing_stop.is_some()
-                && !crate::core::admission::VenueCapabilities::for_route(VenueRoute::BrokerDemo)
+                && !crate::core::admission::RouteCapabilities::for_route(VenueRoute::BrokerDemo)
                     .managed_trailing()
             {
                 return Err("managed trailing stops are unavailable for broker accounts".into());
@@ -201,7 +201,7 @@ impl TradingCore {
                 &entry_command.account_id,
                 &entry_command.instrument_id,
                 entry_command.quantity,
-                template,
+                template.stop_offset_ticks,
             )?;
             return self
                 .place_broker_bracket(entry_command, template)
@@ -222,7 +222,7 @@ impl TradingCore {
             &entry_command.account_id,
             &entry_command.instrument_id,
             entry_command.quantity,
-            template,
+            template.stop_offset_ticks,
         )?;
         // Simulated brackets are owned only by the group owner.
         self.place_owned_bracket(entry_command, template)
@@ -233,7 +233,7 @@ impl TradingCore {
         account_id: &TradingAccountId,
         instrument_id: &InstrumentId,
         quantity: FixedPoint,
-        template: &BracketStrategyTemplate,
+        stop_offset_ticks: u32,
     ) -> Result<(), String> {
         let Some(profile) = self.state.risk_profiles.get(account_id) else {
             return Ok(());
@@ -252,13 +252,10 @@ impl TradingCore {
             .get(account_id)
             .ok_or_else(|| "trading account is not registered".to_string())?;
         let per_contract_tick = tick_value(instrument, account.currency_scale)?;
-        let potential_loss = scale_currency_by_quantity_and_ticks(
-            per_contract_tick,
-            quantity,
-            template.stop_offset_ticks,
-        )?
-        .exact_rescale(profile.daily_loss_limit.scale())
-        .map_err(|error| error.to_string())?;
+        let potential_loss =
+            scale_currency_by_quantity_and_ticks(per_contract_tick, quantity, stop_offset_ticks)?
+                .exact_rescale(profile.daily_loss_limit.scale())
+                .map_err(|error| error.to_string())?;
         let current = self.session_pnl(profile)?.ok_or(BROKER_PNL_UNAVAILABLE)?;
         let daily_remaining = remaining_limit(profile.daily_loss_limit, negative_loss(current)?)?;
         if potential_loss.units() >= daily_remaining.units() {

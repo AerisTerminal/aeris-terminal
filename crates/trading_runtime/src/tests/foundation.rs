@@ -82,7 +82,9 @@ fn broker_account_of_a_retired_venue_loads_but_never_routes() {
         service.place_order(request).unwrap_err(),
         "trading account venue is not supported"
     );
-    let (_generation, requests) = service.attach_demo_venue().expect("venue");
+    let (_generation, requests) = service
+        .attach_demo_venue(super::VENUE_CAPABILITIES)
+        .expect("venue");
     assert!(
         requests.try_recv().is_err(),
         "a retired venue's account is never reconciled"
@@ -114,27 +116,38 @@ fn account_venue_environment_and_broker_reference_must_agree() {
 fn broker_client_order_id_is_bounded_before_dispatch() {
     let directory = TestDirectory::new("client-id-bound");
     let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("register");
-    let mut request = market_order(&"x".repeat(51), OrderSide::Buy, 1, 1_000);
-    request.account_id = broker.id;
+    let (_generation, _requests) = service
+        .attach_demo_venue(super::VENUE_CAPABILITIES)
+        .expect("venue");
+    let limit = super::VENUE_CAPABILITIES.client_order_id_limit;
+    let mut request = market_order(&"x".repeat(limit + 1), OrderSide::Buy, 1, 1_000);
+    request.account_id = broker.id.clone();
     assert_eq!(
         service.place_order(request).unwrap_err(),
-        "broker ClientOrderId must be at most 50 characters"
+        aeris_trading::RejectReason::ClientIdTooLong.to_string()
     );
     assert_eq!(service.snapshot().expect("snapshot").orders.len(), 0);
-    let mut valid = market_order(&"x".repeat(50), OrderSide::Buy, 2, 2_000);
-    valid.account_id = broker_account(AccountEnvironment::Demo).id;
+    let mut valid = market_order(&"x".repeat(limit), OrderSide::Buy, 2, 2_000);
+    valid.account_id = broker.id;
     assert_eq!(
-        service.place_order(valid).unwrap_err(),
-        DEMO_VENUE_UNAVAILABLE
+        service.place_order(valid).expect("at the limit").status,
+        OrderStatus::Pending
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
     let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
-    let count: i64 = database
-        .query_row("SELECT COUNT(*) FROM broker_orders", [], |row| row.get(0))
-        .expect("broker order count");
-    assert_eq!(count, 0);
+    let longest: i64 = database
+        .query_row(
+            "SELECT MAX(LENGTH(client_order_id)) FROM broker_orders",
+            [],
+            |row| row.get(0),
+        )
+        .expect("broker order ids");
+    assert_eq!(longest, i64::try_from(limit).expect("limit"));
 }
 
 #[test]
@@ -176,13 +189,12 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     );
     assert_eq!(
         service
-            .close_broker_position(broker.id.clone(), "position".into())
-            .unwrap_err(),
-        expected
-    );
-    assert_eq!(
-        service
-            .amend_broker_position_sltp(broker.id.clone(), "position".into(), None, None)
+            .move_bracket_level(MoveBracketLevel {
+                client_order_id: ClientOrderId::try_new("live-order").expect("id"),
+                side: aeris_trading::venue::BracketSide::Stop,
+                current_ticks: 8,
+                new_ticks: 12,
+            })
             .unwrap_err(),
         expected
     );
@@ -286,7 +298,7 @@ fn flatten_outcome_preserves_simulated_fills_with_no_pending_closes() {
             .expect("flatten"),
         FlattenOutcome {
             fills: vec![],
-            pending_close_requests: vec![],
+            pending_exits: vec![],
             incomplete: None,
             unpriced: vec![],
         }
@@ -295,7 +307,7 @@ fn flatten_outcome_preserves_simulated_fills_with_no_pending_closes() {
 }
 
 #[test]
-fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
+fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
     let directory = TestDirectory::new("managed-broker");
     let service = start_service(&directory);
     service
@@ -303,6 +315,9 @@ fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
         .expect("instrument");
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("broker");
+    let (_generation, _requests) = service
+        .attach_demo_venue(super::VENUE_CAPABILITIES)
+        .expect("venue");
     for (index, feature) in ["bracket", "trailing", "break-even"].iter().enumerate() {
         let mut template = bracket_template();
         template.template_id = format!("foundation-{feature}");
@@ -321,22 +336,25 @@ fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
             1_000,
         );
         entry.account_id = broker.id.clone();
-        assert_eq!(
-            service
-                .place_inline_bracket(PlaceInlineBracket {
-                    entry,
-                    template: template.clone()
-                })
-                .unwrap_err(),
-            match *feature {
-                "trailing" => "managed trailing stops are unavailable for broker accounts",
-                "break-even" => "managed break-even stops are unavailable for broker accounts",
-                _ => {
-                    "the broker holds one take-profit per order; scale-out targets are \
-                     unavailable for broker accounts"
-                }
-            }
-        );
+        entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+        let placed = service.place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: template.clone(),
+        });
+        match *feature {
+            "trailing" => assert_eq!(
+                placed.unwrap_err(),
+                "managed trailing stops are unavailable for broker accounts"
+            ),
+            "break-even" => assert_eq!(
+                placed.unwrap_err(),
+                "managed break-even stops are unavailable for broker accounts"
+            ),
+            _ => assert!(matches!(
+                placed,
+                Ok(crate::PlacementOutcome::BrokerProtected(_))
+            )),
+        }
         let mut simulated = market_order(
             &format!("sim-{feature}"),
             OrderSide::Buy,
@@ -362,12 +380,15 @@ fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
             .count(),
         9
     );
-    assert_eq!(snapshot.orders.len(), 12);
-    assert!(
+    assert_eq!(snapshot.orders.len(), 13);
+    assert_eq!(
         snapshot
             .orders
             .iter()
-            .all(|order| order.account_id != broker.id)
+            .filter(|order| order.account_id == broker.id)
+            .count(),
+        1,
+        "the broker bracket is one entry; the venue holds its levels"
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }

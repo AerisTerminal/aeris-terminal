@@ -141,7 +141,7 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V27 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V28 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -166,10 +166,18 @@ violations and missing verification explicitly, and never describe them as satis
   `risk_locks.kind` column; the owner timer rolls each account's session at its configured
   boundary (UTC midnight by default, 17:00 America/Chicago for futures) in one transaction that
   persists the rolled row with the realized baseline, resets the daily meter, releases only
-  daily-meter locks (manual locks survive) and writes the boundary equity sample. Old P&L tables and
-  per-fill columns remain unread until their deferred removal migration. Store-open preflight scratch cleanup may
-  remove only exact preflight directories containing solely the expected database copy and
-  SQLite sidecars; preserve unknown contents and report cleanup failures through observability.
+  daily-meter locks (manual locks survive) and writes the boundary equity sample. V28 makes broker
+  accounts netted futures accounts: broker fills run through the same `positions` ledger as
+  practice fills, so it drops the hedged `broker_positions` table and
+  `broker_deals.broker_position_id` and adds `broker_bracket_levels`, the server-held target and
+  stop levels kept with their entry order. A venue position report sets only the open P&L; a
+  reconcile snapshot that disagrees with the ledger rebases the position in one transaction.
+  Broker accounts write no cash-ledger entries (their balance is the venue's), and a broker venue
+  declares its `VenueCapabilities` (held bracket levels, client order id length) when attached.
+  Old P&L tables and per-fill columns remain unread until their deferred removal migration.
+  Store-open preflight scratch cleanup may remove only exact preflight directories containing
+  solely the expected database copy and SQLite sidecars; preserve unknown contents and report
+  cleanup failures through observability.
 - Simulated quote-only marks update unrealized P&L in owner memory without cloning all trading
   state or writing SQLite. Retention runs only from the owner timer at startup and hourly; each
   run writes position and ledger checkpoints in the same transaction before pruning fills or

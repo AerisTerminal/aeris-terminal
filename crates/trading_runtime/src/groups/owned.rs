@@ -1118,13 +1118,11 @@ impl TradingCore {
         let ticks = u32::try_from(distance / tick_units)
             .map_err(|_| "bracket leg distance overflowed".to_string())?;
         if role == LegRole::StopLoss {
-            let mut template = self.group_template_view(group);
-            template.stop_offset_ticks = ticks;
             self.check_bracket_stop_risk(
                 &entry.account_id,
                 &entry.instrument_id,
                 entry.quantity,
-                &template,
+                ticks,
             )?;
         }
         Ok(ticks)

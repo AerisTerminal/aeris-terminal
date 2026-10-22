@@ -94,10 +94,10 @@ pub fn flatten_feedback(
     if !outcome.fills.is_empty() {
         parts.push(format!("{} fill(s)", outcome.fills.len()));
     }
-    if !outcome.pending_close_requests.is_empty() {
+    if !outcome.pending_exits.is_empty() {
         parts.push(format!(
-            "{} broker close request(s) sent",
-            outcome.pending_close_requests.len()
+            "{} broker exit request(s) sent",
+            outcome.pending_exits.len()
         ));
     }
     if !outcome.unpriced.is_empty() {
@@ -136,10 +136,10 @@ pub fn kill_feedback(
     if !outcome.cancelled.is_empty() {
         parts.push(format!("{} order(s) cancelled", outcome.cancelled.len()));
     }
-    if !outcome.pending_close_requests.is_empty() {
+    if !outcome.pending_exits.is_empty() {
         parts.push(format!(
-            "{} broker close request(s) sent",
-            outcome.pending_close_requests.len()
+            "{} broker exit request(s) sent",
+            outcome.pending_exits.len()
         ));
     }
     if !outcome.unpriced.is_empty() {
@@ -522,28 +522,26 @@ pub fn cancel_simulated_order(
         .detach();
 }
 
-/// Requests closing one whole broker position off the UI thread. The position stays until the
-/// broker reports it closed.
+/// Requests the exit of one broker account's whole position on an instrument off the UI
+/// thread. The position stays open until the broker reports the exit fills.
 pub fn close_broker_position(
     service: &TradingService,
     feedback: &TradingFeedback,
-    account_key: String,
-    broker_position_id: String,
+    account_id: aeris_trading::TradingAccountId,
+    instrument_id: InstrumentId,
     cx: &mut gpui::App,
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let Ok(account_id) = aeris_trading::TradingAccountId::try_new(account_key) else {
-        feedback.record(Err("Broker account identifier is invalid".to_string()));
-        return;
-    };
     cx.background_executor()
         .spawn(async move {
-            record_outcome(
-                &feedback,
-                service.close_broker_position(account_id, broker_position_id),
-                "Close sent to the broker",
-            );
+            feedback.record(flatten_feedback(
+                "Closing position",
+                service.flatten(aeris_trading_runtime::FlattenScope {
+                    account: Some(account_id),
+                    instrument: Some(instrument_id),
+                }),
+            ));
         })
         .detach();
 }
@@ -977,17 +975,26 @@ mod tests {
     }
 
     #[test]
-    fn flatten_feedback_reports_broker_closes_as_requests_and_partial_work_as_errors() {
-        use aeris_trading_runtime::FlattenOutcome;
+    fn flatten_feedback_reports_broker_exits_as_requests_and_partial_work_as_errors() {
+        use aeris_trading_runtime::{FlattenOutcome, PendingExit};
+        let exit = |instrument: &str| PendingExit {
+            account_id: aeris_trading::TradingAccountId::try_new("broker-demo-1").expect("account"),
+            instrument_id: aeris_instruments::InstrumentId::try_new(instrument)
+                .expect("instrument"),
+            net_quantity: aeris_trading::FixedPoint::try_new(2, 0).expect("quantity"),
+        };
         assert_eq!(
             super::flatten_feedback(
                 "Flattened",
                 Ok(FlattenOutcome {
-                    pending_close_requests: vec!["77".into(), "78".into()],
+                    pending_exits: vec![
+                        exit("instrument:fixture:CME:ESZ6"),
+                        exit("instrument:fixture:CME:NQZ6"),
+                    ],
                     ..FlattenOutcome::default()
                 })
             ),
-            Ok("Flattened · 2 broker close request(s) sent".to_string())
+            Ok("Flattened · 2 broker exit request(s) sent".to_string())
         );
         assert_eq!(
             super::flatten_feedback(

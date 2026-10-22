@@ -8,6 +8,7 @@ use super::{
     sqlite_u64,
 };
 use aeris_trading::OrderEventReason;
+use aeris_trading::venue::{BracketLevel, BracketSide, ServerBracket};
 
 const LOAD_ORDERS_SQL: &str = "SELECT id, client_order_id, account_id, instrument_id, side,
     order_type, time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
@@ -267,12 +268,15 @@ impl TradingStore {
         tx.commit().map_err(database_error)
     }
 
-    /// Persists a submitted broker order with its broker mapping row; the broker order id
-    /// is bound when the venue first reports the order.
+    /// Persists a broker order with its broker mapping row and any bracket levels the venue
+    /// holds with it. A submitted order is bound to its broker order id when the venue first
+    /// reports it; an order mirrored from a venue report is bound at once by `binding`.
     pub(crate) fn insert_broker_order(
         &mut self,
         order: &Order,
         event: &OrderEvent,
+        binding: Option<&str>,
+        bracket: Option<&ServerBracket>,
         next_sequence: u64,
     ) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
@@ -282,16 +286,56 @@ impl TradingStore {
             .execute(
                 "INSERT INTO broker_orders(order_id, broker_order_id, client_order_id,
                     session_generation, updated_unix_nanos)
-                 VALUES (?1, NULL, ?2, ?3, ?4)",
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     order.id.as_str(),
+                    binding,
                     order.client_order_id.as_str(),
                     sqlite_i64(order.provenance.session_generation)?,
                     order.provenance.observed_unix_nanos,
                 ],
             )
             .map_err(database_error)?;
+        for side in [BracketSide::Target, BracketSide::Stop] {
+            for level in bracket.map_or(&[][..], |bracket| bracket.side(side)) {
+                transaction
+                    .execute(
+                        "INSERT INTO broker_bracket_levels(order_id, side, ticks,
+                            quantity_units, quantity_scale) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            order.id.as_str(),
+                            side.as_str(),
+                            level.ticks,
+                            level.quantity.units(),
+                            level.quantity.scale(),
+                        ],
+                    )
+                    .map_err(database_error)?;
+            }
+        }
         update_next_sequence(&transaction, next_sequence)?;
+        StepTx::commit_revision(transaction).map_err(database_error)
+    }
+
+    /// Records a bracket level the venue moved.
+    pub(crate) fn move_broker_bracket_level(
+        &mut self,
+        order_id: &OrderId,
+        side: BracketSide,
+        from_ticks: i32,
+        to_ticks: i32,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        let moved = transaction
+            .execute(
+                "UPDATE broker_bracket_levels SET ticks = ?4
+                 WHERE order_id = ?1 AND side = ?2 AND ticks = ?3",
+                params![order_id.as_str(), side.as_str(), from_ticks, to_ticks],
+            )
+            .map_err(database_error)?;
+        if moved != 1 {
+            return Err("the bracket level is not held".into());
+        }
         StepTx::commit_revision(transaction).map_err(database_error)
     }
 
@@ -307,13 +351,15 @@ impl TradingStore {
     }
 
     /// Persists one broker order transition. `binding` records the broker order id the
-    /// venue reported for it, in the same transaction.
+    /// venue reported for it and `released` drops the bracket levels of entries that ended,
+    /// both in the same transaction.
     pub(crate) fn transition_broker_order(
         &mut self,
         order: &Order,
         event: &OrderEvent,
         next_sequence: u64,
         binding: Option<&str>,
+        released: &[OrderId],
     ) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
@@ -360,10 +406,27 @@ impl TradingStore {
                 )
                 .map_err(database_error)?;
         }
+        release_bracket_levels(&transaction, released)?;
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
         StepTx::commit_revision(transaction).map_err(database_error)
     }
+}
+
+/// Drops the bracket levels of entries that ended; the venue released or cancelled them.
+pub(super) fn release_bracket_levels(
+    transaction: &Transaction<'_>,
+    released: &[OrderId],
+) -> Result<(), String> {
+    for order_id in released {
+        transaction
+            .execute(
+                "DELETE FROM broker_bracket_levels WHERE order_id = ?1",
+                [order_id.as_str()],
+            )
+            .map_err(database_error)?;
+    }
+    Ok(())
 }
 
 impl TradingStore {
@@ -530,6 +593,55 @@ impl TradingStore {
 }
 
 impl TradingStore {
+    /// The bracket levels of every bracketed broker entry. A gated pre-group store has no
+    /// bracket table yet and holds none.
+    pub(super) fn load_broker_brackets(&self) -> Result<BTreeMap<OrderId, ServerBracket>, String> {
+        let present: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'broker_bracket_levels'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if present == 0 {
+            return Ok(BTreeMap::new());
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT order_id, side, ticks, quantity_units, quantity_scale
+                 FROM broker_bracket_levels ORDER BY order_id, side, ticks",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i32>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
+                ))
+            })
+            .map_err(database_error)?;
+        let mut brackets = BTreeMap::<OrderId, ServerBracket>::new();
+        for row in rows {
+            let (order_id, side, ticks, units, scale) = row.map_err(database_error)?;
+            let side = BracketSide::parse(&side).ok_or("stored bracket side is invalid")?;
+            brackets
+                .entry(OrderId::try_new(order_id).map_err(|error| error.to_string())?)
+                .or_default()
+                .side_mut(side)
+                .push(BracketLevel {
+                    quantity: fixed(units, scale)?,
+                    ticks,
+                });
+        }
+        Ok(brackets)
+    }
+
     pub(super) fn load_broker_order_ids(&self) -> Result<BTreeMap<String, OrderId>, String> {
         let mut statement = self
             .connection

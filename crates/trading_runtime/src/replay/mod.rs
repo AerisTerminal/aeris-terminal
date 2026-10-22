@@ -1576,7 +1576,7 @@ fn replay_failed_broker_submit_does_not_publish_reserved_request() {
             starting_equity: None,
         })
         .expect("demo account");
-    let (_, requests) = harness.command(Command::AttachVenue).expect("attach venue");
+    let (_, requests) = harness.command(attach_venue).expect("attach venue");
     assert!(matches!(
         requests.try_recv(),
         Ok(crate::venue::VenueRequest::Reconcile { .. })
@@ -1594,9 +1594,7 @@ fn replay_failed_broker_submit_does_not_publish_reserved_request() {
     harness.restart().expect("restart after failure");
     assert_eq!(harness.snapshot().expect("disk"), before);
     // The old receiver belongs to the retired generation. Reattach before replaying.
-    let (_, next) = harness
-        .command(Command::AttachVenue)
-        .expect("new generation");
+    let (_, next) = harness.command(attach_venue).expect("new generation");
     assert!(matches!(
         next.try_recv(),
         Ok(crate::venue::VenueRequest::Reconcile { .. })
@@ -1629,7 +1627,7 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
             starting_equity: None,
         })
         .expect("account");
-    let (generation, requests) = harness.command(Command::AttachVenue).expect("attach");
+    let (generation, requests) = harness.command(attach_venue).expect("attach");
     assert!(matches!(
         requests.try_recv(),
         Ok(crate::venue::VenueRequest::Reconcile { .. })
@@ -1657,8 +1655,6 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         filled_quantity: placed.filled_quantity,
         limit_price: None,
         stop_price: None,
-        broker_position_id: Some("77".into()),
-        closing: false,
     };
     let accepted = event(
         generation,
@@ -1669,7 +1665,7 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         },
     );
     assert_failed_venue_commit(&mut harness, &accepted);
-    let (generation, _) = harness.command(Command::AttachVenue).expect("reattach");
+    let (generation, _) = harness.command(attach_venue).expect("reattach");
     harness
         .venue_event(&event(generation, accepted.update))
         .expect("ack");
@@ -1678,18 +1674,15 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         VenueUpdate::Fill(BrokerFill {
             broker_deal_id: "d1".into(),
             broker_order_id: "501".into(),
-            broker_position_id: "77".into(),
             instrument_id: placed.instrument_id,
             side: placed.side,
             price: FixedPoint::try_new(9_000, 2).expect("price"),
             quantity: placed.quantity,
             executed_unix_nanos: 5_000,
-            commission: None,
-            realized: None,
         }),
     );
     assert_failed_venue_commit(&mut harness, &deal);
-    let (generation, _) = harness.command(Command::AttachVenue).expect("reattach");
+    let (generation, _) = harness.command(attach_venue).expect("reattach");
     harness
         .venue_event(&event(generation, deal.update.clone()))
         .expect("deal");
@@ -1707,6 +1700,10 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         .venue_event(&event(generation, deal.update))
         .expect("replayed deal");
     assert_eq!(harness.snapshot().expect("idempotent replay"), committed);
+}
+
+fn attach_venue(reply: Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>) -> Command {
+    Command::AttachVenue(super::VENUE_CAPABILITIES, reply)
 }
 
 fn assert_failed_venue_commit(harness: &mut ReplayHarness, event: &crate::venue::VenueEvent) {

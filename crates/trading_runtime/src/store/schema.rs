@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -359,6 +359,19 @@ pub(super) const MIGRATION_V27: &str = "
      WHEN reason = 'session plan maximum loss reached' THEN 'session_plan'
      WHEN reason = 'news/session restriction is active' THEN 'news_restriction'
      ELSE 'manual' END;";
+/// Broker accounts are netted futures accounts: positions live in the shared `positions`
+/// ledger, so the hedged `broker_positions` table and the per-deal position id go. Server
+/// bracket levels persist with their entry order until the venue releases them.
+pub(super) const MIGRATION_V28: &str = "
+ DROP TABLE broker_positions;
+ ALTER TABLE broker_deals DROP COLUMN broker_position_id;
+ CREATE TABLE broker_bracket_levels (
+     order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+     side TEXT NOT NULL,
+     ticks INTEGER NOT NULL,
+     quantity_units INTEGER NOT NULL, quantity_scale INTEGER NOT NULL,
+     PRIMARY KEY(order_id, side, ticks)
+ ) STRICT;";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -524,6 +537,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 26,
         to: 27,
         sql: MIGRATION_V27,
+    },
+    Migration {
+        from: 27,
+        to: 28,
+        sql: MIGRATION_V28,
     },
 ];
 

@@ -4691,21 +4691,24 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
                 OrderStatus::Working,
             ),
         ],
-        broker_positions: vec![aeris_trading::BrokerPosition {
-            account_id: account.clone(),
-            instrument_id: instrument("instrument:fixture:D"),
-            broker_position_id: "77".into(),
-            side: OrderSide::Sell,
-            quantity: point(100, 2),
-            entry_price: point(108_250, 5),
-            stop_loss: None,
-            take_profit: None,
-            swap: point(0, 2),
-            commission: point(0, 2),
-            gross_unrealized: point(0, 2),
-            net_unrealized: point(0, 2),
-            opened_unix_nanos: 1,
-        }],
+        positions: [("instrument:fixture:D", -2), ("instrument:fixture:E", 0)]
+            .into_iter()
+            .map(|(instrument_id, net)| aeris_trading_runtime::PositionPnl {
+                position: aeris_trading::Position {
+                    account_id: account.clone(),
+                    instrument_id: instrument(instrument_id),
+                    net_quantity: point(net, 0),
+                    average_entry_price: Some(point(689_625, 2)),
+                    realized_pnl: point(0, 2),
+                    unrealized_pnl: point(0, 2),
+                    last_fill_unix_nanos: 1,
+                },
+                realized_ticks: None,
+                unrealized_ticks: None,
+                point_value: None,
+                currency_scale: 2,
+            })
+            .collect(),
         ..super::TradingPnlState::default()
     };
     assert!(state.instruments_with_activity().is_empty());
@@ -4717,55 +4720,6 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
         .collect::<Vec<_>>();
     active.sort_unstable();
     assert_eq!(active, ["instrument:fixture:A", "instrument:fixture:D"]);
-}
-
-#[test]
-fn broker_exposure_nets_hedged_positions_and_knows_a_single_entry() {
-    let account = aeris_trading::TradingAccountId::try_new("broker-demo-1001").expect("id");
-    let point = |units, scale| aeris_trading::FixedPoint::try_new(units, scale).expect("point");
-    let position = |id: &str, side, quantity| aeris_trading::BrokerPosition {
-        account_id: account.clone(),
-        instrument_id: aeris_instruments::InstrumentId::try_new("broker:demo:1001:1")
-            .expect("instrument"),
-        broker_position_id: id.into(),
-        side,
-        quantity: point(quantity, 2),
-        entry_price: point(108_250, 5),
-        stop_loss: None,
-        take_profit: None,
-        swap: point(0, 2),
-        commission: point(0, 2),
-        gross_unrealized: point(0, 2),
-        net_unrealized: point(0, 2),
-        opened_unix_nanos: 1,
-    };
-    let single = [position("77", aeris_trading::OrderSide::Buy, 100_000)];
-    assert_eq!(
-        super::broker_exposure(&single, &account, "broker:demo:1001:1"),
-        Some(super::BrokerExposure {
-            net_units: 100_000,
-            scale: 2,
-            entry_price: Some(point(108_250, 5)),
-        })
-    );
-    let hedged = [
-        position("77", aeris_trading::OrderSide::Buy, 100_000),
-        position("78", aeris_trading::OrderSide::Sell, 30_000),
-    ];
-    let exposure = super::broker_exposure(&hedged, &account, "broker:demo:1001:1").expect("net");
-    assert_eq!((exposure.net_units, exposure.entry_price), (70_000, None));
-    let flat = [
-        position("77", aeris_trading::OrderSide::Buy, 100_000),
-        position("78", aeris_trading::OrderSide::Sell, 100_000),
-    ];
-    assert_eq!(
-        super::broker_exposure(&flat, &account, "broker:demo:1001:1"),
-        None
-    );
-    assert_eq!(
-        super::broker_exposure(&single, &account, "broker:demo:1001:2"),
-        None
-    );
 }
 
 #[test]

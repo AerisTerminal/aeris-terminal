@@ -1,10 +1,10 @@
 use crate::VenueRoute;
 use aeris_trading::{OrderType, TimeInForce};
 
-/// Trading capabilities of the selected route, independent of provider market data.
+/// Order policy of the selected route, independent of provider market data. What an attached
+/// broker venue itself supports is the venue's `VenueCapabilities`, declared at attach.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct VenueCapabilities {
-    pub client_id_limit: Option<usize>,
+pub(crate) struct RouteCapabilities {
     protection: ProtectionSupport,
     tif_policy: TifPolicy,
 }
@@ -21,16 +21,14 @@ enum TifPolicy {
     Broker,
 }
 
-impl VenueCapabilities {
+impl RouteCapabilities {
     pub const fn for_route(route: VenueRoute) -> Self {
         match route {
             VenueRoute::Simulated => Self {
-                client_id_limit: None,
                 protection: ProtectionSupport::Managed,
                 tif_policy: TifPolicy::Simulated,
             },
             VenueRoute::BrokerDemo => Self {
-                client_id_limit: Some(50),
                 protection: ProtectionSupport::Native,
                 tif_policy: TifPolicy::Broker,
             },
@@ -47,10 +45,6 @@ impl VenueCapabilities {
         } else {
             requested
         }
-    }
-
-    pub const fn native_sltp(self) -> bool {
-        matches!(self.protection, ProtectionSupport::Native)
     }
 
     pub const fn managed_trailing(self) -> bool {

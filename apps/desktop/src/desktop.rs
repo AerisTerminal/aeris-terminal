@@ -925,9 +925,6 @@ struct TradingPnlState {
     orders: Vec<aeris_trading::Order>,
     planned_legs: Vec<aeris_trading_runtime::PlannedLeg>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
-    /// Broker positions, per broker position id, with the broker's own unrealized P&L in
-    /// the account's deposit currency.
-    broker_positions: Vec<aeris_trading::BrokerPosition>,
     /// Broker accounts the attached venue can reach now.
     connected_broker_accounts: std::collections::BTreeSet<aeris_trading::TradingAccountId>,
     risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
@@ -1053,44 +1050,6 @@ impl TimeSalesFilter {
     }
 }
 
-/// An account's net broker exposure on one instrument, with hedged positions summed by
-/// side. Its entry price is known only when a single position makes it up.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct BrokerExposure {
-    net_units: i64,
-    scale: u8,
-    entry_price: Option<aeris_trading::FixedPoint>,
-}
-
-fn broker_exposure(
-    positions: &[aeris_trading::BrokerPosition],
-    account_id: &aeris_trading::TradingAccountId,
-    instrument_id: &str,
-) -> Option<BrokerExposure> {
-    let mut matching = positions.iter().filter(|position| {
-        &position.account_id == account_id && position.instrument_id.as_str() == instrument_id
-    });
-    let first = matching.next()?;
-    let mut exposure = BrokerExposure {
-        net_units: first.side.sign().checked_mul(first.quantity.units())?,
-        scale: first.quantity.scale(),
-        entry_price: Some(first.entry_price),
-    };
-    for position in matching {
-        if position.quantity.scale() != exposure.scale {
-            return None;
-        }
-        exposure.net_units = exposure.net_units.checked_add(
-            position
-                .side
-                .sign()
-                .checked_mul(position.quantity.units())?,
-        )?;
-        exposure.entry_price = None;
-    }
-    (exposure.net_units != 0).then_some(exposure)
-}
-
 impl Default for TradingPnlState {
     fn default() -> Self {
         Self {
@@ -1099,7 +1058,6 @@ impl Default for TradingPnlState {
             orders: Vec::new(),
             planned_legs: Vec::new(),
             positions: Vec::new(),
-            broker_positions: Vec::new(),
             connected_broker_accounts: std::collections::BTreeSet::new(),
             risk_profiles: Vec::new(),
             risk_locks: Vec::new(),
@@ -1115,8 +1073,7 @@ impl Default for TradingPnlState {
 }
 
 impl TradingPnlState {
-    /// Instruments where the selected account has a working order or an open position,
-    /// practice or broker.
+    /// Instruments where the selected account has a working order or an open position.
     fn instruments_with_activity(&self) -> HashSet<&str> {
         let Some(account_id) = self.order_entry.selected_account_id.as_ref() else {
             return HashSet::new();
@@ -1134,12 +1091,7 @@ impl TradingPnlState {
                 &position.account_id == account_id && position.net_quantity.units() != 0
             })
             .map(|position| position.instrument_id.as_str());
-        let broker_positions = self
-            .broker_positions
-            .iter()
-            .filter(|position| &position.account_id == account_id && position.quantity.units() != 0)
-            .map(|position| position.instrument_id.as_str());
-        orders.chain(positions).chain(broker_positions).collect()
+        orders.chain(positions).collect()
     }
 }
 
@@ -2689,12 +2641,7 @@ fn chart_close_position_from_intent(
         &position.position.account_id == account_id
             && position.position.instrument_id.as_str() == product.instrument_id
             && position.position.net_quantity.units() != 0
-    }) || broker_exposure(
-        &app.trading_pnl.broker_positions,
-        account_id,
-        &product.instrument_id,
-    )
-    .is_some();
+    });
     if intent.position_id.as_ref() != Some(&expected_position_id) || !has_position {
         return Err(ChartIntentRejection::NotOnChart);
     }

@@ -12,8 +12,8 @@ use super::{
     Order, OrderEvent, Position, PositionPnl, ProtectionRole, RAPID_LOSS_COOLDOWN_NANOS,
     RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter, SessionAdherenceReview,
     TradeRoundTrip, TradingAccount, TradingAccountId, TradingCore, TradingSnapshot,
-    consistency_projection, is_simulated, negative_loss, nonnegative_difference, pnl_ticks,
-    remaining_limit, round_trip, subtract_fixed, tick_value,
+    consistency_projection, negative_loss, nonnegative_difference, pnl_ticks, remaining_limit,
+    round_trip, subtract_fixed, tick_value,
 };
 
 /// The durable per-position projection folded from pruned fills: the exact state after every
@@ -142,41 +142,15 @@ impl TradingCore {
         }
     }
 
-    /// The newest simulated-account fills, within the snapshot bound.
-    pub(super) fn simulated_fills_newest_first(&self) -> Vec<&Fill> {
-        self.state
-            .fills
-            .iter()
-            .rev()
-            .filter(|fill| is_simulated(&self.state.accounts, &fill.account_id))
-            .take(MAXIMUM_SNAPSHOT_ITEMS)
-            .collect()
-    }
-
-    /// Simulated round trips, open and closed, merged with closed broker round trips; every exit
+    /// Round trips, open and closed, of every account within the snapshot bound; every exit
     /// fill, partial or final, is one closed round trip.
     pub(super) fn round_trips(&self) -> Result<Vec<TradeRoundTrip>, String> {
-        let broker_fills = self
-            .state
-            .fills
-            .iter()
-            .rev()
-            .filter(|fill| self.state.broker_fill_positions.contains_key(&fill.id))
-            .take(MAXIMUM_SNAPSHOT_ITEMS)
-            .collect::<Vec<_>>();
-        let mut round_trips = round_trip::project_round_trips(
-            self.simulated_fills_newest_first().into_iter(),
+        round_trip::project_round_trips(
+            self.state.fills.iter().rev().take(MAXIMUM_SNAPSHOT_ITEMS),
             &self.state.positions,
             &self.state.fill_accounting,
             &self.state.trade_cycles,
-        )?;
-        round_trips.extend(round_trip::project_closed_broker_round_trips(
-            broker_fills.into_iter(),
-            &self.state.broker_fill_positions,
-            &self.state.fill_accounting,
-        )?);
-        round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
-        Ok(round_trips)
+        )
     }
 
     pub(crate) fn snapshot(&self) -> Result<TradingSnapshot, String> {
@@ -186,7 +160,6 @@ impl TradingCore {
         if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.positions.len() > MAXIMUM_SNAPSHOT_ITEMS
-            || self.state.broker_positions.len() > MAXIMUM_SNAPSHOT_ITEMS
         {
             return Err("trading snapshot item limit exceeded".to_string());
         }
@@ -240,7 +213,6 @@ impl TradingCore {
                 .collect(),
             round_trips: self.round_trips()?,
             positions: self.state.positions.values().cloned().collect(),
-            broker_positions: self.state.broker_positions.values().cloned().collect(),
             broker_balances: self.state.broker_balances.clone(),
             connected_broker_accounts: self.connected_broker_accounts.clone(),
             position_pnl: self.position_pnl()?,
@@ -387,29 +359,20 @@ impl TradingCore {
             .collect()
     }
 
-    /// A broker account adds the broker-reported realized P&L of every deal Aeris recorded and
-    /// the broker's net unrealized P&L of its open positions. Its balance is the broker's and its
-    /// equity is that balance plus the open P&L. Open P&L, balance and equity need the venue to
-    /// reach the account now, so a disconnected account shows none of them rather than a stale
-    /// value.
+    /// A broker account's realized P&L is its positions', like a simulated account's; its
+    /// open P&L is the venue's. Its balance is the broker's and its equity is that balance plus
+    /// the open P&L. Open P&L, balance and equity need the venue to reach the account now, so a
+    /// disconnected account shows none of them rather than a stale value.
     pub(super) fn broker_account_pnl(
         &self,
         account: &TradingAccount,
         realized: FixedPoint,
         unrealized: FixedPoint,
     ) -> Result<AccountPnl, String> {
-        let realized = realized
-            .checked_add(self.broker_realized_since(
-                &account.id,
-                i64::MIN,
-                account.currency_scale,
-            )?)
-            .map_err(|error| error.to_string())?;
         let unrealized = self
-            .broker_unrealized(&account.id, account.currency_scale)?
-            .map(|broker| unrealized.checked_add(broker))
-            .transpose()
-            .map_err(|error| error.to_string())?;
+            .connected_broker_accounts
+            .contains(&account.id)
+            .then_some(unrealized);
         let balance = self
             .state
             .broker_balances

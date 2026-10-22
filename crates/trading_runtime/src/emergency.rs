@@ -73,9 +73,7 @@ impl TradingCore {
             }
             match self.flatten_broker_account(account, None) {
                 Ok(closed) => {
-                    outcome
-                        .pending_close_requests
-                        .extend(closed.pending_close_requests);
+                    outcome.pending_exits.extend(closed.pending_exits);
                     if let Some(failure) = closed.incomplete {
                         append_incomplete(
                             &mut outcome.incomplete,
@@ -85,7 +83,7 @@ impl TradingCore {
                 }
                 Err(error) => append_incomplete(
                     &mut outcome.incomplete,
-                    format!("accounts are locked; broker positions were not closed: {error}"),
+                    format!("accounts are locked; broker positions were not exited: {error}"),
                 ),
             }
         }
@@ -204,16 +202,14 @@ impl TradingCore {
         for account_id in broker {
             match self.flatten_broker_account(&account_id, scope.instrument.as_ref()) {
                 Ok(closed) => {
-                    outcome
-                        .pending_close_requests
-                        .extend(closed.pending_close_requests);
+                    outcome.pending_exits.extend(closed.pending_exits);
                     if let Some(failure) = closed.incomplete {
                         append_incomplete(&mut outcome.incomplete, failure);
                     }
                 }
                 Err(error) => append_incomplete(
                     &mut outcome.incomplete,
-                    format!("broker positions were not closed: {error}"),
+                    format!("broker positions were not exited: {error}"),
                 ),
             }
         }

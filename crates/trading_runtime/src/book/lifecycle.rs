@@ -744,8 +744,6 @@ mod tests {
             filled_quantity: pending.filled_quantity,
             limit_price: pending.limit_price,
             stop_price: pending.stop_price,
-            broker_position_id: None,
-            closing: false,
         };
         let (accepted, _) = broker_report(
             &pending,
@@ -1014,8 +1012,6 @@ mod tests {
             filled_quantity: sample.filled_quantity,
             limit_price: sample.limit_price,
             stop_price: sample.stop_price,
-            broker_position_id: None,
-            closing: false,
         };
         for status in [
             OrderStatus::Pending,

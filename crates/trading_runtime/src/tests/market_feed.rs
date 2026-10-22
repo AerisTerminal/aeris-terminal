@@ -1314,7 +1314,9 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
             starting_equity: None,
         })
         .expect("demo account");
-    let (_generation, outbound) = service.attach_demo_venue().expect("venue");
+    let (_generation, outbound) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("venue");
     while outbound.try_recv().is_ok() {}
     let feed = service
         .attach_market_feed(Arc::new(RecordedInterest::default()))

@@ -74,9 +74,9 @@ fn resting_at_resolves_on_touch_for_every_side() {
 }
 
 #[test]
-fn venue_capabilities_resolve_day_and_protection_policy() {
-    let simulated = VenueCapabilities::for_route(VenueRoute::Simulated);
-    let broker = VenueCapabilities::for_route(VenueRoute::BrokerDemo);
+fn route_capabilities_resolve_day_and_protection_policy() {
+    let simulated = RouteCapabilities::for_route(VenueRoute::Simulated);
+    let broker = RouteCapabilities::for_route(VenueRoute::BrokerDemo);
     assert_eq!(
         simulated.effective_tif(OrderType::Limit, TimeInForce::Day),
         TimeInForce::Day
@@ -89,11 +89,8 @@ fn venue_capabilities_resolve_day_and_protection_policy() {
         broker.effective_tif(OrderType::Market, TimeInForce::Day),
         TimeInForce::ImmediateOrCancel
     );
-    assert_eq!(broker.client_id_limit, Some(50));
-    assert!(broker.native_sltp());
     assert!(!broker.managed_trailing());
     assert!(simulated.managed_trailing());
-    assert!(!simulated.native_sltp());
 }
 
 #[test]
@@ -181,44 +178,46 @@ fn fixed_and_significant_figure_grids_reject_off_grid_prices() {
 fn shared_admission_rejects_quantity_capacity_and_broker_client_length() {
     let mut instrument = crate::tests::instrument();
     let mut order = crate::tests::market_order("capacity", OrderSide::Buy, 1, 1_000);
-    for route in [VenueRoute::Simulated, VenueRoute::BrokerDemo] {
+    // The simulated venue has no client id limit; an attached broker venue declares one.
+    let limits = [None, Some(50)];
+    for limit in limits {
         assert_eq!(
-            validate_common_order(&instrument, &order, route, MAXIMUM_OPEN_ORDERS, 0),
+            validate_common_order(&instrument, &order, limit, MAXIMUM_OPEN_ORDERS, 0),
             Err(RejectReason::CapacityExceeded)
         );
         order.quantity = FixedPoint::try_new(0, order.quantity.scale()).expect("quantity");
         assert_eq!(
-            validate_common_order(&instrument, &order, route, 0, 0),
+            validate_common_order(&instrument, &order, limit, 0, 0),
             Err(RejectReason::InvalidQuantity)
         );
         order.quantity = FixedPoint::try_new(1, order.quantity.scale()).expect("quantity");
         assert_eq!(
-            validate_common_order(&instrument, &order, route, 0, 0),
+            validate_common_order(&instrument, &order, limit, 0, 0),
             Ok(())
         );
     }
     order.client_order_id = aeris_trading::ClientOrderId::try_new("x".repeat(51)).expect("id");
     assert_eq!(
-        validate_common_order(&instrument, &order, VenueRoute::BrokerDemo, 0, 0),
+        validate_common_order(&instrument, &order, Some(50), 0, 0),
         Err(RejectReason::ClientIdTooLong)
     );
     assert_eq!(
-        validate_common_order(&instrument, &order, VenueRoute::Simulated, 0, 0),
+        validate_common_order(&instrument, &order, None, 0, 0),
         Ok(())
     );
     instrument.contract.order_quantity_increment =
         Some(InstrumentDecimal::try_new(2, 0).expect("increment"));
     order.client_order_id = aeris_trading::ClientOrderId::try_new("increment").expect("id");
-    for route in [VenueRoute::Simulated, VenueRoute::BrokerDemo] {
+    for limit in limits {
         assert_eq!(
-            validate_common_order(&instrument, &order, route, 0, 0),
+            validate_common_order(&instrument, &order, limit, 0, 0),
             Err(RejectReason::InvalidQuantity)
         );
     }
     order.quantity = FixedPoint::try_new(1, 1).expect("wrong quantity scale");
-    for route in [VenueRoute::Simulated, VenueRoute::BrokerDemo] {
+    for limit in limits {
         assert_eq!(
-            validate_common_order(&instrument, &order, route, 0, 0),
+            validate_common_order(&instrument, &order, limit, 0, 0),
             Err(RejectReason::ScaleMismatch)
         );
     }

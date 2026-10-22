@@ -1,18 +1,23 @@
-//! Broker order state is persisted and advanced only by the trading owner.
+//! Broker order state is persisted and advanced only by the trading owner. Broker fills run
+//! through the same net-position ledger as practice fills; the venue's position reports supply
+//! the open P&L and settle any difference at reconcile.
 
+use super::FillMemoryUpdate;
 use crate::BracketStrategyTemplate;
+use crate::core::ledger::{CostBasis, TradeCycle};
 use crate::venue::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::{
-    DEMO_VENUE_UNAVAILABLE, FlattenOutcome, ModifyOrder, PlaceOrder, TradingCore,
-    TradingProvenance, store::BrokerFillRecord,
+    DEMO_VENUE_UNAVAILABLE, FlattenOutcome, ModifyOrder, MoveBracketLevel, PendingExit, PlaceOrder,
+    TradingCore, TradingInstrument, TradingProvenance, store::BrokerFillRecord,
 };
+use aeris_instruments::InstrumentId;
 use aeris_trading::{
-    AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
-    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
-    TradingAccount, TradingAccountId,
+    AccountEnvironment, ClientOrderId, Fill, FillId, FixedPoint, Liquidity, Order, OrderEvent,
+    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
+    TimeInForce, TradingAccount, TradingAccountId,
     venue::{
-        BROKER_VENUE_ID, BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount,
-        PositionUnrealizedPnl, Protection, RealizedClose, VenueAmendment, VenueOrder,
+        BROKER_VENUE_ID, BracketLevel, BracketSide, BrokerFill, BrokerOrder, BrokerOrderKind,
+        BrokerOrderState, ObservedAccount, ServerBracket, VenueAmendment, VenueOrder,
         VenuePosition, VenueSnapshot,
     },
 };
@@ -133,66 +138,72 @@ impl TradingCore {
     }
 
     pub(crate) fn place_broker_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
-        self.place_protected_broker_order(command, None, None)
+        self.place_broker_entry(command, None)
     }
 
-    /// A bracket on a broker account is one entry order carrying server-side protection:
-    /// the stop at the template's stop distance and the take-profit at its single target.
-    /// The broker venue holds one take-profit per order, so scale-out targets are refused.
+    /// A bracket on a broker account is one entry order carrying a server-held bracket: the
+    /// template's targets split the entry quantity exactly as on a practice account and one
+    /// stop covers all of it. The venue releases the levels as the entry fills, so they keep
+    /// working while Aeris is disconnected.
     pub(crate) fn place_broker_bracket(
         &mut self,
         command: &PlaceOrder,
         template: &BracketStrategyTemplate,
     ) -> Result<Order, String> {
-        if !crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::BrokerDemo)
-            .native_sltp()
-        {
-            return Err("broker route does not support native protection".into());
+        let held_levels = self
+            .venue_capabilities
+            .map_or(0, |capabilities| capabilities.bracket_levels);
+        if held_levels == 0 {
+            return Err("the broker venue holds no server-side brackets".into());
         }
-        let take_profit_ticks = match template.targets.as_slice() {
-            [] => None,
-            [target] if target.quantity_percent == 100 => Some(target.offset_ticks),
-            _ => {
-                return Err(
-                    "the broker holds one take-profit per order; scale-out targets are \
-                     unavailable for broker accounts"
-                        .into(),
-                );
-            }
-        };
         let instrument = self
             .state
             .instruments
             .get(&command.instrument_id)
             .ok_or("trading instrument is not registered")?;
-        let tick = instrument
-            .contract
-            .tick_size
-            .ok_or("the instrument has no tick size")
-            .and_then(|tick| {
-                FixedPoint::try_new(tick.units(), tick.scale())
-                    .and_then(|tick| tick.exact_rescale(instrument.price_scale))
-                    .map_err(|_| "the instrument tick size does not fit its price scale")
-            })?;
-        let distance = |ticks: u32| {
-            tick.units()
-                .checked_mul(i64::from(ticks))
-                .ok_or_else(|| "bracket distance overflowed".to_string())
-                .and_then(|units| {
-                    FixedPoint::try_new(units, tick.scale()).map_err(|error| error.to_string())
-                })
-                .map(Protection::Distance)
+        let ticks = |offset: u32| {
+            i32::try_from(offset).map_err(|_| "bracket distance is out of range".to_string())
         };
-        let stop_loss = distance(template.stop_offset_ticks)?;
-        let take_profit = take_profit_ticks.map(distance).transpose()?;
-        self.place_protected_broker_order(command, Some(stop_loss), take_profit)
+        let mut targets = if template.targets.is_empty() {
+            Vec::new()
+        } else {
+            super::allocated_target_quantities(
+                command.quantity,
+                &template.targets,
+                super::order_increment_units(instrument),
+            )?
+            .into_iter()
+            .map(|(index, quantity)| {
+                Ok(BracketLevel {
+                    quantity,
+                    ticks: ticks(template.targets[index].offset_ticks)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+        };
+        if targets.len() > held_levels {
+            return Err(format!(
+                "the broker venue holds at most {held_levels} target levels per bracket"
+            ));
+        }
+        targets.sort_by_key(|level| level.ticks);
+        let bracket = ServerBracket {
+            targets,
+            stops: vec![BracketLevel {
+                quantity: command.quantity,
+                ticks: ticks(template.stop_offset_ticks)?,
+            }],
+        };
+        bracket
+            .validate(command.quantity)
+            .map_err(|error| error.to_string())?;
+        self.place_broker_entry(command, Some(bracket))
     }
 
-    fn place_protected_broker_order(
+    fn place_broker_entry(
         &mut self,
         command: &PlaceOrder,
-        stop_loss: Option<Protection>,
-        take_profit: Option<Protection>,
+        bracket: Option<ServerBracket>,
     ) -> Result<Order, String> {
         if self.venue_outbound.is_none() {
             return Err(DEMO_VENUE_UNAVAILABLE.into());
@@ -211,14 +222,14 @@ impl TradingCore {
             0,
             &[],
             crate::core::admission::AdmissionRisk::Enforced {
-                attached_stop: command.stop_price.is_some(),
+                attached_stop: command.stop_price.is_some() || bracket.is_some(),
             },
         )?;
         // Every M3.2 check applies to broker orders. The practice rule that the contract
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
         let time_in_force =
-            crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::BrokerDemo)
+            crate::core::admission::RouteCapabilities::for_route(crate::VenueRoute::BrokerDemo)
                 .effective_tif(command.order_type, command.time_in_force);
         let request = VenueRequest::Place(VenueOrder {
             client_order_id: command.client_order_id.clone(),
@@ -230,9 +241,7 @@ impl TradingCore {
             quantity: command.quantity,
             limit_price: command.limit_price,
             stop_price: command.stop_price,
-            stop_loss,
-            take_profit,
-            broker_position_id: None,
+            bracket: bracket.clone(),
         });
         request.validate().map_err(|error| error.to_string())?;
         // Validate and persist before making a request visible to the relay.
@@ -289,9 +298,12 @@ impl TradingCore {
             .try_reserve(request)
             .map_err(|error| outbound_error(&error))?;
         self.store
-            .insert_broker_order(&order, &event, sequence + 1)?;
+            .insert_broker_order(&order, &event, None, bracket.as_ref(), sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.orders.insert(order.id.clone(), order.clone());
+        if let Some(bracket) = bracket {
+            self.state.broker_brackets.insert(order.id.clone(), bracket);
+        }
         self.state.order_events.push_back(event);
         self.state.revision = self.state.revision.saturating_add(1).min(i64::MAX as u64);
         reservation.commit();
@@ -314,7 +326,7 @@ impl TradingCore {
         if command.modified_unix_nanos <= 0 {
             return Err("order modification timestamp must be positive".into());
         }
-        if crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::BrokerDemo)
+        if crate::core::admission::RouteCapabilities::for_route(crate::VenueRoute::BrokerDemo)
             .effective_tif(order.order_type, command.time_in_force)
             != order.time_in_force
         {
@@ -345,11 +357,10 @@ impl TradingCore {
             broker_account: self.broker_account(&order.account_id)?,
             broker_order_id,
             instrument_id: order.instrument_id.clone(),
-            quantity: None,
+            order_type: order.order_type,
+            quantity: order.quantity,
             limit_price: command.limit_price,
             stop_price: command.stop_price,
-            stop_loss: None,
-            take_profit: None,
         });
         let pending =
             crate::book::lifecycle::request(order, OrderStatus::PendingModify, self.command_now)
@@ -391,19 +402,45 @@ impl TradingCore {
         Ok(pending)
     }
 
-    fn broker_position_state(
-        &self,
-        account_id: &TradingAccountId,
-        broker_position_id: &str,
-    ) -> Result<BrokerPosition, String> {
-        if broker_position_id.trim().is_empty() {
-            return Err("broker position identifier must not be empty".into());
+    /// Asks the venue to move one level of a bracket it holds. The level keeps its distance
+    /// until the venue reports the move, so a lost request never changes the record.
+    pub(crate) fn move_bracket_level(&self, command: &MoveBracketLevel) -> Result<(), String> {
+        let entry = self
+            .state
+            .orders
+            .by_client(&command.client_order_id)
+            .ok_or("bracket entry is not registered")?;
+        self.require_broker_route(&entry.account_id)?;
+        let bracket = self
+            .state
+            .broker_brackets
+            .get(&entry.id)
+            .ok_or("the order holds no server-side bracket")?;
+        let levels = bracket.side(command.side);
+        let level = levels
+            .iter()
+            .find(|level| level.ticks == command.current_ticks)
+            .ok_or("the bracket holds no level at that distance")?;
+        if levels.iter().any(|level| level.ticks == command.new_ticks) {
+            return Err("the bracket already holds a level at the new distance".into());
         }
-        self.state
-            .broker_positions
-            .get(&(account_id.clone(), broker_position_id.to_string()))
-            .cloned()
-            .ok_or_else(|| "broker position is not open".into())
+        if command.side == BracketSide::Stop && command.new_ticks > command.current_ticks {
+            self.check_bracket_stop_risk(
+                &entry.account_id,
+                &entry.instrument_id,
+                level.quantity,
+                u32::try_from(command.new_ticks)
+                    .map_err(|_| "bracket distance is out of range".to_string())?,
+            )?;
+        }
+        let entry_broker_order_id = self.broker_order_id(&entry.id).ok_or(NOT_ACKNOWLEDGED)?;
+        self.send_venue_request(VenueRequest::MoveBracketLevel {
+            broker_account: self.broker_account(&entry.account_id)?,
+            entry_broker_order_id,
+            side: command.side,
+            current_ticks: command.current_ticks,
+            new_ticks: command.new_ticks,
+        })
     }
 
     fn send_venue_request(&self, request: VenueRequest) -> Result<(), String> {
@@ -415,130 +452,109 @@ impl TradingCore {
             .map_err(|error| outbound_error(&error))
     }
 
-    /// Requests closing one whole broker position. The close is asynchronous: the
-    /// position stays until the broker reports it closed.
-    pub(crate) fn close_broker_position(
-        &self,
-        account_id: &TradingAccountId,
-        broker_position_id: &str,
-    ) -> Result<(), String> {
-        let position = self.broker_position_state(account_id, broker_position_id)?;
-        self.send_venue_request(VenueRequest::ClosePosition {
-            broker_account: self.broker_account(account_id)?,
-            instrument_id: position.instrument_id,
-            broker_position_id: position.broker_position_id,
-            quantity: position.quantity,
-        })
-    }
-
-    /// Requests a position's complete server-side protection; a level left `None` is
-    /// removed, as the broker does.
-    pub(crate) fn amend_broker_position_protection(
-        &self,
-        account_id: &TradingAccountId,
-        broker_position_id: &str,
-        stop_loss: Option<FixedPoint>,
-        take_profit: Option<FixedPoint>,
-    ) -> Result<(), String> {
-        if stop_loss.is_none() && take_profit.is_none() {
-            return Err("stop-loss or take-profit is required".into());
-        }
-        let position = self.broker_position_state(account_id, broker_position_id)?;
-        let price_scale = self
-            .state
-            .instruments
-            .get(&position.instrument_id)
-            .ok_or("trading instrument is not registered")?
-            .price_scale;
-        if stop_loss
-            .into_iter()
-            .chain(take_profit)
-            .any(|price| price.scale() != price_scale)
-        {
-            return Err("protection prices do not match the instrument scale".into());
-        }
-        self.send_venue_request(VenueRequest::AmendPositionProtection {
-            broker_account: self.broker_account(account_id)?,
-            instrument_id: position.instrument_id,
-            broker_position_id: position.broker_position_id,
-            stop_loss,
-            take_profit,
-        })
-    }
-
-    /// Requests closing every broker position of `account_id`, optionally limited to one
-    /// instrument, and returns the positions whose closes were submitted.
-    pub(crate) fn close_broker_positions(
-        &self,
-        account_id: &TradingAccountId,
-        instrument_id: Option<&aeris_instruments::InstrumentId>,
-    ) -> Result<Vec<String>, String> {
-        let positions: Vec<String> = self
-            .state
-            .broker_positions
-            .values()
-            .filter(|position| {
-                position.account_id == *account_id
-                    && instrument_id.is_none_or(|instrument| instrument == &position.instrument_id)
-            })
-            .map(|position| position.broker_position_id.clone())
-            .collect();
-        for broker_position_id in &positions {
-            self.close_broker_position(account_id, broker_position_id)?;
-        }
-        Ok(positions)
-    }
-
-    /// Flattens one broker account across the scoped instruments: cancels its in-scope open
-    /// orders and requests closing its in-scope positions. Closes are attempted even when a
-    /// cancel cannot be requested; what failed is reported in the outcome.
+    /// Flattens one broker account across the scoped instruments. A whole-account flatten
+    /// cancels every working order at the venue, including bracket exits Aeris has not seen;
+    /// an instrument flatten cancels that instrument's open orders. Each open position in
+    /// scope is then exited at the venue and stays until the venue reports the fills. Exits
+    /// are requested even when a cancel cannot be; what failed is reported in the outcome.
     pub(crate) fn flatten_broker_account(
         &mut self,
         account_id: &TradingAccountId,
-        instrument_id: Option<&aeris_instruments::InstrumentId>,
+        instrument_id: Option<&InstrumentId>,
     ) -> Result<FlattenOutcome, String> {
-        let (_, incomplete) = self.cancel_open_orders(Some(account_id), instrument_id)?;
-        let pending_close_requests = self.close_broker_positions(account_id, instrument_id)?;
+        let broker_account = self.broker_account(account_id)?;
+        let mut incomplete = match instrument_id {
+            // Without an attached venue nothing can be asked, and only orders the owner
+            // knows of are worth reporting as left working.
+            None if self.venue_outbound.is_none()
+                && self.state.orders.open_for_account(account_id).is_empty() =>
+            {
+                None
+            }
+            None => self
+                .send_venue_request(VenueRequest::CancelAll {
+                    broker_account: broker_account.clone(),
+                })
+                .err()
+                .map(|error| format!("open broker orders were not cancelled: {error}")),
+            Some(_) => self.cancel_open_orders(Some(account_id), instrument_id)?.1,
+        };
+        let positions = self
+            .state
+            .positions
+            .values()
+            .filter(|position| {
+                position.account_id == *account_id
+                    && position.net_quantity.units() != 0
+                    && instrument_id.is_none_or(|scope| scope == &position.instrument_id)
+            })
+            .map(|position| PendingExit {
+                account_id: position.account_id.clone(),
+                instrument_id: position.instrument_id.clone(),
+                net_quantity: position.net_quantity,
+            })
+            .collect::<Vec<_>>();
+        let mut pending_exits = Vec::with_capacity(positions.len());
+        for exit in positions {
+            match self.send_venue_request(VenueRequest::ExitPosition {
+                broker_account: broker_account.clone(),
+                instrument_id: exit.instrument_id.clone(),
+            }) {
+                Ok(()) => pending_exits.push(exit),
+                Err(error) => {
+                    let failure = format!(
+                        "the {} position was not exited: {error}",
+                        exit.instrument_id.as_str()
+                    );
+                    incomplete = Some(match incomplete {
+                        Some(earlier) => format!("{earlier}; {failure}"),
+                        None => failure,
+                    });
+                }
+            }
+        }
         Ok(FlattenOutcome {
             fills: Vec::new(),
-            pending_close_requests,
+            pending_exits,
             incomplete,
             unpriced: Vec::new(),
         })
     }
 
-    /// Reverses the account's net broker exposure on one instrument: closes its positions
-    /// and places one risk-checked market order for the opposite net quantity.
+    /// Reverses the account's broker position in one instrument: exits it and places one
+    /// risk-checked market order for the opposite quantity. Nothing is placed unless the exit
+    /// was requested, so a failed exit can never double the position.
     pub(crate) fn reverse_broker_position(
         &mut self,
         account_id: &TradingAccountId,
-        instrument_id: &aeris_instruments::InstrumentId,
+        instrument_id: &InstrumentId,
         provenance: &TradingProvenance,
     ) -> Result<FlattenOutcome, String> {
-        let mut net = 0_i64;
-        let mut scale = None;
-        for position in self.state.broker_positions.values().filter(|position| {
-            position.account_id == *account_id && position.instrument_id == *instrument_id
-        }) {
-            net = net
-                .checked_add(position.side.sign() * position.quantity.units())
-                .ok_or("reverse quantity overflowed")?;
-            scale = Some(position.quantity.scale());
-        }
-        let (Some(scale), false) = (scale, net == 0) else {
-            return Err("reverse requires an open position".into());
-        };
-        let side = if net > 0 {
+        let net = self
+            .state
+            .positions
+            .get(&(account_id.clone(), instrument_id.clone()))
+            .map(|position| position.net_quantity)
+            .filter(|net| net.units() != 0)
+            .ok_or("reverse requires an open position")?;
+        let side = if net.units() > 0 {
             OrderSide::Sell
         } else {
             OrderSide::Buy
         };
         let quantity = FixedPoint::try_new(
-            i64::try_from(net.unsigned_abs()).map_err(|_| "reverse quantity overflowed")?,
-            scale,
+            net.units()
+                .checked_abs()
+                .ok_or("reverse quantity overflowed")?,
+            net.scale(),
         )
         .map_err(|error| error.to_string())?;
         let outcome = self.flatten_broker_account(account_id, Some(instrument_id))?;
+        if outcome.pending_exits.is_empty() {
+            return Err(outcome
+                .incomplete
+                .unwrap_or_else(|| "the position exit could not be requested".into()));
+        }
         let order = PlaceOrder {
             client_order_id: ClientOrderId::try_new(format!(
                 "ct-reverse-{}",
@@ -587,21 +603,28 @@ impl TradingCore {
                 reason,
             } => self.apply_refusal(&account_id, client_order_id, reason),
             VenueUpdate::Fill(fill) => {
-                self.apply_broker_fill(&account_id, fill)?;
-                if fill.realized.is_some() {
+                if self.apply_broker_fill(&account_id, fill)? {
                     self.evaluate_live_risk(event.observed_unix_nanos)?;
                 }
                 Ok(())
             }
             VenueUpdate::Position(position) => {
-                let position = self.broker_position(&account_id, position)?;
-                self.write_positions(&account_id, position.into_iter().collect(), &[], false)
+                if self.apply_open_pnl(&account_id, position)? {
+                    self.evaluate_live_risk(event.observed_unix_nanos)?;
+                }
+                Ok(())
             }
-            VenueUpdate::PositionClosed { broker_position_id } => self.write_positions(
+            VenueUpdate::BracketLevelMoved {
+                entry_broker_order_id,
+                side,
+                from_ticks,
+                to_ticks,
+            } => self.apply_bracket_move(
                 &account_id,
-                Vec::new(),
-                std::slice::from_ref(broker_position_id),
-                false,
+                entry_broker_order_id,
+                *side,
+                *from_ticks,
+                *to_ticks,
             ),
             VenueUpdate::Balance { balance } => {
                 self.store
@@ -610,120 +633,118 @@ impl TradingCore {
                 self.bump_revision()
             }
             VenueUpdate::Snapshot(snapshot) => self.apply_snapshot(&account_id, snapshot),
-            VenueUpdate::UnrealizedPnl(positions) => {
-                if self.apply_unrealized_pnl(&account_id, positions)? {
-                    self.evaluate_live_risk(event.observed_unix_nanos)?;
-                }
-                Ok(())
-            }
         }
     }
 
-    /// Broker accounts the venue can reach that hold open broker positions; only they need
-    /// the broker's unrealized P&L.
-    fn broker_accounts_with_positions(&self) -> BTreeSet<String> {
-        self.state
-            .broker_positions
-            .keys()
-            .filter(|(account_id, _)| self.connected_broker_accounts.contains(account_id))
-            .filter_map(|(account_id, _)| self.state.accounts.get(account_id))
-            .filter_map(|account| account.broker_ref.clone())
-            .collect()
-    }
-
-    pub(crate) fn wants_unrealized_pnl(&self) -> bool {
-        self.venue_outbound.is_some() && !self.broker_accounts_with_positions().is_empty()
-    }
-
-    /// Asks the venue for the unrealized P&L of every connected account with open broker
-    /// positions. A full outbound queue skips this round; the next interval asks again.
-    pub(crate) fn request_unrealized_pnl(&self) {
-        let Some(outbound) = &self.venue_outbound else {
-            return;
-        };
-        for broker_account in self.broker_accounts_with_positions() {
-            match outbound.try_send(VenueRequest::UnrealizedPnl { broker_account }) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Disconnected(_)) => return,
-            }
-        }
-    }
-
-    /// Applies the broker's unrealized P&L to the positions it names and reports whether
-    /// any value changed. It is a live mark, so it is held in memory; a position the owner
-    /// has not seen yet gets its value on the next refresh after its position event.
-    fn apply_unrealized_pnl(
+    /// Applies the venue's open P&L to the position it describes and reports whether it
+    /// changed. It is a live mark held in owner memory like a quote mark. A report whose
+    /// quantity differs from the ledger waits for the fills, or the next reconcile, that
+    /// bring the two together.
+    fn apply_open_pnl(
         &mut self,
         account_id: &TradingAccountId,
-        reports: &[PositionUnrealizedPnl],
+        report: &VenuePosition,
     ) -> Result<bool, String> {
-        let scale = self
+        let Some(open_pnl) = report.open_pnl else {
+            return Ok(false);
+        };
+        let Some(position) = self
             .state
-            .accounts
-            .get(account_id)
-            .ok_or("trading account is not registered")?
-            .currency_scale;
-        let mut changed = false;
-        for report in reports {
-            let Some(position) = self
-                .state
-                .broker_positions
-                .get_mut(&(account_id.clone(), report.broker_position_id.clone()))
-            else {
-                continue;
-            };
-            let gross = report
-                .gross
-                .exact_rescale(scale)
-                .map_err(|error| error.to_string())?;
-            let net = report
-                .net
-                .exact_rescale(scale)
-                .map_err(|error| error.to_string())?;
-            if (position.gross_unrealized, position.net_unrealized) != (gross, net) {
-                position.gross_unrealized = gross;
-                position.net_unrealized = net;
-                changed = true;
-            }
+            .positions
+            .get_mut(&(account_id.clone(), report.instrument_id.clone()))
+        else {
+            return Ok(false);
+        };
+        let reported = report
+            .net_quantity
+            .exact_rescale(position.net_quantity.scale())
+            .map_err(|error| error.to_string())?;
+        if reported != position.net_quantity || reported.units() == 0 {
+            return Ok(false);
         }
-        if changed {
-            self.bump_revision()?;
+        let open_pnl = open_pnl
+            .exact_rescale(position.unrealized_pnl.scale())
+            .map_err(|error| error.to_string())?;
+        if position.unrealized_pnl == open_pnl {
+            return Ok(false);
         }
-        Ok(changed)
+        position.unrealized_pnl = open_pnl;
+        self.mark_revision = self.mark_revision.saturating_add(1);
+        Ok(true)
     }
 
-    /// Records one broker deal once. Our order's filled quantity is the larger of what
-    /// the broker reported and what its deals add up to, so replays never double-count.
+    /// Records a bracket level the venue moved. A move of a level the owner no longer holds
+    /// changes nothing.
+    fn apply_bracket_move(
+        &mut self,
+        account_id: &TradingAccountId,
+        entry_broker_order_id: &str,
+        side: BracketSide,
+        from_ticks: i32,
+        to_ticks: i32,
+    ) -> Result<(), String> {
+        let Some(order_id) = self
+            .state
+            .orders
+            .broker_owner(entry_broker_order_id)
+            .filter(|order_id| {
+                self.state
+                    .orders
+                    .get(order_id)
+                    .is_some_and(|order| order.account_id == *account_id)
+            })
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(levels) = self
+            .state
+            .broker_brackets
+            .get(&order_id)
+            .map(|bracket| bracket.side(side))
+        else {
+            return Ok(());
+        };
+        if !levels.iter().any(|level| level.ticks == from_ticks) {
+            return Ok(());
+        }
+        if to_ticks <= 0 || levels.iter().any(|level| level.ticks == to_ticks) {
+            return Err("the broker moved a bracket level onto an invalid distance".into());
+        }
+        self.store
+            .move_broker_bracket_level(&order_id, side, from_ticks, to_ticks)?;
+        if let Some(levels) = self
+            .state
+            .broker_brackets
+            .get_mut(&order_id)
+            .map(|bracket| bracket.side_mut(side))
+        {
+            for level in levels.iter_mut().filter(|level| level.ticks == from_ticks) {
+                level.ticks = to_ticks;
+            }
+            levels.sort_by_key(|level| level.ticks);
+        }
+        self.bump_revision()
+    }
+
+    /// Records one broker deal once and runs it through the account's net position exactly
+    /// like a practice fill: position, cost basis, trade cycle, per-fill accounting and the
+    /// rule and discipline state commit with the order transition. The broker holds the
+    /// account's cash, so a broker fill writes no cash-ledger entries. Our order's filled
+    /// quantity is the larger of what the broker reported and what its deals add up to, so
+    /// replays never double-count. Returns whether the deal was new.
     fn apply_broker_fill(
         &mut self,
         account_id: &TradingAccountId,
         report: &BrokerFill,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if self.store.broker_deal_recorded(&report.broker_deal_id)? {
-            return Ok(());
+            return Ok(false);
         }
-        if !self.state.instruments.contains_key(&report.instrument_id) {
-            return Err("broker fill names an unregistered instrument".into());
-        }
+        let (account, instrument) = self.deal_terms(account_id, report)?;
         let provenance = self.venue_provenance();
         let sequence = self.state.next_sequence;
-        let bound = self
-            .state
-            .orders
-            .broker_owner(&report.broker_order_id)
-            .and_then(|order_id| self.state.orders.get(order_id))
-            .filter(|order| order.account_id == *account_id)
-            .cloned();
-        let (current, mirror) = match bound {
-            Some(order) => (order, None),
-            None => (
-                Self::mirror_order(account_id, report, sequence, &provenance)?,
-                Some(()),
-            ),
-        };
-        if report.quantity.scale() != current.quantity.scale() {
-            return Err("broker fill quantity scale does not match the order".into());
-        }
+        let (current, mirror) = self.deal_order(account_id, report, &provenance)?;
         let fill = Fill {
             id: FillId::try_new(format!("ct-fill-{}", report.broker_deal_id))
                 .map_err(|error| error.to_string())?,
@@ -741,7 +762,7 @@ impl TradingCore {
         let updated = crate::book::lifecycle::broker_deal(
             &current,
             filled_by_deals,
-            mirror.is_some(),
+            mirror,
             provenance,
             self.command_now,
         )
@@ -754,48 +775,119 @@ impl TradingCore {
             "filled at the broker",
             updated.provenance.clone(),
         )?;
-        let realized_pnl = report
-            .realized
-            .map(|realized| self.realized_in_account_currency(account_id, &realized))
-            .transpose()?;
+        let position_key = (account_id.clone(), report.instrument_id.clone());
+        let previous = self.state.positions.get(&position_key).cloned();
+        let (position, cost_basis, mut policy_update) = self.apply_fill(
+            &fill,
+            previous.as_ref(),
+            &account,
+            &instrument,
+            Liquidity::Taker,
+        )?;
+        policy_update.ledger_entries.clear();
+        let released = self.ended_brackets(
+            account_id,
+            &report.instrument_id,
+            position.net_quantity.units() == 0,
+            Some(&updated),
+        );
         self.store.insert_broker_fill(
             &BrokerFillRecord {
                 fill: &fill,
                 order: &updated,
                 event: &event,
-                mirror: mirror.map(|()| (&current, report.broker_order_id.as_str())),
+                mirror: mirror.then_some((&current, report.broker_order_id.as_str())),
                 broker_deal_id: &report.broker_deal_id,
-                broker_position_id: &report.broker_position_id,
-                realized_pnl,
+                position: &position,
+                cost_basis,
+                accounting: policy_update.accounting,
+                trade_cycle: &policy_update.trade_cycle,
+                rule_state: policy_update.rule_state.as_ref(),
+                discipline_state: &policy_update.discipline_state,
+                released_brackets: &released,
             },
             sequence + 1,
         )?;
-        if let Some(pnl) = realized_pnl {
-            self.state.fill_accounting.insert(
-                fill.id.clone(),
-                crate::core::ledger::FillAccounting {
-                    cycle_id: 0,
-                    realized_gross: Some(pnl),
-                    commission: FixedPoint::try_new(0, pnl.scale())
-                        .map_err(|error| error.to_string())?,
-                    cycle_realized: None,
-                    cycle_closed: false,
-                },
-            );
+        for order_id in &released {
+            self.state.broker_brackets.remove(order_id);
         }
-        self.state
-            .broker_fill_positions
-            .insert(fill.id.clone(), report.broker_position_id.clone());
-        self.state.next_sequence = sequence + 1;
-        self.state.orders.insert(updated.id.clone(), updated);
-        if mirror.is_some() {
+        self.apply_fill_to_memory(
+            updated,
+            event,
+            &fill,
+            FillMemoryUpdate {
+                position,
+                cost_basis,
+                position_key,
+                policy_update,
+                next_sequence: sequence + 1,
+            },
+        );
+        if mirror {
             self.state
                 .orders
-                .bind_broker(report.broker_order_id.clone(), current.id.clone());
+                .bind_broker(report.broker_order_id.clone(), current.id);
         }
-        self.state.order_events.push_back(event);
-        self.state.fills.push_back(fill);
-        self.bump_revision()
+        self.bump_revision()?;
+        Ok(true)
+    }
+
+    /// The account and instrument a deal is accounted in, at scales the deal matches.
+    fn deal_terms(
+        &self,
+        account_id: &TradingAccountId,
+        report: &BrokerFill,
+    ) -> Result<(TradingAccount, TradingInstrument), String> {
+        let instrument = self
+            .state
+            .instruments
+            .get(&report.instrument_id)
+            .cloned()
+            .ok_or("broker fill names an unregistered instrument")?;
+        if report.quantity.scale() != instrument.quantity_scale
+            || report.price.scale() != instrument.price_scale
+        {
+            return Err("broker fill scales do not match the instrument".into());
+        }
+        let account = self
+            .state
+            .accounts
+            .get(account_id)
+            .cloned()
+            .ok_or("trading account is not registered")?;
+        Ok((account, instrument))
+    }
+
+    /// The order a deal belongs to: its bound order, or a mirror of a broker-originated order
+    /// first seen through this deal. Reports whether the order is a new mirror.
+    fn deal_order(
+        &self,
+        account_id: &TradingAccountId,
+        report: &BrokerFill,
+        provenance: &TradingProvenance,
+    ) -> Result<(Order, bool), String> {
+        if let Some(order) = self
+            .state
+            .orders
+            .broker_owner(&report.broker_order_id)
+            .and_then(|order_id| self.state.orders.get(order_id))
+            .filter(|order| order.account_id == *account_id)
+        {
+            if report.quantity.scale() != order.quantity.scale() {
+                return Err("broker fill quantity scale does not match the order".into());
+            }
+            return Ok((order.clone(), false));
+        }
+        let order = Self::mirror_order(
+            account_id,
+            &report.broker_order_id,
+            &report.instrument_id,
+            report.side,
+            report.quantity,
+            provenance,
+        )?;
+        order.validate().map_err(|error| error.to_string())?;
+        Ok((order, true))
     }
 
     fn deal_quantity(
@@ -811,32 +903,35 @@ impl TradingCore {
             .map_err(|error| error.to_string())
     }
 
-    /// A broker-originated order (a server stop-loss or take-profit, a close request, or
-    /// an order placed outside Aeris) first seen through one of its deals. Its client id is
-    /// namespaced by the broker order id, because brokers reuse request ids across sessions.
+    /// A broker-originated order (a released bracket exit, a venue exit, or an order placed
+    /// outside Aeris), accepted as a working market order. Its client id is namespaced by the
+    /// broker order id, because brokers reuse request ids across sessions.
     fn mirror_order(
         account_id: &TradingAccountId,
-        report: &BrokerFill,
-        sequence: u64,
+        broker_order_id: &str,
+        instrument_id: &InstrumentId,
+        side: OrderSide,
+        quantity: FixedPoint,
         provenance: &TradingProvenance,
     ) -> Result<Order, String> {
+        let sequence = provenance.source_sequence;
         let order = Order {
             id: OrderId::try_new(format!("broker-order-{sequence}"))
                 .map_err(|error| error.to_string())?,
-            client_order_id: ClientOrderId::try_new(format!("ct-{}", report.broker_order_id))
+            client_order_id: ClientOrderId::try_new(format!("ct-{broker_order_id}"))
                 .map_err(|error| error.to_string())?,
             account_id: account_id.clone(),
-            instrument_id: report.instrument_id.clone(),
-            side: report.side,
+            instrument_id: instrument_id.clone(),
+            side,
             order_type: OrderType::Market,
             time_in_force: TimeInForce::ImmediateOrCancel,
-            quantity: report.quantity,
-            filled_quantity: FixedPoint::try_new(0, report.quantity.scale())
+            quantity,
+            filled_quantity: FixedPoint::try_new(0, quantity.scale())
                 .map_err(|error| error.to_string())?,
             limit_price: None,
             stop_price: None,
             status: OrderStatus::Working,
-            submitted_unix_nanos: report.executed_unix_nanos,
+            submitted_unix_nanos: provenance.observed_unix_nanos,
             revision: 0,
             accepted_unix_nanos: 0,
             eligible_after_unix_nanos: 0,
@@ -846,131 +941,130 @@ impl TradingCore {
             terminal_unix_nanos: None,
             provenance: provenance.clone(),
         };
-        let order = crate::book::lifecycle::accept(order, provenance.observed_unix_nanos)
-            .map_err(|error| error.to_string())?;
-        order.validate().map_err(|error| error.to_string())?;
-        Ok(order)
+        crate::book::lifecycle::accept(order, provenance.observed_unix_nanos)
+            .map_err(|error| error.to_string())
     }
 
-    /// Net realized amount of a closing deal, exactly in the account currency scale.
-    fn realized_in_account_currency(
-        &self,
-        account_id: &TradingAccountId,
-        realized: &RealizedClose,
-    ) -> Result<FixedPoint, String> {
-        let scale = self
-            .state
-            .accounts
-            .get(account_id)
-            .ok_or("trading account is not registered")?
-            .currency_scale;
-        [realized.gross_profit, realized.swap, realized.commission]
-            .into_iter()
-            .try_fold(
-                FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?,
-                |total, amount| {
-                    amount
-                        .exact_rescale(scale)
-                        .and_then(|amount| total.checked_add(amount))
-                        .map_err(|error| error.to_string())
-                },
-            )
-    }
-
-    fn broker_position(
-        &self,
-        account_id: &TradingAccountId,
-        report: &VenuePosition,
-    ) -> Result<Option<BrokerPosition>, String> {
-        // A position without fills is a pending order's placeholder, not exposure.
-        let Some(entry_price) = report.entry_price else {
-            return Ok(None);
-        };
-        let scale = self
-            .state
-            .accounts
-            .get(account_id)
-            .ok_or("trading account is not registered")?
-            .currency_scale;
-        let zero = FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?;
-        // Position events carry no P&L; the last broker refresh holds until the next one.
-        let (gross_unrealized, net_unrealized) = self
-            .state
-            .broker_positions
-            .get(&(account_id.clone(), report.broker_position_id.clone()))
-            .map_or((zero, zero), |known| {
-                (known.gross_unrealized, known.net_unrealized)
-            });
-        let position = BrokerPosition {
-            account_id: account_id.clone(),
-            instrument_id: report.instrument_id.clone(),
-            broker_position_id: report.broker_position_id.clone(),
-            side: report.side,
-            quantity: report.quantity,
-            entry_price,
-            stop_loss: report.stop_loss,
-            take_profit: report.take_profit,
-            swap: report
-                .swap
-                .exact_rescale(scale)
-                .map_err(|error| error.to_string())?,
-            commission: report
-                .commission
-                .exact_rescale(scale)
-                .map_err(|error| error.to_string())?,
-            gross_unrealized,
-            net_unrealized,
-            opened_unix_nanos: report.opened_unix_nanos,
-        };
-        position.validate().map_err(|error| error.to_string())?;
-        Ok(Some(position))
-    }
-
-    fn write_positions(
+    /// Mirrors a working broker order Aeris did not place when the venue first reports it,
+    /// so it can be seen, cancelled and matched to its deals. An order of a kind Aeris does
+    /// not place stays unmirrored until a deal arrives. Returns the mirrored order's id.
+    fn mirror_open_order(
         &mut self,
         account_id: &TradingAccountId,
-        upserts: Vec<BrokerPosition>,
-        removals: &[String],
-        replace_all: bool,
-    ) -> Result<(), String> {
-        self.store
-            .write_broker_positions(account_id, &upserts, removals, replace_all)?;
-        if replace_all {
-            self.state
-                .broker_positions
-                .retain(|(owner, _), _| owner != account_id);
+        report: &BrokerOrder,
+    ) -> Result<Option<OrderId>, String> {
+        let order_type = match report.kind {
+            BrokerOrderKind::Market => OrderType::Market,
+            BrokerOrderKind::Limit => OrderType::Limit,
+            BrokerOrderKind::Stop => OrderType::Stop,
+            BrokerOrderKind::StopLimit => OrderType::StopLimit,
+            BrokerOrderKind::Other => return Ok(None),
+        };
+        let instrument = self
+            .state
+            .instruments
+            .get(&report.instrument_id)
+            .ok_or("broker order names an unregistered instrument")?;
+        if report.quantity.scale() != instrument.quantity_scale
+            || report.filled_quantity.scale() != instrument.quantity_scale
+        {
+            return Err("broker order quantity scale does not match the instrument".into());
         }
-        for broker_position_id in removals {
-            self.state
-                .broker_positions
-                .remove(&(account_id.clone(), broker_position_id.clone()));
+        // The venue sequence keys the mirror's id; the owner sequence keys its event.
+        let sequence = self.state.next_sequence;
+        let provenance = self.broker_provenance(self.command_now, sequence);
+        let mut order = Self::mirror_order(
+            account_id,
+            &report.broker_order_id,
+            &report.instrument_id,
+            report.side,
+            report.quantity,
+            &provenance,
+        )?;
+        order.order_type = order_type;
+        if order_type != OrderType::Market {
+            order.time_in_force = TimeInForce::GoodTillCancelled;
         }
-        for position in upserts {
-            self.state.broker_positions.insert(
-                (account_id.clone(), position.broker_position_id.clone()),
-                position,
-            );
+        if matches!(order_type, OrderType::Limit | OrderType::StopLimit) {
+            order.limit_price = report.limit_price;
         }
-        self.bump_revision()
+        if matches!(order_type, OrderType::Stop | OrderType::StopLimit) {
+            order.stop_price = report.stop_price;
+        }
+        order.filled_quantity = report.filled_quantity;
+        if report.filled_quantity.units() > 0 {
+            order.status = OrderStatus::PartiallyFilled;
+        }
+        order.validate().map_err(|error| error.to_string())?;
+        let event = Self::broker_event(
+            &order,
+            sequence,
+            OrderEventKind::Accepted,
+            "reported by the broker",
+            provenance,
+        )?;
+        self.store.insert_broker_order(
+            &order,
+            &event,
+            Some(&report.broker_order_id),
+            None,
+            sequence + 1,
+        )?;
+        let order_id = order.id.clone();
+        self.state.next_sequence = sequence + 1;
+        self.state.orders.insert(order_id.clone(), order);
+        self.state
+            .orders
+            .bind_broker(report.broker_order_id.clone(), order_id.clone());
+        self.state.order_events.push_back(event);
+        self.bump_revision()?;
+        Ok(Some(order_id))
     }
 
-    /// Makes the owner agree with the broker after a (re)attach. Positions are replaced.
-    /// Open orders still at the broker are re-confirmed, which also resolves requests the
-    /// broker never answered; open orders it no longer holds are settled from their deals.
+    /// Brackets that end with this step. An entry's levels are released once the entry is
+    /// terminal and either never filled or left the account flat in the instrument, because
+    /// the venue then holds no exit for it.
+    fn ended_brackets(
+        &self,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+        flat: bool,
+        changed: Option<&Order>,
+    ) -> Vec<OrderId> {
+        self.state
+            .broker_brackets
+            .keys()
+            .filter(|order_id| {
+                changed
+                    .filter(|order| &order.id == *order_id)
+                    .or_else(|| self.state.orders.get(order_id))
+                    .is_some_and(|entry| {
+                        entry.account_id == *account_id
+                            && entry.instrument_id == *instrument_id
+                            && !entry.status.is_open()
+                            && (flat || entry.filled_quantity.units() == 0)
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn is_flat(&self, account_id: &TradingAccountId, instrument_id: &InstrumentId) -> bool {
+        self.state
+            .positions
+            .get(&(account_id.clone(), instrument_id.clone()))
+            .is_none_or(|position| position.net_quantity.units() == 0)
+    }
+
+    /// Makes the owner agree with the broker after a (re)attach. Open orders still at the
+    /// broker are re-confirmed, which also resolves requests the broker never answered, and
+    /// working orders Aeris has not seen are mirrored; open orders it no longer holds are
+    /// settled from their deals. Positions the venue disagrees with are then rebased.
     fn apply_snapshot(
         &mut self,
         account_id: &TradingAccountId,
         snapshot: &VenueSnapshot,
     ) -> Result<(), String> {
-        let positions = snapshot
-            .positions
-            .iter()
-            .map(|position| self.broker_position(account_id, position))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        self.write_positions(account_id, positions, &[], true)?;
         let mut reconfirmed = BTreeSet::new();
         for report in &snapshot.orders {
             if let Some(order) = self.reported_order(account_id, report) {
@@ -982,6 +1076,8 @@ impl TradingCore {
                     Some("confirmed by reconcile"),
                     true,
                 )?;
+            } else if let Some(mirrored) = self.mirror_open_order(account_id, report)? {
+                reconfirmed.insert(mirrored);
             }
         }
         let missing: Vec<Order> = self
@@ -1004,7 +1100,159 @@ impl TradingCore {
             let provenance = updated.provenance.clone();
             self.record_broker_transition(updated, kind, detail, provenance, None)?;
         }
-        Ok(())
+        self.rebase_positions(account_id, &snapshot.positions)
+    }
+
+    /// Rebases every position of the account the venue disagrees with. Positions in
+    /// instruments the owner has not registered cannot be accounted and are reported after
+    /// the rest are settled.
+    fn rebase_positions(
+        &mut self,
+        account_id: &TradingAccountId,
+        reports: &[VenuePosition],
+    ) -> Result<(), String> {
+        let mut instruments = self
+            .state
+            .positions
+            .values()
+            .filter(|position| {
+                position.account_id == *account_id && position.net_quantity.units() != 0
+            })
+            .map(|position| position.instrument_id.clone())
+            .collect::<BTreeSet<_>>();
+        instruments.extend(reports.iter().map(|report| report.instrument_id.clone()));
+        let mut unregistered = Vec::new();
+        for instrument_id in instruments {
+            if !self.state.instruments.contains_key(&instrument_id) {
+                unregistered.push(instrument_id.as_str().to_string());
+                continue;
+            }
+            let report = reports
+                .iter()
+                .find(|report| report.instrument_id == instrument_id);
+            self.rebase_position(account_id, &instrument_id, report)?;
+        }
+        if unregistered.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "the broker reports positions in unregistered instruments: {}",
+                unregistered.join(", ")
+            ))
+        }
+    }
+
+    /// Replaces a ledger position the venue disagrees with by the venue's net quantity and
+    /// average price. The venue averages fills at instrument prices, so the average times the
+    /// quantity is a whole number of price units up to the average's own rounding, and the
+    /// nearest unit recovers the exact basis. Realized P&L is kept; the trade cycle's P&L
+    /// becomes unknown, because fills Aeris never saw moved it. A position the venue agrees
+    /// with only takes its open P&L.
+    fn rebase_position(
+        &mut self,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+        report: Option<&VenuePosition>,
+    ) -> Result<(), String> {
+        let currency_scale = self
+            .state
+            .accounts
+            .get(account_id)
+            .ok_or("trading account is not registered")?
+            .currency_scale;
+        let instrument = self
+            .state
+            .instruments
+            .get(instrument_id)
+            .ok_or("trading instrument is not registered")?;
+        let (price_scale, quantity_scale) = (instrument.price_scale, instrument.quantity_scale);
+        let key = (account_id.clone(), instrument_id.clone());
+        let current = self.state.positions.get(&key).cloned();
+        let zero_money =
+            FixedPoint::try_new(0, currency_scale).map_err(|error| error.to_string())?;
+        let net = match report {
+            Some(report) => report.net_quantity.exact_rescale(quantity_scale),
+            None => FixedPoint::try_new(0, quantity_scale),
+        }
+        .map_err(|error| error.to_string())?;
+        let open_pnl = match report.and_then(|report| report.open_pnl) {
+            Some(open_pnl) if net.units() != 0 => open_pnl
+                .exact_rescale(currency_scale)
+                .map_err(|error| error.to_string())?,
+            _ => zero_money,
+        };
+        let ledger_net = current
+            .as_ref()
+            .map(|position| position.net_quantity.exact_rescale(quantity_scale))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .map_or(0, FixedPoint::units);
+        if ledger_net == net.units() {
+            if let Some(position) = self.state.positions.get_mut(&key)
+                && net.units() != 0
+                && position.unrealized_pnl != open_pnl
+            {
+                position.unrealized_pnl = open_pnl;
+                self.mark_revision = self.mark_revision.saturating_add(1);
+            }
+            return Ok(());
+        }
+        let (basis, average_entry_price) = venue_entry(report, net, price_scale)?;
+        let position = Position {
+            account_id: account_id.clone(),
+            instrument_id: instrument_id.clone(),
+            net_quantity: net,
+            average_entry_price,
+            realized_pnl: current
+                .as_ref()
+                .map_or(zero_money, |position| position.realized_pnl),
+            unrealized_pnl: open_pnl,
+            last_fill_unix_nanos: current
+                .as_ref()
+                .map_or(self.command_now, |position| position.last_fill_unix_nanos),
+        };
+        // The ledger's open cycle ends here, as a flatten or reversal would end it; the
+        // rebased cycle's P&L is unknown because fills Aeris never saw moved it.
+        let cycle_id = match self.state.trade_cycles.get(&key) {
+            Some(cycle) if ledger_net != 0 => cycle
+                .cycle_id
+                .checked_add(1)
+                .ok_or("trade cycle id overflowed")?,
+            Some(cycle) => cycle.cycle_id,
+            None => 0,
+        };
+        let cycle = TradeCycle {
+            account_id: account_id.clone(),
+            instrument_id: instrument_id.clone(),
+            cycle_id,
+            peak_quantity: FixedPoint::try_new(
+                net.units()
+                    .checked_abs()
+                    .ok_or("position quantity overflowed")?,
+                quantity_scale,
+            )
+            .map_err(|error| error.to_string())?,
+            realized_pnl: zero_money,
+            risk_realized_pnl: zero_money,
+            pnl_known: false,
+        };
+        let released = if net.units() == 0 {
+            self.ended_brackets(account_id, instrument_id, true, None)
+        } else {
+            Vec::new()
+        };
+        self.store
+            .rebase_position(&position, basis, &cycle, &released)?;
+        for order_id in &released {
+            self.state.broker_brackets.remove(order_id);
+        }
+        match basis {
+            Some(basis) => self.state.cost_basis.insert(key.clone(), basis),
+            None => self.state.cost_basis.remove(&key),
+        };
+        self.state.trade_cycles.insert(key.clone(), cycle);
+        self.state.positions.insert(key, position);
+        self.bump_revision()
     }
 
     /// The owner order a broker report describes: by its bound broker id, or, before the
@@ -1028,8 +1276,9 @@ impl TradingCore {
             .cloned()
     }
 
-    /// Applies one broker order report. `resolve_pending` (a reconcile) treats an
-    /// unanswered modify or cancel as settled by the broker's current state.
+    /// Applies one broker order report; a working order Aeris has not seen is mirrored.
+    /// `resolve_pending` (a reconcile) treats an unanswered modify or cancel as settled by
+    /// the broker's current state.
     fn apply_broker_order(
         &mut self,
         account_id: &TradingAccountId,
@@ -1039,6 +1288,14 @@ impl TradingCore {
         resolve_pending: bool,
     ) -> Result<(), String> {
         let Some(current) = self.reported_order(account_id, report) else {
+            if matches!(
+                state,
+                BrokerOrderState::Accepted
+                    | BrokerOrderState::Replaced
+                    | BrokerOrderState::PartiallyFilled
+            ) {
+                self.mirror_open_order(account_id, report)?;
+            }
             return Ok(());
         };
         let binding = self
@@ -1135,7 +1392,7 @@ impl TradingCore {
             .try_reserve(request)
             .map_err(|error| outbound_error(&error))?;
         self.store
-            .transition_broker_order(updated, &event, sequence + 1, None)?;
+            .transition_broker_order(updated, &event, sequence + 1, None, &[])?;
         self.state.next_sequence = sequence + 1;
         self.state
             .orders
@@ -1178,6 +1435,8 @@ impl TradingCore {
         Ok(event)
     }
 
+    /// Persists one venue-driven order transition. An entry that ends releases its bracket
+    /// levels in the same transaction when the venue no longer holds exits for it.
     fn record_broker_transition(
         &mut self,
         updated: Order,
@@ -1189,18 +1448,91 @@ impl TradingCore {
         updated.validate().map_err(|error| error.to_string())?;
         let sequence = self.state.next_sequence;
         let event = Self::broker_event(&updated, sequence, kind, detail, provenance)?;
+        let released = if updated.status.is_open() {
+            Vec::new()
+        } else {
+            self.ended_brackets(
+                &updated.account_id,
+                &updated.instrument_id,
+                self.is_flat(&updated.account_id, &updated.instrument_id),
+                Some(&updated),
+            )
+        };
         self.store
-            .transition_broker_order(&updated, &event, sequence + 1, binding)?;
+            .transition_broker_order(&updated, &event, sequence + 1, binding, &released)?;
         if let Some(broker_order_id) = binding {
             self.state
                 .orders
                 .bind_broker(broker_order_id.to_string(), updated.id.clone());
+        }
+        for order_id in &released {
+            self.state.broker_brackets.remove(order_id);
         }
         self.state.next_sequence = sequence + 1;
         self.state.orders.insert(updated.id.clone(), updated);
         self.state.order_events.push_back(event);
         self.bump_revision()
     }
+}
+
+/// The exact cost basis and the average entry price of a venue-reported position of `net`.
+fn venue_entry(
+    report: Option<&VenuePosition>,
+    net: FixedPoint,
+    price_scale: u8,
+) -> Result<(Option<CostBasis>, Option<FixedPoint>), String> {
+    if net.units() == 0 {
+        return Ok((None, None));
+    }
+    let reported = report
+        .and_then(|report| report.average_price)
+        .ok_or("the broker reported an open position without its average price")?;
+    let basis = venue_basis(
+        reported,
+        net,
+        price_scale
+            .checked_add(net.scale())
+            .ok_or("position cost basis scale overflowed")?,
+    )?;
+    let average =
+        aeris_trading::round_divide_i128(basis.units, i128::from(net.units().unsigned_abs()))
+            .map_err(|error| error.to_string())?;
+    let average = FixedPoint::try_new(
+        i64::try_from(average).map_err(|_| "position average overflowed".to_string())?,
+        price_scale,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((Some(basis), Some(average)))
+}
+
+/// The exact cost basis of `net` at `average`, at the instrument's combined basis scale,
+/// rounded once to the nearest basis unit when the average carries finer decimals.
+fn venue_basis(average: FixedPoint, net: FixedPoint, scale: u8) -> Result<CostBasis, String> {
+    if average.units() <= 0 {
+        return Err("the broker reported a non-positive average price".into());
+    }
+    let units = i128::from(average.units())
+        .checked_mul(i128::from(net.units().unsigned_abs()))
+        .ok_or("position cost basis overflowed")?;
+    let reported = average
+        .scale()
+        .checked_add(net.scale())
+        .ok_or("position cost basis scale overflowed")?;
+    if reported <= scale {
+        return CostBasis {
+            units,
+            scale: reported,
+        }
+        .rescaled(scale);
+    }
+    let divisor = 10_i128
+        .checked_pow(u32::from(reported - scale))
+        .ok_or("position cost basis scale overflowed")?;
+    Ok(CostBasis {
+        units: aeris_trading::round_divide_i128(units, divisor)
+            .map_err(|error| error.to_string())?,
+        scale,
+    })
 }
 
 fn broker_report_detail(state: BrokerOrderState) -> &'static str {

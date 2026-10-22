@@ -31,6 +31,13 @@ impl Drop for TestDirectory {
     }
 }
 
+/// What the scripted test venue supports.
+pub(crate) const VENUE_CAPABILITIES: aeris_trading::venue::VenueCapabilities =
+    aeris_trading::venue::VenueCapabilities {
+        bracket_levels: aeris_trading::venue::MAXIMUM_BRACKET_LEVELS,
+        client_order_id_limit: 50,
+    };
+
 pub(crate) fn config(directory: &TestDirectory) -> TradingServiceConfig {
     TradingServiceConfig {
         database_path: directory.0.join("trading.sqlite3"),
@@ -121,7 +128,9 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
             starting_equity: None,
         })
         .expect("broker account");
-    let (_generation, _receiver) = service.attach_demo_venue().expect("venue");
+    let (_generation, _receiver) = service
+        .attach_demo_venue(VENUE_CAPABILITIES)
+        .expect("venue");
     let mut request = market_order("unknown-grid", OrderSide::Buy, 1, 1_000);
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
@@ -4595,7 +4604,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
         })
         .expect("flatten succeeds");
     assert_eq!(fills.fills.len(), 1);
-    assert_eq!(fills.pending_close_requests.len(), 0);
+    assert_eq!(fills.pending_exits, []);
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
     assert_eq!(snapshot.fills.len(), 2);
@@ -4790,7 +4799,7 @@ fn reverse_closes_and_reopens_the_exact_opposite_position() {
         )
         .expect("position reverses");
     assert_eq!(fills.fills.len(), 2);
-    assert_eq!(fills.pending_close_requests.len(), 0);
+    assert_eq!(fills.pending_exits, []);
     let position = service.snapshot().expect("snapshot").positions[0].clone();
     assert_eq!(position.net_quantity.units(), -1);
     service

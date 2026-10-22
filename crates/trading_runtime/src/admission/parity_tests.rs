@@ -80,7 +80,9 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
             starting_equity: None,
         })
         .expect("demo account");
-    let (_generation, outbound) = service.attach_demo_venue().expect("venue");
+    let (_generation, outbound) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("venue");
     // Attachment starts by requesting reconciliation for existing broker accounts.
     while outbound.try_recv().is_ok() {}
     let before = service.snapshot().expect("before");
@@ -115,7 +117,8 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
             );
         }
     }
-    let mut too_long = market_order(&"b".repeat(51), OrderSide::Buy, 1, 1_000);
+    let limit = crate::tests::VENUE_CAPABILITIES.client_order_id_limit;
+    let mut too_long = market_order(&"b".repeat(limit + 1), OrderSide::Buy, 1, 1_000);
     too_long.account_id = broker_id.clone();
     too_long.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     assert_eq!(
@@ -170,7 +173,9 @@ fn broker_day_entry_maps_to_gtc_before_the_venue_request() {
             starting_equity: None,
         })
         .expect("demo account");
-    let (_generation, outbound) = service.attach_demo_venue().expect("venue");
+    let (_generation, outbound) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("venue");
     while outbound.try_recv().is_ok() {}
     let mut entry = market_order("broker-day", OrderSide::Buy, 1, 1_000);
     entry.account_id = broker_id;

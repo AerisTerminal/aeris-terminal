@@ -2,13 +2,13 @@ use super::*;
 use crate::tests::{
     TestDirectory, config, instrument, market_order, start_service, start_service_with_config,
 };
-use crate::{ModifyOrder, PlaceOrder, TradingService, VenueRoute};
+use crate::{ModifyOrder, MoveBracketLevel, PendingExit, PlaceOrder, TradingService, VenueRoute};
 use aeris_trading::{
     AccountEnvironment, ClientOrderId, FixedPoint, Order, OrderSide, OrderStatus, OrderType,
-    TimeInForce, TradingAccount, TradingAccountId,
+    Position, TimeInForce, TradingAccount, TradingAccountId,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState, PositionUnrealizedPnl,
-        RealizedClose, VenuePosition, VenueSnapshot,
+        BracketLevel, BracketSide, BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState,
+        ServerBracket, VenuePosition, VenueSnapshot,
     },
 };
 use std::{
@@ -48,7 +48,9 @@ fn setup(
     service
         .register_instrument(instrument())
         .expect("instrument");
-    let (generation, receiver) = service.attach_demo_venue().expect("attach");
+    let (generation, receiver) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("attach");
     assert_eq!(generation, 1);
     // Every attach first reconciles each demo broker account; with nothing recorded yet
     // there are no deals to replay.
@@ -132,8 +134,6 @@ fn report(order: &Order, broker_order_id: &str, filled: i64) -> BrokerOrder {
         filled_quantity: point(filled, order.quantity.scale()),
         limit_price: order.limit_price,
         stop_price: order.stop_price,
-        broker_position_id: Some("77".into()),
-        closing: false,
     }
 }
 
@@ -186,34 +186,47 @@ fn assert_broker_orders_survive_restart(directory: &TestDirectory, service: &Tra
         .expect("shutdown");
 }
 
+/// A buy deal at 90.00; the fixture contract is worth 50.00 per point.
 fn fill(deal: &str, broker_order_id: &str, quantity: i64) -> BrokerFill {
     BrokerFill {
         broker_deal_id: deal.into(),
         broker_order_id: broker_order_id.into(),
-        broker_position_id: "77".into(),
         instrument_id: instrument().instrument_id,
         side: OrderSide::Buy,
         price: point(9_000, 2),
         quantity: point(quantity, 0),
         executed_unix_nanos: 2_000,
-        commission: None,
-        realized: None,
     }
 }
 
-fn position(id: &str, quantity: i64) -> VenuePosition {
-    VenuePosition {
-        broker_position_id: id.into(),
-        instrument_id: instrument().instrument_id,
-        side: OrderSide::Buy,
-        quantity: point(quantity, 0),
-        entry_price: Some(point(9_000, 2)),
-        stop_loss: None,
-        take_profit: None,
-        swap: point(0, 2),
-        commission: point(-35, 2),
-        opened_unix_nanos: 2_000,
+fn sell(deal: &str, broker_order_id: &str, quantity: i64, price: i64) -> BrokerFill {
+    BrokerFill {
+        side: OrderSide::Sell,
+        price: point(price, 2),
+        ..fill(deal, broker_order_id, quantity)
     }
+}
+
+/// The venue's report of the account's net position at 90.00, without open P&L.
+fn position(net: i64) -> VenuePosition {
+    VenuePosition {
+        instrument_id: instrument().instrument_id,
+        net_quantity: point(net, 0),
+        average_price: (net != 0).then(|| point(9_000, 2)),
+        open_pnl: None,
+    }
+}
+
+fn broker_position(service: &TradingService) -> Option<Position> {
+    service
+        .snapshot()
+        .expect("snapshot")
+        .positions
+        .into_iter()
+        .find(|position| {
+            position.account_id == broker().id
+                && position.instrument_id == instrument().instrument_id
+        })
 }
 
 #[test]
@@ -447,7 +460,9 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
         panic!("a place request");
     };
     assert_eq!(sent.broker_account, BROKER_ACCOUNT);
-    let (generation, _retired) = service.attach_demo_venue().expect("reconnect");
+    let (generation, _retired) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reconnect");
     assert_eq!(generation, 2);
     let inbox = service.demo_venue_inbox();
     inbox
@@ -486,7 +501,9 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 
     let restarted = start_service(&directory);
-    let (generation, receiver) = restarted.attach_demo_venue().expect("advance");
+    let (generation, receiver) = restarted
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("advance");
     assert_eq!(generation, 3, "a restart never reuses a generation");
     // The open order makes the reconcile replay deals from its submission.
     assert!(matches!(
@@ -780,17 +797,10 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
     );
     assert_broker_lifecycle(&service, &order, 4, true);
 
-    // A server stop-loss closes the position through an order Aeris never placed.
-    let mut close = fill("d3", "802", 3);
-    close.side = OrderSide::Sell;
-    close.realized = Some(RealizedClose {
-        gross_profit: point(1_250, 2),
-        swap: point(-12, 2),
-        commission: point(-35, 2),
-        balance: point(1_001_203, 2),
-    });
+    // A server-held stop closes the position through an order Aeris never placed, and the
+    // ledger realizes it like any exit: 0.50 points on 3 contracts at 50.00 a point.
     inbox
-        .push(venue(1, VenueUpdate::Fill(close)))
+        .push(venue(1, VenueUpdate::Fill(sell("d3", "802", 3, 9_050))))
         .expect("closing deal");
     let snapshot = service.snapshot().expect("snapshot");
     let mirror = snapshot
@@ -806,8 +816,12 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
         .iter()
         .find(|candidate| candidate.order_id == mirror.id)
         .expect("closing fill");
-    assert_eq!(snapshot.fill_realized_pnl[&closing.id], point(1_203, 2));
+    assert_eq!(snapshot.fill_realized_pnl[&closing.id], point(7_500, 2));
     assert_eq!(snapshot.round_trips.len(), 1, "the position is closed");
+    assert_eq!(
+        broker_position(&service).map(|position| position.net_quantity),
+        Some(point(0, 0))
+    );
     assert_broker_orders_survive_restart(&directory, &service);
 }
 
@@ -815,31 +829,19 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
 fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart() {
     let (directory, service, _receiver) = setup("venue-round-trips");
     let inbox = service.demo_venue_inbox();
-    inbox
-        .push(venue(1, VenueUpdate::Position(position("77", 3))))
-        .expect("open position");
     for (deal, quantity) in [("d1", 1), ("d2", 2)] {
         inbox
             .push(venue(1, VenueUpdate::Fill(fill(deal, "801", quantity))))
             .expect("entry");
     }
-    let closing_deal = |deal, quantity, price, executed_unix_nanos, gross_profit| {
-        let mut close = fill(deal, "802", quantity);
-        close.side = OrderSide::Sell;
-        close.price = point(price, 2);
-        close.executed_unix_nanos = executed_unix_nanos;
-        close.realized = Some(RealizedClose {
-            gross_profit: point(gross_profit, 2),
-            swap: point(0, 2),
-            commission: point(-35, 2),
-            balance: point(1_001_465, 2),
-        });
-        close
+    let closing_deal = |deal, quantity, price, executed_unix_nanos| BrokerFill {
+        executed_unix_nanos,
+        ..sell(deal, "802", quantity, price)
     };
     inbox
         .push(venue(
             1,
-            VenueUpdate::Fill(closing_deal("d3", 1, 9_500, 3_000, 500)),
+            VenueUpdate::Fill(closing_deal("d3", 1, 9_500, 3_000)),
         ))
         .expect("partial closing deal");
     let row = |trip: &crate::TradeRoundTrip| {
@@ -854,29 +856,26 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
     let partial = (
         Some((point(1, 0), point(9_000, 2))),
         Some((point(1, 0), point(9_500, 2))),
-        Some(point(465, 2)),
+        Some(point(25_000, 2)),
     );
     let trips = service.snapshot().expect("snapshot").round_trips;
     assert_eq!(
-        trips.iter().map(row).collect::<Vec<_>>(),
+        trips
+            .iter()
+            .filter(|trip| trip.closed)
+            .map(row)
+            .collect::<Vec<_>>(),
         [partial],
-        "a partial close is history while the broker still holds the rest"
+        "a partial close is history while the rest is still open"
     );
+    assert_eq!(trips.iter().filter(|trip| !trip.closed).count(), 1);
 
     inbox
         .push(venue(
             1,
-            VenueUpdate::Fill(closing_deal("d4", 2, 9_600, 4_000, 1_200)),
+            VenueUpdate::Fill(closing_deal("d4", 2, 9_600, 4_000)),
         ))
         .expect("final closing deal");
-    inbox
-        .push(venue(
-            1,
-            VenueUpdate::PositionClosed {
-                broker_position_id: "77".into(),
-            },
-        ))
-        .expect("closed");
     let expected = |trips: &[crate::TradeRoundTrip]| {
         assert_eq!(
             trips.iter().map(row).collect::<Vec<_>>(),
@@ -884,7 +883,7 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
                 (
                     Some((point(2, 0), point(9_000, 2))),
                     Some((point(2, 0), point(9_600, 2))),
-                    Some(point(1_165, 2)),
+                    Some(point(60_000, 2)),
                 ),
                 partial,
             ]
@@ -898,7 +897,7 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
             .iter()
             .find(|pnl| pnl.account_id == broker().id)
             .map(|pnl| pnl.realized),
-        Some(point(1_630, 2)),
+        Some(point(85_000, 2)),
         "every recorded closing deal counts toward the realized P&L"
     );
 
@@ -908,27 +907,14 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
 }
 
 #[test]
-fn positions_follow_reports_and_reconcile_settles_every_open_order() {
+fn reconcile_settles_every_open_order_and_rebases_positions_the_venue_disagrees_with() {
     let (directory, service, receiver) = setup("venue-reconcile");
     let inbox = service.demo_venue_inbox();
+    // A position report is not a fill: only deals and reconciles move the ledger.
     inbox
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .push(venue(1, VenueUpdate::Position(position(2))))
         .expect("position");
-    inbox
-        .push(venue(1, VenueUpdate::Position(position("78", 1))))
-        .expect("position");
-    inbox
-        .push(venue(
-            1,
-            VenueUpdate::PositionClosed {
-                broker_position_id: "78".into(),
-            },
-        ))
-        .expect("closed");
-    let positions = service.snapshot().expect("snapshot").broker_positions;
-    assert_eq!(positions.len(), 1);
-    assert_eq!(positions[0].broker_position_id, "77");
-    assert_eq!(positions[0].commission, point(-35, 2));
+    assert_eq!(broker_position(&service), None);
 
     let lost = service
         .place_order(request("never-received"))
@@ -960,15 +946,15 @@ fn positions_follow_reports_and_reconcile_settles_every_open_order() {
     while receiver.try_recv().is_ok() {}
 
     // After a reconnect the broker holds only the kept order, at the price it accepted,
-    // and a different set of positions.
+    // and a position of 4 whose fills the owner never saw.
     let mut kept_report = report(&kept, "902", 0);
     kept_report.limit_price = Some(point(8_950, 2));
     inbox
         .push(venue(
             1,
             VenueUpdate::Snapshot(VenueSnapshot {
-                orders: vec![kept_report],
-                positions: vec![position("79", 4)],
+                orders: vec![kept_report.clone()],
+                positions: vec![position(4)],
             }),
         ))
         .expect("snapshot");
@@ -989,51 +975,40 @@ fn positions_follow_reports_and_reconcile_settles_every_open_order() {
     assert_eq!(kept_now.status, OrderStatus::Working);
     assert_eq!(kept_now.limit_price, Some(point(8_950, 2)));
     assert_broker_lifecycle(&service, &kept, 4, false);
+    let rebased = broker_position(&service).expect("rebased position");
     assert_eq!(
-        snapshot
-            .broker_positions
-            .iter()
-            .map(|position| position.broker_position_id.as_str())
-            .collect::<Vec<_>>(),
-        ["79"]
+        (rebased.net_quantity, rebased.average_entry_price),
+        (point(4, 0), Some(point(9_000, 2)))
     );
+
+    // A venue that reports the account flat closes the ledger position the same way.
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Snapshot(VenueSnapshot {
+                orders: vec![kept_report],
+                positions: Vec::new(),
+            }),
+        ))
+        .expect("flat snapshot");
+    let flat = broker_position(&service).expect("flat position");
+    assert_eq!(
+        (flat.net_quantity, flat.average_entry_price),
+        (point(0, 0), None)
+    );
+    let positions = service.snapshot().expect("snapshot").positions;
     assert_broker_orders_survive_restart(&directory, &service);
+    let restarted = start_service(&directory);
+    assert_eq!(restarted.snapshot().expect("restored").positions, positions);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
 }
 
 #[test]
-fn broker_positions_close_and_amend_through_the_venue() {
-    let (_directory, service, receiver) = setup("venue-positions");
-    service
-        .demo_venue_inbox()
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
-        .expect("position");
-    service
-        .close_broker_position(broker().id, "77".into())
-        .expect("close");
-    assert!(matches!(
-        receiver.recv().expect("close"),
-        VenueRequest::ClosePosition { broker_position_id, quantity, .. }
-            if broker_position_id == "77" && quantity == point(2, 0)
-    ));
-    service
-        .amend_broker_position_sltp(broker().id, "77".into(), Some(point(8_800, 2)), None)
-        .expect("amend");
-    assert!(matches!(
-        receiver.recv().expect("amend"),
-        VenueRequest::AmendPositionProtection { stop_loss: Some(stop), take_profit: None, .. }
-            if stop == point(8_800, 2)
-    ));
-    assert!(
-        service
-            .close_broker_position(broker().id, "unknown".into())
-            .is_err()
-    );
-}
-
-#[test]
-fn a_broker_flatten_requests_closes_for_every_instrument() {
+fn a_broker_flatten_exits_every_ledger_position_and_waits_for_the_fills() {
     // VAL-TRD-062: a scripted broker account with positions on two symbols receives
-    // close requests for both from one flatten; an instrument scope closes only its own.
+    // exit requests for both from one flatten; an instrument scope exits only its own.
     let (_directory, service, receiver) = setup("venue-flatten-all");
     let mut second_instrument = instrument();
     second_instrument.instrument_id =
@@ -1043,13 +1018,22 @@ fn a_broker_flatten_requests_closes_for_every_instrument() {
         .expect("second instrument");
     let inbox = service.demo_venue_inbox();
     inbox
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
-        .expect("position 77");
-    let mut second_position = position("78", 1);
-    second_position.instrument_id = second_instrument.instrument_id.clone();
+        .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
+        .expect("long position");
     inbox
-        .push(venue(1, VenueUpdate::Position(second_position)))
-        .expect("position 78");
+        .push(venue(
+            1,
+            VenueUpdate::Fill(BrokerFill {
+                instrument_id: second_instrument.instrument_id.clone(),
+                ..sell("d2", "802", 1, 9_000)
+            }),
+        ))
+        .expect("short position");
+    let exit = |instrument_id: &crate::InstrumentId, net| PendingExit {
+        account_id: broker().id,
+        instrument_id: instrument_id.clone(),
+        net_quantity: point(net, 0),
+    };
 
     let scoped = service
         .flatten(crate::FlattenScope {
@@ -1057,12 +1041,17 @@ fn a_broker_flatten_requests_closes_for_every_instrument() {
             instrument: Some(instrument().instrument_id),
         })
         .expect("instrument-scoped broker flatten");
-    assert_eq!(scoped.pending_close_requests, ["77".to_string()]);
+    assert_eq!(scoped.pending_exits, [exit(&instrument().instrument_id, 2)]);
     assert_eq!(scoped.incomplete, None);
     assert!(matches!(
-        receiver.recv().expect("close 77"),
-        VenueRequest::ClosePosition { broker_position_id, .. } if broker_position_id == "77"
+        receiver.recv().expect("exit"),
+        VenueRequest::ExitPosition { instrument_id, .. } if instrument_id == instrument().instrument_id
     ));
+    assert_eq!(
+        broker_position(&service).map(|position| position.net_quantity),
+        Some(point(2, 0)),
+        "the position stays until the venue reports the exit's fills"
+    );
 
     let all = service
         .flatten(crate::FlattenScope {
@@ -1071,19 +1060,175 @@ fn a_broker_flatten_requests_closes_for_every_instrument() {
         })
         .expect("account-wide broker flatten");
     assert_eq!(
-        all.pending_close_requests,
-        ["77".to_string(), "78".to_string()]
+        all.pending_exits,
+        [
+            exit(&second_instrument.instrument_id, -1),
+            exit(&instrument().instrument_id, 2)
+        ]
     );
     assert_eq!(all.incomplete, None);
-    let mut closed = Vec::new();
-    while let Ok(VenueRequest::ClosePosition {
-        broker_position_id, ..
-    }) = receiver.try_recv()
-    {
-        closed.push(broker_position_id);
+    // A whole-account flatten first cancels every order the venue holds, bracket exits
+    // included.
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(VenueRequest::CancelAll { broker_account }) if broker_account == BROKER_ACCOUNT
+    ));
+    let mut exited = Vec::new();
+    while let Ok(VenueRequest::ExitPosition { instrument_id, .. }) = receiver.try_recv() {
+        exited.push(instrument_id);
     }
-    closed.sort();
-    assert_eq!(closed, ["77".to_string(), "78".to_string()]);
+    assert_eq!(
+        exited,
+        [
+            second_instrument.instrument_id.clone(),
+            instrument().instrument_id
+        ]
+    );
+
+    // The venue's exit fills flatten the ledger.
+    inbox
+        .push(venue(1, VenueUpdate::Fill(sell("d3", "803", 2, 9_000))))
+        .expect("long exit");
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Fill(BrokerFill {
+                instrument_id: second_instrument.instrument_id.clone(),
+                ..fill("d4", "804", 1)
+            }),
+        ))
+        .expect("short exit");
+    let positions = service.snapshot().expect("snapshot").positions;
+    assert!(
+        positions
+            .iter()
+            .filter(|position| position.account_id == broker().id)
+            .all(|position| position.net_quantity.units() == 0)
+    );
+}
+
+fn place_bracket(service: &TradingService, id: &str) -> Order {
+    let template = crate::BracketStrategyTemplate {
+        template_id: "broker-bracket".into(),
+        revision: 1,
+        name: "Broker bracket".into(),
+        stop_offset_ticks: 8,
+        targets: vec![crate::BracketTarget {
+            offset_ticks: 16,
+            quantity_percent: 100,
+        }],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    };
+    let placement = service
+        .place_inline_bracket(crate::PlaceInlineBracket {
+            entry: request(id),
+            template,
+        })
+        .expect("bracket");
+    let crate::PlacementOutcome::BrokerProtected(order) = placement else {
+        panic!("a broker bracket is held by the broker");
+    };
+    order
+}
+
+#[test]
+fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
+    let (directory, service, receiver) = setup("venue-bracket-move");
+    let entry = place_bracket(&service, "moved-entry");
+    assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
+    let stop = |current_ticks, new_ticks| MoveBracketLevel {
+        client_order_id: entry.client_order_id.clone(),
+        side: BracketSide::Stop,
+        current_ticks,
+        new_ticks,
+    };
+    assert!(
+        service
+            .move_bracket_level(stop(8, 6))
+            .expect_err("unacknowledged entry")
+            .contains("not acknowledged")
+    );
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            order_update(report(&entry, "1201", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("accepted");
+    service
+        .move_bracket_level(stop(8, 6))
+        .expect("move requested");
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(VenueRequest::MoveBracketLevel {
+            entry_broker_order_id,
+            side: BracketSide::Stop,
+            current_ticks: 8,
+            new_ticks: 6,
+            ..
+        }) if entry_broker_order_id == "1201"
+    ));
+    assert!(
+        service.move_bracket_level(stop(6, 5)).is_err(),
+        "the level keeps its distance until the venue confirms the move"
+    );
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            VenueUpdate::BracketLevelMoved {
+                entry_broker_order_id: "1201".into(),
+                side: BracketSide::Stop,
+                from_ticks: 8,
+                to_ticks: 6,
+            },
+        ))
+        .expect("moved");
+    assert!(service.move_bracket_level(stop(8, 7)).is_err());
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+
+    // The moved level survives a restart.
+    let restarted = start_service(&directory);
+    let (generation, receiver) = restarted
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reattach");
+    restarted
+        .move_bracket_level(stop(6, 5))
+        .expect("the confirmed distance is current");
+    while receiver.try_recv().is_ok() {}
+
+    // The entry fills, a released stop closes the position, and the levels end with it.
+    let inbox = restarted.demo_venue_inbox();
+    inbox
+        .push(venue(generation, VenueUpdate::Fill(fill("d1", "1201", 1))))
+        .expect("entry fill");
+    restarted
+        .move_bracket_level(stop(6, 5))
+        .expect("levels stay while the position is open");
+    inbox
+        .push(venue(
+            generation,
+            VenueUpdate::Fill(sell("d2", "1202", 1, 8_850)),
+        ))
+        .expect("stop fill");
+    assert!(
+        restarted
+            .move_bracket_level(stop(6, 5))
+            .expect_err("released")
+            .contains("no server-side bracket")
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+    let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
+    let levels: i64 = database
+        .query_row("SELECT count(*) FROM broker_bracket_levels", [], |row| {
+            row.get(0)
+        })
+        .expect("level count");
+    assert_eq!(levels, 0);
 }
 
 #[test]
@@ -1109,7 +1254,7 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
     assert_eq!(outcome.accounts_locked, 2);
     assert_eq!(outcome.cancelled, []);
     assert_eq!(outcome.fills, []);
-    assert_eq!(outcome.pending_close_requests, Vec::<String>::new());
+    assert_eq!(outcome.pending_exits, []);
     assert_eq!(outcome.unpriced, []);
     assert_eq!(outcome.incomplete, None);
     let locks = service.snapshot().expect("snapshot").risk_locks;
@@ -1119,7 +1264,9 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
             "{account:?} locked"
         );
     }
-    let _venue = service.attach_demo_venue().expect("attach");
+    let _venue = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("attach");
     assert!(
         service
             .place_order(request("after-kill"))
@@ -1130,12 +1277,14 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
 }
 
 #[test]
-fn the_kill_switch_reports_broker_orders_it_could_not_cancel_after_locking() {
-    let (_directory, service, _receiver) = setup("venue-kill-pending");
-    // An unacknowledged order has no broker id yet, so no cancel can be requested.
-    service
-        .place_order(request("unacknowledged"))
-        .expect("pending");
+fn the_kill_switch_reports_venue_requests_it_could_not_make_after_locking() {
+    let (_directory, service, receiver) = setup("venue-kill-pending");
+    for index in 0..OUTBOUND_CAPACITY {
+        service
+            .place_order(request(&format!("unacknowledged-{index}")))
+            .expect("pending");
+    }
+    // The request queue is full, so the venue cannot be asked to cancel anything.
     let outcome = service
         .kill_switch(Some(broker().id), "test".into(), 5_000)
         .expect("the lock and simulated step still commit");
@@ -1145,10 +1294,7 @@ fn the_kill_switch_reports_broker_orders_it_could_not_cancel_after_locking() {
         incomplete.starts_with("accounts are locked;"),
         "{incomplete}"
     );
-    assert!(
-        incomplete.contains("could not be cancelled"),
-        "{incomplete}"
-    );
+    assert!(incomplete.contains("were not cancelled"), "{incomplete}");
     assert!(
         service
             .snapshot()
@@ -1157,6 +1303,20 @@ fn the_kill_switch_reports_broker_orders_it_could_not_cancel_after_locking() {
             .iter()
             .any(|lock| lock.account_id == broker().id)
     );
+    // Once the venue can be asked again, one cancel-all covers every order, including
+    // those the broker never acknowledged.
+    while receiver.try_recv().is_ok() {}
+    let outcome = service
+        .flatten(crate::FlattenScope {
+            account: Some(broker().id),
+            instrument: None,
+        })
+        .expect("flatten");
+    assert_eq!(outcome.incomplete, None);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(VenueRequest::CancelAll { broker_account }) if broker_account == BROKER_ACCOUNT
+    ));
 }
 
 #[test]
@@ -1221,49 +1381,41 @@ fn day_pending_orders_rest_good_till_cancelled_and_market_orders_fill_or_cancel(
 }
 
 #[test]
-fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
+fn a_broker_bracket_sends_server_levels_at_the_template_distances() {
     let (directory, service, receiver) = setup("venue-bracket");
-    let template = crate::BracketStrategyTemplate {
-        template_id: "broker-bracket".into(),
-        revision: 1,
-        name: "Broker bracket".into(),
-        stop_offset_ticks: 8,
-        targets: vec![crate::BracketTarget {
-            offset_ticks: 16,
-            quantity_percent: 100,
-        }],
-        trailing_stop: None,
-        break_even: None,
-        enabled: true,
-    };
-    let placement = service
-        .place_inline_bracket(crate::PlaceInlineBracket {
-            entry: request("protected-entry"),
-            template,
-        })
-        .expect("bracket");
-    let crate::PlacementOutcome::BrokerProtected(order) = placement else {
-        panic!("a broker bracket is held by the broker");
-    };
+    let order = place_bracket(&service, "protected-entry");
     assert_eq!(order.status, OrderStatus::Pending);
     let VenueRequest::Place(sent) = receiver.try_recv().expect("place") else {
         panic!("a place request");
     };
-    // The fixture tick is 0.25, so 8 and 16 ticks are 2.00 and 4.00.
+    let level = |ticks| BracketLevel {
+        quantity: point(1, 0),
+        ticks,
+    };
     assert_eq!(
-        (sent.stop_loss, sent.take_profit),
-        (
-            Some(aeris_trading::venue::Protection::Distance(point(200, 2))),
-            Some(aeris_trading::venue::Protection::Distance(point(400, 2)))
-        )
+        sent.bracket,
+        Some(ServerBracket {
+            targets: vec![level(16)],
+            stops: vec![level(8)],
+        })
     );
     assert_eq!(service.snapshot().expect("snapshot").managed_brackets, []);
-    // Broker brackets stay server-side: the local group authority never records them.
+    // Broker brackets stay server-side: the local group authority never records them, and
+    // the levels persist with the entry order.
     let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
-    let groups: i64 = database
-        .query_row("SELECT count(*) FROM order_groups", [], |row| row.get(0))
-        .expect("group count");
-    assert_eq!(groups, 0, "a broker bracket creates no order-group rows");
+    let count = |table: &str| -> i64 {
+        database
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("row count")
+    };
+    assert_eq!(
+        count("order_groups"),
+        0,
+        "a broker bracket creates no order-group rows"
+    );
+    assert_eq!(count("broker_bracket_levels"), 2);
 }
 
 fn risk_profile(daily_loss_limit: i64, max_contracts: i64) -> crate::RiskProfile {
@@ -1309,7 +1461,7 @@ fn open_broker_positions_count_toward_the_maximum_contract_rule() {
     observe_broker(&service);
     service
         .demo_venue_inbox()
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
         .expect("position");
     assert!(
         service
@@ -1322,7 +1474,7 @@ fn open_broker_positions_count_toward_the_maximum_contract_rule() {
 #[test]
 fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
     let (_directory, service, _receiver) = setup("venue-loss-rules");
-    let mut baseline = risk_profile(1_000, 10);
+    let mut baseline = risk_profile(5_000, 10);
     baseline.session_start_realized_pnl = point(5, 2);
     assert!(
         service
@@ -1331,7 +1483,7 @@ fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
             .contains("baseline must be zero")
     );
     service
-        .register_risk_profile(risk_profile(1_000, 10))
+        .register_risk_profile(risk_profile(5_000, 10))
         .expect("an unreachable account still registers");
     assert!(
         service
@@ -1348,39 +1500,34 @@ fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
     observe_broker(&service);
     let inbox = service.demo_venue_inbox();
     inbox
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
-        .expect("position");
-    // A closing deal in the session realizes -4.00 gross and -1.00 commission.
+        .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
+        .expect("entry");
+    // A closing deal in the session realizes 0.25 points against one contract: -12.50.
     inbox
-        .push(venue(
-            1,
-            VenueUpdate::Fill(BrokerFill {
-                realized: Some(RealizedClose {
-                    gross_profit: point(-400, 2),
-                    swap: point(0, 2),
-                    commission: point(-100, 2),
-                    balance: point(99_500, 2),
-                }),
-                ..fill("901", "closing-order", 1)
-            }),
-        ))
+        .push(venue(1, VenueUpdate::Fill(sell("d2", "802", 1, 8_975))))
         .expect("realized");
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.risk_locks, []);
-    assert_eq!(snapshot.risk_meters[0].current_realized_pnl, point(-500, 2));
-    assert_eq!(snapshot.risk_meters[0].daily_loss_remaining, point(500, 2));
+    assert_eq!(
+        snapshot.risk_meters[0].current_realized_pnl,
+        point(-1_250, 2)
+    );
+    assert_eq!(
+        snapshot.risk_meters[0].daily_loss_remaining,
+        point(3_750, 2)
+    );
 
-    // The broker's open P&L takes the session to the limit, and the account locks.
+    // The venue's open P&L on the remaining contract takes the session to the limit, and
+    // the account locks.
     inbox
         .push(venue(
             1,
-            VenueUpdate::UnrealizedPnl(vec![PositionUnrealizedPnl {
-                broker_position_id: "77".into(),
-                gross: point(-480, 2),
-                net: point(-500, 2),
-            }]),
+            VenueUpdate::Position(VenuePosition {
+                open_pnl: Some(point(-3_750, 2)),
+                ..position(1)
+            }),
         ))
-        .expect("pnl");
+        .expect("open pnl");
     let locks = service.snapshot().expect("snapshot").risk_locks;
     assert_eq!(locks.len(), 1);
     assert_eq!(locks[0].account_id, broker().id);
@@ -1388,8 +1535,8 @@ fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
 }
 
 #[test]
-fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
-    let (_directory, service, receiver) = setup("venue-unrealized");
+fn connected_broker_positions_carry_the_venue_open_pnl() {
+    let (_directory, service, receiver) = setup("venue-open-pnl");
     observe_broker(&service);
     let inbox = service.demo_venue_inbox();
     inbox
@@ -1400,45 +1547,41 @@ fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
             },
         ))
         .expect("balance");
-    assert!(
-        receiver.try_recv().is_err(),
-        "no positions, so no P&L requests"
-    );
     inbox
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
         .expect("position");
-    assert!(matches!(
-        receiver.recv_timeout(std::time::Duration::from_secs(5)),
-        Ok(VenueRequest::UnrealizedPnl { broker_account }) if broker_account == BROKER_ACCOUNT
-    ));
-
     inbox
         .push(venue(
             1,
-            VenueUpdate::UnrealizedPnl(vec![
-                PositionUnrealizedPnl {
-                    broker_position_id: "77".into(),
-                    gross: point(-125, 2),
-                    net: point(-160, 2),
-                },
-                PositionUnrealizedPnl {
-                    broker_position_id: "unknown".into(),
-                    gross: point(5, 2),
-                    net: point(5, 2),
-                },
-            ]),
+            VenueUpdate::Position(VenuePosition {
+                open_pnl: Some(point(-160, 2)),
+                ..position(2)
+            }),
         ))
-        .expect("pnl");
-    // A later position event carries no P&L and keeps the last refresh.
+        .expect("open pnl");
+    // A report whose quantity disagrees with the ledger waits for the fills that explain
+    // it, and a report without open P&L keeps the last one.
     inbox
-        .push(venue(1, VenueUpdate::Position(position("77", 2))))
-        .expect("position again");
-    let snapshot = service.snapshot().expect("snapshot");
-    let position = &snapshot.broker_positions[0];
-    assert_eq!(
-        (position.gross_unrealized, position.net_unrealized),
-        (point(-125, 2), point(-160, 2))
+        .push(venue(
+            1,
+            VenueUpdate::Position(VenuePosition {
+                open_pnl: Some(point(500, 2)),
+                ..position(3)
+            }),
+        ))
+        .expect("ahead of its fills");
+    inbox
+        .push(venue(1, VenueUpdate::Position(position(2))))
+        .expect("no open pnl");
+    assert!(
+        receiver.try_recv().is_err(),
+        "the owner never polls the venue for open P&L"
     );
+    assert_eq!(
+        broker_position(&service).map(|position| position.unrealized_pnl),
+        Some(point(-160, 2))
+    );
+    let snapshot = service.snapshot().expect("snapshot");
     let pnl = snapshot
         .account_pnl
         .iter()
@@ -1449,11 +1592,13 @@ fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
     assert_eq!(
         pnl.equity,
         Some(point(99_840, 2)),
-        "balance plus net open P&L"
+        "balance plus the open P&L"
     );
 
     // A new generation reaches no account yet: no open P&L, balance or equity is claimed.
-    let (_generation, next) = service.attach_demo_venue().expect("reattach");
+    let (_generation, next) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reattach");
     let snapshot = service.snapshot().expect("snapshot");
     let pnl = snapshot
         .account_pnl
@@ -1468,10 +1613,7 @@ fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
         next.try_recv(),
         Ok(VenueRequest::Reconcile { .. })
     ));
-    assert!(
-        next.try_recv().is_err(),
-        "an unreachable account is not polled"
-    );
+    assert!(next.try_recv().is_err());
 }
 
 #[test]
@@ -1532,7 +1674,9 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
         .connected_broker_accounts;
     assert!(connected.contains(&TradingAccountId::try_new("broker-demo-2002").expect("id")));
     assert!(!connected.contains(&broker().id));
-    let _next = service.attach_demo_venue().expect("reattach");
+    let _next = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reattach");
     assert_eq!(
         service
             .snapshot()

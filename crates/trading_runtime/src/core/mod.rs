@@ -61,11 +61,11 @@ pub use crate::strategy::{
 use crate::venue::VenueInbox;
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
-use aeris_trading::venue::BROKER_VENUE_ID;
+use aeris_trading::venue::{BROKER_VENUE_ID, BracketSide, VenueCapabilities};
 use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
-    AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, EquitySample, FeeSchedule, Fill,
-    FillId, FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
+    AccountEnvironment, AccountPnl, ClientOrderId, EquitySample, FeeSchedule, Fill, FillId,
+    FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
     OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, RiskWarning, TimeInForce,
     TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
 };
@@ -99,8 +99,6 @@ pub(crate) const DEMO_VENUE_UNAVAILABLE: &str = "broker demo venue is not connec
 pub(crate) const VENUE_UNSUPPORTED: &str = "trading account venue is not supported";
 pub(crate) const BROKER_PNL_UNAVAILABLE: &str =
     "the broker account is unreachable, so its open P&L for the loss rules is unknown";
-/// One request per connected account with open broker positions.
-pub(crate) const UNREALIZED_PNL_INTERVAL: Duration = Duration::from_secs(1);
 /// The equity timer cadence; the owner wakes on it alongside the other timer deadlines.
 pub(crate) const EQUITY_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
@@ -139,8 +137,8 @@ impl VenueRoute {
 pub enum PlacementOutcome {
     /// Simulated accounts: the owner manages the stop and target child orders locally.
     Managed(BracketView),
-    /// Broker accounts: the entry order carries server-side stop-loss and take-profit, which
-    /// the broker holds and enforces.
+    /// Broker accounts: the entry order carries a server-held bracket, whose target and stop
+    /// levels the venue releases and enforces as the entry fills.
     BrokerProtected(Order),
 }
 
@@ -154,12 +152,13 @@ impl PlacementOutcome {
     }
 }
 
-/// Simulated closes fill immediately; broker closes are asynchronous requests.
+/// Simulated closes fill immediately; broker exits are asynchronous requests.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FlattenOutcome {
     pub fills: Vec<Fill>,
-    /// Broker position IDs whose close requests have been submitted but not yet filled.
-    pub pending_close_requests: Vec<String>,
+    /// Broker positions whose exit was requested; each stays open until the venue reports
+    /// the fills.
+    pub pending_exits: Vec<PendingExit>,
     /// What could not be requested (for example with a broker venue disconnected); every
     /// other order and position in scope was still handled.
     pub incomplete: Option<String>,
@@ -174,6 +173,14 @@ pub struct FlattenOutcome {
 pub struct FlattenScope {
     pub account: Option<TradingAccountId>,
     pub instrument: Option<InstrumentId>,
+}
+
+/// A broker position whose exit a flatten, reverse or the kill switch requested from the venue.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingExit {
+    pub account_id: TradingAccountId,
+    pub instrument_id: InstrumentId,
+    pub net_quantity: FixedPoint,
 }
 
 /// A position a flatten or the kill switch kept because no current verified quote could
@@ -197,8 +204,9 @@ pub struct EmergencyOutcome {
     pub cancelled: Vec<Order>,
     /// Simulated closing fills committed in the same step.
     pub fills: Vec<Fill>,
-    /// Broker position IDs whose close requests have been submitted but not yet filled.
-    pub pending_close_requests: Vec<String>,
+    /// Broker positions whose exit was requested; each stays open until the venue reports
+    /// the fills.
+    pub pending_exits: Vec<PendingExit>,
     /// Positions kept because the owner holds no current verified quote for their
     /// instrument; they are reported, never silently skipped, and keep their protection.
     pub unpriced: Vec<UnpricedPosition>,
@@ -327,6 +335,17 @@ pub struct ModifyOrder {
     pub stop_price: Option<FixedPoint>,
     pub modified_unix_nanos: i64,
     pub provenance: TradingProvenance,
+}
+
+/// Moves one level of a bracket the broker venue holds for a broker entry, from its current
+/// distance in ticks from the entry fill to a new one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MoveBracketLevel {
+    /// The bracketed entry order.
+    pub client_order_id: ClientOrderId,
+    pub side: BracketSide,
+    pub current_ticks: i32,
+    pub new_ticks: i32,
 }
 
 /// One order modification with an optional owner-side optimistic revision fence.
@@ -471,11 +490,9 @@ pub struct TradingSnapshot {
     /// Realized P&L of each fill that reduced or closed a position, partial exits included.
     pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
     /// Trades grouped from `fills`, newest activity first: one closed round trip per exit fill,
-    /// partial or final, of simulated and broker trades, plus each open simulated trade (open
-    /// broker trades are `broker_positions`).
+    /// partial or final, plus each open trade, of simulated and broker accounts alike.
     pub round_trips: Vec<TradeRoundTrip>,
     pub positions: Vec<Position>,
-    pub broker_positions: Vec<BrokerPosition>,
     /// The last balance each broker account reported, in its currency.
     pub broker_balances: BTreeMap<TradingAccountId, FixedPoint>,
     /// Broker accounts the attached venue can reach now.
@@ -645,6 +662,8 @@ pub(crate) struct TradingCore {
     recovery_quote_floor: i64,
     execution: ExecutionPolicy,
     venue_outbound: Option<VenueRequestSender>,
+    /// What the attached venue declared it supports.
+    venue_capabilities: Option<VenueCapabilities>,
     venue_inbox: Weak<VenueInbox>,
     venue_ingestion: u64,
     /// Broker accounts the current venue generation has announced; the rest are not
@@ -956,11 +975,16 @@ impl TradingService {
     /// Attaches a bounded demo-venue writer under the next session generation, which the
     /// owner assigns and persists. The relay stamps every event with that generation, and
     /// the receiver (64 slots) belongs to it alone; any earlier generation is retired.
+    /// `capabilities` is what the relay's venue supports.
     ///
     /// # Errors
-    /// Returns an error when the owner is unavailable or the generation cannot be stored.
-    pub fn attach_demo_venue(&self) -> Result<(u64, VenueRequestReceiver), String> {
-        self.request(Command::AttachVenue)
+    /// Returns an error for invalid capabilities, when the owner is unavailable or when the
+    /// generation cannot be stored.
+    pub fn attach_demo_venue(
+        &self,
+        capabilities: VenueCapabilities,
+    ) -> Result<(u64, VenueRequestReceiver), String> {
+        self.request(|reply| Command::AttachVenue(capabilities, reply))
     }
 
     /// Returns the shared bounded event inbox for the broker reader.
@@ -1088,38 +1112,15 @@ impl TradingService {
         self.request(|reply| Command::CancelAll(account_id, reply))
     }
 
-    /// Requests an asynchronous close of a broker position. No simulation is fabricated.
+    /// Asks the broker venue to move one level of a bracket it holds for a broker entry. The
+    /// level keeps its distance until the venue confirms the move. Widening a stop is
+    /// risk-checked like a new bracket.
     ///
     /// # Errors
-    /// Returns an error for non-broker or live accounts, an empty position ID, or an unattached demo venue.
-    pub fn close_broker_position(
-        &self,
-        account_id: TradingAccountId,
-        broker_position_id: String,
-    ) -> Result<(), String> {
-        self.request(|reply| Command::CloseBrokerPosition(account_id, broker_position_id, reply))
-    }
-
-    /// Requests broker-native stop-loss and take-profit changes.
-    ///
-    /// # Errors
-    /// Returns an error for non-broker or live accounts, empty inputs, or an unattached demo venue.
-    pub fn amend_broker_position_sltp(
-        &self,
-        account_id: TradingAccountId,
-        broker_position_id: String,
-        stop_loss: Option<FixedPoint>,
-        take_profit: Option<FixedPoint>,
-    ) -> Result<(), String> {
-        self.request(|reply| {
-            Command::AmendBrokerPositionSltp(
-                account_id,
-                broker_position_id,
-                stop_loss,
-                take_profit,
-                reply,
-            )
-        })
+    /// Returns an error for an unknown entry, a non-broker or live account, a bracket that does
+    /// not hold the level, an unacknowledged entry, a risk refusal, or an unattached demo venue.
+    pub fn move_bracket_level(&self, command: MoveBracketLevel) -> Result<(), String> {
+        self.request(|reply| Command::MoveBracketLevel(command, reply))
     }
 
     /// Installs a versioned deterministic pre-trade rule profile.
@@ -1434,6 +1435,7 @@ impl TradingCore {
             recovery_quote_floor,
             execution,
             venue_outbound: None,
+            venue_capabilities: None,
             venue_inbox,
             venue_ingestion: 0,
             connected_broker_accounts: BTreeSet::new(),
@@ -1485,7 +1487,15 @@ impl TradingCore {
     }
 
     fn repair_loaded_position_projections(&mut self) -> Result<(), String> {
-        let keys = self.state.positions.keys().cloned().collect::<Vec<_>>();
+        // A broker position is settled against the venue at every attach, and a rebase moves
+        // it away from its fills, so only simulated positions are rebuilt from their fills.
+        let keys = self
+            .state
+            .positions
+            .keys()
+            .filter(|(account_id, _)| is_simulated(&self.state.accounts, account_id))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut repaired = Vec::new();
         for key in keys {
             let Some(stored) = self.state.positions.get(&key).cloned() else {
@@ -1646,8 +1656,7 @@ impl TradingCore {
             | Command::Cancel(..)
             | Command::CancelChecked(..)
             | Command::CancelAll(..)
-            | Command::CloseBrokerPosition(..)
-            | Command::AmendBrokerPositionSltp(..) => {
+            | Command::MoveBracketLevel(..) => {
                 self.dispatch_order_command(command);
             }
             Command::RegisterRiskProfile(profile, reply) => {
@@ -1678,7 +1687,9 @@ impl TradingCore {
             Command::Export(directory, reply) => {
                 let _ = reply.send(self.store.export(&directory));
             }
-            Command::AttachVenue(reply) => respond(&reply, self.attach_venue()),
+            Command::AttachVenue(capabilities, reply) => {
+                respond(&reply, self.attach_venue(capabilities));
+            }
             Command::DrainVenueEvents => self.drain_venue_events(),
             #[cfg(test)]
             Command::BlockOwnerForTest(ready, barrier) => {
@@ -1737,7 +1748,7 @@ impl TradingCore {
         }
     }
 
-    /// Refreshes broker P&L only at a due deadline, never on an idle command wake.
+    /// Runs due timer work only at a due deadline, never on an idle command wake.
     pub(crate) fn on_timer(&mut self, now: i64) {
         self.command_now = self.command_now.max(now);
         #[cfg(test)]
@@ -1753,7 +1764,6 @@ impl TradingCore {
         if let Err(error) = self.roll_risk_sessions(self.command_now) {
             aeris_observability::diagnostic!("risk session rollover persistence failed: {error}");
         }
-        self.request_unrealized_pnl();
         if self.command_now >= self.next_retention_at {
             match self.enforce_retention() {
                 Ok(()) => {
@@ -1905,28 +1915,9 @@ impl TradingCore {
             Command::CancelAll(account_id, reply) => {
                 respond(&reply, self.cancel_all(account_id.as_ref()));
             }
-            Command::CloseBrokerPosition(account_id, position_id, reply) => respond(
-                &reply,
-                self.require_broker_route(&account_id)
-                    .and_then(|()| self.close_broker_position(&account_id, &position_id)),
-            ),
-            Command::AmendBrokerPositionSltp(
-                account_id,
-                position_id,
-                stop_loss,
-                take_profit,
-                reply,
-            ) => respond(
-                &reply,
-                self.require_broker_route(&account_id).and_then(|()| {
-                    self.amend_broker_position_protection(
-                        &account_id,
-                        &position_id,
-                        stop_loss,
-                        take_profit,
-                    )
-                }),
-            ),
+            Command::MoveBracketLevel(command, reply) => {
+                respond(&reply, self.move_bracket_level(&command));
+            }
             _ => {}
         }
     }
@@ -2089,7 +2080,6 @@ impl TradingCore {
         while self.state.fills.len() > self.retention.maximum_fills {
             if let Some(fill) = self.state.fills.pop_front() {
                 self.state.fill_accounting.remove(&fill.id);
-                self.state.broker_fill_positions.remove(&fill.id);
             }
         }
         while self.state.orders.len() > self.retention.maximum_orders {
@@ -2097,7 +2087,9 @@ impl TradingCore {
                 .state
                 .orders
                 .values()
-                .filter(|order| !order.status.is_open())
+                .filter(|order| {
+                    !order.status.is_open() && !self.state.broker_brackets.contains_key(&order.id)
+                })
                 .min_by_key(|order| order.submitted_unix_nanos)
                 .map(|order| order.id.clone())
             else {

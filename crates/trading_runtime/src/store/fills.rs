@@ -1,8 +1,9 @@
 use super::{
-    BTreeMap, BrokerFillRecord, Fill, FillAccounting, FillId, FixedPoint, InstrumentId, OrderId,
-    StepTx, TradeCycle, TradingAccountId, TradingStore, VecDeque, database_error,
-    decode_provenance, encode_provenance, fixed, insert_event_row, insert_order_row, params,
-    parse_side, sqlite_i64, update_next_sequence,
+    BTreeMap, BrokerFillRecord, CostBasis, Fill, FillAccounting, FillId, FixedPoint, InstrumentId,
+    OrderId, Position, StepTx, TradeCycle, TradingAccountId, TradingStore, VecDeque,
+    database_error, decode_provenance, encode_provenance, fixed, insert_event_row,
+    insert_order_row, params, parse_side, release_bracket_levels, sqlite_i64, update_next_sequence,
+    upsert_discipline_state, upsert_position, upsert_position_basis, upsert_risk_rule_state,
 };
 
 pub(super) fn insert_fill_accounting(
@@ -151,35 +152,46 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
-        insert_fill_accounting(
-            &transaction,
-            fill,
-            FillAccounting {
-                cycle_id: 0,
-                realized_gross: record.realized_pnl,
-                commission: FixedPoint::try_new(
-                    0,
-                    record.realized_pnl.map_or(2, FixedPoint::scale),
-                )
-                .map_err(|error| error.to_string())?,
-                cycle_realized: None,
-                cycle_closed: false,
-            },
-        )?;
+        insert_fill_accounting(&transaction, fill, record.accounting)?;
         transaction
             .execute(
                 "INSERT INTO broker_deals(broker_deal_id, fill_id, account_id,
-                    broker_position_id, executed_unix_millis) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    executed_unix_millis) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     record.broker_deal_id,
                     fill.id.as_str(),
                     fill.account_id.as_str(),
-                    record.broker_position_id,
                     fill.execution_unix_nanos / 1_000_000,
                 ],
             )
             .map_err(database_error)?;
+        upsert_position(&transaction, record.position)?;
+        upsert_position_basis(&transaction, record.position, record.cost_basis)?;
+        upsert_trade_cycle(&transaction, record.trade_cycle)?;
+        if let Some(rule_state) = record.rule_state {
+            upsert_risk_rule_state(&transaction, rule_state)?;
+        }
+        upsert_discipline_state(&transaction, record.discipline_state)?;
+        release_bracket_levels(&transaction, record.released_brackets)?;
         update_next_sequence(&transaction, next_sequence)?;
+        StepTx::commit_revision(transaction).map_err(database_error)
+    }
+
+    /// Replaces one ledger position with the venue's after a reconcile found them apart:
+    /// the position, its exact basis, its trade cycle and the bracket levels a now flat
+    /// position releases commit together.
+    pub(crate) fn rebase_position(
+        &mut self,
+        position: &Position,
+        basis: Option<CostBasis>,
+        cycle: &TradeCycle,
+        released: &[OrderId],
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        upsert_position(&transaction, position)?;
+        upsert_position_basis(&transaction, position, basis)?;
+        upsert_trade_cycle(&transaction, cycle)?;
+        release_bracket_levels(&transaction, released)?;
         StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
@@ -374,30 +386,5 @@ impl TradingStore {
             );
         }
         Ok(output)
-    }
-}
-
-impl TradingStore {
-    pub(super) fn load_broker_fill_positions(&self) -> Result<BTreeMap<FillId, String>, String> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT fill_id, broker_position_id FROM broker_deals
-                 WHERE broker_position_id IS NOT NULL",
-            )
-            .map_err(database_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(database_error)?;
-        rows.map(|row| {
-            let (fill_id, broker_position_id) = row.map_err(database_error)?;
-            Ok((
-                FillId::try_new(fill_id).map_err(|error| error.to_string())?,
-                broker_position_id,
-            ))
-        })
-        .collect()
     }
 }

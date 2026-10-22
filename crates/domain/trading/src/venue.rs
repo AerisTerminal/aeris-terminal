@@ -1,10 +1,11 @@
-//! Provider-neutral contract between the trading owner and a broker venue relay.
+//! Provider-neutral contract between the trading owner and a futures broker venue relay.
 //!
 //! The trading owner sends [`VenueRequest`]s and applies [`VenueEvent`]s. The relay owns
 //! the broker connection, translates both to and from one broker's protocol, and holds
-//! no order, fill, position or account state. Prices and quantities are fixed-point at
-//! the instrument's scales and money at the broker's reported scale; broker identifiers
-//! are opaque strings whose ordering carries no meaning.
+//! no order, fill, position or account state. Accounts are netted: one position per
+//! account and instrument. Prices and quantities are fixed-point at the instrument's
+//! scales and money at the broker's reported scale; broker identifiers are opaque strings
+//! whose ordering carries no meaning.
 
 use crate::{
     ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingValidationError,
@@ -15,22 +16,133 @@ use aeris_instruments::InstrumentId;
 /// The venue id of accounts registered by the attached broker venue relay.
 pub const BROKER_VENUE_ID: &str = "broker";
 
-/// A stop-loss or take-profit level: an absolute price, or a distance from the entry
-/// price, both at the instrument's price scale.
+/// Most target levels and most stop levels one server-held bracket carries.
+pub const MAXIMUM_BRACKET_LEVELS: usize = 4;
+
+/// What the attached venue supports beyond placing, modifying and cancelling orders,
+/// cancelling all orders and exiting a position, which every venue supports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Protection {
-    Price(FixedPoint),
-    Distance(FixedPoint),
+pub struct VenueCapabilities {
+    /// Most target levels and most stop levels the venue holds per bracket; zero when the
+    /// venue holds no brackets.
+    pub bracket_levels: usize,
+    /// Longest client order id the venue echoes back unchanged, in bytes.
+    pub client_order_id_limit: usize,
 }
 
-impl Protection {
-    fn validate(self) -> Result<(), TradingValidationError> {
-        match self {
-            Self::Price(value) | Self::Distance(value) if value.units() <= 0 => {
-                Err(TradingValidationError::NonPositivePrice)
-            }
-            _ => Ok(()),
+impl VenueCapabilities {
+    /// # Errors
+    /// Returns a validation error for more bracket levels than the contract carries or a
+    /// zero client order id limit.
+    pub const fn validate(self) -> Result<(), TradingValidationError> {
+        if self.bracket_levels > MAXIMUM_BRACKET_LEVELS {
+            return Err(TradingValidationError::InvalidBracket);
         }
+        if self.client_order_id_limit == 0 {
+            return Err(TradingValidationError::EmptyField("client_order_id_limit"));
+        }
+        Ok(())
+    }
+}
+
+/// The exit side of a bracket level.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BracketSide {
+    Target,
+    Stop,
+}
+
+impl BracketSide {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Target => "target",
+            Self::Stop => "stop",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "target" => Some(Self::Target),
+            "stop" => Some(Self::Stop),
+            _ => None,
+        }
+    }
+}
+
+/// One exit level of a server-held bracket: `quantity` of the entry, placed `ticks`
+/// minimum price increments from the entry's fill price.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BracketLevel {
+    pub quantity: FixedPoint,
+    pub ticks: i32,
+}
+
+/// Exit levels the venue holds with an entry order and releases as the entry fills, so
+/// they keep working while Aeris is disconnected. Each side with levels covers the entry
+/// quantity exactly with distinct distances, because a level is addressed by its distance.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ServerBracket {
+    pub targets: Vec<BracketLevel>,
+    pub stops: Vec<BracketLevel>,
+}
+
+impl ServerBracket {
+    /// The levels on one side.
+    #[must_use]
+    pub fn side(&self, side: BracketSide) -> &[BracketLevel] {
+        match side {
+            BracketSide::Target => &self.targets,
+            BracketSide::Stop => &self.stops,
+        }
+    }
+
+    /// Mutable levels on one side.
+    pub fn side_mut(&mut self, side: BracketSide) -> &mut Vec<BracketLevel> {
+        match side {
+            BracketSide::Target => &mut self.targets,
+            BracketSide::Stop => &mut self.stops,
+        }
+    }
+
+    /// Validates the levels against the entry quantity they protect.
+    ///
+    /// # Errors
+    /// Returns [`TradingValidationError::InvalidBracket`] for a bracket without levels, too
+    /// many levels, non-positive distances or quantities, repeated distances, or a side
+    /// that does not cover the entry quantity exactly.
+    pub fn validate(&self, entry_quantity: FixedPoint) -> Result<(), TradingValidationError> {
+        if self.targets.is_empty() && self.stops.is_empty() {
+            return Err(TradingValidationError::InvalidBracket);
+        }
+        for levels in [&self.targets, &self.stops] {
+            if levels.is_empty() {
+                continue;
+            }
+            if levels.len() > MAXIMUM_BRACKET_LEVELS {
+                return Err(TradingValidationError::InvalidBracket);
+            }
+            let mut covered = 0_i64;
+            for (index, level) in levels.iter().enumerate() {
+                if level.ticks <= 0
+                    || level.quantity.units() <= 0
+                    || level.quantity.scale() != entry_quantity.scale()
+                    || levels[..index]
+                        .iter()
+                        .any(|earlier| earlier.ticks == level.ticks)
+                {
+                    return Err(TradingValidationError::InvalidBracket);
+                }
+                covered = covered
+                    .checked_add(level.quantity.units())
+                    .ok_or(TradingValidationError::ArithmeticOverflow)?;
+            }
+            if covered != entry_quantity.units() {
+                return Err(TradingValidationError::InvalidBracket);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -46,24 +158,20 @@ pub struct VenueOrder {
     pub quantity: FixedPoint,
     pub limit_price: Option<FixedPoint>,
     pub stop_price: Option<FixedPoint>,
-    pub stop_loss: Option<Protection>,
-    pub take_profit: Option<Protection>,
-    /// The broker position this order adds to or reduces, on a hedged account.
-    pub broker_position_id: Option<String>,
+    pub bracket: Option<ServerBracket>,
 }
 
-/// A change to a working broker order; only the fields that are `Some` change.
+/// The complete replacement terms of a working broker order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VenueAmendment {
     pub client_order_id: ClientOrderId,
     pub broker_account: String,
     pub broker_order_id: String,
     pub instrument_id: InstrumentId,
-    pub quantity: Option<FixedPoint>,
+    pub order_type: OrderType,
+    pub quantity: FixedPoint,
     pub limit_price: Option<FixedPoint>,
     pub stop_price: Option<FixedPoint>,
-    pub stop_loss: Option<Protection>,
-    pub take_profit: Option<Protection>,
 }
 
 /// One request from the trading owner to a broker venue.
@@ -76,31 +184,30 @@ pub enum VenueRequest {
         broker_account: String,
         broker_order_id: String,
     },
-    /// Close `quantity` of one broker position.
-    ClosePosition {
+    /// Moves one level of a bracket the venue still holds, addressed by its current
+    /// distance from the entry.
+    MoveBracketLevel {
         broker_account: String,
-        instrument_id: InstrumentId,
-        broker_position_id: String,
-        quantity: FixedPoint,
+        entry_broker_order_id: String,
+        side: BracketSide,
+        current_ticks: i32,
+        new_ticks: i32,
     },
-    /// Set a position's complete protection; a level left `None` is removed.
-    AmendPositionProtection {
+    /// Cancels every working order of the account, including bracket exits.
+    CancelAll {
+        broker_account: String,
+    },
+    /// Flattens the account's position in one instrument at the venue.
+    ExitPosition {
         broker_account: String,
         instrument_id: InstrumentId,
-        broker_position_id: String,
-        stop_loss: Option<FixedPoint>,
-        take_profit: Option<FixedPoint>,
     },
     /// Report every open order and position of the account as one snapshot, preceded by
     /// the deals executed since `deals_since_unix_nanos` so fills missed while disconnected
-    /// are applied before the snapshot settles open orders.
+    /// are applied before the snapshot settles open orders and positions.
     Reconcile {
         broker_account: String,
         deals_since_unix_nanos: Option<i64>,
-    },
-    /// The broker's current unrealized P&L of every open position of the account.
-    UnrealizedPnl {
-        broker_account: String,
     },
 }
 
@@ -112,58 +219,51 @@ impl VenueRequest {
             Self::Place(order) => &order.broker_account,
             Self::Amend(amendment) => &amendment.broker_account,
             Self::Cancel { broker_account, .. }
-            | Self::ClosePosition { broker_account, .. }
-            | Self::AmendPositionProtection { broker_account, .. }
-            | Self::Reconcile { broker_account, .. }
-            | Self::UnrealizedPnl { broker_account } => broker_account,
+            | Self::MoveBracketLevel { broker_account, .. }
+            | Self::CancelAll { broker_account }
+            | Self::ExitPosition { broker_account, .. }
+            | Self::Reconcile { broker_account, .. } => broker_account,
         }
     }
 
-    /// Validates identities, positive amounts and protection before a request leaves the
+    /// Validates identities, positive amounts and brackets before a request leaves the
     /// owner.
     ///
     /// # Errors
-    /// Returns a validation error for blank identities or non-positive values.
+    /// Returns a validation error for blank identities, non-positive values or an invalid
+    /// bracket.
     pub fn validate(&self) -> Result<(), TradingValidationError> {
         validate_field("broker_account", self.broker_account())?;
         match self {
             Self::Place(order) => {
                 positive(order.quantity)?;
                 prices(order.limit_price, order.stop_price)?;
-                protections(order.stop_loss, order.take_profit)?;
-                if let Some(position) = &order.broker_position_id {
-                    validate_field("broker_position_id", position)?;
-                }
-                Ok(())
+                order
+                    .bracket
+                    .as_ref()
+                    .map_or(Ok(()), |bracket| bracket.validate(order.quantity))
             }
             Self::Amend(amendment) => {
                 validate_field("broker_order_id", &amendment.broker_order_id)?;
-                if let Some(quantity) = amendment.quantity {
-                    positive(quantity)?;
-                }
-                prices(amendment.limit_price, amendment.stop_price)?;
-                protections(amendment.stop_loss, amendment.take_profit)
+                positive(amendment.quantity)?;
+                prices(amendment.limit_price, amendment.stop_price)
             }
             Self::Cancel {
                 broker_order_id, ..
             } => validate_field("broker_order_id", broker_order_id),
-            Self::ClosePosition {
-                broker_position_id,
-                quantity,
+            Self::MoveBracketLevel {
+                entry_broker_order_id,
+                current_ticks,
+                new_ticks,
                 ..
             } => {
-                validate_field("broker_position_id", broker_position_id)?;
-                positive(*quantity)
+                validate_field("entry_broker_order_id", entry_broker_order_id)?;
+                if *current_ticks <= 0 || *new_ticks <= 0 || current_ticks == new_ticks {
+                    return Err(TradingValidationError::InvalidBracket);
+                }
+                Ok(())
             }
-            Self::AmendPositionProtection {
-                broker_position_id,
-                stop_loss,
-                take_profit,
-                ..
-            } => {
-                validate_field("broker_position_id", broker_position_id)?;
-                prices(*stop_loss, *take_profit)
-            }
+            Self::CancelAll { .. } | Self::ExitPosition { .. } => Ok(()),
             Self::Reconcile {
                 deals_since_unix_nanos,
                 ..
@@ -173,7 +273,6 @@ impl VenueRequest {
                 }
                 Ok(())
             }
-            Self::UnrealizedPnl { .. } => Ok(()),
         }
     }
 }
@@ -183,7 +282,7 @@ impl VenueRequest {
 pub struct ObservedAccount {
     pub environment: crate::AccountEnvironment,
     pub display_name: String,
-    /// The deposit currency, in which the broker reports balances and realized P&L.
+    /// The account currency, in which the broker reports balances and open P&L.
     pub currency: String,
     pub currency_scale: u8,
 }
@@ -209,16 +308,6 @@ fn prices(
     Ok(())
 }
 
-fn protections(
-    stop_loss: Option<Protection>,
-    take_profit: Option<Protection>,
-) -> Result<(), TradingValidationError> {
-    stop_loss
-        .into_iter()
-        .chain(take_profit)
-        .try_for_each(Protection::validate)
-}
-
 /// What kind of order the broker reports, including orders it creates itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrokerOrderKind {
@@ -226,9 +315,7 @@ pub enum BrokerOrderKind {
     Limit,
     Stop,
     StopLimit,
-    /// A server-created stop-loss/take-profit order that closes its position.
-    Protection,
-    /// A broker order type Aeris does not place (for example a market-range order).
+    /// A broker order type Aeris does not place.
     Other,
 }
 
@@ -259,18 +346,6 @@ pub struct BrokerOrder {
     pub filled_quantity: FixedPoint,
     pub limit_price: Option<FixedPoint>,
     pub stop_price: Option<FixedPoint>,
-    pub broker_position_id: Option<String>,
-    /// The order reduces or closes its position.
-    pub closing: bool,
-}
-
-/// What a closing fill realized, in the account's money scale.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RealizedClose {
-    pub gross_profit: FixedPoint,
-    pub swap: FixedPoint,
-    pub commission: FixedPoint,
-    pub balance: FixedPoint,
 }
 
 /// One broker execution (deal). The deal id makes it idempotent across replays.
@@ -278,33 +353,27 @@ pub struct RealizedClose {
 pub struct BrokerFill {
     pub broker_deal_id: String,
     pub broker_order_id: String,
-    pub broker_position_id: String,
     pub instrument_id: InstrumentId,
     pub side: OrderSide,
     pub price: FixedPoint,
     pub quantity: FixedPoint,
     pub executed_unix_nanos: i64,
-    pub commission: Option<FixedPoint>,
-    pub realized: Option<RealizedClose>,
 }
 
-/// One open broker position as reported.
+/// The account's net position in one instrument as the venue reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VenuePosition {
-    pub broker_position_id: String,
     pub instrument_id: InstrumentId,
-    pub side: OrderSide,
-    pub quantity: FixedPoint,
-    /// `None` while the position has no fills.
-    pub entry_price: Option<FixedPoint>,
-    pub stop_loss: Option<FixedPoint>,
-    pub take_profit: Option<FixedPoint>,
-    pub swap: FixedPoint,
-    pub commission: FixedPoint,
-    pub opened_unix_nanos: i64,
+    /// Positive long, negative short, zero flat.
+    pub net_quantity: FixedPoint,
+    /// The average open price; `None` while flat.
+    pub average_price: Option<FixedPoint>,
+    /// Open P&L in the account currency; `None` when the venue did not report it.
+    pub open_pnl: Option<FixedPoint>,
 }
 
-/// Every open order and position of one account at one moment.
+/// Every open order and position of one account at one moment. An instrument without a
+/// position entry is flat.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VenueSnapshot {
     pub orders: Vec<BrokerOrder>,
@@ -328,24 +397,17 @@ pub enum VenueUpdate {
     },
     Fill(BrokerFill),
     Position(VenuePosition),
-    PositionClosed {
-        broker_position_id: String,
+    /// The venue moved a bracket level it still holds.
+    BracketLevelMoved {
+        entry_broker_order_id: String,
+        side: BracketSide,
+        from_ticks: i32,
+        to_ticks: i32,
     },
     Balance {
         balance: FixedPoint,
     },
     Snapshot(VenueSnapshot),
-    /// The broker's unrealized P&L of the account's open positions.
-    UnrealizedPnl(Vec<PositionUnrealizedPnl>),
-}
-
-/// One open position's unrealized P&L as the broker computes it, in the account's deposit
-/// currency. `net` includes swap and opening commission but not the closing commission.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PositionUnrealizedPnl {
-    pub broker_position_id: String,
-    pub gross: FixedPoint,
-    pub net: FixedPoint,
 }
 
 /// One update for one broker account, stamped with the relay session that saw it.
@@ -361,8 +423,15 @@ pub struct VenueEvent {
 mod tests {
     use super::*;
 
-    fn point(units: i64) -> FixedPoint {
-        FixedPoint::try_new(units, 2).expect("fixed point")
+    fn point(units: i64, scale: u8) -> FixedPoint {
+        FixedPoint::try_new(units, scale).expect("fixed point")
+    }
+
+    fn level(quantity: i64, ticks: i32) -> BracketLevel {
+        BracketLevel {
+            quantity: point(quantity, 0),
+            ticks,
+        }
     }
 
     fn order() -> VenueOrder {
@@ -373,12 +442,13 @@ mod tests {
             side: OrderSide::Buy,
             order_type: OrderType::Market,
             time_in_force: TimeInForce::ImmediateOrCancel,
-            quantity: point(100_000),
+            quantity: point(3, 0),
             limit_price: None,
             stop_price: None,
-            stop_loss: Some(Protection::Distance(point(50))),
-            take_profit: None,
-            broker_position_id: None,
+            bracket: Some(ServerBracket {
+                targets: vec![level(2, 8), level(1, 16)],
+                stops: vec![level(3, 12)],
+            }),
         }
     }
 
@@ -389,11 +459,8 @@ mod tests {
         assert!(place.validate().is_ok());
         for bad in [
             VenueRequest::Place(VenueOrder {
-                quantity: point(0),
-                ..order()
-            }),
-            VenueRequest::Place(VenueOrder {
-                stop_loss: Some(Protection::Distance(point(0))),
+                quantity: point(0, 0),
+                bracket: None,
                 ..order()
             }),
             VenueRequest::Place(VenueOrder {
@@ -405,11 +472,12 @@ mod tests {
                 broker_account: "1001".into(),
                 broker_order_id: String::new(),
             },
-            VenueRequest::ClosePosition {
+            VenueRequest::MoveBracketLevel {
                 broker_account: "1001".into(),
-                instrument_id: order().instrument_id,
-                broker_position_id: "77".into(),
-                quantity: point(0),
+                entry_broker_order_id: "entry".into(),
+                side: BracketSide::Stop,
+                current_ticks: 12,
+                new_ticks: 12,
             },
         ] {
             assert!(bad.validate().is_err(), "{bad:?} must be rejected");
@@ -427,6 +495,58 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn bracket_sides_cover_the_entry_with_distinct_positive_distances() {
+        let entry = point(3, 0);
+        let valid = order().bracket.expect("bracket");
+        assert!(valid.validate(entry).is_ok());
+        assert!(
+            ServerBracket {
+                targets: Vec::new(),
+                stops: vec![level(3, 10)],
+            }
+            .validate(entry)
+            .is_ok()
+        );
+        for bad in [
+            ServerBracket::default(),
+            ServerBracket {
+                targets: vec![level(2, 8)],
+                stops: Vec::new(),
+            },
+            ServerBracket {
+                targets: vec![level(2, 8), level(1, 8)],
+                stops: Vec::new(),
+            },
+            ServerBracket {
+                targets: Vec::new(),
+                stops: vec![level(3, 0)],
+            },
+            ServerBracket {
+                targets: vec![level(1, 1), level(1, 2), level(0, 3), level(1, 4)],
+                stops: Vec::new(),
+            },
+            ServerBracket {
+                targets: (1..=5).map(|ticks| level(1, ticks)).collect(),
+                stops: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                bad.validate(entry),
+                Err(TradingValidationError::InvalidBracket),
+                "{bad:?} must be rejected"
+            );
+        }
+        assert_eq!(
+            VenueCapabilities {
+                bracket_levels: MAXIMUM_BRACKET_LEVELS + 1,
+                client_order_id_limit: 32,
+            }
+            .validate(),
+            Err(TradingValidationError::InvalidBracket)
         );
     }
 }

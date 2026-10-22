@@ -23,7 +23,7 @@ use {
     ledger::{fixed, optional_fixed, split_optional, upsert_position, upsert_position_basis},
     orders::{
         decode_provenance, encode_contract, encode_provenance, insert_event_row, insert_order_row,
-        parse_side, update_next_sequence,
+        parse_side, release_bracket_levels, update_next_sequence,
     },
     risk::{upsert_discipline_state, upsert_risk_rule_state},
     schema::sweep_stale_preflight_directories,
@@ -58,10 +58,10 @@ use aeris_instruments::{
 };
 use aeris_trading::market::MarketRoute;
 use aeris_trading::{
-    AccountEnvironment, BrokerPosition, ClientOrderId, EquitySample, FeeModel, FeeSchedule, Fill,
-    FillId, FixedPoint, LedgerEntry, LedgerEntryKind, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce,
-    TradingAccount, TradingAccountId, TradingProvenance,
+    AccountEnvironment, ClientOrderId, EquitySample, FeeModel, FeeSchedule, Fill, FillId,
+    FixedPoint, LedgerEntry, LedgerEntryKind, Order, OrderEvent, OrderEventId, OrderEventKind,
+    OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce, TradingAccount,
+    TradingAccountId, TradingProvenance,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -230,9 +230,8 @@ pub(super) struct StoredState {
     pub ledger_checkpoints: BTreeMap<TradingAccountId, LedgerCheckpoint>,
     /// The in-memory equity rings of each simulated account, rebuilt from durable samples.
     pub equity_rings: BTreeMap<TradingAccountId, VecDeque<EquitySample>>,
-    pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
-    /// The broker position each retained broker fill belongs to.
-    pub broker_fill_positions: BTreeMap<FillId, String>,
+    /// The levels each bracketed broker entry still holds at the venue.
+    pub broker_brackets: BTreeMap<OrderId, aeris_trading::venue::ServerBracket>,
     /// The latest relay session generation ever attached.
     pub venue_generation: u64,
     /// The last balance each broker account reported.
@@ -321,9 +320,15 @@ pub(super) struct BrokerFillRecord<'a> {
     /// A broker-originated order first seen through this deal, with its broker order id.
     pub mirror: Option<(&'a Order, &'a str)>,
     pub broker_deal_id: &'a str,
-    pub broker_position_id: &'a str,
-    /// What a closing deal realized, in the account currency.
-    pub realized_pnl: Option<FixedPoint>,
+    /// The account's position in the instrument after this deal, with its exact basis.
+    pub position: &'a Position,
+    pub cost_basis: Option<CostBasis>,
+    pub accounting: FillAccounting,
+    pub trade_cycle: &'a TradeCycle,
+    pub rule_state: Option<&'a RiskRuleState>,
+    pub discipline_state: &'a DisciplineState,
+    /// Bracket entries whose levels end with this deal.
+    pub released_brackets: &'a [OrderId],
 }
 
 impl TradingStore {
@@ -461,9 +466,8 @@ impl TradingStore {
         } else {
             BTreeMap::new()
         };
-        let broker_positions = self.load_broker_positions()?;
         let broker_order_ids = self.load_broker_order_ids()?;
-        let broker_fill_positions = self.load_broker_fill_positions()?;
+        let broker_brackets = self.load_broker_brackets()?;
         let venue_generation = self.metadata("venue_generation")?;
         let broker_balances = self.load_broker_balances()?;
         let risk_profiles = self.load_risk_profiles()?;
@@ -498,8 +502,7 @@ impl TradingStore {
             position_checkpoints,
             ledger_checkpoints,
             equity_rings,
-            broker_positions,
-            broker_fill_positions,
+            broker_brackets,
             venue_generation,
             broker_balances,
             risk_profiles,
@@ -780,7 +783,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 27);
+        assert_eq!(SCHEMA_VERSION, 28);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -2123,7 +2126,7 @@ mod tests {
             ("user_records", 1),
             ("broker_orders", 0),
             ("broker_deals", 0),
-            ("broker_positions", 0),
+            ("broker_bracket_levels", 0),
             ("broker_account_state", 0),
         ] {
             let actual: i64 = store
@@ -2168,6 +2171,9 @@ mod tests {
         };
         store.migrate(false).expect("current schema");
         store
+            .complete_post_group_migrations()
+            .expect("post-group migrations complete");
+        store
             .connection
             .execute_batch(
                 "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,
@@ -2188,15 +2194,11 @@ mod tests {
                 executed_unix_millis) VALUES ('deal','fill','broker',1);
              INSERT INTO broker_account_state(account_id,balance_units,balance_scale,
                 session_generation) VALUES ('broker',100,2,1);
-             INSERT INTO broker_positions(account_id,broker_position_id,instrument_id,
-                side,quantity_units,quantity_scale,entry_units,entry_scale,
-                swap_units,swap_scale,commission_units,commission_scale,
-                gross_unrealized_units,gross_unrealized_scale,
-                net_unrealized_units,net_unrealized_scale,opened_unix_nanos)
-                VALUES ('broker','position','symbol','buy',1,0,100,2,0,2,0,2,0,2,0,2,1);",
+             INSERT INTO broker_bracket_levels(order_id,side,ticks,quantity_units,
+                quantity_scale) VALUES ('order','stop',8,1,0);",
             )
             .expect("broker history");
-        assert_eq!(store.load_broker_positions().expect("positions").len(), 1);
+        assert_eq!(store.load_broker_brackets().expect("brackets").len(), 1);
         store
             .connection
             .execute("DELETE FROM fills WHERE id='fill'", [])
@@ -2205,7 +2207,7 @@ mod tests {
             .connection
             .execute("DELETE FROM orders WHERE id='order'", [])
             .expect("retire order");
-        for table in ["broker_orders", "broker_deals"] {
+        for table in ["broker_orders", "broker_deals", "broker_bracket_levels"] {
             let count: i64 = store
                 .connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -2218,14 +2220,12 @@ mod tests {
             .connection
             .execute("DELETE FROM accounts WHERE id='broker'", [])
             .expect("retire account");
-        for table in ["broker_positions", "broker_account_state"] {
-            let count: i64 = store
-                .connection
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .expect("account-dependent rows");
-            assert_eq!(count, 0, "{table} must cascade with account");
-        }
+        let count: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM broker_account_state", [], |row| {
+                row.get(0)
+            })
+            .expect("account-dependent rows");
+        assert_eq!(count, 0, "broker account state must cascade with account");
     }
 }

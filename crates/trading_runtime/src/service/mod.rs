@@ -4,8 +4,8 @@ pub(crate) mod owner;
 
 use super::{
     BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount, EconomicEventRiskOutcome,
-    EconomicEventRiskTrigger, EmergencyOutcome, FeeSchedule, FixedPoint, FlattenOutcome,
-    FlattenScope, ModifyOrder, MovePlannedLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket,
+    EconomicEventRiskTrigger, EmergencyOutcome, FeeSchedule, FlattenOutcome, FlattenScope,
+    ModifyOrder, MoveBracketLevel, MovePlannedLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket,
     PlaceInlineBracket, PlaceOco, PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply,
     RevisionedCancelOrder, RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan,
     TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
@@ -48,14 +48,7 @@ pub(crate) enum Command {
     Cancel(ClientOrderId, Reply<Order>),
     CancelChecked(RevisionedCancelOrder, Reply<Result<Order, Box<Order>>>),
     CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
-    CloseBrokerPosition(TradingAccountId, String, Reply<()>),
-    AmendBrokerPositionSltp(
-        TradingAccountId,
-        String,
-        Option<FixedPoint>,
-        Option<FixedPoint>,
-        Reply<()>,
-    ),
+    MoveBracketLevel(MoveBracketLevel, Reply<()>),
     SetFeeSchedule(TradingAccountId, FeeSchedule, Reply<()>),
     RegisterRiskProfile(RiskProfile, Reply<()>),
     RegisterSessionPlan(SessionPlan, Reply<()>),
@@ -85,7 +78,10 @@ pub(crate) enum Command {
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
-    AttachVenue(Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>),
+    AttachVenue(
+        aeris_trading::venue::VenueCapabilities,
+        Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>,
+    ),
     DrainVenueEvents,
     #[cfg(test)]
     BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),

@@ -1,9 +1,8 @@
 use super::{
-    AccountEnvironment, BTreeMap, BrokerPosition, Connection, CostBasis, EquitySample, FeeModel,
-    FeeSchedule, FillId, FixedPoint, InstrumentId, LedgerCheckpoint, LedgerEntry, LedgerEntryKind,
-    Position, PositionCheckpoint, StepTx, TradingAccount, TradingAccountId, TradingInstrument,
-    TradingStore, Transaction, Value, database_error, encode_contract, json_string, json_u64,
-    params, parse_side, sqlite_i64,
+    AccountEnvironment, BTreeMap, Connection, CostBasis, EquitySample, FeeModel, FeeSchedule,
+    FillId, FixedPoint, InstrumentId, LedgerCheckpoint, LedgerEntry, LedgerEntryKind, Position,
+    PositionCheckpoint, StepTx, TradingAccount, TradingAccountId, TradingInstrument, TradingStore,
+    Transaction, Value, database_error, encode_contract, json_string, json_u64, params, sqlite_i64,
 };
 
 impl TradingStore {
@@ -184,89 +183,6 @@ impl TradingStore {
 }
 
 impl TradingStore {
-    /// Writes one account's broker positions: upserts and removals, or, with
-    /// `replace_all`, exactly the given positions.
-    pub(crate) fn write_broker_positions(
-        &mut self,
-        account_id: &TradingAccountId,
-        upserts: &[BrokerPosition],
-        removals: &[String],
-        replace_all: bool,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        if replace_all {
-            transaction
-                .execute(
-                    "DELETE FROM broker_positions WHERE account_id = ?1",
-                    [account_id.as_str()],
-                )
-                .map_err(database_error)?;
-        }
-        for broker_position_id in removals {
-            transaction
-                .execute(
-                    "DELETE FROM broker_positions WHERE account_id = ?1
-                        AND broker_position_id = ?2",
-                    params![account_id.as_str(), broker_position_id],
-                )
-                .map_err(database_error)?;
-        }
-        for position in upserts {
-            position.validate().map_err(|error| error.to_string())?;
-            transaction
-                .execute(
-                    "INSERT INTO broker_positions(account_id, broker_position_id, instrument_id,
-                        side, quantity_units, quantity_scale, entry_units, entry_scale,
-                        stop_units, stop_scale, take_units, take_scale, swap_units, swap_scale,
-                        commission_units, commission_scale, gross_unrealized_units,
-                        gross_unrealized_scale, net_unrealized_units, net_unrealized_scale,
-                        opened_unix_nanos)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                        ?16, ?17, ?18, ?19, ?20, ?21)
-                     ON CONFLICT(account_id, broker_position_id) DO UPDATE SET
-                        instrument_id = excluded.instrument_id, side = excluded.side,
-                        quantity_units = excluded.quantity_units,
-                        quantity_scale = excluded.quantity_scale,
-                        entry_units = excluded.entry_units, entry_scale = excluded.entry_scale,
-                        stop_units = excluded.stop_units, stop_scale = excluded.stop_scale,
-                        take_units = excluded.take_units, take_scale = excluded.take_scale,
-                        swap_units = excluded.swap_units, swap_scale = excluded.swap_scale,
-                        commission_units = excluded.commission_units,
-                        commission_scale = excluded.commission_scale,
-                        gross_unrealized_units = excluded.gross_unrealized_units,
-                        gross_unrealized_scale = excluded.gross_unrealized_scale,
-                        net_unrealized_units = excluded.net_unrealized_units,
-                        net_unrealized_scale = excluded.net_unrealized_scale,
-                        opened_unix_nanos = excluded.opened_unix_nanos",
-                    params![
-                        position.account_id.as_str(),
-                        position.broker_position_id,
-                        position.instrument_id.as_str(),
-                        position.side.as_str(),
-                        position.quantity.units(),
-                        position.quantity.scale(),
-                        position.entry_price.units(),
-                        position.entry_price.scale(),
-                        position.stop_loss.map(FixedPoint::units),
-                        position.stop_loss.map(FixedPoint::scale),
-                        position.take_profit.map(FixedPoint::units),
-                        position.take_profit.map(FixedPoint::scale),
-                        position.swap.units(),
-                        position.swap.scale(),
-                        position.commission.units(),
-                        position.commission.scale(),
-                        position.gross_unrealized.units(),
-                        position.gross_unrealized.scale(),
-                        position.net_unrealized.units(),
-                        position.net_unrealized.scale(),
-                        position.opened_unix_nanos,
-                    ],
-                )
-                .map_err(database_error)?;
-        }
-        StepTx::commit_revision(transaction).map_err(database_error)
-    }
-
     pub(crate) fn set_broker_balance(
         &self,
         account_id: &TradingAccountId,
@@ -335,55 +251,6 @@ impl TradingStore {
 }
 
 impl TradingStore {
-    pub(super) fn load_broker_positions(
-        &self,
-    ) -> Result<BTreeMap<(TradingAccountId, String), BrokerPosition>, String> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT account_id, broker_position_id, instrument_id, side,
-                quantity_units, quantity_scale, entry_units, entry_scale,
-                stop_units, stop_scale, take_units, take_scale,
-                swap_units, swap_scale, commission_units, commission_scale,
-                gross_unrealized_units, gross_unrealized_scale,
-                net_unrealized_units, net_unrealized_scale, opened_unix_nanos
-             FROM broker_positions ORDER BY account_id, broker_position_id",
-            )
-            .map_err(database_error)?;
-        let mut rows = statement.query([]).map_err(database_error)?;
-        let mut positions = BTreeMap::new();
-        while let Some(row) = rows.next().map_err(database_error)? {
-            let string = |column| row.get::<_, String>(column).map_err(database_error);
-            let integer = |column| row.get::<_, i64>(column).map_err(database_error);
-            let scale = |column| row.get::<_, u8>(column).map_err(database_error);
-            let optional_integer =
-                |column| row.get::<_, Option<i64>>(column).map_err(database_error);
-            let optional_scale = |column| row.get::<_, Option<u8>>(column).map_err(database_error);
-            let account_id =
-                TradingAccountId::try_new(string(0)?).map_err(|error| error.to_string())?;
-            let broker_position_id = string(1)?;
-            let position = BrokerPosition {
-                account_id: account_id.clone(),
-                broker_position_id: broker_position_id.clone(),
-                instrument_id: InstrumentId::try_new(string(2)?)
-                    .map_err(|error| error.to_string())?,
-                side: parse_side(&string(3)?)?,
-                quantity: fixed(integer(4)?, scale(5)?)?,
-                entry_price: fixed(integer(6)?, scale(7)?)?,
-                stop_loss: optional_fixed(optional_integer(8)?, optional_scale(9)?)?,
-                take_profit: optional_fixed(optional_integer(10)?, optional_scale(11)?)?,
-                swap: fixed(integer(12)?, scale(13)?)?,
-                commission: fixed(integer(14)?, scale(15)?)?,
-                gross_unrealized: fixed(integer(16)?, scale(17)?)?,
-                net_unrealized: fixed(integer(18)?, scale(19)?)?,
-                opened_unix_nanos: integer(20)?,
-            };
-            position.validate().map_err(|error| error.to_string())?;
-            positions.insert((account_id, broker_position_id), position);
-        }
-        Ok(positions)
-    }
-
     pub(super) fn load_cost_basis(
         &self,
     ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), CostBasis>, String> {

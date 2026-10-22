@@ -8,10 +8,11 @@ use super::{
     multiply_quantity, order_acceptance_detail, shifted_price, venue,
 };
 use aeris_instruments::PriceGrid;
+use aeris_trading::venue::VenueCapabilities;
 use aeris_trading::{OrderSide, RejectReason, RiskWarning, TimeInForce};
 
 mod capabilities;
-pub(crate) use capabilities::VenueCapabilities;
+pub(crate) use capabilities::RouteCapabilities;
 
 /// Explicit no-op buying-power step; margin is outside the solid-core venue.
 pub(crate) struct BuyingPower;
@@ -227,14 +228,15 @@ pub(crate) fn placement_touch_price(
 }
 
 /// The shared, side-effect-free checks run before either route persists an order.
+/// `client_id_limit` is the route's longest accepted client order id, if it has one.
 pub(crate) fn validate_common_order(
     instrument: &TradingInstrument,
     command: &PlaceOrder,
-    route: VenueRoute,
+    client_id_limit: Option<usize>,
     open_orders: usize,
     staged_orders: usize,
 ) -> Result<(), RejectReason> {
-    validate_client_id(command, route)?;
+    validate_client_id(command, client_id_limit)?;
     if command.quantity.scale() != instrument.quantity_scale
         || command
             .limit_price
@@ -263,11 +265,8 @@ pub(crate) fn validate_common_order(
     Ok(())
 }
 
-fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), RejectReason> {
-    if VenueCapabilities::for_route(route)
-        .client_id_limit
-        .is_some_and(|limit| command.client_order_id.as_str().len() > limit)
-    {
+fn validate_client_id(command: &PlaceOrder, limit: Option<usize>) -> Result<(), RejectReason> {
+    if limit.is_some_and(|limit| command.client_order_id.as_str().len() > limit) {
         Err(RejectReason::ClientIdTooLong)
     } else {
         Ok(())
@@ -305,7 +304,7 @@ pub(crate) fn admit(
     validate_common_order(
         instrument,
         command,
-        route,
+        owner.client_order_id_limit(route),
         owner.state.orders.open_count(),
         additional_open_orders,
     )
@@ -435,7 +434,11 @@ impl TradingCore {
         )
     }
 
-    pub(super) fn attach_venue(&mut self) -> Result<(u64, VenueRequestReceiver), String> {
+    pub(super) fn attach_venue(
+        &mut self,
+        capabilities: VenueCapabilities,
+    ) -> Result<(u64, VenueRequestReceiver), String> {
+        capabilities.validate().map_err(|error| error.to_string())?;
         let generation = self
             .state
             .venue_generation
@@ -459,6 +462,7 @@ impl TradingCore {
         }
         self.store.set_venue_generation(generation)?;
         self.venue_outbound = Some(outbound);
+        self.venue_capabilities = Some(capabilities);
         self.state.venue_generation = generation;
         self.venue_ingestion = 0;
         self.connected_broker_accounts.clear();
@@ -468,8 +472,19 @@ impl TradingCore {
 
     pub(super) fn require_broker_route(&self, account_id: &TradingAccountId) -> Result<(), String> {
         match self.route(account_id)? {
-            VenueRoute::Simulated => Err("broker position requires a broker account".into()),
+            VenueRoute::Simulated => Err("this action requires a broker account".into()),
             VenueRoute::BrokerDemo => Ok(()),
+        }
+    }
+
+    /// The longest client order id a route accepts: the attached venue's limit on the broker
+    /// route, none on the simulated venue.
+    fn client_order_id_limit(&self, route: VenueRoute) -> Option<usize> {
+        match route {
+            VenueRoute::Simulated => None,
+            VenueRoute::BrokerDemo => self
+                .venue_capabilities
+                .map(|capabilities| capabilities.client_order_id_limit),
         }
     }
 
@@ -586,7 +601,6 @@ impl TradingCore {
             .filter(|fill| &fill.account_id == account_id)
         {
             self.state.fill_accounting.remove(&fill.id);
-            self.state.broker_fill_positions.remove(&fill.id);
         }
         self.state
             .fills
@@ -662,7 +676,7 @@ impl TradingCore {
         match self.route(&command.account_id)? {
             VenueRoute::Simulated => {}
             VenueRoute::BrokerDemo => {
-                validate_client_id(command, VenueRoute::BrokerDemo)
+                validate_client_id(command, self.client_order_id_limit(VenueRoute::BrokerDemo))
                     .map_err(|error| error.to_string())?;
                 if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
                     return existing_client_order(existing, command)

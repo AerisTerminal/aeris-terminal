@@ -399,23 +399,6 @@ impl TradingCore {
                 .or_default()
                 .0 = i128::from(current.units());
         }
-        // A broker account's open exposure is its broker positions, netted per instrument
-        // like a simulated position.
-        for position in self
-            .state
-            .broker_positions
-            .values()
-            .filter(|position| &position.account_id == account_id)
-        {
-            let quantity = position
-                .quantity
-                .exact_rescale(quantity_scale)
-                .map_err(|error| error.to_string())?;
-            scenarios
-                .entry(position.instrument_id.clone())
-                .or_default()
-                .0 += i128::from(position.side.sign()) * i128::from(quantity.units());
-        }
         for order in self.state.orders.open_orders().filter(|order| {
             &order.account_id == account_id
                 && order.status.is_open()
@@ -620,8 +603,8 @@ impl TradingCore {
             .map_err(|error| error.to_string())
     }
 
-    /// The broker's net unrealized P&L of the account's open positions, or `None` while the
-    /// venue cannot reach the account.
+    /// The venue's open P&L of the account's positions, or `None` while the venue cannot
+    /// reach the account.
     pub(super) fn broker_unrealized(
         &self,
         account_id: &TradingAccountId,
@@ -632,14 +615,14 @@ impl TradingCore {
         }
         let zero = FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?;
         self.state
-            .broker_positions
+            .positions
             .values()
             .filter(|position| &position.account_id == account_id)
             .try_fold(zero, |total, position| {
                 position
-                    .net_unrealized
+                    .unrealized_pnl
                     .exact_rescale(scale)
-                    .and_then(|net| total.checked_add(net))
+                    .and_then(|open| total.checked_add(open))
             })
             .map(Some)
             .map_err(|error| error.to_string())

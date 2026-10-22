@@ -28,9 +28,7 @@ pub(crate) use core::REPLY_CAPACITY;
 pub(crate) use core::chart_bracket_template;
 pub use core::market::feed::MarketFeedInbox;
 pub use core::*;
-pub(crate) use core::{
-    DEMO_VENUE_UNAVAILABLE, EQUITY_SAMPLE_INTERVAL, Reply, TradingCore, UNREALIZED_PNL_INTERVAL,
-};
+pub(crate) use core::{DEMO_VENUE_UNAVAILABLE, EQUITY_SAMPLE_INTERVAL, Reply, TradingCore};
 pub use history::{HistoryCursor, HistoryPage, HistoryQuery, MAXIMUM_HISTORY_PAGE};
 pub(crate) use service::Command;
 pub(crate) use std::path::PathBuf;

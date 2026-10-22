@@ -132,12 +132,11 @@ pub(super) enum BottomPanelTab {
     TradeHistory,
 }
 
-/// How a position closes: a broker closes its own position by identity, while a practice
-/// position closes at its instrument's current quote.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// How a position closes: a broker position exits through a broker flatten of its
+/// instrument, while a practice position closes at its instrument's current quote.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PositionCloser {
     Broker {
-        broker_position_id: String,
         /// Only a broker account the venue reaches now can close a position or report a
         /// current open P&L.
         connected: bool,
@@ -231,7 +230,7 @@ impl BottomPanelState {
         self.history.account_pnl = snapshot.account_pnl.clone().into();
         self.adopt_positions(open_positions(
             &snapshot.positions,
-            &snapshot.broker_positions,
+            &snapshot.accounts,
             &snapshot.round_trips,
             &snapshot.connected_broker_accounts,
             |account_id, instrument_id| snapshot.position_protection(account_id, instrument_id),
@@ -298,12 +297,12 @@ impl BottomPanelState {
     }
 }
 
-/// Every open position, newest opened first: practice positions from the owner's net
-/// positions, dated by their open trade and protected by the owner's working stop loss and
-/// take profit orders, and broker positions exactly as the broker reports them.
+/// Every open position of the owner's ledger, newest opened first, dated by its open trade
+/// and protected by the owner's working stop loss and take profit orders. A broker
+/// position shows the open P&L its venue reported only while the account is reachable.
 fn open_positions(
-    simulated: &[aeris_trading::Position],
-    broker: &[aeris_trading::BrokerPosition],
+    positions: &[aeris_trading::Position],
+    accounts: &[aeris_trading::TradingAccount],
     round_trips: &[aeris_trading_runtime::TradeRoundTrip],
     connected: &BTreeSet<aeris_trading::TradingAccountId>,
     protection: impl Fn(
@@ -311,56 +310,55 @@ fn open_positions(
         &aeris_instruments::InstrumentId,
     ) -> aeris_trading_runtime::PositionProtection,
 ) -> Vec<OpenPosition> {
-    let simulated = simulated.iter().filter_map(|position| {
-        let net = position.net_quantity;
-        let side = match net.units().signum() {
-            1 => aeris_trading::OrderSide::Buy,
-            -1 => aeris_trading::OrderSide::Sell,
-            _ => return None,
-        };
-        let opened_unix_nanos = round_trips
-            .iter()
-            .find(|trip| {
-                !trip.closed
-                    && trip.account_id == position.account_id
-                    && trip.instrument_id == position.instrument_id
-            })
-            .and_then(|trip| trip.entry)
-            .map(|entry| entry.first_unix_nanos);
-        let protection = protection(&position.account_id, &position.instrument_id);
-        Some(OpenPosition {
-            account_id: position.account_id.clone(),
-            instrument_id: position.instrument_id.clone(),
-            side,
-            quantity: aeris_trading::FixedPoint::try_new(net.units().checked_abs()?, net.scale())
+    let mut positions = positions
+        .iter()
+        .filter_map(|position| {
+            let net = position.net_quantity;
+            let side = match net.units().signum() {
+                1 => aeris_trading::OrderSide::Buy,
+                -1 => aeris_trading::OrderSide::Sell,
+                _ => return None,
+            };
+            let opened_unix_nanos = round_trips
+                .iter()
+                .find(|trip| {
+                    !trip.closed
+                        && trip.account_id == position.account_id
+                        && trip.instrument_id == position.instrument_id
+                })
+                .and_then(|trip| trip.entry)
+                .map(|entry| entry.first_unix_nanos);
+            let protection = protection(&position.account_id, &position.instrument_id);
+            let simulated = accounts.iter().any(|account| {
+                account.id == position.account_id
+                    && account.environment == aeris_trading::AccountEnvironment::Simulated
+            });
+            let closer = if simulated {
+                PositionCloser::Simulated
+            } else {
+                PositionCloser::Broker {
+                    connected: connected.contains(&position.account_id),
+                }
+            };
+            Some(OpenPosition {
+                account_id: position.account_id.clone(),
+                instrument_id: position.instrument_id.clone(),
+                side,
+                quantity: aeris_trading::FixedPoint::try_new(
+                    net.units().checked_abs()?,
+                    net.scale(),
+                )
                 .ok()?,
-            entry_price: position.average_entry_price,
-            stop_loss: protection.stop_loss,
-            take_profit: protection.take_profit,
-            open_pnl: Some(position.unrealized_pnl),
-            opened_unix_nanos,
-            closer: PositionCloser::Simulated,
+                entry_price: position.average_entry_price,
+                stop_loss: protection.stop_loss,
+                take_profit: protection.take_profit,
+                open_pnl: (!matches!(closer, PositionCloser::Broker { connected: false }))
+                    .then_some(position.unrealized_pnl),
+                opened_unix_nanos,
+                closer,
+            })
         })
-    });
-    let broker = broker.iter().map(|position| {
-        let connected = connected.contains(&position.account_id);
-        OpenPosition {
-            account_id: position.account_id.clone(),
-            instrument_id: position.instrument_id.clone(),
-            side: position.side,
-            quantity: position.quantity,
-            entry_price: Some(position.entry_price),
-            stop_loss: position.stop_loss,
-            take_profit: position.take_profit,
-            open_pnl: connected.then_some(position.net_unrealized),
-            opened_unix_nanos: Some(position.opened_unix_nanos),
-            closer: PositionCloser::Broker {
-                broker_position_id: position.broker_position_id.clone(),
-                connected,
-            },
-        }
-    });
-    let mut positions = simulated.chain(broker).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     positions.sort_by_key(|position| std::cmp::Reverse(position.opened_unix_nanos));
     positions
 }
@@ -1210,7 +1208,8 @@ fn position_close_button(
     terminal: &Entity<TerminalApp>,
     theme: &AerisTheme,
 ) -> Button {
-    let account_key = position.account_id.as_str().to_string();
+    let account_id = position.account_id.clone();
+    let instrument_id = position.instrument_id.clone();
     let button = Button::new(("position_close", index), theme)
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
@@ -1219,38 +1218,30 @@ fn position_close_button(
         .icon(header_icon(HugeIcon::Close))
         .aria_label("Close position")
         .tooltip(TooltipSpec::new("Close position", theme).show_delay(TOOLTIP_OPEN_DELAY));
-    match &position.closer {
-        PositionCloser::Broker {
-            broker_position_id,
-            connected,
-        } => {
-            let broker_position_id = broker_position_id.clone();
-            let terminal = terminal.clone();
+    let terminal = terminal.clone();
+    match position.closer {
+        PositionCloser::Broker { connected } => {
             button.disabled(!connected).on_click(move |_, _, cx| {
                 let service = terminal.read(cx).lifecycle.trading().clone();
                 let feedback = terminal.read(cx).lifecycle.trading_feedback().clone();
                 aeris_desktop::trading::close_broker_position(
                     &service,
                     &feedback,
-                    account_key.clone(),
-                    broker_position_id.clone(),
+                    account_id.clone(),
+                    instrument_id.clone(),
                     cx,
                 );
             })
         }
-        PositionCloser::Simulated => {
-            let terminal = terminal.clone();
-            let instrument_id = position.instrument_id.clone();
-            button.on_click(move |_, _, cx| {
-                terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.close_simulated_position(
-                        account_key.clone(),
-                        &instrument_id,
-                        terminal_cx,
-                    );
-                });
-            })
-        }
+        PositionCloser::Simulated => button.on_click(move |_, _, cx| {
+            terminal.update(cx, |terminal, terminal_cx| {
+                terminal.close_simulated_position(
+                    account_id.as_str().to_string(),
+                    &instrument_id,
+                    terminal_cx,
+                );
+            });
+        }),
     }
 }
 
@@ -1530,24 +1521,47 @@ mod tests {
         );
     }
 
-    fn broker_position(account: &str, id: &str, opened: i64) -> aeris_trading::BrokerPosition {
-        let money = |units| aeris_trading::FixedPoint::try_new(units, 2).expect("money");
-        aeris_trading::BrokerPosition {
-            account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
-            instrument_id: aeris_instruments::InstrumentId::try_new("broker:demo:1001:1")
-                .expect("instrument"),
-            broker_position_id: id.into(),
-            side: aeris_trading::OrderSide::Buy,
-            quantity: money(100_000),
-            entry_price: aeris_trading::FixedPoint::try_new(112_142, 5).expect("entry"),
-            stop_loss: None,
-            take_profit: None,
-            swap: money(0),
-            commission: money(-5),
-            gross_unrealized: money(-1),
-            net_unrealized: money(-6),
-            opened_unix_nanos: opened,
+    fn trading_account(
+        account: &str,
+        environment: aeris_trading::AccountEnvironment,
+    ) -> aeris_trading::TradingAccount {
+        aeris_trading::TradingAccount {
+            id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
+            display_name: account.to_string(),
+            environment,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: None,
         }
+    }
+
+    /// A broker account's one netted position on a futures contract, opened at `opened`.
+    fn broker_position(
+        account: &str,
+        instrument: &str,
+        opened: i64,
+    ) -> (
+        aeris_trading::Position,
+        aeris_trading_runtime::TradeRoundTrip,
+    ) {
+        let instrument_id = aeris_instruments::InstrumentId::try_new(instrument).expect("id");
+        let position = aeris_trading::Position {
+            instrument_id: instrument_id.clone(),
+            net_quantity: aeris_trading::FixedPoint::try_new(2, 0).expect("quantity"),
+            average_entry_price: Some(
+                aeris_trading::FixedPoint::try_new(689_625, 2).expect("price"),
+            ),
+            unrealized_pnl: aeris_trading::FixedPoint::try_new(-6, 2).expect("open pnl"),
+            ..simulated_position(account, 0)
+        };
+        let mut trip = open_round_trip(account);
+        trip.instrument_id = instrument_id;
+        if let Some(entry) = trip.entry.as_mut() {
+            entry.first_unix_nanos = opened;
+        }
+        (position, trip)
     }
 
     fn simulated_position(account: &str, net_units: i64) -> aeris_trading::Position {
@@ -1573,7 +1587,10 @@ mod tests {
             recovery_notices: Vec::new(),
             revision: 4,
             market_observation_error: None,
-            accounts: Vec::new(),
+            accounts: vec![trading_account(
+                "practice",
+                aeris_trading::AccountEnvironment::Simulated,
+            )],
             instruments: Vec::new(),
             orders: Vec::new(),
             order_events: Vec::new(),
@@ -1582,7 +1599,6 @@ mod tests {
             fill_realized_pnl: BTreeMap::new(),
             round_trips: vec![open_round_trip("practice")],
             positions: vec![position],
-            broker_positions: Vec::new(),
             broker_balances: BTreeMap::new(),
             connected_broker_accounts: BTreeSet::new(),
             position_pnl: Vec::new(),
@@ -1632,35 +1648,40 @@ mod tests {
         assert!(!panel.apply_snapshot(&second));
     }
 
-    fn broker_ids(state: &BottomPanelState) -> Vec<String> {
+    fn shown_instruments(state: &BottomPanelState) -> Vec<&str> {
         state
             .positions
             .rows
             .iter()
-            .filter_map(|row| match &state.positions.positions[*row].closer {
-                PositionCloser::Broker {
-                    broker_position_id, ..
-                } => Some(broker_position_id.clone()),
-                PositionCloser::Simulated => None,
-            })
+            .map(|row| state.positions.positions[*row].instrument_id.as_str())
             .collect()
     }
 
     #[test]
     fn positions_follow_the_account_filter_newest_opened_first() {
         let mut state = BottomPanelState::default();
+        let (positions, trips): (Vec<_>, Vec<_>) = [
+            broker_position("a", "broker:demo:ESZ6", 10),
+            broker_position("b", "broker:demo:NQZ6", 30),
+            broker_position("a", "broker:demo:CLZ6", 20),
+        ]
+        .into_iter()
+        .unzip();
+        let accounts = [
+            trading_account("a", aeris_trading::AccountEnvironment::Demo),
+            trading_account("b", aeris_trading::AccountEnvironment::Demo),
+        ];
         state.adopt_positions(open_positions(
-            &[],
-            &[
-                broker_position("a", "1", 10),
-                broker_position("b", "2", 30),
-                broker_position("a", "3", 20),
-            ],
-            &[],
+            &positions,
+            &accounts,
+            &trips,
             &BTreeSet::new(),
             |_, _| aeris_trading_runtime::PositionProtection::default(),
         ));
-        assert_eq!(broker_ids(&state), ["2", "3", "1"]);
+        assert_eq!(
+            shown_instruments(&state),
+            ["broker:demo:NQZ6", "broker:demo:CLZ6", "broker:demo:ESZ6"]
+        );
         assert_eq!(
             position_rows(
                 &state.positions.positions,
@@ -1669,12 +1690,11 @@ mod tests {
             vec![1, 2]
         );
         assert!(
-            state
-                .positions
-                .positions
-                .iter()
-                .all(|position| position.open_pnl.is_none()),
-            "an unreachable broker account has no current open P&L"
+            state.positions.positions.iter().all(|position| {
+                position.open_pnl.is_none()
+                    && position.closer == PositionCloser::Broker { connected: false }
+            }),
+            "an unreachable broker account has no current open P&L and cannot close"
         );
     }
 
@@ -1682,13 +1702,20 @@ mod tests {
     fn positions_list_practice_and_broker_accounts_together() {
         let connected =
             BTreeSet::from([aeris_trading::TradingAccountId::try_new("broker").expect("account")]);
+        let (broker_position, broker_trip) = broker_position("broker", "broker:demo:ESZ6", 10);
+        let accounts = [
+            trading_account("practice", aeris_trading::AccountEnvironment::Simulated),
+            trading_account("flat", aeris_trading::AccountEnvironment::Simulated),
+            trading_account("broker", aeris_trading::AccountEnvironment::Demo),
+        ];
         let positions = open_positions(
             &[
                 simulated_position("practice", -200_000_000),
                 simulated_position("flat", 0),
+                broker_position,
             ],
-            &[broker_position("broker", "7", 10)],
-            &[open_round_trip("practice"), round_trip("flat")],
+            &accounts,
+            &[open_round_trip("practice"), round_trip("flat"), broker_trip],
             &connected,
             |account_id, _| aeris_trading_runtime::PositionProtection {
                 stop_loss: (account_id.as_str() == "practice")
@@ -1719,16 +1746,14 @@ mod tests {
         );
 
         let broker = &positions[1];
-        assert_eq!(
-            broker.closer,
-            PositionCloser::Broker {
-                broker_position_id: "7".to_string(),
-                connected: true,
-            }
-        );
+        assert_eq!(broker.closer, PositionCloser::Broker { connected: true });
+        assert_eq!(broker.side, aeris_trading::OrderSide::Buy);
+        assert_eq!(broker.quantity.units(), 2);
+        assert_eq!(broker.opened_unix_nanos, Some(10));
         assert_eq!(
             broker.open_pnl.map(aeris_trading::FixedPoint::units),
-            Some(-6)
+            Some(-6),
+            "a reachable broker account shows the open P&L its venue reported"
         );
     }
 

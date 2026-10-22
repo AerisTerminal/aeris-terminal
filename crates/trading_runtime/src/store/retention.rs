@@ -528,8 +528,9 @@ impl TradingStore {
                 [usize_to_i64(maximum_user_records)?],
             )
             .map_err(database_error)?;
+        // An entry whose bracket the venue still holds keeps its row with the levels.
         let group_pin_orders = if checkpointed {
-            format!("AND {GROUP_PIN_ID}")
+            format!("AND {GROUP_PIN_ID} AND id NOT IN (SELECT order_id FROM broker_bracket_levels)")
         } else {
             String::new()
         };

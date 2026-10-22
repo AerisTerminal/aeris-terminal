@@ -743,47 +743,6 @@ pub struct Position {
     pub last_fill_unix_nanos: i64,
 }
 
-/// One broker-owned hedged position, identified independently of net instrument exposure.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BrokerPosition {
-    pub account_id: TradingAccountId,
-    pub instrument_id: InstrumentId,
-    pub broker_position_id: String,
-    pub side: OrderSide,
-    pub quantity: FixedPoint,
-    pub entry_price: FixedPoint,
-    pub stop_loss: Option<FixedPoint>,
-    pub take_profit: Option<FixedPoint>,
-    pub swap: FixedPoint,
-    pub commission: FixedPoint,
-    pub gross_unrealized: FixedPoint,
-    pub net_unrealized: FixedPoint,
-    pub opened_unix_nanos: i64,
-}
-
-impl BrokerPosition {
-    /// Validates the broker position before persisting or publishing it.
-    ///
-    /// # Errors
-    /// Returns an error for missing identity, invalid amounts, or invalid timestamp.
-    pub fn validate(&self) -> Result<(), TradingValidationError> {
-        validate_field("broker_position_id", &self.broker_position_id)?;
-        if self.quantity.units() <= 0 {
-            return Err(TradingValidationError::NonPositiveQuantity);
-        }
-        if self.entry_price.units() <= 0
-            || self.stop_loss.is_some_and(|value| value.units() <= 0)
-            || self.take_profit.is_some_and(|value| value.units() <= 0)
-        {
-            return Err(TradingValidationError::NonPositivePrice);
-        }
-        if self.opened_unix_nanos <= 0 {
-            return Err(TradingValidationError::InvalidTimestamp);
-        }
-        Ok(())
-    }
-}
-
 /// Account-level `PnL` projection in an explicit currency scale.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountPnl {
@@ -1027,6 +986,7 @@ pub enum TradingValidationError {
     InexactRescale,
     InvalidOrderPrices,
     InvalidAccountRoute,
+    InvalidBracket,
     InvalidStartingEquity,
     InvalidFeeRate(u32),
     InvalidFilledQuantity,
@@ -1053,6 +1013,9 @@ impl fmt::Display for TradingValidationError {
             Self::InvalidOrderPrices => formatter.write_str("prices do not match the order type"),
             Self::InvalidAccountRoute => formatter
                 .write_str("trading account venue, environment and broker reference do not match"),
+            Self::InvalidBracket => formatter.write_str(
+                "bracket levels must cover the entry quantity with distinct positive distances",
+            ),
             Self::InvalidStartingEquity => formatter
                 .write_str("starting equity must be positive and use the account currency scale"),
             Self::InvalidFilledQuantity => {
@@ -1267,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn demo_environment_and_hedged_position_validate_without_simulation_label() {
+    fn demo_environment_validates_without_simulation_label() {
         let account = TradingAccount {
             id: TradingAccountId::try_new("broker").expect("id"),
             display_name: "Demo account".to_string(),
@@ -1280,27 +1243,6 @@ mod tests {
         };
         assert_eq!(account.environment.as_str(), "demo");
         account.validate().expect("demo account");
-        let mut position = BrokerPosition {
-            account_id: account.id,
-            instrument_id: InstrumentId::try_new("symbol").expect("instrument"),
-            broker_position_id: "position".to_string(),
-            side: OrderSide::Buy,
-            quantity: FixedPoint::try_new(1, 2).expect("quantity"),
-            entry_price: FixedPoint::try_new(100, 2).expect("price"),
-            stop_loss: None,
-            take_profit: None,
-            swap: FixedPoint::try_new(0, 2).expect("swap"),
-            commission: FixedPoint::try_new(0, 2).expect("commission"),
-            gross_unrealized: FixedPoint::try_new(0, 2).expect("gross"),
-            net_unrealized: FixedPoint::try_new(0, 2).expect("net"),
-            opened_unix_nanos: 1,
-        };
-        position.validate().expect("hedged position");
-        position.broker_position_id.clear();
-        assert_eq!(
-            position.validate(),
-            Err(TradingValidationError::EmptyField("broker_position_id"))
-        );
     }
 
     #[test]

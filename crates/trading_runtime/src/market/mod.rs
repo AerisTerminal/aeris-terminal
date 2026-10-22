@@ -733,6 +733,7 @@ impl TradingCore {
         for current in self.state.positions.values().filter(|position| {
             position.instrument_id == observation.instrument_id
                 && position.net_quantity.units() != 0
+                && crate::core::is_simulated(&self.state.accounts, &position.account_id)
         }) {
             let mark = if current.net_quantity.units() > 0 {
                 observation.bid
@@ -771,11 +772,15 @@ impl TradingCore {
         instrument: &TradingInstrument,
     ) -> Result<bool, String> {
         let mut positions_changed = false;
+        // A broker position's open P&L is the venue's, never a local mark.
         let position_keys = self
             .state
             .positions
             .keys()
-            .filter(|(_, instrument_id)| instrument_id == &observation.instrument_id)
+            .filter(|(account_id, instrument_id)| {
+                instrument_id == &observation.instrument_id
+                    && crate::core::is_simulated(&self.state.accounts, account_id)
+            })
             .cloned()
             .collect::<Vec<_>>();
         for key in position_keys {
