@@ -16,8 +16,8 @@ use std::{
 
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    SearchProviderInstruments, SelectProviderInstrument,
+    ProviderContractMetadata, ProviderInstrumentKind, ProviderInstrumentSearchResult,
+    ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
 use aeris_platform_runtime::{
@@ -30,12 +30,12 @@ use aeris_rithmic_protocol_adapter::{
     MAXIMUM_RITHMIC_SEARCH_RESULTS, ProviderInvalidationReason, ProviderSessionEvent,
     RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE,
     RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
-    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCommandError,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
-    RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeError,
-    RithmicProviderRuntimeState, RithmicReadOnlySubscription, RithmicRetryScheduler,
-    RithmicSessionLimits, RithmicSymbolSearch, SearchPattern, SessionGeneration,
-    apply_rithmic_environment_event, try_recv_rithmic_event,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProductListing,
+    RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderDriver,
+    RithmicProviderEvents, RithmicProviderInstrument, RithmicProviderRuntime,
+    RithmicProviderRuntimeConfig, RithmicProviderRuntimeError, RithmicProviderRuntimeState,
+    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
+    SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
@@ -52,6 +52,8 @@ const CALLBACK_DEPTH_LEVELS: usize = 4_096;
 const ADAPTER_CONTROL_WAIT: Duration = Duration::from_millis(2);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const ENVIRONMENT_CAPACITY: usize = 8;
+/// Aeris charts Rithmic futures only, and contract searches filter to them.
+const LISTED_PRODUCT_ASSET_CLASS: &str = "futures";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicInstrumentDemand {
@@ -312,6 +314,23 @@ impl CatalogDispatchFailure {
     }
 }
 
+/// The ticker-login command that serves one consumer search.
+#[derive(Debug, Eq, PartialEq)]
+enum CatalogSearchRequest {
+    Symbols(RithmicSymbolSearch),
+    /// An empty query lists products; their contracts are a later symbol search.
+    Products(RithmicProductListing),
+}
+
+impl CatalogSearchRequest {
+    const fn generation(&self) -> NonZeroUsize {
+        match self {
+            Self::Symbols(search) => search.generation(),
+            Self::Products(listing) => listing.generation(),
+        }
+    }
+}
+
 /// Catalog commands sent on the one shared ticker login.
 ///
 /// Every consumer numbers its own searches and selections, so different
@@ -343,10 +362,15 @@ impl CatalogCommands {
     fn search_request(
         &mut self,
         search: &SearchProviderInstruments,
-    ) -> Result<RithmicSymbolSearch, CatalogDispatchFailure> {
+    ) -> Result<CatalogSearchRequest, CatalogDispatchFailure> {
         let maximum_results = bounded_search_results(search.maximum_results)
             .ok_or(CatalogDispatchFailure::InvalidRequest)?;
         let wire = self.mint()?;
+        if search.query.trim().is_empty() {
+            return RithmicProductListing::try_new(wire, maximum_results)
+                .map(CatalogSearchRequest::Products)
+                .map_err(|_| CatalogDispatchFailure::InvalidRequest);
+        }
         // Rithmic symbols are upper case and the search matches them exactly.
         // Aeris charts Rithmic futures only; filtering at the provider keeps a
         // broad query's options and strategies from filling the bounded result
@@ -360,6 +384,7 @@ impl CatalogCommands {
             SearchPattern::Equals,
             maximum_results,
         )
+        .map(CatalogSearchRequest::Symbols)
         .map_err(|_| CatalogDispatchFailure::InvalidRequest)
     }
 
@@ -429,6 +454,12 @@ impl CatalogCommands {
         }
         self.completed_searches.push_back((issuer, wire));
         Some(issuer)
+    }
+
+    /// A product listing holds no selectable instruments, so it is not
+    /// retained and cannot evict a completed search a selection may name.
+    fn listing_completed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
+        self.searches.remove(&wire)
     }
 
     fn selection_installed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
@@ -700,9 +731,15 @@ fn send_catalog_control(
         RithmicCatalogControl::Search(search) => {
             let request = commands.search_request(search)?;
             let wire = request.generation();
-            events
-                .search_symbols(session_generation, request)
-                .map_err(CatalogDispatchFailure::Command)?;
+            match request {
+                CatalogSearchRequest::Symbols(request) => {
+                    events.search_symbols(session_generation, request)
+                }
+                CatalogSearchRequest::Products(request) => {
+                    events.list_products(session_generation, request)
+                }
+            }
+            .map_err(CatalogDispatchFailure::Command)?;
             commands.search_sent(wire, search);
         }
         RithmicCatalogControl::Select(selection) => {
@@ -752,6 +789,7 @@ fn publish_catalog_callback(
                 .results
                 .into_iter()
                 .map(|result| ProviderInstrumentSummary {
+                    kind: ProviderInstrumentKind::Instrument,
                     display_symbol: result.symbol.clone(),
                     symbol: result.symbol,
                     exchange: result.exchange,
@@ -763,6 +801,39 @@ fn publish_catalog_callback(
                 })
                 .collect::<Vec<_>>();
             instruments.sort_by(front_month_first);
+            let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
+                ProviderInstrumentSearchResult {
+                    consumer_id: issuer.consumer_id,
+                    provider: "rithmic".to_string(),
+                    provider_generation,
+                    search_generation: issuer.generation,
+                    instruments,
+                },
+            ));
+            None
+        }
+        AdapterCatalogEvent::ProductsListed {
+            listing_generation,
+            products,
+            ..
+        } => {
+            let issuer = commands.listing_completed(listing_generation)?;
+            // The adapter orders products by code, then exchange.
+            let instruments = products
+                .products
+                .into_iter()
+                .map(|product| ProviderInstrumentSummary {
+                    kind: ProviderInstrumentKind::Product,
+                    symbol: product.product_code.clone(),
+                    display_symbol: product.product_code.clone(),
+                    exchange: product.exchange,
+                    name: product.name,
+                    product_code: Some(product.product_code),
+                    instrument_type: None,
+                    expiration_date: None,
+                    asset_class: Some(LISTED_PRODUCT_ASSET_CLASS.to_string()),
+                })
+                .collect();
             let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
                 ProviderInstrumentSearchResult {
                     consumer_id: issuer.consumer_id,
@@ -2014,22 +2085,23 @@ mod tests {
     };
 
     use super::{
-        CatalogCommands, CatalogDispatchFailure, CatalogIssuer, EnvironmentState,
-        MAXIMUM_RITHMIC_RETAINED_SEARCHES, MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogControl,
-        RithmicCatalogEvent, RithmicRealtimeControl, bounded_search_results,
+        CatalogCommands, CatalogDispatchFailure, CatalogIssuer, CatalogSearchRequest,
+        EnvironmentState, MAXIMUM_RITHMIC_RETAINED_SEARCHES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
+        RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, bounded_search_results,
         catalog_selection_subscription, next_generation, publish_catalog_callback,
         queue_depth_snapshot, reject_catalog_generation, reject_pending_catalog,
         reject_undispatched, retire_pending_catalog_generation,
     };
     use aeris_contracts::{
-        InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
-        SearchProviderInstruments, SelectProviderInstrument,
+        InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentKind,
+        ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
     };
     use aeris_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
     use aeris_platform_runtime::{NetworkEvent, PowerEvent};
     use aeris_rithmic_protocol_adapter::{
-        CollectedSymbols, InstrumentType, RithmicCatalogEvent as AdapterCatalogEvent,
-        RithmicCatalogRejection, RithmicEnvironmentEvent, SearchPattern, SymbolSearchResult,
+        CollectedProducts, CollectedSymbols, InstrumentType, ProductCodeResult,
+        RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
+        RithmicEnvironmentEvent, SearchPattern, SymbolSearchResult,
     };
 
     #[test]
@@ -2560,17 +2632,115 @@ mod tests {
     #[test]
     fn search_query_is_upper_cased_for_the_exact_symbol_match() {
         let mut commands = CatalogCommands::default();
-        let request = commands
-            .search_request(&search_control(41, 1, "mnq"))
-            .expect("search validates");
+        let Ok(CatalogSearchRequest::Symbols(request)) =
+            commands.search_request(&search_control(41, 1, "mnq"))
+        else {
+            panic!("a typed query searches symbols");
+        };
 
         assert_eq!(request.query(), "MNQ");
         assert_eq!(request.pattern(), SearchPattern::Equals);
         assert_eq!(request.instrument_type(), Some(InstrumentType::Future));
-        assert_eq!(
-            commands.search_request(&search_control(41, 2, "")),
-            Err(CatalogDispatchFailure::InvalidRequest)
+    }
+
+    #[test]
+    fn empty_query_lists_products_within_the_session_result_bound() {
+        let mut commands = CatalogCommands::default();
+        for query in ["", "  "] {
+            let mut search = search_control(41, 1, query);
+            search.maximum_results = 1_000;
+            let Ok(CatalogSearchRequest::Products(listing)) = commands.search_request(&search)
+            else {
+                panic!("an empty query lists products");
+            };
+            assert_eq!(
+                listing.maximum_results().get(),
+                MAXIMUM_RITHMIC_SEARCH_RESULTS
+            );
+        }
+    }
+
+    #[test]
+    fn product_listing_publishes_unselectable_products_without_evicting_searches() {
+        let (publications, published) = publications(1);
+        let mut commands = CatalogCommands::default();
+        let searched = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
+        complete_search(
+            &publications,
+            &mut commands,
+            searched,
+            found(&[("MNQZ6", "CME", "MNQ", Some("20261218"))]),
         );
+        let _ = published.recv().expect("search result is published");
+
+        for generation in
+            2..=u64::try_from(MAXIMUM_RITHMIC_RETAINED_SEARCHES + 1).expect("retention bound fits")
+        {
+            let listed = issue_search(&mut commands, &search_control(41, generation, ""));
+            let products = CollectedProducts {
+                products: vec![
+                    ProductCodeResult {
+                        product_code: "MNQ".to_string(),
+                        exchange: "CME".to_string(),
+                        name: Some("Micro E-mini Nasdaq-100".to_string()),
+                    },
+                    ProductCodeResult {
+                        product_code: "NQ".to_string(),
+                        exchange: "CME".to_string(),
+                        name: None,
+                    },
+                ],
+                duplicate_count: 0,
+            };
+            let callback = AdapterCatalogEvent::products_listed(NonZeroU64::MIN, listed, products);
+            assert!(publish_catalog_callback(&publications, 7, callback, &mut commands).is_none());
+            let result = search_result(published.recv().expect("listing is published"));
+            assert_eq!(result.search_generation, generation);
+            let rows = result
+                .instruments
+                .iter()
+                .map(|product| {
+                    (
+                        product.kind,
+                        product.symbol.as_str(),
+                        product.product_code.as_deref(),
+                        product.name.as_deref(),
+                        product.asset_class.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows,
+                [
+                    (
+                        ProviderInstrumentKind::Product,
+                        "MNQ",
+                        Some("MNQ"),
+                        Some("Micro E-mini Nasdaq-100"),
+                        Some("futures"),
+                    ),
+                    (
+                        ProviderInstrumentKind::Product,
+                        "NQ",
+                        Some("NQ"),
+                        None,
+                        Some("futures"),
+                    ),
+                ]
+            );
+            assert_eq!(
+                commands.selection_request(&selection_control(41, 100, generation, "MNQ"), false),
+                Err(CatalogDispatchFailure::UnretainedSearch),
+                "a product listing is never a selection source"
+            );
+        }
+        assert!(
+            commands
+                .selection_request(&selection_control(41, 101, 1, "MNQZ6"), false)
+                .is_ok(),
+            "listings never evict a retained contract search"
+        );
+        assert!(!commands.has_pending());
     }
 
     #[test]

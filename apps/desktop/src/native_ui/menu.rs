@@ -238,6 +238,7 @@ pub(crate) struct MenuRow {
     label: SharedString,
     leading_icon: Option<Icon>,
     leading: Option<AnyElement>,
+    description: Option<SharedString>,
     detail: Option<SharedString>,
     trailing: Option<AnyElement>,
     activation: Option<Activation>,
@@ -298,6 +299,7 @@ impl MenuRow {
             label: label.into(),
             leading_icon: None,
             leading: None,
+            description: None,
             detail: None,
             trailing: None,
             activation: None,
@@ -321,6 +323,13 @@ impl MenuRow {
     /// state, including a destructive row's `danger-hover` while hovered.
     pub(crate) fn leading_icon(mut self, icon: Icon) -> Self {
         self.leading_icon = Some(icon);
+        self
+    }
+
+    /// Supporting text that follows the label and truncates before it does, such as an
+    /// instrument's full name.
+    pub(crate) fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -425,6 +434,25 @@ impl MenuRow {
     }
 }
 
+fn row_description(description: SharedString, ink: ThemeColor) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_color(gpui_color(ink))
+        .child(description)
+}
+
+fn row_detail(detail: SharedString, scale: MenuScale, ink: ThemeColor) -> Div {
+    div()
+        .flex_none()
+        .max_w(scale.rems(10.0))
+        .truncate()
+        .text_size(scale.rems(0.75))
+        .text_color(gpui_color(ink))
+        .child(detail)
+}
+
 impl RenderOnce for MenuRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
@@ -443,9 +471,13 @@ impl RenderOnce for MenuRow {
         // GPUI fixes a text run's colour at layout, before the row's group hitbox exists, so a
         // group-hover text colour only applies to an element that keeps hover state: one with an
         // id. Without it the glyph (coloured at paint) turns while the label never does.
+        let described = self.description.is_some();
         let label = div()
             .id("menu_row_label")
-            .flex_1()
+            .when(described, |label| {
+                label.flex_shrink_0().max_w(gpui::relative(0.5))
+            })
+            .when(!described, gpui::Styled::flex_1)
             .min_w_0()
             .truncate()
             .text_color(gpui_color(label_ink))
@@ -477,15 +509,14 @@ impl RenderOnce for MenuRow {
             .children(leading_icon)
             .children(self.leading)
             .child(label)
-            .children(self.detail.map(|detail| {
-                div()
-                    .flex_none()
-                    .max_w(scale.rems(10.0))
-                    .truncate()
-                    .text_size(scale.rems(0.75))
-                    .text_color(gpui_color(colors.text_muted))
-                    .child(detail)
-            }))
+            .children(
+                self.description
+                    .map(|description| row_description(description, colors.text_secondary)),
+            )
+            .children(
+                self.detail
+                    .map(|detail| row_detail(detail, scale, colors.text_muted)),
+            )
             .children(check_mark.or(self.trailing));
 
         BaseButton::new(self.id)

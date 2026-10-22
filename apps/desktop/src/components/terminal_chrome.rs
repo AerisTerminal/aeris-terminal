@@ -575,8 +575,8 @@ pub(super) fn header_controls(
         .child(time_zone)
 }
 
-/// Rithmic requires its attribution marks to stay visible for as long as the
-/// terminal holds a Rithmic session, including while that session recovers.
+/// Rithmic's market-data mark stays visible for as long as the terminal holds a
+/// Rithmic session, including while that session recovers.
 pub(super) fn shows_rithmic_attribution(
     provider: TerminalProvider,
     state: FeedConnectionState,
@@ -609,34 +609,20 @@ impl RenderOnce for AttributionMarkImage {
     }
 }
 
+/// The bottom panel carries only the market-data mark; the OMNE mark and the
+/// Rithmic notices stay on the Rithmic login dialog and in About.
 pub(super) fn rithmic_attribution(theme: &AerisTheme) -> impl IntoElement + use<> {
-    let mark = |mark| AttributionMarkImage {
-        mark,
-        mode: theme.mode,
-    };
     div()
         .id("rithmic_attribution")
         .h_full()
         .flex_none()
         .flex()
         .items_center()
-        .gap_2()
         .px_2()
-        .child(
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child("Connected to Rithmic"),
-        )
-        .child(mark(assets::AttributionMark::MarketDataByRithmic))
-        .child(
-            div()
-                .w(px(theme.dimensions.border_width))
-                .h(px(assets::AttributionMark::HEIGHT))
-                .bg(gpui_color(theme.colors.border)),
-        )
-        .child(mark(assets::AttributionMark::PoweredByOmne))
+        .child(AttributionMarkImage {
+            mark: assets::AttributionMark::MarketDataByRithmic,
+            mode: theme.mode,
+        })
 }
 
 fn chart_link_toggle(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> AnyElement {

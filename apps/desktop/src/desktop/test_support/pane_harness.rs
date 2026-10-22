@@ -1800,7 +1800,7 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
     });
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_instrument(
-            InstrumentMenuSelection(0),
+            InstrumentMenuSelection::SearchResult(0),
             SymbolSelectionTarget::Chart,
             cx,
         ));
@@ -2724,61 +2724,126 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
 }
 
 #[gpui::test]
-fn pane_harness_empty_symbol_query_searches_the_provider_default_listing(cx: &mut TestAppContext) {
+fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query(
+    cx: &mut TestAppContext,
+) {
     let (harness, cx) = PaneHarness::open(cx);
     let commands = harness.commands.as_ref().expect("command receiver");
+    let searches = || {
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                MarketWorkerCommand::ProviderSearch(request) => Some(request),
+                MarketWorkerCommand::SelectCatalog(_) => panic!("a product is never selected"),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let query = |cx: &mut VisualTestContext| {
+        cx.read(|cx| {
+            harness
+                .pane
+                .read(cx)
+                .symbol_input
+                .as_ref()
+                .map(|input| input.read(cx).value().to_string())
+        })
+    };
     cx.update(|window, cx| {
         harness.pane.update(cx, |pane, cx| {
             pane.choose_symbol_provider(TerminalProvider::Rithmic, window, cx);
         });
     });
-    let mut searches =
-        std::iter::from_fn(|| commands.try_recv().ok()).filter_map(|command| match command {
-            MarketWorkerCommand::ProviderSearch(request) => Some(request),
-            _ => None,
-        });
-    let listing = searches
-        .next()
-        .expect("provider switch searches its listing");
-    assert_eq!(listing.provider, "rithmic");
-    assert_eq!(listing.query, "MNQ");
+    let listing = searches();
+    assert_eq!(listing.len(), 1, "provider switch sends one listing search");
+    assert_eq!(listing[0].provider, "rithmic");
+    assert_eq!(listing[0].query, "", "an empty query lists products");
+    assert_eq!(query(cx).as_deref(), Some(""));
+    complete_fixture_search(
+        &harness,
+        &listing[0],
+        ProviderInstrumentSummary {
+            kind: ProviderInstrumentKind::Product,
+            symbol: "NQ".into(),
+            display_symbol: "NQ".into(),
+            exchange: "CME".into(),
+            name: Some("E-mini Nasdaq-100".into()),
+            product_code: Some("NQ".into()),
+            asset_class: Some("futures".into()),
+            ..ProviderInstrumentSummary::default()
+        },
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        let entries = pane.instrument_entries(cx);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].label, "NQ");
+        assert_eq!(entries[0].expanded, Some(false));
+        assert_eq!(
+            pane.symbol_selector_status(),
+            "1 product · expand one for its contracts"
+        );
+        pane.chrome_selection = 0;
+        assert!(
+            !pane.submit_symbol_input(cx),
+            "Enter on a product expands it instead of selecting"
+        );
+    });
+    let contracts = searches();
+    assert_eq!(
+        contracts.len(),
+        1,
+        "expanding searches the product's contracts"
+    );
+    assert_eq!(contracts[0].query, "NQ");
+    assert_eq!(
+        query(cx).as_deref(),
+        Some(""),
+        "expanding leaves the query empty"
+    );
+    complete_fixture_search(
+        &harness,
+        &contracts[0],
+        ProviderInstrumentSummary {
+            kind: ProviderInstrumentKind::Instrument,
+            symbol: "NQZ6".into(),
+            display_symbol: "NQZ6".into(),
+            exchange: "CME".into(),
+            product_code: Some("NQ".into()),
+            expiration_date: Some("20261218".into()),
+            ..ProviderInstrumentSummary::default()
+        },
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        let entries = pane.instrument_entries(cx);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].expanded, Some(true));
+        assert_eq!(entries[1].label, "NQZ6");
+        assert!(entries[1].nested);
+        assert_eq!(
+            entries[1].description.as_deref(),
+            Some("E-mini Nasdaq-100 (Dec 2026)")
+        );
+    });
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+fn complete_fixture_search(
+    harness: &PaneHarness,
+    request: &SearchProviderInstruments,
+    instrument: ProviderInstrumentSummary,
+) {
     harness
         .publications
         .send(MarketWorkerMessage::ProviderCatalog(
             ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
-                provider: listing.provider,
-                search_generation: listing.search_generation,
+                provider: request.provider.clone(),
+                search_generation: request.search_generation,
+                instruments: vec![instrument],
                 ..ProviderInstrumentSearchResult::default()
             }),
         ))
         .expect("fixture search completion enters mailbox");
-    harness.pane.update(cx, |pane, cx| {
-        assert_eq!(pane.poll_market_worker(cx), 1);
-    });
-    cx.update(|window, cx| {
-        let input = harness
-            .pane
-            .read(cx)
-            .symbol_input
-            .clone()
-            .expect("symbol input");
-        input.update(cx, |input, cx| input.set_value("", window, cx));
-        harness.pane.update(cx, |pane, cx| {
-            assert!(pane.search_symbol_input(cx));
-        });
-    });
-    cx.run_until_parked();
-    let cleared = std::iter::from_fn(|| commands.try_recv().ok())
-        .find_map(|command| match command {
-            MarketWorkerCommand::ProviderSearch(request) => Some(request),
-            _ => None,
-        })
-        .expect("a cleared field still searches");
-    assert_eq!(
-        cleared.query, "MNQ",
-        "a text-only provider never receives an empty query"
-    );
-    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
 }
 
 #[gpui::test]
@@ -2852,7 +2917,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     for _ in 0..2 {
         harness.pane.update(cx, |pane, cx| {
             assert!(pane.select_instrument(
-                InstrumentMenuSelection(0),
+                InstrumentMenuSelection::SearchResult(0),
                 SymbolSelectionTarget::Chart,
                 cx,
             ));
@@ -2896,7 +2961,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     );
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_instrument(
-            InstrumentMenuSelection(0),
+            InstrumentMenuSelection::SearchResult(0),
             SymbolSelectionTarget::Chart,
             cx,
         ));

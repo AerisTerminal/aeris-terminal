@@ -15,6 +15,14 @@ pub struct SymbolSearchResult {
     pub expiration_date: Option<String>,
 }
 
+/// One product the provider lists for an exchange.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProductCodeResult {
+    pub product_code: String,
+    pub exchange: String,
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstrumentReference {
     pub symbol: String,
@@ -36,6 +44,8 @@ pub struct InstrumentReference {
 pub enum DecodedCatalogMessage {
     SearchResult(SymbolSearchResult),
     SearchComplete { accepted: bool },
+    ProductCode(ProductCodeResult),
+    ProductCodesComplete { accepted: bool },
     InstrumentReference(Option<InstrumentReference>),
 }
 
@@ -51,6 +61,7 @@ pub(crate) fn decode(frame: &[u8]) -> Result<DecodedCatalogMessage, ProtocolErro
     {
         15 => decode_reference(frame),
         110 => decode_search(frame),
+        112 => decode_product_codes(frame),
         template => Err(ProtocolError::UnsupportedTemplate(template)),
     }
 }
@@ -95,6 +106,40 @@ fn decode_search(frame: &[u8]) -> Result<DecodedCatalogMessage, ProtocolError> {
             }))
         }
         (true, false) => Ok(DecodedCatalogMessage::SearchComplete {
+            accepted: accepted(&message.rp_code),
+        }),
+        _ => Err(ProtocolError::ResponseCodeShape),
+    }
+}
+
+/// Product-code responses share the search response shape: each product
+/// carries only `rq_handler_rp_code` and the final frame only `rp_code`.
+#[cfg(rithmic_kit)]
+fn decode_product_codes(frame: &[u8]) -> Result<DecodedCatalogMessage, ProtocolError> {
+    use crate::generated::rti;
+    use prost::Message;
+
+    let message = rti::ResponseProductCodes::decode(frame).map_err(|_| ProtocolError::Decode)?;
+    validate_codes(
+        &message.user_msg,
+        &message.rq_handler_rp_code,
+        &message.rp_code,
+    )?;
+    match (
+        message.rq_handler_rp_code.is_empty(),
+        message.rp_code.is_empty(),
+    ) {
+        (false, true) => {
+            if !accepted(&message.rq_handler_rp_code) {
+                return Err(ProtocolError::RejectedDataFrame);
+            }
+            Ok(DecodedCatalogMessage::ProductCode(ProductCodeResult {
+                product_code: required_string("product.product_code", message.product_code)?,
+                exchange: required_string("product.exchange", message.exchange)?,
+                name: optional_string("product.symbol_name", message.symbol_name)?,
+            }))
+        }
+        (true, false) => Ok(DecodedCatalogMessage::ProductCodesComplete {
             accepted: accepted(&message.rp_code),
         }),
         _ => Err(ProtocolError::ResponseCodeShape),
@@ -381,6 +426,110 @@ mod tests {
         assert!(matches!(
             codec.decode_catalog(&empty_symbol),
             Err(ProtocolError::EmptyField("search.symbol"))
+        ));
+    }
+
+    #[test]
+    fn decodes_product_codes_and_their_completion() {
+        let codec = RithmicProtocolCodec;
+        let product = rti::ResponseProductCodes {
+            template_id: 112,
+            rq_handler_rp_code: vec!["0".to_string()],
+            exchange: Some("CME".to_string()),
+            symbol_name: Some("E-Mini NASDAQ 100".to_string()),
+            product_code: Some("NQ".to_string()),
+            timezone_time_of_interest: Some("America/Chicago".to_string()),
+            begin_time_of_interest_msm: Some(30_600),
+            end_time_of_interest_msm: Some(54_000),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec.decode_catalog(&product).expect("product decodes"),
+            DecodedCatalogMessage::ProductCode(ProductCodeResult {
+                product_code: "NQ".to_string(),
+                exchange: "CME".to_string(),
+                name: Some("E-Mini NASDAQ 100".to_string()),
+            })
+        );
+
+        let unnamed = rti::ResponseProductCodes {
+            template_id: 112,
+            rq_handler_rp_code: vec!["0".to_string()],
+            exchange: Some("CME".to_string()),
+            symbol_name: Some(String::new()),
+            product_code: Some("MNQ".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec
+                .decode_catalog(&unnamed)
+                .expect("unnamed product decodes"),
+            DecodedCatalogMessage::ProductCode(ProductCodeResult { name: None, .. })
+        ));
+
+        let complete = rti::ResponseProductCodes {
+            template_id: 112,
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec.decode_catalog(&complete).expect("completion decodes"),
+            DecodedCatalogMessage::ProductCodesComplete { accepted: true }
+        );
+
+        let rejected = rti::ResponseProductCodes {
+            template_id: 112,
+            rp_code: vec!["7".to_string(), "no products".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec.decode_catalog(&rejected).expect("rejection decodes"),
+            DecodedCatalogMessage::ProductCodesComplete { accepted: false }
+        );
+    }
+
+    #[test]
+    fn product_codes_require_code_exchange_and_one_response_code_lane() {
+        let codec = RithmicProtocolCodec;
+        let missing_exchange = rti::ResponseProductCodes {
+            template_id: 112,
+            rq_handler_rp_code: vec!["0".to_string()],
+            product_code: Some("NQ".to_string()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_catalog(&missing_exchange),
+            Err(ProtocolError::MissingField("product.exchange"))
+        ));
+
+        let empty_code = rti::ResponseProductCodes {
+            template_id: 112,
+            rq_handler_rp_code: vec!["0".to_string()],
+            exchange: Some("CME".to_string()),
+            product_code: Some(String::new()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_catalog(&empty_code),
+            Err(ProtocolError::EmptyField("product.product_code"))
+        ));
+
+        let mixed = rti::ResponseProductCodes {
+            template_id: 112,
+            rq_handler_rp_code: vec!["0".to_string()],
+            rp_code: vec!["0".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_catalog(&mixed),
+            Err(ProtocolError::ResponseCodeShape)
         ));
     }
 

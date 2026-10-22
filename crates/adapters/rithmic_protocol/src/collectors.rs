@@ -1,6 +1,6 @@
 use crate::{
     DecodedCatalogMessage, DecodedHistoryMessage, DecodedTickBar, DecodedTimeBar,
-    DecodedTimeBarType, HistorySource, ReplayKind, SymbolSearchResult,
+    DecodedTimeBarType, HistorySource, ProductCodeResult, ReplayKind, SymbolSearchResult,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -163,6 +163,10 @@ impl SymbolSearchCollector {
                     duplicate_count: self.duplicate_count,
                 }))
             }
+            DecodedCatalogMessage::ProductCode(_)
+            | DecodedCatalogMessage::ProductCodesComplete { .. } => {
+                Err(CollectorError::UnexpectedMessage)
+            }
             message @ DecodedCatalogMessage::InstrumentReference(_) => {
                 Ok(CollectionProgress::Unhandled(message))
             }
@@ -182,6 +186,100 @@ impl SymbolSearchCollector {
             }
         }
         Ok(())
+    }
+}
+
+/// Completed product listing ordered by product code, then exchange.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectedProducts {
+    pub products: Vec<ProductCodeResult>,
+    pub duplicate_count: usize,
+}
+
+/// Bounded, deduplicating product-code response collector.
+pub struct ProductCodeCollector {
+    maximum_results: NonZeroUsize,
+    products: BTreeMap<(String, String), ProductCodeResult>,
+    duplicate_count: usize,
+    state: CollectorState,
+}
+
+impl ProductCodeCollector {
+    /// Creates a collector that keeps at most `maximum_results` products.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a result bound above 4,096.
+    pub fn try_new(maximum_results: NonZeroUsize) -> Result<Self, CollectorError> {
+        if maximum_results.get() > MAX_SEARCH_RESULTS {
+            return Err(CollectorError::InvalidLimit);
+        }
+        Ok(Self {
+            maximum_results,
+            products: BTreeMap::new(),
+            duplicate_count: 0,
+            state: CollectorState::Collecting,
+        })
+    }
+
+    /// Accepts one product or terminal frame.
+    ///
+    /// Only the lowest `maximum_results` product-code/exchange keys are kept,
+    /// independent of arrival order. A repeated key keeps its first product.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for rejection, a symbol-search frame, or any frame
+    /// after a terminal outcome.
+    pub fn accept(
+        &mut self,
+        message: DecodedCatalogMessage,
+    ) -> Result<CollectionProgress<CollectedProducts, DecodedCatalogMessage>, CollectorError> {
+        if self.state != CollectorState::Collecting {
+            return Err(CollectorError::AlreadyTerminal);
+        }
+        let result = self.accept_inner(message);
+        if result.is_err() {
+            self.state = CollectorState::Failed;
+        }
+        result
+    }
+
+    fn accept_inner(
+        &mut self,
+        message: DecodedCatalogMessage,
+    ) -> Result<CollectionProgress<CollectedProducts, DecodedCatalogMessage>, CollectorError> {
+        match message {
+            DecodedCatalogMessage::ProductCode(product) => {
+                let key = (product.product_code.clone(), product.exchange.clone());
+                if self.products.contains_key(&key) {
+                    self.duplicate_count = self.duplicate_count.saturating_add(1);
+                    return Ok(CollectionProgress::Pending);
+                }
+                self.products.insert(key, product);
+                if self.products.len() > self.maximum_results.get() {
+                    self.products.pop_last();
+                }
+                Ok(CollectionProgress::Pending)
+            }
+            DecodedCatalogMessage::ProductCodesComplete { accepted: false } => {
+                Err(CollectorError::Rejected)
+            }
+            DecodedCatalogMessage::ProductCodesComplete { accepted: true } => {
+                self.state = CollectorState::Complete;
+                Ok(CollectionProgress::Complete(CollectedProducts {
+                    products: self.products.values().cloned().collect(),
+                    duplicate_count: self.duplicate_count,
+                }))
+            }
+            DecodedCatalogMessage::SearchResult(_)
+            | DecodedCatalogMessage::SearchComplete { .. } => {
+                Err(CollectorError::UnexpectedMessage)
+            }
+            message @ DecodedCatalogMessage::InstrumentReference(_) => {
+                Ok(CollectionProgress::Unhandled(message))
+            }
+        }
     }
 }
 
@@ -618,6 +716,77 @@ mod tests {
     }
 
     #[test]
+    fn product_listing_dedupes_sorts_by_code_then_exchange_and_bounds() {
+        let mut collector = ProductCodeCollector::try_new(NonZeroUsize::new(3).expect("bound"))
+            .expect("valid listing");
+        for (code, exchange, name) in [
+            ("NQ", "CME", Some("E-Mini NASDAQ 100")),
+            ("ZN", "CBOT", None),
+            ("ES", "CME", Some("E-Mini S&P 500")),
+            ("NQ", "CME", Some("duplicate keeps the first")),
+            ("ES", "CBOT", None),
+        ] {
+            assert_eq!(
+                collector
+                    .accept(DecodedCatalogMessage::ProductCode(product(
+                        code, exchange, name
+                    )))
+                    .expect("product stays within the listing"),
+                CollectionProgress::Pending
+            );
+        }
+        let progress = collector
+            .accept(DecodedCatalogMessage::ProductCodesComplete { accepted: true })
+            .expect("listing completes");
+        let CollectionProgress::Complete(CollectedProducts {
+            products,
+            duplicate_count,
+        }) = progress
+        else {
+            panic!("listing completes");
+        };
+        assert_eq!(duplicate_count, 1);
+        assert_eq!(
+            products,
+            vec![
+                product("ES", "CBOT", None),
+                product("ES", "CME", Some("E-Mini S&P 500")),
+                product("NQ", "CME", Some("E-Mini NASDAQ 100")),
+            ]
+        );
+        assert_eq!(
+            collector.accept(DecodedCatalogMessage::ProductCodesComplete { accepted: true }),
+            Err(CollectorError::AlreadyTerminal)
+        );
+    }
+
+    #[test]
+    fn product_listing_and_symbol_search_reject_each_others_frames() {
+        let mut listing = ProductCodeCollector::try_new(NonZeroUsize::MIN).expect("valid listing");
+        assert_eq!(
+            listing.accept(DecodedCatalogMessage::SearchComplete { accepted: true }),
+            Err(CollectorError::UnexpectedMessage)
+        );
+        let mut rejected = ProductCodeCollector::try_new(NonZeroUsize::MIN).expect("valid listing");
+        assert_eq!(
+            rejected.accept(DecodedCatalogMessage::ProductCodesComplete { accepted: false }),
+            Err(CollectorError::Rejected)
+        );
+        assert_eq!(
+            ProductCodeCollector::try_new(
+                NonZeroUsize::new(MAX_SEARCH_RESULTS + 1).expect("bound")
+            )
+            .err(),
+            Some(CollectorError::InvalidLimit)
+        );
+        let mut search = SymbolSearchCollector::try_new(search_request(2)).expect("valid search");
+        assert_eq!(
+            search.accept(DecodedCatalogMessage::ProductCodesComplete { accepted: true }),
+            Err(CollectorError::UnexpectedMessage)
+        );
+    }
+
+    #[test]
     fn history_validates_exact_time_series_and_reports_envelope() {
         let mut collector = HistoryCollector::try_new(time_request(2)).expect("valid collector");
         let first = time_bar(120);
@@ -822,6 +991,14 @@ mod tests {
                 ..
             }) if values.is_empty()
         ));
+    }
+
+    fn product(code: &str, exchange: &str, name: Option<&str>) -> ProductCodeResult {
+        ProductCodeResult {
+            product_code: code.to_string(),
+            exchange: exchange.to_string(),
+            name: name.map(str::to_string),
+        }
     }
 
     fn search_request(maximum: usize) -> SymbolSearchCollectionRequest {

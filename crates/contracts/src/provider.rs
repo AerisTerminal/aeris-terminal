@@ -34,7 +34,6 @@ pub struct ProviderPresentationDescriptor {
     pub display_name: &'static str,
     pub chart_interval_labels: &'static [&'static str],
     pub daily_bars: ProviderDailyBarCadence,
-    pub default_listing: &'static str,
     pub search_hint: &'static str,
     pub logo_key: &'static str,
     pub catalog_symbol: ProviderCatalogSymbol,

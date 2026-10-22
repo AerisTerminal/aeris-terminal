@@ -182,7 +182,6 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             display_name: "Fourth provider",
             chart_interval_labels: &["1m"],
             daily_bars: aeris_contracts::ProviderDailyBarCadence::FixedDay,
-            default_listing: "",
             search_hint: "Search fourth provider",
             logo_key: "fourth-provider",
             catalog_symbol: aeris_contracts::ProviderCatalogSymbol::ProviderSymbol,

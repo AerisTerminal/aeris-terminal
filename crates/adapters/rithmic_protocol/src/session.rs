@@ -104,6 +104,10 @@ impl RithmicSessionMessage {
             Self::Catalog(message) => match message {
                 DecodedCatalogMessage::SearchResult(_) => "catalog-search-result",
                 DecodedCatalogMessage::SearchComplete { .. } => "catalog-search-complete",
+                DecodedCatalogMessage::ProductCode(_) => "catalog-product-code",
+                DecodedCatalogMessage::ProductCodesComplete { .. } => {
+                    "catalog-product-codes-complete"
+                }
                 DecodedCatalogMessage::InstrumentReference(_) => "catalog-reference",
             },
             Self::Market(message) => match message {
@@ -656,6 +660,8 @@ fn log_session_event(record: &serde_json::Value) {
 /// Authenticated ticker-plant connection.
 pub struct RithmicTickerConnection {
     connection: AuthenticatedConnection,
+    /// A symbol search or product listing awaits its terminal frame. Their
+    /// result frames carry no request identity, so only one may be open.
     search_in_flight: bool,
 }
 
@@ -710,6 +716,21 @@ impl RithmicTickerConnection {
             return Err(RithmicSessionError::RequestInFlight);
         }
         self.send(OutboundRequest::SearchSymbols(request))?;
+        self.search_in_flight = true;
+        Ok(())
+    }
+
+    /// Starts one product-code listing across every exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure, or
+    /// `RequestInFlight` while a search or listing is still open.
+    pub fn list_product_codes(&mut self) -> Result<(), RithmicSessionError> {
+        if self.search_in_flight {
+            return Err(RithmicSessionError::RequestInFlight);
+        }
+        self.send(OutboundRequest::ProductCodes)?;
         self.search_in_flight = true;
         Ok(())
     }
@@ -769,12 +790,7 @@ impl RithmicTickerConnection {
     /// Returns a redacted deadline, transport, or protocol failure.
     pub fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
         let message = self.connection.read_next()?;
-        if matches!(
-            &message,
-            RithmicSessionMessage::Catalog(DecodedCatalogMessage::SearchComplete { .. })
-        ) {
-            self.search_in_flight = false;
-        }
+        self.observe_search_completion(&message);
         Ok(message)
     }
 
@@ -783,13 +799,20 @@ impl RithmicTickerConnection {
         deadline: Instant,
     ) -> Result<RithmicSessionMessage, RithmicSessionError> {
         let message = self.connection.read_next_until(deadline)?;
+        self.observe_search_completion(&message);
+        Ok(message)
+    }
+
+    fn observe_search_completion(&mut self, message: &RithmicSessionMessage) {
         if matches!(
-            &message,
-            RithmicSessionMessage::Catalog(DecodedCatalogMessage::SearchComplete { .. })
+            message,
+            RithmicSessionMessage::Catalog(
+                DecodedCatalogMessage::SearchComplete { .. }
+                    | DecodedCatalogMessage::ProductCodesComplete { .. }
+            )
         ) {
             self.search_in_flight = false;
         }
-        Ok(message)
     }
 
     /// Closes the authenticated WebSocket within the configured close deadline.

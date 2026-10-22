@@ -978,9 +978,21 @@ pub struct SelectProviderInstrument {
     pub entitlement_id: String,
 }
 
+/// What one provider search result names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProviderInstrumentKind {
+    /// A selectable instrument.
+    #[default]
+    Instrument,
+    /// A product that groups dated contracts. It is never selectable; a search
+    /// for its `product_code` lists its contracts.
+    Product,
+}
+
 /// Bounded provider-neutral presentation metadata for one search result.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderInstrumentSummary {
+    pub kind: ProviderInstrumentKind,
     /// Exact provider routing symbol used for selection requests.
     pub symbol: String,
     /// Provider-owned human presentation symbol. Consumers must render this

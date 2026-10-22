@@ -43,6 +43,10 @@ pub fn migrate_retained_provider_display_symbol(
             &instrument.provider_symbol,
             &instrument.display_symbol,
         ),
+        "rithmic" => aeris_rithmic_protocol_adapter::legacy_display_label(
+            &instrument.instrument_id,
+            &instrument.display_symbol,
+        ),
         _ => None,
     }
 }

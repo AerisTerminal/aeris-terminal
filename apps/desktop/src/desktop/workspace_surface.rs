@@ -2767,13 +2767,14 @@ impl WorkspaceSurface {
             self.pending_mnemonic_symbol = None;
             self.chrome_selection = 0;
         }
-        let query = default_listing_query(provider);
+        // An empty query opens the provider's own listing: its markets, or the
+        // products whose contracts expand beneath them.
         if let Some(input) = &self.symbol_input {
             input.update(cx, |input, input_cx| {
-                input.set_value(query, window, input_cx);
+                input.set_value("", window, input_cx);
             });
         }
-        self.search_symbol_query(query, cx);
+        self.search_symbol_query("", cx);
         cx.notify();
     }
 
@@ -2818,20 +2819,30 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn instrument_entries(&self, _cx: &App) -> Vec<InstrumentMenuEntry> {
-        self.symbol_browser
-            .results()
-            .iter()
-            .enumerate()
-            .map(|(index, instrument)| InstrumentMenuEntry {
-                label: instrument.display_symbol.clone(),
-                asset_class: instrument.asset_class.clone(),
-                checked: self.symbol_browser.selected().is_some_and(|selected| {
-                    selected.instrument.symbol == instrument.symbol
-                        && selected.instrument.exchange == instrument.exchange
-                }),
-                selection: InstrumentMenuSelection(index),
-            })
-            .collect()
+        self.symbol_browser.menu_entries()
+    }
+
+    /// Selects an instrument row or expands or collapses a product row. Reports whether a
+    /// selection was scheduled, which is when a chart menu closes.
+    pub(super) fn activate_instrument_entry(
+        &mut self,
+        action: &InstrumentMenuAction,
+        target: SymbolSelectionTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match action {
+            InstrumentMenuAction::Select(selection) => {
+                self.select_instrument(*selection, target, cx)
+            }
+            InstrumentMenuAction::ToggleProduct(product) => {
+                if let Some(request) = self.symbol_browser.toggle_product(product) {
+                    self.dispatch_symbol_search(request, cx);
+                }
+                cx.notify();
+                false
+            }
+            InstrumentMenuAction::Inert => false,
+        }
     }
 
     fn activate_chrome_list_keyboard(&mut self) {
@@ -2893,12 +2904,11 @@ impl WorkspaceSurface {
         #[cfg(feature = "diagnostics")]
         let started = Instant::now();
         let selected = (|| {
-            let index = selection.0;
             let provider = terminal_provider_id(self.symbol_provider);
             let Some(descriptor) = super::provider_presentation(self.symbol_provider) else {
                 return false;
             };
-            let Some(selection) = self.symbol_browser.select(index) else {
+            let Some(selection) = self.symbol_browser.select(selection) else {
                 return false;
             };
             if target == SymbolSelectionTarget::Chart {
@@ -3045,7 +3055,7 @@ impl WorkspaceSurface {
                 if let Some(input) = &self.symbol_input {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
-                self.refresh_default_instrument_listing(cx);
+                self.refresh_instrument_listing(cx);
                 self.sync_instrument_menu_keyboard(cx);
             }
             ChromeOverlay::Indicator => {
@@ -5795,16 +5805,25 @@ impl WorkspaceSurface {
         }
     }
 
-    fn refresh_default_instrument_listing(&mut self, cx: &mut Context<Self>) {
+    fn refresh_instrument_listing(&mut self, cx: &mut Context<Self>) {
+        let query = self.symbol_input_query(cx);
         if !instrument_listing_refresh_needed(
             &self.symbol_browser,
             self.market_state.symbol_selection_pending,
+            &query,
         ) {
             return;
         }
         // The search path posts its own keyed failure notice; a pending query
         // retains the latest request rather than reporting a second failure.
-        self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
+        self.search_symbol_query(&query, cx);
+    }
+
+    fn symbol_input_query(&self, cx: &App) -> String {
+        self.symbol_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
     }
 
     fn post_symbol_search_notice(detail: &'static str, cx: &mut Context<Self>) {
@@ -5859,9 +5878,27 @@ impl WorkspaceSurface {
         if self.symbol_browser.search_pending() {
             return "Searching provider markets".into();
         }
-        let count = self.symbol_browser.results().len();
-        if count > 0 {
-            return format!("{count} matching markets · search to find more");
+        match self.symbol_browser.listing_summary() {
+            Some(rithmic_shell::SymbolListingSummary::Products(count)) => {
+                return format!(
+                    "{} · expand one for its contracts",
+                    counted(count, "product", "products")
+                );
+            }
+            Some(rithmic_shell::SymbolListingSummary::Contracts {
+                contracts,
+                products,
+            }) => {
+                return format!(
+                    "{} in {}",
+                    counted(contracts, "contract", "contracts"),
+                    counted(products, "product", "products")
+                );
+            }
+            Some(rithmic_shell::SymbolListingSummary::Markets(count)) => {
+                return format!("{count} matching markets · search to find more");
+            }
+            None => {}
         }
         if self.symbol_browser.has_completed_search() {
             return "No matching markets · try another search".into();
@@ -5878,14 +5915,8 @@ impl WorkspaceSurface {
         )
     }
 
+    /// An empty query asks the provider for its own listing.
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
-        // An empty field shows the provider's default listing: a provider that
-        // only searches by text would otherwise reject the request.
-        let query = if query.trim().is_empty() {
-            default_listing_query(self.symbol_provider)
-        } else {
-            query
-        };
         if self.symbol_browser.search_pending() {
             if let Ok(already_dispatched) = self.symbol_browser.retain_latest_search(query) {
                 cx.notify();
@@ -5917,6 +5948,7 @@ impl WorkspaceSurface {
         let provider = terminal_provider_id(self.symbol_provider);
         let retained_query = request.query.clone();
         let request_id = request.request_id;
+        let lane = request.lane;
         let search = SearchProviderInstruments {
             startup_resolve: false,
             consumer_id: 0,
@@ -5930,8 +5962,12 @@ impl WorkspaceSurface {
         let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
             true
         } else {
+            // A failed contract search collapses its product, so expanding it retries; a
+            // typed query is kept for the next dispatch.
             self.symbol_browser.reject_search(request_id);
-            if let Err(error) = self.symbol_browser.retain_latest_search(&retained_query) {
+            if lane == rithmic_shell::SymbolSearchLane::Query
+                && let Err(error) = self.symbol_browser.retain_latest_search(&retained_query)
+            {
                 // This query passed begin_search validation; the same keyed
                 // notice below covers dispatch failure without exposing input.
                 diagnostic!("Validated market search could not be retained: {error}");
@@ -5991,7 +6027,7 @@ impl WorkspaceSurface {
         let entries = self.instrument_entries(cx);
         match symbol_submit_decision(entries.len(), self.chrome_selection) {
             SymbolSubmitDecision::Select(index) => entries.get(index).is_some_and(|entry| {
-                self.select_instrument(entry.selection, self.symbol_selection_target, cx)
+                self.activate_instrument_entry(&entry.action, self.symbol_selection_target, cx)
             }),
             SymbolSubmitDecision::Search => {
                 self.search_symbol_input(cx);
@@ -6038,7 +6074,8 @@ impl WorkspaceSurface {
                     self.market_state.catalog_listing_started = true;
                     // The search path owns dispatch failure feedback and queued
                     // replacement requests while catalog startup is pending.
-                    self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
+                    let query = self.symbol_input_query(cx);
+                    self.search_symbol_query(&query, cx);
                 }
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
@@ -6082,23 +6119,34 @@ impl WorkspaceSurface {
         }
         if let Some(symbol) = self.pending_mnemonic_symbol.take() {
             let index = self.symbol_browser.results().iter().position(|instrument| {
-                instrument.symbol.eq_ignore_ascii_case(&symbol)
-                    || instrument.display_symbol.eq_ignore_ascii_case(&symbol)
+                instrument.kind == ProviderInstrumentKind::Instrument
+                    && (instrument.symbol.eq_ignore_ascii_case(&symbol)
+                        || instrument.display_symbol.eq_ignore_ascii_case(&symbol))
             });
             if let Some(index) = index {
-                self.chrome_selection = index;
-                self.select_instrument(
-                    InstrumentMenuSelection(index),
-                    SymbolSelectionTarget::Chart,
-                    cx,
-                );
+                let selection = InstrumentMenuSelection::SearchResult(index);
+                if let Some(row) = self
+                    .instrument_entries(cx)
+                    .iter()
+                    .position(|entry| entry.action == InstrumentMenuAction::Select(selection))
+                {
+                    self.chrome_selection = row;
+                }
+                self.select_instrument(selection, SymbolSelectionTarget::Chart, cx);
                 return;
             }
             Self::post_symbol_search_notice("No exact market matched the requested symbol.", cx);
         }
         self.dispatch_retained_symbol_search(cx);
         if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
-            self.sync_instrument_menu_keyboard(cx);
+            if self.menu_state.chrome_list_keyboard
+                && !self.symbol_input_query(cx).trim().is_empty()
+            {
+                self.chrome_selection =
+                    first_selectable_instrument_index(&self.instrument_entries(cx)).unwrap_or(0);
+            } else {
+                self.sync_instrument_menu_keyboard(cx);
+            }
         }
     }
 

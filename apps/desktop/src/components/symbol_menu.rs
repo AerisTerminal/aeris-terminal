@@ -316,8 +316,9 @@ pub(super) fn instrument_dialog_row(
     let checked = instrument.checked;
     let app = app.clone();
     let add_app = app.clone();
-    let selection = instrument.selection;
+    let action = instrument.action.clone();
     let target = state.target;
+    let selectable = matches!(action, InstrumentMenuAction::Select(_));
     let mut row = MenuRow::search_result(
         ("instrument_dialog_row", index),
         instrument.label.clone(),
@@ -329,37 +330,65 @@ pub(super) fn instrument_dialog_row(
         state.menu.keyboard_selection,
         state.menu.keyboard_active,
     ))
-    .disabled(target == SymbolSelectionTarget::Watchlist && state.availability.selection_pending)
-    .on_click(move |_, window, cx| {
-        if app.update(cx, |app, cx| app.select_instrument(selection, target, cx))
-            && symbol_menu_closes_after_selection(target)
-        {
-            app.update(cx, |app, app_cx| {
-                app.close_chrome_overlay(window, app_cx);
-            });
-        }
-    });
-    if let Some(asset_class) = &instrument.asset_class {
-        row = row.detail(asset_class.clone());
+    .disabled(
+        selectable
+            && target == SymbolSelectionTarget::Watchlist
+            && state.availability.selection_pending,
+    );
+    if action != InstrumentMenuAction::Inert {
+        let click_action = action.clone();
+        row = row.on_click(move |_, window, cx| {
+            if app.update(cx, |app, cx| {
+                app.activate_instrument_entry(&click_action, target, cx)
+            }) && symbol_menu_closes_after_selection(target)
+            {
+                app.update(cx, |app, app_cx| {
+                    app.close_chrome_overlay(window, app_cx);
+                });
+            }
+        });
     }
-    row = row.leading(provider_exchange_mark(
-        state.menu_provider,
-        px(CHROME_MENU_ROW_ICON_WELL),
-        true,
-        &theme.colors,
-    ));
-    if state.target == SymbolSelectionTarget::Watchlist {
-        row = row.trailing(
-            compact_menu_add_button(("add_watchlist_symbol", index), theme)
-                .disabled(state.availability.selection_pending)
-                .on_click(move |_, _, cx| {
-                    add_app.update(cx, |app, cx| {
-                        app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx);
-                    });
-                }),
-        );
-    } else if checked {
-        row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
+    if let Some(description) = &instrument.description {
+        row = row.description(description.clone());
+    }
+    if let Some(detail) = &instrument.detail {
+        row = row.detail(detail.clone());
+    }
+    // Nested rows indent by the provider mark's well so they line up under their product's
+    // label; the product row above already carries the mark.
+    row = if instrument.nested {
+        row.leading(div().flex_none().w(px(CHROME_MENU_ROW_ICON_WELL)))
+    } else {
+        row.leading(provider_exchange_mark(
+            state.menu_provider,
+            px(CHROME_MENU_ROW_ICON_WELL),
+            true,
+            &theme.colors,
+        ))
+    };
+    if let Some(expanded) = instrument.expanded {
+        let chevron = header_icon(HugeIcon::ChevronDown)
+            .with_size(px(14.0))
+            .color(gpui_color(theme.colors.icon));
+        row = row.trailing(if expanded {
+            chevron
+        } else {
+            chevron.rotate(0.75)
+        });
+    } else if let InstrumentMenuAction::Select(selection) = action {
+        if state.target == SymbolSelectionTarget::Watchlist {
+            row = row.trailing(
+                compact_menu_add_button(("add_watchlist_symbol", index), theme)
+                    .disabled(state.availability.selection_pending)
+                    .on_click(move |_, _, cx| {
+                        add_app.update(cx, |app, cx| {
+                            app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx);
+                        });
+                    }),
+            );
+        } else if checked {
+            row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
+        }
     }
     row
 }

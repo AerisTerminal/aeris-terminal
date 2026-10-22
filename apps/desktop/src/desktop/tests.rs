@@ -4,25 +4,27 @@ use super::{
     CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_LIST_HEIGHT,
     CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH, CaptionPlatform,
     CaptionPointerOwner, ChartFailure, ChartNoticePlacement, ChartNoticeTone, ChartState,
-    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
-    InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
-    PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
-    SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision,
-    TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider,
-    TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
-    WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
-    WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
-    active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
-    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
-    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_menu_extent,
-    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuAction,
+    InstrumentMenuEntry, InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN,
+    PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
+    ProviderConnectionPresentation, SidePanel, SidePanelVisibility, SymbolInputAction,
+    SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
+    TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter, TimeSalesSideFilter,
+    TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState,
+    WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+    WorkspaceMaximizeTransition, active_workspace_after_close, aeris_chart_theme,
+    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    catalog_rejection_message, chart_position_id, chart_price_fixed_point,
+    chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
+    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
+    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
-    connection_presentation, connectivity_chart_state, current_instrument_menu_index,
-    desktop_key_bindings, durable_workspace_viewport, fullscreen_escape_command, gpui_color,
-    instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
-    instrument_target_after_close, overlay_height, price_axis_flyout_rows, price_axis_root_rows,
-    publication_chart_state, reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
+    connection_presentation, connectivity_chart_state, counted, current_instrument_menu_index,
+    desktop_key_bindings, durable_workspace_viewport, first_selectable_instrument_index,
+    fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
+    instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
+    overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
     should_finish_chrome_overlay_close, stabilized_connection_state, symbol_input_action,
     symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
@@ -36,8 +38,9 @@ use super::{
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
 use aeris_chart_integration::{AerisChartTheme, ChartSplitDirection, PriceAxisMenuState};
 use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
-    WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
+    InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentKind,
+    ProviderInstrumentSummary, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState,
 };
 
 pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
@@ -128,35 +131,19 @@ const fn catalog_rejection_order_bookain(
 }
 
 #[test]
-fn a_fresh_symbol_browser_accepts_every_provider_default_listing() {
-    for provider in [
-        super::TerminalProvider::Rithmic,
-        super::TerminalProvider::Hyperliquid,
-    ] {
-        let mut browser = crate::desktop::rithmic_shell::RithmicSymbolBrowser::default();
-        assert!(
-            browser
-                .begin_search(super::default_listing_query(provider))
-                .is_ok(),
-            "{} default listing is rejected before any provider switch",
-            super::terminal_provider_display(provider)
-        );
-    }
-}
-
-#[test]
-fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
+fn instrument_menu_requests_a_listing_only_when_idle_and_not_already_shown() {
     use crate::desktop::rithmic_shell::RithmicSymbolBrowser;
     use std::num::NonZeroUsize;
 
     let startup = NonZeroUsize::MIN;
     let mut browser = RithmicSymbolBrowser::rithmic_catalog_awaiting_search(startup, "");
     assert!(
-        !instrument_listing_refresh_needed(&browser, false),
+        !instrument_listing_refresh_needed(&browser, false, ""),
         "startup search is already pending"
     );
 
     let result = ProviderInstrumentSummary {
+        kind: ProviderInstrumentKind::Instrument,
         symbol: "BTC-USD".to_string(),
         display_symbol: "BTC-USD".to_string(),
         exchange: "rithmic".to_string(),
@@ -168,20 +155,26 @@ fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
     };
     assert!(browser.apply_results(startup, vec![result]));
     assert!(
-        !instrument_listing_refresh_needed(&browser, false),
+        !instrument_listing_refresh_needed(&browser, false, ""),
         "populated listing needs no refresh"
     );
-
-    let selection = browser.select(0).expect("catalog result is selectable");
     assert!(
-        !instrument_listing_refresh_needed(&browser, true),
+        instrument_listing_refresh_needed(&browser, false, "ETH"),
+        "a listing for another query is searched again"
+    );
+
+    let selection = browser
+        .select(InstrumentMenuSelection::SearchResult(0))
+        .expect("catalog result is selectable");
+    assert!(
+        !instrument_listing_refresh_needed(&browser, true, ""),
         "in-flight selection defers the refresh"
     );
     assert!(browser.confirm_selection(selection.generation));
     assert!(browser.consume_completed_search(selection.search_generation));
     assert!(
-        instrument_listing_refresh_needed(&browser, false),
-        "consumed selection authorization reopens as a fresh default listing"
+        instrument_listing_refresh_needed(&browser, false, ""),
+        "consumed selection authorization reopens as a fresh listing"
     );
     let refreshed = browser
         .begin_search("")
@@ -194,8 +187,8 @@ fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
         .retain_latest_search("ETH")
         .expect("typed query validates");
     assert!(
-        !instrument_listing_refresh_needed(&browser, false),
-        "a retained typed query outranks the default listing"
+        !instrument_listing_refresh_needed(&browser, false, ""),
+        "a retained typed query outranks the listing"
     );
 }
 
@@ -2739,32 +2732,73 @@ fn instrument_menu_highlights_only_the_live_market_until_keyboard_moves() {
     assert!(instrument_row_highlighted(true, 4, 4, true));
 }
 
+fn instrument_menu_entry(
+    label: &str,
+    checked: bool,
+    action: InstrumentMenuAction,
+) -> InstrumentMenuEntry {
+    InstrumentMenuEntry {
+        label: label.into(),
+        description: None,
+        detail: None,
+        checked,
+        nested: false,
+        expanded: None,
+        action,
+    }
+}
+
 #[test]
 fn instrument_menu_index_follows_the_checked_live_market() {
     let entries = [
-        InstrumentMenuEntry {
-            label: "BTC/USD".into(),
-            asset_class: None,
-            checked: false,
-            selection: InstrumentMenuSelection(0),
-        },
-        InstrumentMenuEntry {
-            label: "ETH/USD".into(),
-            asset_class: None,
-            checked: true,
-            selection: InstrumentMenuSelection(1),
-        },
+        instrument_menu_entry(
+            "BTC/USD",
+            false,
+            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(0)),
+        ),
+        instrument_menu_entry(
+            "ETH/USD",
+            true,
+            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(1)),
+        ),
     ];
     assert_eq!(current_instrument_menu_index(&entries), Some(1));
     assert_eq!(
-        current_instrument_menu_index(&[InstrumentMenuEntry {
-            label: "AAVE/USD".into(),
-            asset_class: None,
-            checked: false,
-            selection: InstrumentMenuSelection(0),
-        }]),
+        current_instrument_menu_index(&[instrument_menu_entry(
+            "AAVE/USD",
+            false,
+            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(0)),
+        )]),
         None
     );
+}
+
+#[test]
+fn a_typed_search_highlights_its_first_instrument_below_the_product_header() {
+    let product = crate::desktop::rithmic_shell::ProductKey {
+        code: "NQ".into(),
+        exchange: "CME".into(),
+    };
+    let entries = [
+        instrument_menu_entry(
+            "E-mini Nasdaq-100",
+            false,
+            InstrumentMenuAction::ToggleProduct(product),
+        ),
+        instrument_menu_entry(
+            "NQZ6",
+            false,
+            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(0)),
+        ),
+    ];
+    assert_eq!(first_selectable_instrument_index(&entries), Some(1));
+    assert_eq!(first_selectable_instrument_index(&entries[..1]), None);
+}
+
+#[test]
+fn listing_counts_name_their_unit() {
+    assert_eq!(counted(1, "product", "products"), "1 product");
+    assert_eq!(counted(12, "product", "products"), "12 products");
 }
 
 #[test]
@@ -3978,6 +4012,7 @@ fn contextual_labels_keep_contract_and_pending_series_truthful() {
 #[test]
 fn provider_catalog_keeps_display_symbol_separate_from_wire_symbol() {
     let instrument = ProviderInstrumentSummary {
+        kind: ProviderInstrumentKind::Instrument,
         symbol: "BTC".to_string(),
         display_symbol: "BTC-USDC".to_string(),
         exchange: "Hyperliquid".to_string(),
@@ -4723,7 +4758,7 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
 }
 
 #[test]
-fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
+fn desktop_provider_labels_come_from_runtime_descriptors() {
     assert_eq!(
         super::terminal_provider_display(super::TerminalProvider::Rithmic),
         "Rithmic"
@@ -4731,14 +4766,6 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
     assert_eq!(
         super::terminal_provider_display(super::TerminalProvider::Hyperliquid),
         "Hyperliquid"
-    );
-    assert_eq!(
-        super::default_listing_query(super::TerminalProvider::Rithmic),
-        "MNQ"
-    );
-    assert_eq!(
-        super::default_listing_query(super::TerminalProvider::Hyperliquid),
-        ""
     );
     // Every provider id round-trips; an id the build does not expose maps to none.
     for provider in super::TerminalProvider::ALL {

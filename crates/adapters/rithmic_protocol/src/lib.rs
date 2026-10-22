@@ -39,11 +39,13 @@ pub use book::{
     AggregateBookAssembler, AggregateBookConfigError, AggregateBookImage, AggregateBookLimits,
     AggregateBookOutcome, AggregateBookRecoveryReason,
 };
-pub use catalog::{DecodedCatalogMessage, InstrumentReference, SymbolSearchResult};
+pub use catalog::{
+    DecodedCatalogMessage, InstrumentReference, ProductCodeResult, SymbolSearchResult,
+};
 pub use collectors::{
-    CollectedHistory, CollectedSymbols, CollectionProgress, CollectorError, HistoryBars,
-    HistoryCollectionRequest, HistoryCollector, HistorySeries, ObservedHistoryRange,
-    SymbolSearchCollectionRequest, SymbolSearchCollector,
+    CollectedHistory, CollectedProducts, CollectedSymbols, CollectionProgress, CollectorError,
+    HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries, ObservedHistoryRange,
+    ProductCodeCollector, SymbolSearchCollectionRequest, SymbolSearchCollector,
 };
 pub use credentials::{
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES,
@@ -64,7 +66,7 @@ pub use history_adapter::{
     collect_rithmic_session_history, collect_rithmic_trade_history, covering_snapshot_from_page,
     decode_rithmic_history_bar, rithmic_chart_aggregation,
 };
-pub use instrument_id::{parse_rithmic_instrument_id, rithmic_instrument_id};
+pub use instrument_id::{legacy_display_label, parse_rithmic_instrument_id, rithmic_instrument_id};
 pub use market::{
     DecodedMarketMessage, DepthByOrderEndEvent, DepthByOrderMutation, DepthByOrderMutationKind,
     DepthByOrderSide, DepthByOrderSnapshotLevel, DepthByOrderSnapshotMessage,
@@ -114,12 +116,12 @@ pub use provider_session::{
     AppliedRithmicEvent, MAXIMUM_RITHMIC_RETAINED_SEARCHES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
     RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicAuthorizedSilenceEvidenceFault,
     RithmicCallbackLimits, RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection,
-    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCallback,
-    RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderConfigError,
-    RithmicProviderDriver, RithmicProviderDriverError, RithmicProviderEventError,
-    RithmicProviderEvents, RithmicProviderInstrument, RithmicReadOnlySubscription,
-    RithmicRetryScheduler, RithmicRetryTicket, RithmicSessionTiming, RithmicSymbolSearch,
-    apply_rithmic_environment_event, try_recv_rithmic_event,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProductListing,
+    RithmicProviderCallback, RithmicProviderCommandError, RithmicProviderConfig,
+    RithmicProviderConfigError, RithmicProviderDriver, RithmicProviderDriverError,
+    RithmicProviderEventError, RithmicProviderEvents, RithmicProviderInstrument,
+    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicRetryTicket, RithmicSessionTiming,
+    RithmicSymbolSearch, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 pub use session::{
     RithmicApplication, RithmicCredentials, RithmicHistoryConnection, RithmicLoginMetadata,

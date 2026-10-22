@@ -318,6 +318,8 @@ pub enum OutboundRequest<'a> {
     DepthByOrder(DepthByOrderSubscription<'a>),
     DepthByOrderSnapshot(DepthByOrderSnapshotRequest<'a>),
     SearchSymbols(SymbolSearchRequest<'a>),
+    /// Lists the time-of-interest product codes of every exchange.
+    ProductCodes,
     InstrumentReference(InstrumentReferenceRequest<'a>),
     TimeBarUpdate(TimeBarSubscription<'a>),
     TimeBarReplay(TimeBarReplayRequest<'a>),
@@ -338,6 +340,7 @@ impl OutboundRequest<'_> {
             | Self::DepthByOrder(_)
             | Self::DepthByOrderSnapshot(_)
             | Self::SearchSymbols(_)
+            | Self::ProductCodes
             | Self::InstrumentReference(_) => matches!(plant, RithmicPlant::Ticker),
             Self::TimeBarUpdate(_)
             | Self::TimeBarReplay(_)
@@ -360,6 +363,7 @@ impl fmt::Debug for OutboundRequest<'_> {
             Self::DepthByOrder(_) => formatter.write_str("DepthByOrder"),
             Self::DepthByOrderSnapshot(_) => formatter.write_str("DepthByOrderSnapshot"),
             Self::SearchSymbols(_) => formatter.write_str("SearchSymbols"),
+            Self::ProductCodes => formatter.write_str("ProductCodes"),
             Self::InstrumentReference(_) => formatter.write_str("InstrumentReference"),
             Self::TimeBarUpdate(_) => formatter.write_str("TimeBarUpdate"),
             Self::TimeBarReplay(_) => formatter.write_str("TimeBarReplay"),
@@ -625,6 +629,7 @@ mod kit {
     const DEPTH_BY_ORDER_UPDATES_RESPONSE: i32 = 118;
     const REFERENCE_DATA_REQUEST: i32 = 14;
     const SEARCH_SYMBOLS_REQUEST: i32 = 109;
+    const PRODUCT_CODES_REQUEST: i32 = 111;
     const TIME_BAR_UPDATE_REQUEST: i32 = 200;
     const TIME_BAR_REPLAY_REQUEST: i32 = 202;
     const TICK_BAR_UPDATE_REQUEST: i32 = 204;
@@ -643,6 +648,7 @@ mod kit {
         DEPTH_BY_ORDER_SNAPSHOT_REQUEST,
         DEPTH_BY_ORDER_UPDATES_REQUEST,
         SEARCH_SYMBOLS_REQUEST,
+        PRODUCT_CODES_REQUEST,
         TIME_BAR_UPDATE_REQUEST,
         TIME_BAR_REPLAY_REQUEST,
         TICK_BAR_UPDATE_REQUEST,
@@ -677,6 +683,13 @@ mod kit {
                 encode_depth_by_order_snapshot(request)?
             }
             OutboundRequest::SearchSymbols(request) => encode_symbol_search(request)?,
+            OutboundRequest::ProductCodes => rti::RequestProductCodes {
+                template_id: PRODUCT_CODES_REQUEST,
+                user_msg: Vec::new(),
+                exchange: None,
+                give_toi_products_only: Some(true),
+            }
+            .encode_to_vec(),
             OutboundRequest::InstrumentReference(request) => encode_instrument_reference(request)?,
             OutboundRequest::TimeBarUpdate(request) => encode_time_bar_update(request)?,
             OutboundRequest::TimeBarReplay(request) => encode_time_bar_replay(request)?,
@@ -1300,6 +1313,7 @@ mod tests {
                 instrument_type: Some(InstrumentType::Future),
                 pattern: SearchPattern::Contains,
             }),
+            OutboundRequest::ProductCodes,
             OutboundRequest::InstrumentReference(InstrumentReferenceRequest {
                 symbol: "ESM7",
                 exchange: "CME",
@@ -1431,8 +1445,9 @@ mod tests {
         assert_eq!(
             emitted,
             [
-                16, 10, 12, 18, 100, 117, 115, 109, 14, 200, 202, 204, 206, 300, 302, 308, 310,
-                312, 314, 316, 320, 330, 332, 334, 336, 338, 340, 346, 3504, 3506, 3512, 400, 402
+                16, 10, 12, 18, 100, 117, 115, 109, 111, 14, 200, 202, 204, 206, 300, 302, 308,
+                310, 312, 314, 316, 320, 330, 332, 334, 336, 338, 340, 346, 3504, 3506, 3512, 400,
+                402
             ]
         );
         assert_eq!(
@@ -1453,6 +1468,18 @@ mod tests {
                 "template {unsupported} is not part of the supported surface"
             );
         }
+    }
+
+    #[test]
+    fn product_code_listing_asks_every_exchange_for_time_of_interest_products() {
+        let frame = RithmicProtocolCodec
+            .encode(OutboundRequest::ProductCodes)
+            .expect("product-code listing encodes");
+        let request = rti::RequestProductCodes::decode(frame.as_bytes())
+            .expect("product-code listing decodes");
+        assert_eq!(request.template_id, 111);
+        assert_eq!(request.exchange, None);
+        assert_eq!(request.give_toi_products_only, Some(true));
     }
 
     #[test]
@@ -1477,6 +1504,7 @@ mod tests {
                 | OutboundRequest::DepthByOrder(_)
                 | OutboundRequest::DepthByOrderSnapshot(_)
                 | OutboundRequest::SearchSymbols(_)
+                | OutboundRequest::ProductCodes
                 | OutboundRequest::InstrumentReference(_) => &[RithmicPlant::Ticker],
                 OutboundRequest::TimeBarUpdate(_)
                 | OutboundRequest::TimeBarReplay(_)

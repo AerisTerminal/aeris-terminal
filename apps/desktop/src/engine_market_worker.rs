@@ -110,6 +110,9 @@ struct EndpointRecord {
     initial_selection_pending: bool,
     /// Instrument of the last session status sent to the chart.
     session_status_sent: Option<String>,
+    /// The runtime publishes provider state for its current demand, which can
+    /// name a pending selection's provider before its outcome is adopted.
+    pending_provider_state: Option<ProviderState>,
     endpoint: WorkerEndpoint,
 }
 
@@ -669,6 +672,7 @@ fn worker_endpoint_with_wake(
         pending_catalog_selection: None,
         initial_selection_pending: initial_generation != 0,
         session_status_sent: None,
+        pending_provider_state: None,
         endpoint: WorkerEndpoint {
             consumer_id,
             messages: message_tx,
@@ -749,6 +753,7 @@ fn spawn_group(
                 &trading,
                 clock.as_ref(),
             ) {
+                aeris_observability::diagnostic!("Aeris market worker stopped: {error}");
                 for record in &endpoints {
                     runtime::report_failure(
                         &record.endpoint.messages,

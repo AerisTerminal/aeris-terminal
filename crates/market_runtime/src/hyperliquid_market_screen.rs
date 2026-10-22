@@ -11,7 +11,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_contracts::{ProviderInstrumentSummary, ProviderMarketStatistics};
+use aeris_contracts::{
+    ProviderInstrumentKind, ProviderInstrumentSummary, ProviderMarketStatistics,
+};
 use aeris_hyperliquid_market_adapter::{
     FUNDING_INTERVAL_SECONDS, FUNDING_RATE_SCALE, HyperliquidCatalog, HyperliquidHttpConfig,
     HyperliquidInstrument, HyperliquidMarketKind, HyperliquidMarketStatistics,
@@ -115,6 +117,7 @@ pub(crate) fn screen_rows(
 /// Provider-neutral search/screen presentation for one catalog instrument.
 pub(crate) fn instrument_summary(instrument: &HyperliquidInstrument) -> ProviderInstrumentSummary {
     ProviderInstrumentSummary {
+        kind: ProviderInstrumentKind::Instrument,
         symbol: instrument.wire_coin.clone(),
         display_symbol: instrument.display.clone(),
         exchange: instrument.venue.clone(),

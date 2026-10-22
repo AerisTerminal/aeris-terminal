@@ -11,14 +11,14 @@ use super::{
     InstrumentReferenceRequest, MAXIMUM_INITIAL_DBO_SNAPSHOT_MESSAGES,
     MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES, MAXIMUM_MBO_ORDERS, MarketDataSubscription,
     MarketIdentity, NonZeroUsize, Ordering, PendingCatalogCommand, PendingSubscription,
-    ProviderInvalidationReason, ProviderSessionEvent, Receiver, RetryDisposition,
-    RithmicAuthorizedSilenceEvidenceFault, RithmicCatalogEvent, RithmicCatalogRejection,
-    RithmicInstrumentSelection, RithmicProviderConfig, RithmicProviderInstrument,
-    RithmicSelectionMode, RithmicSessionCommand, RithmicSessionError, RithmicSessionMessage,
-    SESSION_COMMAND_BATCH, SESSION_COMMAND_POLL_INTERVAL, SessionEmitter, SessionGeneration,
-    SubscriptionAcknowledgement, SubscriptionAction, SubscriptionPhase, SymbolSearchCollector,
-    TryRecvError, VecDeque, malformed, session_failure, thread, unix_nanos_now,
-    validate_provider_instruments,
+    ProductCodeCollector, ProviderInvalidationReason, ProviderSessionEvent, Receiver,
+    RetryDisposition, RithmicAuthorizedSilenceEvidenceFault, RithmicCatalogEvent,
+    RithmicCatalogRejection, RithmicInstrumentSelection, RithmicProviderConfig,
+    RithmicProviderInstrument, RithmicSelectionMode, RithmicSessionCommand, RithmicSessionError,
+    RithmicSessionMessage, SESSION_COMMAND_BATCH, SESSION_COMMAND_POLL_INTERVAL, SessionEmitter,
+    SessionGeneration, SubscriptionAcknowledgement, SubscriptionAction, SubscriptionPhase,
+    SymbolSearchCollector, TryRecvError, VecDeque, malformed, session_failure, thread,
+    unix_nanos_now, validate_provider_instruments,
 };
 
 pub(super) fn emit_connection_failure(
@@ -171,6 +171,7 @@ fn catalog_command_deadline(state: &CatalogCommandState) -> Option<Instant> {
     match state.pending_catalog.as_ref() {
         Some(
             PendingCatalogCommand::Search { deadline, .. }
+            | PendingCatalogCommand::Products { deadline, .. }
             | PendingCatalogCommand::Reference { deadline, .. },
         ) => Some(*deadline),
         None => state
@@ -563,6 +564,27 @@ fn process_session_commands(
                 });
                 return Ok(());
             }
+            RithmicSessionCommand::ListProducts(listing) => {
+                let collector = ProductCodeCollector::try_new(listing.maximum_results())
+                    .map_err(|_| malformed())?;
+                if let Err(error) = connection.list_product_codes() {
+                    let rejection = search_command_failure(error)?;
+                    if !send_rejection(emitter, session_generation, listing.generation(), rejection)
+                    {
+                        return Err((
+                            ProviderInvalidationReason::QueueOverflow,
+                            RetryDisposition::Transient,
+                        ));
+                    }
+                    continue;
+                }
+                state.pending_catalog = Some(PendingCatalogCommand::Products {
+                    generation: listing.generation(),
+                    collector,
+                    deadline: Instant::now() + response_timeout,
+                });
+                return Ok(());
+            }
             RithmicSessionCommand::Select(selection) => {
                 if let Some(reason) = state.selection_rejection(&selection) {
                     if !send_rejection(
@@ -666,6 +688,17 @@ fn handle_catalog_message(
                 Err(malformed())
             }
         },
+        PendingCatalogCommand::Products {
+            generation,
+            collector,
+            ..
+        } => finish_product_listing(
+            collector.accept(message),
+            *generation,
+            session_generation,
+            emitter,
+            state,
+        ),
         PendingCatalogCommand::Reference { selection, .. } => {
             let DecodedCatalogMessage::InstrumentReference(reference) = message else {
                 return Err(malformed());
@@ -707,6 +740,50 @@ fn handle_catalog_message(
                 response_timeout,
             )?;
             Ok(())
+        }
+    }
+}
+
+fn finish_product_listing(
+    progress: Result<
+        CollectionProgress<crate::CollectedProducts, DecodedCatalogMessage>,
+        CollectorError,
+    >,
+    listing_generation: NonZeroUsize,
+    session_generation: SessionGeneration,
+    emitter: &SessionEmitter,
+    state: &mut CatalogCommandState,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    match progress {
+        Ok(CollectionProgress::Pending) => Ok(()),
+        Ok(CollectionProgress::Complete(products)) => {
+            state.pending_catalog = None;
+            if !emitter.send_catalog(RithmicCatalogEvent::ProductsListed {
+                session_generation,
+                listing_generation,
+                products,
+            }) {
+                return Err((
+                    ProviderInvalidationReason::QueueOverflow,
+                    RetryDisposition::Transient,
+                ));
+            }
+            Ok(())
+        }
+        Err(CollectorError::Rejected) => {
+            state.pending_catalog = None;
+            send_rejection(
+                emitter,
+                session_generation,
+                listing_generation,
+                RithmicCatalogRejection::SearchRejected,
+            );
+            Ok(())
+        }
+        Ok(CollectionProgress::Unhandled(_)) => Err(malformed()),
+        Err(error) => {
+            diagnostic!("Aeris Rithmic product listing response was invalid: {error:?}");
+            Err(malformed())
         }
     }
 }
@@ -996,8 +1073,10 @@ pub(super) fn selected_instrument(
     });
     let descriptor = InstrumentDescriptor {
         instrument_id,
+        // A contract is labelled by its symbol alone; the reference data's long name
+        // ("Front Month for ES - ESZ6.CME") is description, not a label.
         provider_symbol: reference.symbol.clone(),
-        display_symbol: reference.name.unwrap_or(reference.symbol),
+        display_symbol: reference.symbol,
         venue_id: reference.exchange,
         price_scale,
         quantity_scale: 0,

@@ -16,6 +16,15 @@ pub fn parse_rithmic_instrument_id(instrument_id: &str) -> Option<(&str, &str)> 
     (!exchange.is_empty() && !symbol.is_empty()).then_some((exchange, symbol))
 }
 
+/// The contract symbol a retained Rithmic instrument should display when its saved label is
+/// something else, such as the reference data's long name ("Front Month for ES - ESZ6.CME").
+/// Rithmic instruments are labelled by their contract symbol alone.
+#[must_use]
+pub fn legacy_display_label(instrument_id: &str, display_symbol: &str) -> Option<String> {
+    let (_, symbol) = parse_rithmic_instrument_id(instrument_id)?;
+    (display_symbol != symbol).then(|| symbol.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -33,5 +42,19 @@ mod tests {
         ] {
             assert_eq!(parse_rithmic_instrument_id(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn retained_long_names_migrate_to_the_contract_symbol() {
+        let id = rithmic_instrument_id("CME", "ESZ6");
+        assert_eq!(
+            legacy_display_label(&id, "Front Month for ES - ESZ6.CME").as_deref(),
+            Some("ESZ6")
+        );
+        assert_eq!(legacy_display_label(&id, "ESZ6"), None);
+        assert_eq!(
+            legacy_display_label("instrument:hyperliquid:BTC", "BTC"),
+            None
+        );
     }
 }

@@ -6,17 +6,18 @@ use crate::{
     SessionGeneration,
 };
 use crate::{
-    CollectedSymbols, CollectionProgress, CollectorError, DecodedCatalogMessage,
+    CollectedProducts, CollectedSymbols, CollectionProgress, CollectorError, DecodedCatalogMessage,
     DecodedControlMessage, DecodedMarketMessage,
     DepthByOrderEndEvent as DecodedDepthByOrderEndEvent, DepthByOrderMutation,
     DepthByOrderMutationKind, DepthByOrderSide, DepthByOrderSnapshotLevel,
     DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
     InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
-    MarketIdentity, ProviderTimestamp, QuoteLevel, QuoteSideUpdate, RetryDisposition,
-    RithmicApplication, RithmicCredentialBytes, RithmicCredentials, RithmicSession,
-    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicTickerConnection,
-    SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
-    SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
+    MarketIdentity, ProductCodeCollector, ProductCodeResult, ProviderTimestamp, QuoteLevel,
+    QuoteSideUpdate, RetryDisposition, RithmicApplication, RithmicCredentialBytes,
+    RithmicCredentials, RithmicSession, RithmicSessionError, RithmicSessionLimits,
+    RithmicSessionMessage, RithmicTickerConnection, SearchPattern, SubscriptionAction,
+    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest, SymbolSearchResult,
+    TradeAggressor,
 };
 use aeris_market_data::{
     AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
@@ -206,6 +207,44 @@ impl RithmicSymbolSearch {
             product_code: self.product_code.clone(),
             maximum_results: self.maximum_results,
         }
+    }
+}
+
+/// Bounded product-code listing for one session-unique search generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RithmicProductListing {
+    listing_generation: NonZeroUsize,
+    maximum_results: NonZeroUsize,
+}
+
+impl RithmicProductListing {
+    /// Creates one bounded listing of every exchange's products.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a result bound above the direct-session instrument limit.
+    pub const fn try_new(
+        listing_generation: NonZeroUsize,
+        maximum_results: NonZeroUsize,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        if maximum_results.get() > MAXIMUM_INSTRUMENTS {
+            return Err(RithmicProviderCommandError::InvalidRequest);
+        }
+        Ok(Self {
+            listing_generation,
+            maximum_results,
+        })
+    }
+
+    /// Returns the generation that fences this listing's callbacks.
+    #[must_use]
+    pub const fn generation(self) -> NonZeroUsize {
+        self.listing_generation
+    }
+
+    #[must_use]
+    pub const fn maximum_results(self) -> NonZeroUsize {
+        self.maximum_results
     }
 }
 
@@ -418,6 +457,11 @@ pub enum RithmicCatalogEvent {
         search_generation: NonZeroUsize,
         symbols: CollectedSymbols,
     },
+    ProductsListed {
+        session_generation: SessionGeneration,
+        listing_generation: NonZeroUsize,
+        products: CollectedProducts,
+    },
     SelectionInstalled {
         session_generation: SessionGeneration,
         selection_generation: NonZeroUsize,
@@ -443,6 +487,16 @@ impl fmt::Debug for RithmicCatalogEvent {
                 .field("session_generation", session_generation)
                 .field("search_generation", search_generation)
                 .field("result_count", &symbols.results.len())
+                .finish(),
+            Self::ProductsListed {
+                session_generation,
+                listing_generation,
+                products,
+            } => formatter
+                .debug_struct("ProductsListed")
+                .field("session_generation", session_generation)
+                .field("listing_generation", listing_generation)
+                .field("product_count", &products.products.len())
                 .finish(),
             Self::SelectionInstalled {
                 session_generation,
@@ -479,6 +533,19 @@ impl RithmicCatalogEvent {
             session_generation: SessionGeneration::new(session_generation),
             search_generation,
             symbols,
+        }
+    }
+
+    #[must_use]
+    pub fn products_listed(
+        session_generation: std::num::NonZeroU64,
+        listing_generation: NonZeroUsize,
+        products: CollectedProducts,
+    ) -> Self {
+        Self::ProductsListed {
+            session_generation: SessionGeneration::new(session_generation),
+            listing_generation,
+            products,
         }
     }
 
@@ -947,6 +1014,19 @@ impl RithmicProviderEvents {
         self.send_command(generation, RithmicSessionCommand::Search(request))
     }
 
+    /// Enqueues one bounded product-code listing for the exact active session generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error for a missing/stale session or a full command queue.
+    pub fn list_products(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicProductListing,
+    ) -> Result<(), RithmicProviderCommandError> {
+        self.send_command(generation, RithmicSessionCommand::ListProducts(request))
+    }
+
     /// Enqueues one read-only selection from a retained completed symbol search.
     ///
     /// # Errors
@@ -1058,6 +1138,7 @@ impl ActiveSession {
 
 enum RithmicSessionCommand {
     Search(RithmicSymbolSearch),
+    ListProducts(RithmicProductListing),
     Select(RithmicInstrumentSelection),
     ReplaceSubscriptions(Vec<RithmicProviderInstrument>),
 }
@@ -1066,6 +1147,10 @@ impl fmt::Debug for RithmicSessionCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Search(request) => formatter.debug_tuple("Search").field(request).finish(),
+            Self::ListProducts(request) => formatter
+                .debug_tuple("ListProducts")
+                .field(request)
+                .finish(),
             Self::Select(request) => formatter.debug_tuple("Select").field(request).finish(),
             Self::ReplaceSubscriptions(instruments) => formatter
                 .debug_struct("ReplaceSubscriptions")
@@ -1986,6 +2071,11 @@ enum PendingCatalogCommand {
         collector: SymbolSearchCollector,
         deadline: Instant,
     },
+    Products {
+        generation: NonZeroUsize,
+        collector: ProductCodeCollector,
+        deadline: Instant,
+    },
     Reference {
         selection: RithmicInstrumentSelection,
         deadline: Instant,
@@ -2194,6 +2284,19 @@ fn retained_catalog_event_bytes(event: &RithmicCatalogEvent) -> Option<usize> {
                 }
             }
         }
+        RithmicCatalogEvent::ProductsListed { products, .. } => {
+            add(products
+                .products
+                .len()
+                .checked_mul(size_of::<ProductCodeResult>())?)?;
+            for product in &products.products {
+                add(product.product_code.capacity())?;
+                add(product.exchange.capacity())?;
+                if let Some(name) = &product.name {
+                    add(name.capacity())?;
+                }
+            }
+        }
         RithmicCatalogEvent::SelectionInstalled {
             instrument,
             entitlement_id,
@@ -2213,6 +2316,9 @@ fn retained_catalog_event_bytes(event: &RithmicCatalogEvent) -> Option<usize> {
 const fn catalog_event_generation(event: &RithmicCatalogEvent) -> Option<SessionGeneration> {
     match event {
         RithmicCatalogEvent::SearchCompleted {
+            session_generation, ..
+        }
+        | RithmicCatalogEvent::ProductsListed {
             session_generation, ..
         }
         | RithmicCatalogEvent::SelectionInstalled {
@@ -2508,6 +2614,34 @@ mod tests {
             ..CatalogCommandState::default()
         };
 
+        assert!(!catalog_command_timed_out(
+            &state,
+            deadline
+                .checked_sub(Duration::from_nanos(1))
+                .expect("deadline has a preceding instant")
+        ));
+        assert!(catalog_command_timed_out(&state, deadline));
+    }
+
+    #[test]
+    fn product_listings_are_bounded_and_expire_at_the_provider_response_deadline() {
+        assert_eq!(
+            RithmicProductListing::try_new(NonZeroUsize::MIN, nonzero(MAXIMUM_INSTRUMENTS + 1)),
+            Err(RithmicProviderCommandError::InvalidRequest)
+        );
+        let listing = RithmicProductListing::try_new(nonzero(3), nonzero(MAXIMUM_INSTRUMENTS))
+            .expect("listing at the instrument bound validates");
+        assert_eq!(listing.generation(), nonzero(3));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let state = CatalogCommandState {
+            pending_catalog: Some(PendingCatalogCommand::Products {
+                generation: listing.generation(),
+                collector: ProductCodeCollector::try_new(listing.maximum_results())
+                    .expect("listing collector validates"),
+                deadline,
+            }),
+            ..CatalogCommandState::default()
+        };
         assert!(!catalog_command_timed_out(
             &state,
             deadline
@@ -3523,6 +3657,10 @@ mod tests {
         .expect("base-venue reference installs");
 
         assert_eq!(selected.descriptor.venue_id, "CME");
+        assert_eq!(
+            selected.descriptor.display_symbol, "MNQU6",
+            "the long reference name never becomes the label"
+        );
         assert_eq!(selected.descriptor.price_increment, Some(25));
         let terms = selected
             .descriptor

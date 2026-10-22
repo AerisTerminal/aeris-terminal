@@ -129,17 +129,17 @@ use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState, WorkspaceChartAppearanceState,
-    WorkspaceChartIndicatorState, WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState,
-    WorkspaceChartState, WorkspaceChartStudyState, WorkspaceCumulativeDeltaState,
-    WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState, WorkspaceInstrumentDrawingsState,
-    WorkspaceLayoutState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    ProviderInstrumentKind, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState,
+    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState,
+    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
+    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
@@ -262,6 +262,7 @@ use price_alert_dialog::{
     runtime_price_alerts,
 };
 use reqwest_client::ReqwestClient;
+use rithmic_shell::{InstrumentMenuAction, InstrumentMenuEntry, InstrumentMenuSelection};
 use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
 use std::{
     borrow::Cow,
@@ -651,8 +652,6 @@ const fn stabilized_connection_state(
     }
 }
 
-const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
-
 fn provider_presentation(
     provider: TerminalProvider,
 ) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
@@ -716,24 +715,17 @@ fn instrument_interval(
         .unwrap_or(interval)
 }
 
-/// Rithmic searches require text, so its default listing is a symbol query;
-/// Hyperliquid lists its whole catalog for an empty query.
-fn default_listing_query(provider: TerminalProvider) -> &'static str {
-    provider_presentation(provider).map_or(DEFAULT_RITHMIC_LISTING_QUERY, |descriptor| {
-        descriptor.default_listing
-    })
-}
-
-/// The instrument menu should open with a default provider listing instead of
-/// a blank list. A completed Rithmic selection consumes the previous search
-/// results (one-shot selection authorization), so an empty idle browser means
-/// a fresh default search must be dispatched.
+/// The instrument menu opens on the results for its current query, an empty one
+/// listing the provider's markets or products. A completed chart selection consumes
+/// the search it came from (one-shot selection authorization), and closing the menu
+/// clears the query, so an idle browser that no longer lists `query` searches again.
 fn instrument_listing_refresh_needed(
     browser: &rithmic_shell::RithmicSymbolBrowser,
     selection_pending: bool,
+    query: &str,
 ) -> bool {
     !selection_pending
-        && browser.results().is_empty()
+        && !browser.lists_query(query)
         && !browser.search_pending()
         && !browser.has_retained_search()
 }
@@ -3034,9 +3026,6 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
     }
 }
 
-#[derive(Clone, Copy)]
-struct InstrumentMenuSelection(usize);
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SymbolSubmitDecision {
     Select(usize),
@@ -3067,13 +3056,16 @@ fn current_instrument_menu_index(entries: &[InstrumentMenuEntry]) -> Option<usiz
     entries.iter().position(|entry| entry.checked)
 }
 
-#[derive(Clone)]
-struct InstrumentMenuEntry {
-    label: String,
-    /// The provider's asset-class name, shown muted beside the label.
-    asset_class: Option<String>,
-    checked: bool,
-    selection: InstrumentMenuSelection,
+/// A typed search highlights its first instrument, not the product header above it, so
+/// Enter selects the best match.
+fn first_selectable_instrument_index(entries: &[InstrumentMenuEntry]) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| matches!(entry.action, InstrumentMenuAction::Select(_)))
+}
+
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
 struct HeaderState {

@@ -173,12 +173,16 @@ fn drain_market_events(
     let empty = events.is_empty();
     let mut changed = false;
     for event in events {
+        let consumer_id = event.0;
         match apply_received_event(market, client_id, event, endpoints, clock) {
             Ok(selection_changed) => changed |= selection_changed,
-            Err(error) => {
+            Err(error) if consumer_id == 0 => {
                 report_runtime_failure(endpoints, &error);
                 return Err(error);
             }
+            // One pane's rejected event fails only that pane; the other panes
+            // share this worker and keep their healthy series.
+            Err(error) => report_consumer_failure(endpoints, consumer_id, error),
         }
     }
     if empty {
@@ -329,6 +333,23 @@ fn report_runtime_failure(endpoints: &[EndpointRecord], error: &str) {
     }
 }
 
+fn report_consumer_failure(endpoints: &[EndpointRecord], consumer_id: u64, error: String) {
+    diagnostic!("Aeris market pane {consumer_id} event was rejected: {error}");
+    if let Some(record) = endpoints
+        .iter()
+        .find(|record| record.endpoint.active && record.endpoint.consumer_id == consumer_id)
+    {
+        report_failure(
+            &record.endpoint.messages,
+            record
+                .role
+                .demands_series()
+                .then_some(record.endpoint.active_generation),
+            error,
+        );
+    }
+}
+
 pub(super) fn report_failure(
     messages: &MarketWorkerSender,
     generation: Option<u64>,
@@ -420,7 +441,12 @@ fn apply_received_event(
     if let MarketRuntimeEvent::ProviderState(state) = &event
         && state.provider != record.product.provider
     {
-        return Err("engine provider state identity mismatched".to_string());
+        // Another provider's state belongs to a selection this pane has not
+        // adopted yet; anything else is left over from a replaced demand.
+        if record.pending_selection.is_some() || record.initial_selection_pending {
+            record.pending_provider_state = Some(state.clone());
+        }
+        return Ok(false);
     }
     if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
         return Ok(false);
@@ -644,6 +670,20 @@ fn adopt_selection_outcome(
             if selection_matches_request(record, generation.0.get())
     );
     apply_selection_outcome(record, outcome)?;
+    if record.pending_selection.is_none()
+        && !record.initial_selection_pending
+        && let Some(state) = record.pending_provider_state.take()
+        && adopted
+        && state.provider == record.product.provider
+    {
+        let generation = Some(record.endpoint.active_generation);
+        forward_runtime_publication(
+            MarketRuntimeEvent::ProviderState(state),
+            &mut record.endpoint,
+            &record.product,
+            generation,
+        );
+    }
     if adopted
         && let Err(error) =
             super::selection_commands::apply_depth_visibility(market, client_id, record)
@@ -1130,6 +1170,117 @@ mod tests {
         drop(receiver);
         apply_received_event(&market, 1, selection(), &mut records, &clock)
             .expect("a closed pane mailbox is not fatal");
+    }
+
+    #[test]
+    fn a_pending_selections_provider_state_waits_for_its_adoption() {
+        use aeris_market_runtime::{InstrumentDescriptor, ResolvedSeries, SelectionOutcome};
+
+        let market = MarketService::start().expect("market runtime");
+        let clock = ManualClock::new(1_781_568_000_000_000_000);
+        let (mut pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            super::super::default_hyperliquid_product(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        record.initial_selection_pending = false;
+        let selected = super::super::default_product("MNQ");
+        record.pending_selection = Some((
+            8,
+            record.product.clone(),
+            aeris_market_data::ChartInterval::Minute1,
+        ));
+        let mut records = vec![record];
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let epoch = epochs.next();
+        let provider_state = (
+            41,
+            Fenced {
+                epoch,
+                value: MarketRuntimeEvent::ProviderState(super::super::ProviderState {
+                    provider: selected.provider.clone(),
+                    state: super::super::ProviderConnectionState::Online,
+                    generation: 1,
+                    detail: None,
+                    transport_rtt_nanos: None,
+                }),
+            },
+        );
+        apply_received_event(&market, 1, provider_state, &mut records, &clock)
+            .expect("another provider's state does not stop the worker");
+        assert!(pane.worker.drain_messages().0.is_empty());
+
+        let presentation =
+            super::super::provider_presentation(&selected.provider).expect("fixture provider");
+        let outcome = (
+            41,
+            Fenced {
+                epoch,
+                value: MarketRuntimeEvent::SelectionOutcome(SelectionOutcome::Selected {
+                    generation: MarketGenerationId(NonZeroU64::new(8).expect("generation")),
+                    descriptor: Box::new(
+                        InstrumentDescriptor::from_install(&selected, presentation, true)
+                            .expect("fixture descriptor"),
+                    ),
+                    series: ResolvedSeries::resolve(
+                        &selected,
+                        aeris_market_data::ChartInterval::Minute1,
+                        presentation,
+                    )
+                    .expect("fixture series"),
+                }),
+            },
+        );
+        apply_received_event(&market, 1, outcome, &mut records, &clock).expect("adopted");
+        let (messages, _) = pane.worker.drain_messages();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            MarketWorkerMessage::EngineSelectionCommitted { sequence: 8 }
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            MarketWorkerMessage::Connection {
+                generation: 8,
+                state: FeedConnectionState::Streaming,
+                ..
+            }
+        )));
+        assert!(records[0].pending_provider_state.is_none());
+    }
+
+    #[test]
+    fn a_rejected_pane_event_fails_only_that_pane() {
+        let product = super::super::default_product("ES");
+        let (mut first, first_record) = super::super::worker_endpoint(
+            1,
+            2,
+            product.clone(),
+            3,
+            super::super::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        let (mut second, second_record) = super::super::worker_endpoint(
+            1,
+            4,
+            product,
+            5,
+            super::super::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        let records = vec![first_record, second_record];
+        report_consumer_failure(&records, 5, "rejected".into());
+        assert!(first.worker.drain_messages().0.is_empty());
+        assert!(matches!(
+            second.worker.drain_messages().0.as_slice(),
+            [MarketWorkerMessage::EndpointFailure { generation: 1, message }]
+                if message == "rejected"
+        ));
     }
 
     #[test]
