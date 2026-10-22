@@ -1013,7 +1013,6 @@ fn chart_settings_panel(
                     terminal, menu, content, view, theme,
                 ))),
         ))
-        .child(popover_highlight(theme, radius))
 }
 
 /// Title bar of the settings panel. Dragging it moves the panel anywhere in the window.

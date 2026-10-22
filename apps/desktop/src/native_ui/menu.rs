@@ -17,7 +17,7 @@ use super::{
     platform_font_weight,
     popup_fit::fit_to_window,
     rem_scale::ROOT_REM_PX,
-    theme::{gpui_color, platform_border_width, popover_highlight, popover_surface, surface_panel},
+    theme::{gpui_color, platform_border_width, popover_surface, surface_panel},
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -769,8 +769,7 @@ impl RenderOnce for MenuPanel {
             MenuPlacement::InFlow => panel,
         })
         .children(self.header)
-        .child(body)
-        .child(popover_highlight(&self.theme, radius));
+        .child(body);
         let panel = match self.animation {
             Some(origin) => animate_popup_from_origin(
                 panel,

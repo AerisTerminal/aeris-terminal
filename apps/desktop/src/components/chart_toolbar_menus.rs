@@ -351,9 +351,6 @@ pub(super) fn chrome_overlay_panel(
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(content)
-        .when(!style.frameless, |panel| {
-            panel.child(popover_highlight(theme, radius))
-        })
         .children(closing.then(|| {
             div()
                 .id("chrome_overlay_closing_blocker")

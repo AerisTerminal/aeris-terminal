@@ -14,10 +14,6 @@ macro_rules! platform_color_registry {
             border => "border",
             border_secondary => "border-secondary",
             border_subtle => "border-subtle",
-            /// Floating-layer outer edge, drawn at the 1px border width.
-            border_popover => "border-popover",
-            /// Floating-layer inner highlight, drawn just inside `border_popover`.
-            border_popover_highlight => "border-popover-highlight",
             text_default => "text-default",
             text_secondary => "text-secondary",
             text_muted => "text-muted",

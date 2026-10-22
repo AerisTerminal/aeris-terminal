@@ -67,8 +67,6 @@
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
   /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
-  --border-popover: var(--border);
-  --border-popover-highlight: #ffffffcc;
   --border-width: 1px;
 
   /* Text */
@@ -190,8 +188,6 @@
   --border: #2E2E2E;
   --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
-  --border-popover: #000000cc;
-  --border-popover-highlight: #ffffff1a;
   --border-width: 1px;
 
   /* Text */

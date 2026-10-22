@@ -1208,7 +1208,6 @@ pub(super) fn chart_status_card(notice: ChartSurfaceNotice, theme: &AerisTheme) 
             None,
             theme,
         ))
-        .child(popover_highlight(theme, toast_radius()))
 }
 
 pub(super) struct ToastLayer<'a, H: ToastHost> {
@@ -1380,7 +1379,6 @@ fn toast_card<H: ToastHost>(
             .w(px(TOAST_WIDTH - 2.0 * border))
             .opacity(frame.content_opacity),
         )
-        .child(popover_highlight(theme, toast_radius()))
         .into_any_element()
 }
 

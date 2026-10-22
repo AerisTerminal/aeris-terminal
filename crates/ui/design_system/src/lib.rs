@@ -388,9 +388,6 @@ pub struct ThemeDimensions {
     pub app_header_height: f32,
     /// Width of every control and layer edge: the `--border-width` token.
     pub border_width: f32,
-    /// Width of the `border-popover-highlight` inner edge. The Theme System states it in
-    /// prose ("a 1px outer edge plus a 1px inner highlight") rather than as a token.
-    pub popover_highlight_width: f32,
 }
 
 /// A fully resolved `Aeris` theme suitable for a single paint revision.
@@ -414,7 +411,6 @@ impl AerisTheme {
             dimensions: ThemeDimensions {
                 app_header_height: 44.0,
                 border_width: f32::from(BORDER_WIDTH),
-                popover_highlight_width: 1.0,
             },
         }
     }
@@ -683,16 +679,6 @@ mod tests {
 
         assert_eq!(light.surface_popover, ThemeColor::from_rgb8(255, 255, 255));
         assert_eq!(dark.surface_popover, ThemeColor::from_rgb8(1, 1, 1));
-        assert_eq!(light.border_popover, light.border);
-        assert_eq!(dark.border_popover, ThemeColor::from_rgba8(0, 0, 0, 204));
-        assert_eq!(
-            light.border_popover_highlight,
-            ThemeColor::from_rgba8(255, 255, 255, 204)
-        );
-        assert_eq!(
-            dark.border_popover_highlight,
-            ThemeColor::from_rgba8(255, 255, 255, 26)
-        );
         // Floating layers paint over arbitrary content, so their fill must stay opaque even
         // though the in-layout surfaces are translucent tints in dark mode.
         for popover in [light.surface_popover, dark.surface_popover] {
@@ -700,10 +686,19 @@ mod tests {
         }
         let dark_tokens = AerisTheme::dark().color_tokens();
         assert_eq!(token_source(&dark_tokens, "surface-popover"), "#010101");
-        assert_eq!(
-            token_source(&AerisTheme::light().color_tokens(), "border-popover"),
-            "var(--border)"
-        );
+        // Floating layers draw their edge with `border`; the retired popover edge tokens must
+        // not return.
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            for retired in ["border-popover", "border-popover-highlight"] {
+                assert!(
+                    theme
+                        .color_tokens()
+                        .iter()
+                        .all(|token| token.canonical_identifier != retired),
+                    "retired popover edge token --{retired} is back"
+                );
+            }
+        }
     }
 
     /// `--ring-primary` is the only focus style; the retired neutral and per-action rings must

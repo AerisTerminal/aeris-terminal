@@ -24,7 +24,7 @@ use gpui::{
 use super::{
     button::{Button, ButtonVariant, close_button},
     platform_font_weight,
-    theme::{gpui_color, platform_border_width, popover_highlight, popover_surface, surface_panel},
+    theme::{gpui_color, platform_border_width, popover_surface, surface_panel},
 };
 
 type DialogHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -390,8 +390,7 @@ impl RenderOnce for Dialog {
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .children(header)
             .child(body)
-            .children(footer)
-            .child(popover_highlight(&theme, radius));
+            .children(footer);
         let scrim = div()
             .id(self.id.clone())
             .absolute()

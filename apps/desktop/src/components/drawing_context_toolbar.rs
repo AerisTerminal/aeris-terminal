@@ -11,8 +11,8 @@ use chart_context_menus::{chart_css_color, color_swatch_dot};
 use drawing_settings_dialog::humanize;
 use drawing_toolbar::{
     FLOATING_TOOLBAR_BUTTON_SIZE, FLOATING_TOOLBAR_DEFAULT_INSET, FLOATING_TOOLBAR_GAP,
-    clamp_floating_toolbar_origin, floating_toolbar_grip, floating_toolbar_highlight,
-    floating_toolbar_panel, floating_toolbar_size,
+    clamp_floating_toolbar_origin, floating_toolbar_grip, floating_toolbar_panel,
+    floating_toolbar_size,
 };
 use local_state::{MAXIMUM_DRAWING_TEMPLATE_NAME_BYTES, MAXIMUM_DRAWING_TEMPLATES};
 use serde_json::Value;
@@ -625,7 +625,6 @@ impl TerminalApp {
                 )
                 .child(more_control(ui))
                 .children(is_position(settings.kind()).then(|| order_button(ui)))
-                .child(floating_toolbar_highlight(theme))
                 .into_any_element(),
         )
     }

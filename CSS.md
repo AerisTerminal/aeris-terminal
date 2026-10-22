@@ -26,9 +26,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   It only appears over an opaque `surface` (the window root) or `surface-popover`; never use it
   as the fill of a layer that floats over other content.
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) use
-  `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
-  fill, a 1px `border-popover` outer edge, and a 1px `border-popover-highlight` inner edge
-  painted above the content.
+  `popover_surface` from `native_ui/theme.rs`: an opaque `surface-popover` fill and a 1px
+  `border` edge, with no inner highlight.
 - Tooltips (`terminal_ui::tooltip`) use the secondary surface: `surface-secondary` resolved over
   `surface-popover`, a 1px `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
@@ -36,7 +35,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
   and slides in from the trigger side and fades out when the pointer leaves, presses or scrolls.
 - Large workspace panels (the symbol, indicator and chart settings panels, the indicator settings
-  dialogs and the header account menu) keep the popover edge and highlight but fill with the main
+  dialogs and the header account menu) keep the popover edge but fill with the main
   `surface` (`surface_panel`, `MenuPanel::on_surface`, or `Dialog::panel_surface`). Their content
   sits on titled, borderless `surface-secondary` group cards: no outlined blocks and no hairlines
   between rows. Size and style settings are dropdowns, not tab groups.
@@ -141,8 +140,6 @@ while invalid.
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
   /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
-  --border-popover: var(--border);
-  --border-popover-highlight: #ffffffcc;
   --border-width: 1px;
 
   /* Text */
@@ -264,8 +261,6 @@ while invalid.
   --border: #2E2E2E;
   --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
-  --border-popover: #000000cc;
-  --border-popover-highlight: #ffffff1a;
   --border-width: 1px;
 
   /* Text */

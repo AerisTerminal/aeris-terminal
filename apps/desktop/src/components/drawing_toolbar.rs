@@ -1064,7 +1064,7 @@ fn floating_toolbar_radius() -> Pixels {
 }
 
 /// The panel of a floating toolbar at `origin`. It keeps presses to itself so the chart under
-/// it never sees them. Callers finish it with [`floating_toolbar_highlight`] as the last child.
+/// it never sees them.
 pub(super) fn floating_toolbar_panel(
     id: &'static str,
     origin: gpui::Point<Pixels>,
@@ -1083,11 +1083,6 @@ pub(super) fn floating_toolbar_panel(
         .px(px(FLOATING_TOOLBAR_PADDING_X))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-}
-
-/// The popover inner edge of a [`floating_toolbar_panel`], painted above its buttons.
-pub(super) fn floating_toolbar_highlight(theme: &AerisTheme) -> Div {
-    popover_highlight(theme, floating_toolbar_radius())
 }
 
 /// The dotted grip that moves a floating toolbar. `on_grab` receives the press position; the
@@ -1223,7 +1218,6 @@ pub(super) fn drawing_favorites_toolbar_layer(
                 },
             ))
             .children(buttons)
-            .child(floating_toolbar_highlight(theme))
             .into_any_element(),
     )
 }

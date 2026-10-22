@@ -117,7 +117,6 @@ fn hint_chip(theme: &AerisTheme) -> Div {
                 .child("Esc"),
         )
         .child("to exit full screen")
-        .child(popover_highlight(theme, radius))
 }
 
 /// The chip, centred at the top of the window while the hint is on screen. It registers no
