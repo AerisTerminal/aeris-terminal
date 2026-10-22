@@ -119,6 +119,17 @@ fn decode_time_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
     use prost::Message;
 
     let message = rti::ResponseTimeBarReplay::decode(frame).map_err(|_| ProtocolError::Decode)?;
+    let decoded = time_replay_message(message);
+    if let Err(error) = &decoded {
+        report_unaccepted_time_replay(frame, error);
+    }
+    decoded
+}
+
+#[cfg(rithmic_kit)]
+fn time_replay_message(
+    message: crate::generated::rti::ResponseTimeBarReplay,
+) -> Result<DecodedHistoryMessage, ProtocolError> {
     validate_codes(
         &message.user_msg,
         &message.rq_handler_rp_code,
@@ -148,6 +159,131 @@ fn decode_time_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
             )?,
         }),
     }
+}
+
+/// The most response codes, and characters of each, an unaccepted reply reports.
+#[cfg(rithmic_kit)]
+const REPORTED_CODES: usize = 4;
+#[cfg(rithmic_kit)]
+const REPORTED_CODE_CHARS: usize = 64;
+
+/// What an unaccepted replay reply carried: its response codes with their
+/// provider text, and which bar fields were present. Prices, volumes and
+/// identities are never reported.
+#[cfg(rithmic_kit)]
+struct UnacceptedReply<'a> {
+    template: i32,
+    handler: &'a [String],
+    terminal: &'a [String],
+    user_messages: usize,
+    fields: &'a [(&'static str, bool)],
+}
+
+#[cfg(rithmic_kit)]
+fn report_unaccepted_time_replay(frame: &[u8], error: &ProtocolError) {
+    use crate::generated::rti;
+    use prost::Message;
+
+    let Ok(message) = rti::ResponseTimeBarReplay::decode(frame) else {
+        return;
+    };
+    report_unaccepted_reply(
+        error,
+        &UnacceptedReply {
+            template: message.template_id,
+            handler: &message.rq_handler_rp_code,
+            terminal: &message.rp_code,
+            user_messages: message.user_msg.len(),
+            fields: &[
+                ("symbol", message.symbol.is_some()),
+                ("exchange", message.exchange.is_some()),
+                ("type", message.r#type.is_some()),
+                ("period", message.period.is_some()),
+                ("marker", message.marker.is_some()),
+                ("open", message.open_price.is_some()),
+                ("high", message.high_price.is_some()),
+                ("low", message.low_price.is_some()),
+                ("close", message.close_price.is_some()),
+                ("num_trades", message.num_trades.is_some()),
+                ("volume", message.volume.is_some()),
+                ("bid_volume", message.bid_volume.is_some()),
+                ("ask_volume", message.ask_volume.is_some()),
+            ],
+        },
+    );
+}
+
+#[cfg(rithmic_kit)]
+fn report_unaccepted_tick_replay(frame: &[u8], error: &ProtocolError) {
+    use crate::generated::rti;
+    use prost::Message;
+
+    let Ok(message) = rti::ResponseTickBarReplay::decode(frame) else {
+        return;
+    };
+    report_unaccepted_reply(
+        error,
+        &UnacceptedReply {
+            template: message.template_id,
+            handler: &message.rq_handler_rp_code,
+            terminal: &message.rp_code,
+            user_messages: message.user_msg.len(),
+            fields: &[
+                ("symbol", message.symbol.is_some()),
+                ("exchange", message.exchange.is_some()),
+                ("type", message.r#type.is_some()),
+                ("sub_type", message.sub_type.is_some()),
+                ("type_specifier", message.type_specifier.is_some()),
+                ("data_bar_seq_num", !message.data_bar_seq_num.is_empty()),
+                ("data_bar_ssboe", !message.data_bar_ssboe.is_empty()),
+                ("data_bar_usecs", !message.data_bar_usecs.is_empty()),
+                ("open", message.open_price.is_some()),
+                ("high", message.high_price.is_some()),
+                ("low", message.low_price.is_some()),
+                ("close", message.close_price.is_some()),
+                ("num_trades", message.num_trades.is_some()),
+                ("volume", message.volume.is_some()),
+                ("bid_volume", message.bid_volume.is_some()),
+                ("ask_volume", message.ask_volume.is_some()),
+            ],
+        },
+    );
+}
+
+#[cfg(rithmic_kit)]
+fn report_unaccepted_reply(error: &ProtocolError, reply: &UnacceptedReply<'_>) {
+    let present = reply
+        .fields
+        .iter()
+        .filter(|(_, present)| *present)
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(",");
+    aeris_observability::diagnostic!(
+        "Rithmic replay reply {} unaccepted ({error:?}): rq_handler_rp_code={} rp_code={} user_msg={} fields=[{present}]",
+        reply.template,
+        reported_codes(reply.handler),
+        reported_codes(reply.terminal),
+        reply.user_messages,
+    );
+}
+
+#[cfg(rithmic_kit)]
+fn reported_codes(codes: &[String]) -> String {
+    let mut reported = codes
+        .iter()
+        .take(REPORTED_CODES)
+        .map(|code| {
+            code.chars()
+                .filter(|character| !character.is_control())
+                .take(REPORTED_CODE_CHARS)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    if codes.len() > REPORTED_CODES {
+        reported.push(format!("+{} more", codes.len() - REPORTED_CODES));
+    }
+    format!("{reported:?}")
 }
 
 #[cfg(rithmic_kit)]
@@ -182,6 +318,17 @@ fn decode_tick_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
     use prost::Message;
 
     let message = rti::ResponseTickBarReplay::decode(frame).map_err(|_| ProtocolError::Decode)?;
+    let decoded = tick_replay_message(message);
+    if let Err(error) = &decoded {
+        report_unaccepted_tick_replay(frame, error);
+    }
+    decoded
+}
+
+#[cfg(rithmic_kit)]
+fn tick_replay_message(
+    message: crate::generated::rti::ResponseTickBarReplay,
+) -> Result<DecodedHistoryMessage, ProtocolError> {
     validate_codes(
         &message.user_msg,
         &message.rq_handler_rp_code,
@@ -633,6 +780,22 @@ mod tests {
                 kind: ReplayKind::Time,
                 accepted: false,
             }
+        );
+    }
+
+    #[test]
+    fn unaccepted_reply_codes_are_bounded_and_printable() {
+        assert_eq!(reported_codes(&[]), "[]");
+        assert_eq!(
+            reported_codes(&["3".to_string(), "bad\nrequest".to_string()]),
+            r#"["3", "badrequest"]"#
+        );
+        let codes = (0..6).map(|code| code.to_string()).collect::<Vec<_>>();
+        assert_eq!(reported_codes(&codes), r#"["0", "1", "2", "3", "+2 more"]"#);
+        let long = "x".repeat(REPORTED_CODE_CHARS + 10);
+        assert_eq!(
+            reported_codes(&[long]),
+            format!("{:?}", ["x".repeat(REPORTED_CODE_CHARS)])
         );
     }
 

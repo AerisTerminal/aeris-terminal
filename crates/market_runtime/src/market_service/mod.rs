@@ -752,6 +752,9 @@ struct ProviderOrderBook {
     trade_tape_dirty: bool,
     trade_tape_published_at: Option<std::time::Instant>,
     retention_clock_unix_nanos: i64,
+    /// When the current session last delivered a newer top of book. Trade-built
+    /// series on the same instrument treat it as feed liveness between trades.
+    quote_observed_at: Option<std::time::Instant>,
 }
 
 mod lifecycle;

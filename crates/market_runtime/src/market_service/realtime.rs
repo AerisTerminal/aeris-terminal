@@ -3,7 +3,7 @@ use super::lifecycle::{RecoveryReason, SeriesInput, SeriesLifecycle, SeriesState
 use super::{
     AggressorSide, BTreeMap, BTreeSet, BarSeriesKey, CanonicalOrderBookState, ConsumerId,
     Coordinator, DepthSnapshot, FailureStage, FormingBar, HyperliquidInstrumentDemand,
-    InstallProviderInstrument, LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS,
+    InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS,
     MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
     OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
     ProviderEvent, ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
@@ -11,9 +11,7 @@ use super::{
     id, merge_live_candle, series_state_payload, series_update_message,
 };
 #[cfg(test)]
-use super::{
-    BarPeriod, Duration, HyperliquidDemand, Instant, RithmicRealtimeDemand, TradeHandoffSeed,
-};
+use super::{BarPeriod, Duration, HyperliquidDemand, RithmicRealtimeDemand, TradeHandoffSeed};
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
 };
@@ -49,6 +47,26 @@ pub(in crate::market_service) fn enqueue_bar_transition(
     Ok(())
 }
 
+/// When a trade-built series last showed its feed alive, for the stall watchdog.
+///
+/// Trades can stay silent for minutes on a healthy feed, and recovering each
+/// silence replays covering history from the provider. A newer quote for the
+/// same instrument and entitlement therefore counts as progress, and every
+/// consecutive recovery that a trade did not follow defers the next one.
+pub(super) fn trade_series_progress(
+    order_books: &BTreeMap<(String, String), ProviderOrderBook>,
+    series: &BarSeriesKey,
+    model: &TradeModel,
+) -> Instant {
+    let quoted = order_books
+        .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+        .filter(|book| book.instrument.entitlement_id == series.entitlement_id)
+        .and_then(|book| book.quote_observed_at);
+    quoted.map_or(model.last_publication_at, |at| {
+        at.max(model.last_publication_at)
+    }) + super::watchdog::quiet_recovery_grace(model.quiet_stall_recoveries)
+}
+
 impl ProviderOrderBook {
     pub(super) fn new(instrument: InstallProviderInstrument, top_of_book_only: bool) -> Self {
         let trade_session_generation = instrument.session_generation;
@@ -73,6 +91,7 @@ impl ProviderOrderBook {
             trade_tape_dirty: true,
             trade_tape_published_at: None,
             retention_clock_unix_nanos: 0,
+            quote_observed_at: None,
         }
     }
 
@@ -98,6 +117,7 @@ impl ProviderOrderBook {
 
     fn invalidate_live_market(&mut self, session_generation: u64) -> bool {
         let quote_changed = self.top_of_book.take().is_some();
+        self.quote_observed_at = None;
         let trades_changed = !self.recent_trades.is_empty() || !self.traded_volumes.is_empty();
         let previous_revision = self.book.revision();
         self.reset_recent_trades_for_session(session_generation);
@@ -1782,12 +1802,17 @@ impl Coordinator<'_> {
             .exchange_unix_nanos
             .or(quote.metadata.timestamps.provider_unix_nanos)
             .unwrap_or(quote.metadata.timestamps.received_unix_nanos);
+        let observed_at = self.clock.monotonic();
         let (quote_changed, trades_changed) = self
             .order_books
             .get_mut(&(provider.to_string(), instrument_id.clone()))
             .map_or((false, false), |order_book| {
                 let trades_changed = order_book.prune_recent_trades(observed_unix_nanos);
-                (order_book.install_top_of_book(quote), trades_changed)
+                let quote_changed = order_book.install_top_of_book(quote);
+                if quote_changed {
+                    order_book.quote_observed_at = Some(observed_at);
+                }
+                (quote_changed, trades_changed)
             });
         if quote_changed || trades_changed {
             self.broadcast_order_book(provider, &instrument_id);
@@ -1901,19 +1926,13 @@ impl Coordinator<'_> {
             .series
             .trade_lifecycle_iter_mut()
             .filter_map(|(series, live)| {
-                let model = live.trade_model()?;
+                let progress =
+                    trade_series_progress(&self.order_books, series, live.trade_model()?);
                 (live.connected
                     && live.history_ready()
-                    && now.duration_since(model.last_publication_at)
+                    && now.saturating_duration_since(progress)
                         >= super::watchdog::OPEN_STALL_THRESHOLD)
-                    .then(|| {
-                        (
-                            series.clone(),
-                            live.generation,
-                            model.last_publication_at,
-                            false,
-                        )
-                    })
+                    .then(|| (series.clone(), live.generation, progress, false))
             })
             .collect::<Vec<_>>();
         let candidates = trade_candidates
@@ -1969,6 +1988,10 @@ impl Coordinator<'_> {
                         FailureStage::Publication,
                         "Live trade series stalled while the market was open",
                     );
+                    if let Some(model) = self.series.trade_mut(&series) {
+                        model.quiet_stall_recoveries =
+                            model.quiet_stall_recoveries.saturating_add(1);
+                    }
                 }
             }
         }

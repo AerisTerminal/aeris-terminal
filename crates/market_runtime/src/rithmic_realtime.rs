@@ -818,7 +818,7 @@ fn publish_catalog_callback(
             ..
         } => {
             let issuer = commands.listing_completed(listing_generation)?;
-            // The adapter orders products by code, then exchange.
+            // The adapter orders featured products first, then the rest by code.
             let instruments = products
                 .products
                 .into_iter()

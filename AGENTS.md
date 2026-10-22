@@ -258,6 +258,8 @@ the check.
   Retired candle handlers must not return, and lifecycle transitions use the injected clock rather than system time.
 - Stall recovery considers every live candle and trade series while its calendar is open;
   closed sessions never recover for silence, and unknown sessions use a longer threshold.
+  A trade-built series counts a newer quote on its instrument as progress, and its threshold
+  doubles after each stall recovery that no trade followed, up to eight minutes.
   Practice session checks use the same calendar for every provider.
 - Verify protocol fields, precision, timestamp meaning, ordering, snapshot semantics, and recovery
   against current provider documentation or representative observed responses before depending on them.

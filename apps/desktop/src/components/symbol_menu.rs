@@ -367,14 +367,25 @@ pub(super) fn instrument_dialog_row(
         ))
     };
     if let Some(expanded) = instrument.expanded {
-        let chevron = header_icon(HugeIcon::ChevronDown)
-            .with_size(px(14.0))
-            .color(gpui_color(theme.colors.icon));
-        row = row.trailing(if expanded {
-            chevron
-        } else {
-            chevron.rotate(0.75)
-        });
+        let chevron = header_icon(HugeIcon::ChevronDown).with_size(px(14.0));
+        let toggle = action.clone();
+        row = row.trailing(
+            Button::new(("toggle_symbol_product", index), theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Sm)
+                .icon(if expanded {
+                    chevron
+                } else {
+                    chevron.rotate(0.75)
+                })
+                .aria_label(if expanded { "Collapse" } else { "Expand" })
+                .tab_stop(false)
+                .on_click(move |_, _, cx| {
+                    add_app.update(cx, |app, cx| {
+                        app.activate_instrument_entry(&toggle, target, cx);
+                    });
+                }),
+        );
     } else if let InstrumentMenuAction::Select(selection) = action {
         if state.target == SymbolSelectionTarget::Watchlist {
             row = row.trailing(

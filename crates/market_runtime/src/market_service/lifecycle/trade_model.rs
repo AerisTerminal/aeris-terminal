@@ -34,6 +34,8 @@ pub(in crate::market_service) struct TradeModel {
     pub(in crate::market_service) history_boundary_unix_nanos: i64,
     pub(in crate::market_service) last_publication_at: Instant,
     pub(in crate::market_service) last_trade_at: Option<Instant>,
+    /// Stall recoveries since the last trade; the watchdog waits longer after each.
+    pub(in crate::market_service) quiet_stall_recoveries: u32,
 }
 
 enum TradeLiveCadence {
@@ -132,6 +134,7 @@ impl TradeModel {
             last_trade_sequence: None,
             history_boundary_unix_nanos: i64::MIN,
             last_trade_at: None,
+            quiet_stall_recoveries: 0,
         })
     }
 
@@ -148,6 +151,7 @@ impl TradeModel {
         self.history_boundary_unix_nanos = i64::MIN;
         self.last_publication_at = self.clock.monotonic();
         self.last_trade_at = None;
+        self.quiet_stall_recoveries = 0;
         if let TradeLiveCadence::Tick { trades, forming } = &mut self.cadence {
             *forming = *trades;
         }
@@ -264,6 +268,7 @@ impl TradeModel {
         trade: &MarketTrade,
     ) -> Result<(), String> {
         self.last_trade_at = Some(self.clock.monotonic());
+        self.quiet_stall_recoveries = 0;
         if self.apply_trade(trade)? {
             self.dirty = true;
         }
@@ -277,6 +282,7 @@ impl TradeModel {
         if self.buffered.len() == LIVE_BUFFER_CAPACITY {
             return Err("Trade-built history/live buffer overflowed".to_string());
         }
+        self.quiet_stall_recoveries = 0;
         self.buffered.push_back(trade.clone());
         Ok(())
     }

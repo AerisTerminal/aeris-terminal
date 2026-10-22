@@ -13,6 +13,79 @@ const MAX_SEARCH_RESULTS: usize = 4_096;
 const MAX_REPLAY_BARS: usize = 10_000;
 const MAX_REPLAY_TICK_KEYS: usize = 100_000;
 
+/// Widely traded futures products, most active first, keyed by product code and the exchange
+/// Rithmic lists them on. The plant returns hundreds of codes in no useful order (many of them
+/// numeric spread or option codes), so a bounded listing keeps these ahead of the rest.
+const FEATURED_PRODUCTS: &[(&str, &str)] = &[
+    ("ES", "CME"),
+    ("NQ", "CME"),
+    ("MES", "CME"),
+    ("MNQ", "CME"),
+    ("YM", "CBOT"),
+    ("MYM", "CBOT"),
+    ("RTY", "CME"),
+    ("M2K", "CME"),
+    ("CL", "NYMEX"),
+    ("MCL", "NYMEX"),
+    ("GC", "COMEX"),
+    ("MGC", "COMEX"),
+    ("SI", "COMEX"),
+    ("SIL", "COMEX"),
+    ("HG", "COMEX"),
+    ("NG", "NYMEX"),
+    ("RB", "NYMEX"),
+    ("HO", "NYMEX"),
+    ("PL", "NYMEX"),
+    ("ZN", "CBOT"),
+    ("ZB", "CBOT"),
+    ("ZF", "CBOT"),
+    ("ZT", "CBOT"),
+    ("UB", "CBOT"),
+    ("SR3", "CME"),
+    ("6E", "CME"),
+    ("6J", "CME"),
+    ("6B", "CME"),
+    ("6A", "CME"),
+    ("6C", "CME"),
+    ("6S", "CME"),
+    ("M6E", "CME"),
+    ("ZC", "CBOT"),
+    ("ZS", "CBOT"),
+    ("ZW", "CBOT"),
+    ("ZL", "CBOT"),
+    ("ZM", "CBOT"),
+    ("LE", "CME"),
+    ("HE", "CME"),
+    ("BTC", "CME"),
+    ("MBT", "CME"),
+    ("ETH", "CME"),
+    ("MET", "CME"),
+];
+
+/// Listing order of one product: featured products by activity, then lettered codes, then
+/// codes without letters.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ListingRank {
+    Featured(usize),
+    Lettered,
+    Unlettered,
+}
+
+impl ListingRank {
+    fn of(product_code: &str, exchange: &str) -> Self {
+        if let Some(position) = FEATURED_PRODUCTS
+            .iter()
+            .position(|&(code, venue)| code == product_code && venue == exchange)
+        {
+            Self::Featured(position)
+        } else if product_code.bytes().any(|byte| byte.is_ascii_alphabetic()) {
+            Self::Lettered
+        } else {
+            Self::Unlettered
+        }
+    }
+}
+
 /// Fail-closed validation errors for bounded multi-response collection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectorError {
@@ -189,7 +262,7 @@ impl SymbolSearchCollector {
     }
 }
 
-/// Completed product listing ordered by product code, then exchange.
+/// Completed product listing ordered by [`ListingRank`], then product code and exchange.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectedProducts {
     pub products: Vec<ProductCodeResult>,
@@ -199,7 +272,7 @@ pub struct CollectedProducts {
 /// Bounded, deduplicating product-code response collector.
 pub struct ProductCodeCollector {
     maximum_results: NonZeroUsize,
-    products: BTreeMap<(String, String), ProductCodeResult>,
+    products: BTreeMap<(ListingRank, String, String), ProductCodeResult>,
     duplicate_count: usize,
     state: CollectorState,
 }
@@ -224,7 +297,7 @@ impl ProductCodeCollector {
 
     /// Accepts one product or terminal frame.
     ///
-    /// Only the lowest `maximum_results` product-code/exchange keys are kept,
+    /// Only the first `maximum_results` products in listing order are kept,
     /// independent of arrival order. A repeated key keeps its first product.
     ///
     /// # Errors
@@ -251,7 +324,11 @@ impl ProductCodeCollector {
     ) -> Result<CollectionProgress<CollectedProducts, DecodedCatalogMessage>, CollectorError> {
         match message {
             DecodedCatalogMessage::ProductCode(product) => {
-                let key = (product.product_code.clone(), product.exchange.clone());
+                let key = (
+                    ListingRank::of(&product.product_code, &product.exchange),
+                    product.product_code.clone(),
+                    product.exchange.clone(),
+                );
                 if self.products.contains_key(&key) {
                     self.duplicate_count = self.duplicate_count.saturating_add(1);
                     return Ok(CollectionProgress::Pending);
@@ -716,15 +793,19 @@ mod tests {
     }
 
     #[test]
-    fn product_listing_dedupes_sorts_by_code_then_exchange_and_bounds() {
-        let mut collector = ProductCodeCollector::try_new(NonZeroUsize::new(3).expect("bound"))
+    fn product_listing_dedupes_ranks_featured_first_and_bounds() {
+        let mut collector = ProductCodeCollector::try_new(NonZeroUsize::new(5).expect("bound"))
             .expect("valid listing");
         for (code, exchange, name) in [
+            ("0X", "CME", None),
+            ("1012", "CBOT", None),
+            ("AB", "CME", None),
             ("NQ", "CME", Some("E-Mini NASDAQ 100")),
             ("ZN", "CBOT", None),
             ("ES", "CME", Some("E-Mini S&P 500")),
             ("NQ", "CME", Some("duplicate keeps the first")),
             ("ES", "CBOT", None),
+            ("999", "CME", None),
         ] {
             assert_eq!(
                 collector
@@ -749,9 +830,11 @@ mod tests {
         assert_eq!(
             products,
             vec![
-                product("ES", "CBOT", None),
                 product("ES", "CME", Some("E-Mini S&P 500")),
                 product("NQ", "CME", Some("E-Mini NASDAQ 100")),
+                product("ZN", "CBOT", None),
+                product("0X", "CME", None),
+                product("AB", "CME", None),
             ]
         );
         assert_eq!(

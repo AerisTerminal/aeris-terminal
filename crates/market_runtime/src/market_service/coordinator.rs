@@ -1,4 +1,5 @@
 use super::lifecycle::{self, SeriesLifecycles};
+use super::realtime::trade_series_progress;
 use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
     ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter, Duration,
@@ -1135,7 +1136,7 @@ impl Coordinator<'_> {
             };
             let last = live.trade_model().map_or_else(
                 || live.last_progress(),
-                |model| Some(model.last_publication_at),
+                |model| Some(trade_series_progress(&self.order_books, series, model)),
             );
             if let Some(last) = last {
                 deadlines.entry(last + threshold).or_default().0 |= TimerKey::WATCHDOG;
@@ -6755,8 +6756,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn watchdog_rithmic_cme_trade_series_recovers_without_recent_trades() {
+    /// A connected, history-ready trade-built Rithmic CME series during an open
+    /// session that has seen no trade since its seed.
+    fn quiet_rithmic_trade_series() -> (
+        Coordinator<'static>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        Arc<super::super::clock::ScriptedClock>,
+        BarSeriesKey,
+    ) {
         use super::super::clock::{Clock, ScriptedClock};
         use chrono::{DateTime, Utc};
         let at = "2026-08-17T14:00:00Z"
@@ -6794,6 +6801,47 @@ mod tests {
         live.connected = true;
         coordinator.series.insert_trade(selected.clone(), live);
         set_trade_history_ready(&mut coordinator, &selected);
+        (coordinator, history_rx, clock, selected)
+    }
+
+    /// Stands in for a completed covering-history reseed of a recovered series.
+    fn reseed_quiet_trade_series(coordinator: &mut Coordinator<'_>, selected: &BarSeriesKey) {
+        let model = coordinator.series.trade_mut(selected).expect("trade model");
+        model.last_publication_at = model.clock.monotonic();
+        set_trade_history_ready(coordinator, selected);
+    }
+
+    fn watchdog_quote(sequence: u64) -> TopOfBookQuote {
+        let selected = instrument();
+        TopOfBookQuote {
+            metadata: EventMetadata {
+                provider_id: selected.provider,
+                instrument_id: selected.instrument_id,
+                entitlement_id: selected.entitlement_id,
+                source_sequence: sequence,
+                session_generation: 1,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(1),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: 1,
+                },
+            },
+            bid: Some(aeris_market_data::QuoteLevel {
+                price: 100,
+                quantity: Some(2),
+                order_count: None,
+            }),
+            ask: Some(aeris_market_data::QuoteLevel {
+                price: 101,
+                quantity: Some(2),
+                order_count: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn watchdog_rithmic_cme_trade_series_recovers_without_recent_trades() {
+        let (mut coordinator, history_rx, clock, selected) = quiet_rithmic_trade_series();
         clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
         coordinator.recover_stalled_live_series();
         assert!(history_rx.try_recv().is_ok(), "current history requested");
@@ -6806,6 +6854,71 @@ mod tests {
         );
         coordinator.recover_stalled_live_series();
         assert_no_history_request(&history_rx, "Rithmic recovery is requested only once");
+    }
+
+    #[test]
+    fn watchdog_quiet_trade_series_with_live_quotes_does_not_recover() {
+        let (mut coordinator, history_rx, clock, selected) = quiet_rithmic_trade_series();
+        coordinator.order_books.insert(
+            (selected.provider_id.clone(), selected.instrument_id.clone()),
+            ProviderOrderBook::new(instrument(), false),
+        );
+        clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.provider_quote("rithmic", 1, &watchdog_quote(1));
+        coordinator.recover_stalled_live_series();
+        assert_no_history_request(&history_rx, "a newer quote proves the feed alive");
+        coordinator.provider_quote("rithmic", 1, &watchdog_quote(1));
+        clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert!(
+            history_rx.try_recv().is_ok(),
+            "a repeated quote is not progress, so trade and quote silence recovers"
+        );
+    }
+
+    #[test]
+    fn watchdog_quiet_trade_series_defers_repeated_recoveries_until_a_trade() {
+        use super::super::watchdog::OPEN_STALL_THRESHOLD;
+        let (mut coordinator, _history_rx, clock, selected) = quiet_rithmic_trade_series();
+        let recovering = |coordinator: &Coordinator<'_>| {
+            !coordinator
+                .series
+                .trade_lifecycle(&selected)
+                .expect("trade lifecycle")
+                .history_ready()
+        };
+        clock.advance(OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert!(recovering(&coordinator), "first silence recovers");
+        reseed_quiet_trade_series(&mut coordinator, &selected);
+        clock.advance(OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert!(
+            !recovering(&coordinator),
+            "a second quiet stall waits twice as long"
+        );
+        clock.advance(OPEN_STALL_THRESHOLD);
+        coordinator.recover_stalled_live_series();
+        assert!(recovering(&coordinator), "doubled silence recovers");
+        reseed_quiet_trade_series(&mut coordinator, &selected);
+        let model = coordinator
+            .series
+            .trade_mut(&selected)
+            .expect("trade model");
+        assert_eq!(model.quiet_stall_recoveries, 2);
+        model
+            .buffer_trade(&rithmic_trade_for_series(&selected, 1, 1))
+            .expect("trade buffers");
+        assert_eq!(
+            model.quiet_stall_recoveries, 0,
+            "a trade restores the threshold"
+        );
+        clock.advance(OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert!(
+            recovering(&coordinator),
+            "the normal threshold applies again"
+        );
     }
 
     fn scripted_watchdog_recovery(provider: &'static str, unknown: bool) {
