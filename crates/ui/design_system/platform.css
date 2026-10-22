@@ -59,14 +59,11 @@
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
-  /* Floating layers (menus, dialogs, tooltips) */
-  --surface-popover: #ffffff;
 
   /* Borders */
   --border: #0a0a0a33;
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
-  /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
   --border-width: 1px;
 
   /* Text */
@@ -181,12 +178,11 @@
 .dark {
   /* Surfaces */
   --surface: #000000;
-  --surface-secondary: #fafafa0a;
-  --surface-popover: #010101;
+  --surface-secondary: #171717;
 
   /* Borders */
-  --border: #2E2E2E;
-  --border-secondary: #fafafa26;
+  --border: #2c2c2c;
+  --border-secondary: #404040;
   --border-subtle: #fafafa12;
   --border-width: 1px;
 
@@ -203,7 +199,7 @@
   --text-active: #ededed;
 
   /* Interaction states */
-  --hover-bg: #fafafa13;
+  --hover-bg: #fafafa1f;
   --active-bg: #fafafa26;
   --disabled-bg: #fafafa0d;
 

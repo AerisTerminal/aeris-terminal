@@ -143,17 +143,14 @@ impl TooltipSpec {
         self.show_delay
     }
 
-    /// The secondary surface: `surface-secondary` laid over the opaque `surface-popover` so
-    /// content beneath never shows through, edged with `border-secondary`. Single-line labels
-    /// are pills; rich content keeps a rounded rectangle so rows stay aligned.
+    /// The Theme System popover look: `surface-secondary` edged with `border-secondary`.
+    /// Single-line labels are pills; rich content keeps a rounded rectangle so rows stay aligned.
     fn surface(&self, cx: &App) -> Div {
         let colors = self.theme.colors;
         let base = div()
             .border(px(self.theme.dimensions.border_width))
             .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(
-                colors.surface_secondary.over(colors.surface_popover),
-            ))
+            .bg(gpui_color(colors.surface_secondary))
             .font_family(platform_font_family())
             .font_weight(gpui::FontWeight(f32::from(
                 platform_typography().weight(TypographyRole::Normal),

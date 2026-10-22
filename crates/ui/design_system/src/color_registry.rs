@@ -9,8 +9,6 @@ macro_rules! platform_color_registry {
         $expand! {
             surface => "surface",
             surface_secondary => "surface-secondary",
-            /// Opaque fill for floating layers: menus, dialogs, tooltips and toasts.
-            surface_popover => "surface-popover",
             border => "border",
             border_secondary => "border-secondary",
             border_subtle => "border-subtle",

@@ -221,7 +221,7 @@ impl Dialog {
         self
     }
 
-    /// Fills the panel with the main `surface` instead of `surface-popover`, as the chart
+    /// Fills the panel with the main `surface` instead of `surface-secondary`, as the chart
     /// settings panel does, for settings dialogs whose groups sit on `surface-secondary` cards.
     pub(crate) fn panel_surface(mut self) -> Self {
         self.panel_surface = true;

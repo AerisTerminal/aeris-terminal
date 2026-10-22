@@ -207,9 +207,8 @@ impl ThemeColor {
     /// resolve the mix here. Achromatic results keep identical channels so the
     /// overlay cannot introduce a conversion tint.
     ///
-    /// The result is opaque only when the backdrop is. Dark surfaces such as
-    /// `--surface-secondary` are translucent tints, so resolve them over the
-    /// opaque surface they sit on before using them as a replacement fill.
+    /// The result is opaque only when the backdrop is, so resolve a translucent
+    /// fill over the opaque surface it sits on before using it as a replacement fill.
     #[must_use]
     pub fn over(self, backdrop: ThemeColor) -> Self {
         let top = self.alpha;
@@ -546,15 +545,9 @@ mod tests {
             ThemeColor::from_rgb8(255, 255, 255)
         );
         assert_eq!(dark.surface, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(
-            dark.surface_secondary,
-            ThemeColor::from_rgba8(250, 250, 250, 10)
-        );
-        assert_eq!(dark.border, ThemeColor::from_rgb8(46, 46, 46));
-        assert_eq!(
-            dark.border_secondary,
-            ThemeColor::from_rgba8(250, 250, 250, 38)
-        );
+        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(23, 23, 23));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(44, 44, 44));
+        assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(64, 64, 64));
         assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
         assert_eq!(dark.text_default, ThemeColor::from_rgb8(237, 237, 237));
         assert_eq!(
@@ -594,6 +587,8 @@ mod tests {
             dark.active_bg.over(dark.surface),
             light.hover_bg.over(light.surface_secondary),
             light.active_bg.over(light.surface_secondary),
+            dark.hover_bg.over(dark.surface_secondary),
+            dark.active_bg.over(dark.surface_secondary),
         ] {
             assert!((composited.alpha() - 1.0).abs() < f32::EPSILON);
             assert!((composited.red() - composited.green()).abs() < f32::EPSILON);
@@ -607,7 +602,7 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
         assert_eq!(token_source(&light_tokens, "border"), "#0a0a0a33");
         assert_eq!(token_source(&dark_tokens, "surface"), "#000000");
-        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa13");
+        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa1f");
         assert_eq!(token_source(&light_tokens, "text-muted"), "#0a0a0a40");
         assert_eq!(token_source(&light_tokens, "text-secondary"), "#0a0a0a94");
         assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
@@ -634,16 +629,14 @@ mod tests {
     #[test]
     fn compositing_over_a_translucent_tint_keeps_its_transparency() {
         let dark = AerisTheme::dark().colors;
-        let tinted = dark.hover_bg.over(dark.surface_secondary);
+        let tinted = dark.hover_bg.over(dark.disabled_bg);
         assert!(tinted.alpha() < 1.0);
         assert!(tinted.alpha() > dark.hover_bg.alpha());
 
-        let resolved_bar = dark.surface_secondary.over(dark.surface);
-        assert!((resolved_bar.alpha() - 1.0).abs() < f32::EPSILON);
-        let hover = dark.hover_bg.over(resolved_bar);
+        let hover = dark.hover_bg.over(dark.surface_secondary);
         assert!((hover.alpha() - 1.0).abs() < f32::EPSILON);
-        // A hover over the dark title bar stays a subtle lift, never a near-white fill.
-        assert!(hover.red() > resolved_bar.red());
+        // A hover over the dark secondary surface stays a subtle lift, never a near-white fill.
+        assert!(hover.red() > dark.surface_secondary.red());
         assert!(hover.red() < 0.3);
     }
 
@@ -677,25 +670,28 @@ mod tests {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
 
-        assert_eq!(light.surface_popover, ThemeColor::from_rgb8(255, 255, 255));
-        assert_eq!(dark.surface_popover, ThemeColor::from_rgb8(1, 1, 1));
-        // Floating layers paint over arbitrary content, so their fill must stay opaque even
-        // though the in-layout surfaces are translucent tints in dark mode.
-        for popover in [light.surface_popover, dark.surface_popover] {
+        // Floating layers paint `surface-secondary` over arbitrary content, so it must stay
+        // opaque in both modes.
+        for popover in [light.surface_secondary, dark.surface_secondary] {
             assert!((popover.alpha() - 1.0).abs() < f32::EPSILON);
         }
         let dark_tokens = AerisTheme::dark().color_tokens();
-        assert_eq!(token_source(&dark_tokens, "surface-popover"), "#010101");
-        // Floating layers draw their edge with `border`; the retired popover edge tokens must
-        // not return.
+        assert_eq!(token_source(&dark_tokens, "surface-secondary"), "#171717");
+        assert_eq!(token_source(&dark_tokens, "border-secondary"), "#404040");
+        // Floating layers draw their edge with `border-secondary`; the retired popover tokens
+        // must not return.
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
-            for retired in ["border-popover", "border-popover-highlight"] {
+            for retired in [
+                "surface-popover",
+                "border-popover",
+                "border-popover-highlight",
+            ] {
                 assert!(
                     theme
                         .color_tokens()
                         .iter()
                         .all(|token| token.canonical_identifier != retired),
-                    "retired popover edge token --{retired} is back"
+                    "retired popover token --{retired} is back"
                 );
             }
         }
@@ -854,7 +850,6 @@ mod tests {
         assert!((AerisTheme::light().dimensions.border_width - 1.0).abs() < f32::EPSILON);
         assert!((AerisTheme::dark().dimensions.border_width - 1.0).abs() < f32::EPSILON);
         assert_eq!(css.matches("--border-width: 1px;").count(), 2);
-        assert!(css.contains("a 1px outer edge plus a 1px inner highlight"));
     }
 
     #[test]

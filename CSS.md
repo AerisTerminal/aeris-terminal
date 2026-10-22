@@ -22,14 +22,11 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
-- Dark `surface-secondary` is a translucent tint of `surface`.
-  It only appears over an opaque `surface` (the window root) or `surface-popover`; never use it
-  as the fill of a layer that floats over other content.
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) use
-  `popover_surface` from `native_ui/theme.rs`: an opaque `surface-popover` fill and a 1px
-  `border` edge, with no inner highlight.
-- Tooltips (`terminal_ui::tooltip`) use the secondary surface: `surface-secondary` resolved over
-  `surface-popover`, a 1px `border-secondary` edge and `text-default`. A one-line
+  `popover_surface` from `native_ui/theme.rs`, the Theme System `.ui-popover`: an opaque
+  `surface-secondary` fill and a 1px `border-secondary` edge, with no inner highlight.
+- Tooltips (`terminal_ui::tooltip`) use the same popover look: `surface-secondary`, a 1px
+  `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
   opens beside its trigger on the caller's side (bottom by default, toward the content for edge
   sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
@@ -39,12 +36,13 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `surface` (`surface_panel`, `MenuPanel::on_surface`, or `Dialog::panel_surface`). Their content
   sits on titled, borderless `surface-secondary` group cards: no outlined blocks and no hairlines
   between rows. Size and style settings are dropdowns, not tab groups.
-- Nothing inside a `surface-popover` layer rests on plain `surface` in dark mode. Fields and setting
-  rows use `field_surface` (`surface`, `surface-secondary` in dark), and buttons use the `Secondary`
-  variant.
+- Nothing inside a popover layer rests on plain `surface` in dark mode. Fields and setting rows use
+  `field_surface` (`surface`, `surface-secondary` in dark) with `field_border` (`border`,
+  `border-secondary` in dark, as the Theme System inputs and trade-ticket fields), and buttons use
+  the `Secondary` variant.
 - Button labels always use the normal platform weight, trade buttons included.
 - A fill resolved with `.over(..)` is opaque only over an opaque backdrop. Resolve a translucent
-  surface over the `surface` beneath it first (the title bar uses `title_bar_fill`).
+  fill over the opaque surface beneath it first.
 - Menus, dialogs and popovers never dim, tint or blur what is behind them: their dismiss scrims
   paint nothing. A popover stays inside the window, flipping to the other side of its trigger
   when there is no room.
@@ -95,7 +93,7 @@ normal platform weight; there is no bold button. `close_button` is the one close
 select menu. The panel is a popover layer (see Rules). Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. Rows rest on
-`surface-popover`. A `destructive` row
+`surface-secondary`. A `destructive` row
 keeps the shared neutral row fills and colours only its label and glyph: `text-danger` at rest,
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.
@@ -132,14 +130,11 @@ while invalid.
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
-  /* Floating layers (menus, dialogs, tooltips) */
-  --surface-popover: #ffffff;
 
   /* Borders */
   --border: #0a0a0a33;
   --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
-  /* Floating-layer edge: a 1px outer edge plus a 1px inner highlight. */
   --border-width: 1px;
 
   /* Text */
@@ -254,12 +249,11 @@ while invalid.
 .dark {
   /* Surfaces */
   --surface: #000000;
-  --surface-secondary: #fafafa0a;
-  --surface-popover: #010101;
+  --surface-secondary: #171717;
 
   /* Borders */
-  --border: #2E2E2E;
-  --border-secondary: #fafafa26;
+  --border: #2c2c2c;
+  --border-secondary: #404040;
   --border-subtle: #fafafa12;
   --border-width: 1px;
 
@@ -276,7 +270,7 @@ while invalid.
   --text-active: #ededed;
 
   /* Interaction states */
-  --hover-bg: #fafafa13;
+  --hover-bg: #fafafa1f;
   --active-bg: #fafafa26;
   --disabled-bg: #fafafa0d;
 

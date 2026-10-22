@@ -6,7 +6,8 @@ use gpui::{FontWeight, Hsla, Pixels, Styled, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
 
 /// Text-field tokens, exactly as the Theme System `Input` uses them: a `border` field on
-/// `surface` (`surface-secondary` in dark mode) that takes `hover-bg` on hover, the shared 2px
+/// `surface` (a `border-secondary` field on `surface-secondary` in dark mode) that takes
+/// `hover-bg` on hover, the shared 2px
 /// `ring-primary` focus outline, and a `danger` border with a 3px `danger-ring` halo while invalid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InputAppearance {
@@ -23,7 +24,7 @@ pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
     InputAppearance {
         fill: field_surface(theme),
         hover_fill: colors.hover_bg,
-        border: colors.border,
+        border: field_border(theme),
         focus_ring: colors.ring_primary,
         invalid_border: colors.danger,
         invalid_ring: colors.danger_ring,
@@ -39,6 +40,15 @@ pub(crate) const fn field_surface(theme: &AerisTheme) -> ThemeColor {
     }
 }
 
+/// The Theme System `border dark:border-border-secondary` pair for fields: `border` in light
+/// mode, `border-secondary` in dark mode so the edge stays visible on `surface-secondary`.
+pub(crate) const fn field_border(theme: &AerisTheme) -> ThemeColor {
+    match theme.mode {
+        ThemeMode::Light => theme.colors.border,
+        ThemeMode::Dark => theme.colors.border_secondary,
+    }
+}
+
 pub(crate) fn gpui_color(color: ThemeColor) -> Hsla {
     let (h, s, l, a) = color.hsla_components();
     Hsla { h, s, l, a }
@@ -48,10 +58,10 @@ pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
     px(theme.dimensions.border_width)
 }
 
-/// Floating-layer chrome (menus, dialogs, popovers, toasts, hints): the opaque `surface-popover`
-/// fill and the `border` hairline.
+/// Floating-layer chrome (menus, dialogs, popovers, toasts, hints): the Theme System
+/// `.ui-popover` `surface-secondary` fill and `border-secondary` hairline.
 pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
-    popover_edge(element, theme, radius).bg(gpui_color(theme.colors.surface_popover))
+    popover_edge(element, theme, radius).bg(gpui_color(theme.colors.surface_secondary))
 }
 
 /// A floating workspace panel (the symbol, indicator and chart settings panels and the account
@@ -64,7 +74,7 @@ fn popover_edge<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E 
     element
         .rounded(radius)
         .border(platform_border_width(theme))
-        .border_color(gpui_color(theme.colors.border))
+        .border_color(gpui_color(theme.colors.border_secondary))
 }
 
 /// Projects `Aeris`'s semantic design contract into the unstyled Base
@@ -144,7 +154,13 @@ mod tests {
                 }
             );
             assert_eq!(field.hover_fill, theme.colors.hover_bg);
-            assert_eq!(field.border, theme.colors.border);
+            assert_eq!(
+                field.border,
+                match theme.mode {
+                    ThemeMode::Light => theme.colors.border,
+                    ThemeMode::Dark => theme.colors.border_secondary,
+                }
+            );
             assert_eq!(field.focus_ring, theme.colors.ring_primary);
             assert_eq!(field.invalid_border, theme.colors.danger);
             assert_eq!(field.invalid_ring, theme.colors.danger_ring);
