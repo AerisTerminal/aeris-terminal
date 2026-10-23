@@ -25,6 +25,8 @@ const PRESET_GRID_TOP: f32 = 10.0;
 const PRESET_CHIP_HEIGHT: f32 = 28.0;
 const PRESET_CHIP_GAP: f32 = 4.0;
 const PRESET_SWATCH_SIZE: f32 = 14.0;
+/// Space between the swatch ring and its primary-color dot.
+const PRESET_SWATCH_INSET: f32 = 2.0;
 /// Presets lay out two per row.
 const PRESET_ROWS: usize = ThemePreset::ALL.len().div_ceil(2);
 const _: () = assert!(
@@ -664,12 +666,12 @@ fn preset_chip(preset: ThemePreset, theme: &AerisTheme, on_select: ThemeSelect) 
                         .border(platform_border_width(theme))
                         .border_color(gpui_color(colors.border_secondary))
                         .bg(gpui_color(preview.colors.surface))
-                        .flex()
-                        .items_center()
-                        .justify_center()
+                        // An equal inset inside the ring keeps the dot concentric; flex
+                        // centering a fixed-size dot lands on half pixels and drifts.
+                        .p(px(PRESET_SWATCH_INSET))
                         .child(
                             div()
-                                .size(px(PRESET_SWATCH_SIZE / 2.0))
+                                .size_full()
                                 .rounded_full()
                                 .bg(gpui_color(preview.colors.primary)),
                         ),
