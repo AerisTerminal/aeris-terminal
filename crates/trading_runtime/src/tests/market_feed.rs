@@ -84,6 +84,45 @@ pub(crate) fn feed_service(
     (start_service_with_config(configuration), clock)
 }
 
+// A deliberately different maker/taker schedule makes the execution-side liquidity
+// classification observable in the persisted fill accounting, not merely in a comment.
+fn install_liquidity_schedule(service: &TradingService) {
+    let mut schedule = aeris_trading::FeeSchedule::default();
+    schedule.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::NotionalBps {
+            maker_bps: 1,
+            taker_bps: 3,
+        },
+    );
+    service
+        .set_fee_schedule(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            schedule,
+        )
+        .expect("liquidity schedule");
+}
+
+fn assert_fill_liquidity_fee(directory: &TestDirectory, fill: &Fill, maker: bool) {
+    let database = rusqlite::Connection::open(config(directory).database_path).expect("reader");
+    let commission: i64 = database
+        .query_row(
+            "SELECT commission_units FROM fill_accounting WHERE fill_id = ?1",
+            [fill.id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("persisted fee");
+    // Fixture point value is 50, price scale and account currency scale are both 2.
+    let bps = if maker { 1 } else { 3 };
+    let expected = (fill.price.units() * 50 * bps + 5_000) / 10_000;
+    assert_eq!(
+        commission,
+        expected,
+        "wrong liquidity tier for {}",
+        fill.id.as_str()
+    );
+}
+
 pub(crate) fn live_session(id: InstrumentId, generation: u64) -> MarketFeedEvent {
     MarketFeedEvent::Session(aeris_trading::market::InstrumentSession {
         instrument_id: id,
@@ -662,6 +701,97 @@ pub(crate) fn feed_state(id: InstrumentId, generation: u64, state: FeedState) ->
 }
 
 #[test]
+fn expiring_pending_bracket_cancels_every_held_leg_with_cascade() {
+    let directory = TestDirectory::new("pending-bracket-expiry-cascade");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    let mut entry = market_order("expiring-bracket", OrderSide::Buy, 1, 1_000_000_000_000);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::Day;
+    entry.limit_price = Some(FixedPoint::try_new(9_900, 2).expect("limit"));
+    entry.quantity = quantity(2);
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("pending bracket");
+    let before = service.snapshot().expect("held legs");
+    let legs = before
+        .orders
+        .iter()
+        .filter(|order| order.status == OrderStatus::Inactive)
+        .map(|order| order.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(legs.len(), 3);
+    clock.set_wall_unix_nanos(2_000_000_000_000);
+    service.status().expect("expiry timer");
+    service.status().expect("expiry barrier");
+    let after = service.snapshot().expect("expired bracket");
+    assert!(
+        after
+            .orders
+            .iter()
+            .any(|order| order.status == OrderStatus::Expired)
+    );
+    for id in legs {
+        assert_eq!(
+            after
+                .orders
+                .iter()
+                .find(|order| order.id == id)
+                .expect("leg")
+                .status,
+            OrderStatus::Cancelled
+        );
+        assert_leg_event(
+            &after,
+            &id,
+            OrderEventKind::Cancelled,
+            aeris_trading::OrderEventReason::Cascade,
+        );
+    }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
+fn repeated_identical_feed_terms_after_restart_keep_the_durable_revision() {
+    let directory = TestDirectory::new("replayed-feed-terms-revision");
+    let (service, _) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms()))
+        .expect("verified terms");
+    service.status().expect("drain terms");
+    let before = service.snapshot().expect("before restart");
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    let feed = restarted
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("restarted feed");
+    feed.push(MarketFeedEvent::Terms(terms()))
+        .expect("replayed terms");
+    restarted.status().expect("drain replay");
+    let after = restarted.snapshot().expect("after restart");
+    assert_eq!(after.instruments, before.instruments);
+    assert_eq!(after.revision, before.revision);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
 fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
     for (index, side, kind, tif, limit, expected) in [
         (
@@ -707,6 +837,7 @@ fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
     ] {
         let directory = TestDirectory::new(&format!("placement-touch-{index}"));
         let (service, _clock) = feed_service(&directory);
+        install_liquidity_schedule(&service);
         service
             .set_ticket_interest(vec![route()])
             .expect("ticket interest");
@@ -735,6 +866,7 @@ fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
             .find(|fill| fill.order_id == order.id)
             .expect("fill");
         assert_eq!(fill.price, FixedPoint::try_new(expected, 2).expect("price"));
+        assert_fill_liquidity_fee(&directory, fill, false);
         assert_eq!(fill.provenance.observed_unix_nanos, 1_000_001_000_000);
         let mut events = snapshot
             .order_events
@@ -951,6 +1083,7 @@ fn stops_trigger_at_exact_and_gapped_touches_on_the_correct_side() {
     ] {
         let directory = TestDirectory::new(&format!("stop-gap-{index}"));
         let (service, clock) = feed_service(&directory);
+        install_liquidity_schedule(&service);
         service.set_ticket_interest(vec![route()]).expect("ticket");
         let feed = service
             .attach_market_feed(Arc::new(RecordedInterest::default()))
@@ -1001,6 +1134,7 @@ fn stops_trigger_at_exact_and_gapped_touches_on_the_correct_side() {
             .find(|fill| fill.order_id == order.id)
             .unwrap();
         assert_eq!(fill.price, FixedPoint::try_new(expected, 2).unwrap());
+        assert_fill_liquidity_fee(&directory, fill, false);
         let mut events = snapshot
             .order_events
             .iter()
@@ -1050,6 +1184,7 @@ fn stop_limit_gap_through_triggers_then_rests_at_limit_across_restart() {
     ] {
         let directory = TestDirectory::new(&format!("stop-limit-gap-{index}"));
         let (service, clock) = feed_service(&directory);
+        install_liquidity_schedule(&service);
         service.set_ticket_interest(vec![route()]).expect("ticket");
         let feed = service
             .attach_market_feed(Arc::new(RecordedInterest::default()))
@@ -1112,6 +1247,7 @@ fn stop_limit_gap_through_triggers_then_rests_at_limit_across_restart() {
         );
         assert_eq!(after.fills.len(), 1);
         assert_eq!(after.fills[0].price, FixedPoint::try_new(limit, 2).unwrap());
+        assert_fill_liquidity_fee(&directory, &after.fills[0], true);
         assert_eq!(
             after
                 .order_events
@@ -1136,6 +1272,7 @@ fn stop_limit_trigger_and_fill_on_one_quote_uses_taker_touch() {
     ] {
         let directory = TestDirectory::new(&format!("stop-limit-same-{index}"));
         let (service, clock) = feed_service(&directory);
+        install_liquidity_schedule(&service);
         let feed = service
             .attach_market_feed(Arc::new(RecordedInterest::default()))
             .expect("feed");
@@ -1170,6 +1307,7 @@ fn stop_limit_trigger_and_fill_on_one_quote_uses_taker_touch() {
             snapshot.fills[0].price,
             FixedPoint::try_new(price, 2).unwrap()
         );
+        assert_fill_liquidity_fee(&directory, &snapshot.fills[0], false);
         let mut events = snapshot
             .order_events
             .iter()

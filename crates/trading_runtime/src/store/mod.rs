@@ -891,6 +891,10 @@ mod tests {
             .expect("foreign keys");
         create_schema_at(&connection, 23);
         write_v23_ledger_fixture(&connection);
+        // Same quote before and after migration: long marked at bid 101.00,
+        // short at ask 49.00, with a 50 USD contract multiplier.
+        let before_marks = migration_marks(&connection);
+        assert_eq!(before_marks, [(2, 10_002, 9_800), (-2, 5_000, 10_000)]);
         let mut store = TradingStore {
             connection,
             retention: TradingRetention::default(),
@@ -949,6 +953,11 @@ mod tests {
             migrated_position_row(&store, "instrument-two"),
             (-2, 5_000, 0, 0, 10_000, 2)
         );
+        assert_eq!(
+            migration_marks(&store.connection),
+            before_marks,
+            "migration changed unrealized P&L at the same quote"
+        );
         // The instrument query columns decode from the contract document.
         let class: String = store
             .connection
@@ -974,6 +983,19 @@ mod tests {
         assert_eq!(count_cash_entries(&store), 2);
         store.backfill_ledger().expect("second backfill is a no-op");
         assert_eq!(count_cash_entries(&store), 2);
+    }
+
+    fn migration_marks(connection: &Connection) -> [(i64, i64, i64); 2] {
+        ["instrument", "instrument-two"].map(|id| {
+            connection
+                .query_row(
+                    "SELECT net_units, average_units, unrealized_units FROM positions
+                     WHERE account_id = 'cash' AND instrument_id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("migration mark")
+        })
     }
 
     fn write_v23_ledger_fixture(connection: &Connection) {
@@ -1029,11 +1051,11 @@ mod tests {
                  INSERT INTO positions(account_id,instrument_id,net_units,net_scale,
                     average_units,average_scale,realized_units,realized_scale,
                     unrealized_units,unrealized_scale,last_fill_unix_nanos)
-                    VALUES ('cash','instrument',2,0,10002,2,300,2,0,2,20);
+                    VALUES ('cash','instrument',2,0,10002,2,300,2,9800,2,20);
                  INSERT INTO positions(account_id,instrument_id,net_units,net_scale,
                     average_units,average_scale,realized_units,realized_scale,
                     unrealized_units,unrealized_scale,last_fill_unix_nanos)
-                    VALUES ('cash','instrument-two',-2,0,5000,2,0,2,0,2,10);",
+                    VALUES ('cash','instrument-two',-2,0,5000,2,0,2,10000,2,10);",
             )
             .expect("fixture history");
     }

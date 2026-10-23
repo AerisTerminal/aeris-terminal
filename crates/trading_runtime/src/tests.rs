@@ -1372,9 +1372,13 @@ fn retention_writes_checkpoints_and_recovers_the_exact_projection() {
         FixedPoint::try_new(2, 0).expect("net")
     );
 
-    // The status wake crosses the hourly interval, so retention runs first.
+    let database = rusqlite::Connection::open(config(&directory).database_path).expect("reader");
+    assert_failed_retention_is_atomic(&database, &service, &clock);
+
+    // The next hourly wake retries the same prefix and commits it once.
     clock.advance(Duration::from_secs(3_700));
-    service.status().expect("retention tick");
+    service.status().expect("retention retry");
+    service.status().expect("retention barrier");
     let during = service.snapshot().expect("post-retention snapshot");
     assert_eq!(during.positions, before.positions);
     assert_eq!(during.account_pnl, before.account_pnl);
@@ -1396,6 +1400,39 @@ fn retention_writes_checkpoints_and_recovers_the_exact_projection() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("shutdown");
+}
+
+fn assert_failed_retention_is_atomic(
+    database: &rusqlite::Connection,
+    service: &TradingService,
+    clock: &crate::clock::ManualClock,
+) {
+    // Fail at the actual delete after checkpoints have been written. SQLite rolls
+    // the whole retention transaction back, including both checkpoint families.
+    database
+        .execute_batch(
+            "CREATE TRIGGER fail_retention_delete BEFORE DELETE ON fills
+             BEGIN SELECT RAISE(ABORT, 'injected crash between checkpoint and delete'); END;",
+        )
+        .expect("install failure");
+    clock.advance(Duration::from_secs(3_700));
+    service.status().expect("retention tick");
+    service.status().expect("failed-retention barrier");
+    let failed_fills: i64 = database
+        .query_row("SELECT count(*) FROM fills", [], |row| row.get(0))
+        .expect("fills after failed retention");
+    assert_eq!(failed_fills, 13, "no fill deletion can survive the crash");
+    for table in ["position_checkpoints", "ledger_checkpoints"] {
+        let rows: i64 = database
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("checkpoint after failed retention");
+        assert_eq!(rows, 0, "{table} must roll back with the delete");
+    }
+    database
+        .execute_batch("DROP TRIGGER fail_retention_delete")
+        .expect("remove failure");
 }
 
 #[test]
@@ -1581,17 +1618,19 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
         settled == initial + 1 || settled == initial + 2,
         "the settling tick writes at most one changed sample"
     );
-    clock.advance(Duration::from_secs(61));
-    service.status().expect("unchanged tick");
-    assert_eq!(
-        service
-            .snapshot()
-            .expect("unchanged snapshot")
-            .equity_samples
-            .len(),
-        settled,
-        "an unchanged equity writes nothing"
-    );
+    for tick in 0..10 {
+        clock.advance(Duration::from_secs(61));
+        service.status().expect("unchanged tick");
+        assert_eq!(
+            service
+                .snapshot()
+                .expect("unchanged snapshot")
+                .equity_samples
+                .len(),
+            settled,
+            "unchanged equity wrote a sample on tick {tick}"
+        );
+    }
 
     // A quote move changes unrealized, so the next timer tick samples once.
     service
@@ -2242,10 +2281,13 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .find(|order| order.order_type == OrderType::Stop && order.status.is_open())
         .expect("replacement stop");
     assert_eq!(stop.quantity, FixedPoint::try_new(1, 0).expect("quantity"));
-    assert_eq!(
-        stop.stop_price,
-        Some(FixedPoint::try_new(10_025, 2).expect("break even stop"))
+    assert_leg_event(
+        &scaled,
+        &stop.id,
+        OrderEventKind::Resized,
+        aeris_trading::OrderEventReason::CoverageShrink,
     );
+    assert_eq!(stop.stop_price, Some(price(10_025)));
 
     service
         .observe_market(observation(10_000, 10_025, 4, 4_000))
@@ -2718,7 +2760,7 @@ fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
         })
         .expect("bracket");
     service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .observe_market(observation(9_775, 10_000, 2, 2_000))
         .expect("entry fills and arms exits");
     let armed = service.snapshot().expect("armed");
     assert_eq!(armed.fills.len(), 1);
@@ -2728,7 +2770,8 @@ fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
             .iter()
             .filter(|order| order.status.is_open())
             .count(),
-        3
+        3,
+        "the entry's own quote crosses the newly armed stop, but cannot fill it"
     );
 
     let fills = service
@@ -2753,6 +2796,195 @@ fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
     assert_eq!(restored.fills, settled.fills);
     assert_eq!(restored.managed_brackets, settled.managed_brackets);
     reopened.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
+fn active_bracket_cancellation_cascades_only_from_the_stop() {
+    for cancel_stop in [false, true] {
+        let directory = TestDirectory::new(if cancel_stop {
+            "active-stop-cascade"
+        } else {
+            "active-target-only"
+        });
+        let service = start_service(&directory);
+        service.register_instrument(instrument()).expect("terms");
+        let mut entry = market_order("cascade-entry", OrderSide::Buy, 1, 1_000);
+        entry.quantity = quantity(2);
+        place_managed_bracket(&service, entry);
+        service
+            .observe_market(observation(9_975, 10_000, 2, 2_000))
+            .expect("entry fill");
+        let armed = service.snapshot().expect("active bracket");
+        let stop = armed
+            .orders
+            .iter()
+            .find(|order| order.order_type == OrderType::Stop && order.status.is_open())
+            .expect("active stop");
+        let targets = armed
+            .orders
+            .iter()
+            .filter(|order| order.order_type == OrderType::Limit && order.status.is_open())
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 2);
+        let cancelled = if cancel_stop { stop } else { targets[0] };
+        service
+            .cancel_order(cancelled.client_order_id.clone())
+            .expect("cancel active leg");
+        let after = service.snapshot().expect("cascade");
+        for target in targets {
+            let current = after
+                .orders
+                .iter()
+                .find(|order| order.id == target.id)
+                .expect("target persists");
+            let cascaded = cancel_stop && target.id != cancelled.id;
+            assert_eq!(
+                current.status,
+                if cascaded || target.id == cancelled.id {
+                    OrderStatus::Cancelled
+                } else {
+                    OrderStatus::Working
+                }
+            );
+            if cascaded {
+                assert_leg_event(
+                    &after,
+                    &target.id,
+                    OrderEventKind::Cancelled,
+                    aeris_trading::OrderEventReason::Cascade,
+                );
+            }
+        }
+        let current_stop = after
+            .orders
+            .iter()
+            .find(|order| order.id == stop.id)
+            .expect("stop persists");
+        assert_eq!(
+            current_stop.status,
+            if cancel_stop {
+                OrderStatus::Cancelled
+            } else {
+                OrderStatus::Working
+            }
+        );
+        service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    }
+}
+
+#[test]
+fn maker_bracket_entry_stop_and_fees_survive_both_restarts() {
+    let directory = TestDirectory::new("maker-bracket-fee-chain");
+    let service = start_service(&directory);
+    service.register_instrument(instrument()).expect("terms");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut schedule = aeris_trading::FeeSchedule::default();
+    schedule.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::PerContract {
+            per_side: FixedPoint::try_new(5, 2).expect("per-contract fee"),
+        },
+    );
+    service
+        .set_fee_schedule(account.clone(), schedule)
+        .expect("fee schedule");
+    service
+        .observe_market(observation(10_000, 10_025, 1, 1_000))
+        .expect("initial quote");
+    let mut entry = market_order("maker-bracket", OrderSide::Buy, 2, 2_000);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    entry.limit_price = Some(price(9_900));
+    entry.quantity = quantity(2);
+    place_managed_bracket(&service, entry);
+    assert_eq!(service.snapshot().expect("resting").fills.len(), 0);
+    service
+        .observe_market(observation(9_875, 9_900, 3, 3_000))
+        .expect("maker entry fills");
+    let active = service.snapshot().expect("active");
+    assert_eq!(active.fills.len(), 1);
+    assert_eq!(active.fills[0].price, price(9_900));
+    assert_eq!(active.managed_brackets[0].status, BracketViewStatus::Active);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    assert_eq!(
+        restarted.snapshot().expect("recovered").ledger_entries,
+        active.ledger_entries
+    );
+    let exit = restarted
+        .observe_market(observation(9_675, 9_700, 4, 4_000))
+        .expect("stop fills at bid");
+    assert_eq!(exit.len(), 1);
+    assert_eq!(exit[0].price, price(9_675));
+    let settled = restarted.snapshot().expect("settled");
+    assert_eq!(settled.positions[0].net_quantity, quantity(0));
+    assert_eq!(
+        settled.managed_brackets[0].status,
+        BracketViewStatus::Completed
+    );
+    for target in settled.orders.iter().filter(|order| {
+        order.order_type == OrderType::Limit && order.client_order_id.as_str() != "maker-bracket"
+    }) {
+        assert_leg_event(
+            &settled,
+            &target.id,
+            OrderEventKind::Cancelled,
+            aeris_trading::OrderEventReason::Cascade,
+        );
+    }
+    let entries = settled
+        .ledger_entries
+        .iter()
+        .filter(|entry| entry.account_id == account)
+        .map(|entry| (entry.kind, entry.amount.units()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries,
+        [
+            (aeris_trading::LedgerEntryKind::Deposit, 5_000_000),
+            (aeris_trading::LedgerEntryKind::Commission, -10),
+            (aeris_trading::LedgerEntryKind::RealizedPnl, -22_500),
+            (aeris_trading::LedgerEntryKind::Commission, -10),
+        ]
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+    let again = start_service(&directory);
+    let recovered = again.snapshot().expect("second restart");
+    assert_eq!(recovered.orders, settled.orders);
+    assert_eq!(recovered.fills, settled.fills);
+    assert_eq!(recovered.ledger_entries, settled.ledger_entries);
+    assert_eq!(recovered.managed_brackets, settled.managed_brackets);
+    again.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
+fn identical_verified_terms_after_restart_do_not_advance_trading_revision() {
+    let directory = TestDirectory::new("terms-revision-restart");
+    let service = start_service(&directory);
+    let terms = instrument();
+    service
+        .register_instrument(terms.clone())
+        .expect("first terms");
+    let before = service.snapshot().expect("before restart");
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    assert_eq!(
+        restarted.snapshot().expect("recovered").revision,
+        before.revision
+    );
+    restarted
+        .register_instrument(terms)
+        .expect("identical terms");
+    assert_eq!(
+        restarted.snapshot().expect("replayed terms").revision,
+        before.revision,
+        "a repeated identical Terms event is not a new durable fact"
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
 }
 
 #[test]

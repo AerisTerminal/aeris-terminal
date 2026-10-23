@@ -197,11 +197,15 @@ impl TradingCore {
             .market_routes
             .get(&id)
             .is_some_and(|route| route != &terms.route);
-        self.store
-            .put_verified_instrument(&instrument, &terms.route)
-            .map_err(MarketConsumerError::Persistence)?;
-        self.state.instruments.insert(id.clone(), instrument);
-        self.state.market_routes.insert(id.clone(), terms.route);
+        let changed = self.state.market_routes.get(&id) != Some(&terms.route)
+            || self.state.instruments.get(&id) != Some(&instrument);
+        if changed {
+            self.store
+                .put_verified_instrument(&instrument, &terms.route)
+                .map_err(MarketConsumerError::Persistence)?;
+            self.state.instruments.insert(id.clone(), instrument);
+            self.state.market_routes.insert(id.clone(), terms.route);
+        }
         if route_changed {
             self.quote_book.retire_route(&id);
         }
@@ -216,8 +220,11 @@ impl TradingCore {
             .map_err(MarketConsumerError::Persistence)?;
         self.expire_due_day_orders()
             .map_err(MarketConsumerError::Persistence)?;
-        self.bump_revision()
-            .map_err(MarketConsumerError::Persistence)
+        if changed {
+            self.bump_revision()
+                .map_err(MarketConsumerError::Persistence)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn replace_ticket_interest(

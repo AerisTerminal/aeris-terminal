@@ -652,8 +652,9 @@ impl TradingCore {
             let liquidity = if !placement
                 && (matches!(order.order_type, OrderType::Limit)
                     || (matches!(order.order_type, OrderType::StopLimit)
-                        && order.triggered_unix_nanos.is_some()))
-            {
+                        && order.triggered_unix_nanos.is_some_and(|triggered| {
+                            triggered < observation.provenance.observed_unix_nanos
+                        }))) {
                 LiquiditySide::Maker
             } else {
                 LiquiditySide::Taker

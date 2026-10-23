@@ -661,6 +661,9 @@ impl TradingCore {
             .contract
             .validate()
             .map_err(|error| error.to_string())?;
+        if self.state.instruments.get(&instrument.instrument_id) == Some(&instrument) {
+            return Ok(());
+        }
         self.store.put_instrument(&instrument)?;
         self.state
             .instruments
