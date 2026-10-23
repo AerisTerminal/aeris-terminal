@@ -89,6 +89,7 @@ fn fixture_bar_message(
             Arc::clone(bars),
         ),
         received_unix_nanos: 0,
+        recovery_request_id: None,
     }
 }
 

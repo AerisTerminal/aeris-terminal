@@ -4049,17 +4049,19 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RuntimeSeriesPublication {
                 event,
                 received_unix_nanos,
-            } => self.apply_runtime_series_publication(event, received_unix_nanos, cx),
+                recovery_request_id,
+            } => {
+                if let Some(request_id) = recovery_request_id {
+                    self.apply_runtime_recovery(event, request_id, received_unix_nanos, cx);
+                } else {
+                    self.apply_runtime_series_publication(event, received_unix_nanos, cx);
+                }
+            }
             MarketWorkerMessage::Recovery {
                 generation,
                 request_id,
                 failure,
             } => self.apply_recovery_message(generation, request_id, failure, cx),
-            MarketWorkerMessage::RuntimeRecovery {
-                event,
-                request_id,
-                received_unix_nanos,
-            } => self.apply_runtime_recovery(event, request_id, received_unix_nanos, cx),
             MarketWorkerMessage::CatalogFailure { message: _ } => {
                 Self::post_symbol_search_notice(
                     "The market catalog is unavailable. Try again later.",

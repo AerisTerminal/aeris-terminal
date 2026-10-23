@@ -1145,6 +1145,7 @@ mod tests {
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
                     },
                     received_unix_nanos: 11,
+                    recovery_request_id: None,
                 },
                 MarketWorkerMessage::RuntimeSeriesPublication {
                     event: Fenced {
@@ -1152,6 +1153,7 @@ mod tests {
                         value: MarketRuntimeEvent::SeriesUpdate(_),
                     },
                     received_unix_nanos: 12,
+                    recovery_request_id: None,
                 },
             ] if *snapshot_epoch == epoch && *tail_epoch == epoch
         ));
@@ -1967,12 +1969,12 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeRecovery {
+            [MarketWorkerMessage::RuntimeSeriesPublication {
                 event: aeris_market_runtime::fence::Fenced {
                     epoch: delivered_epoch,
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot)
                 },
-                request_id: 9,
+                recovery_request_id: Some(9),
                 received_unix_nanos: 1_000_000_000,
             }] if *delivered_epoch == epoch && snapshot.publication_generation == 1 && snapshot.generation.0.get() == 3
         ));
@@ -2364,6 +2366,7 @@ mod tests {
                 let MarketWorkerMessage::RuntimeSeriesPublication {
                     event,
                     received_unix_nanos,
+                    ..
                 } = message
                 else {
                     continue;

@@ -196,23 +196,18 @@ pub enum MarketWorkerMessage {
     /// Coordinator events retain their consumer fence through the bounded
     /// queue; the pane projects each event at its owning presentation boundary.
     Runtime(aeris_market_runtime::MarketConsumerEvent),
-    /// Coordinator-fenced bars; the pane converts them only after selection acceptance.
+    /// Coordinator-fenced bars; a covering recovery snapshot also carries its
+    /// exact pending request, so both projections keep the original envelope.
     RuntimeSeriesPublication {
         event: aeris_market_runtime::MarketConsumerEvent,
         received_unix_nanos: i64,
+        recovery_request_id: Option<u64>,
     },
     /// Coordinator provider state, retained with its consumer epoch and the
     /// selection that was active when the endpoint accepted it.
     RuntimeProviderState {
         event: aeris_market_runtime::MarketConsumerEvent,
         generation: u64,
-    },
-    /// The covering snapshot retains the coordinator consumer epoch until the
-    /// pane accepts the request and projects it for the chart.
-    RuntimeRecovery {
-        event: aeris_market_runtime::MarketConsumerEvent,
-        request_id: u64,
-        received_unix_nanos: i64,
     },
     Recovery {
         generation: u64,
@@ -1370,6 +1365,7 @@ mod tests {
                 )
                 .expect("fixture snapshot publishes"),
             received_unix_nanos: 0,
+            recovery_request_id: None,
         }
     }
 
@@ -1388,6 +1384,7 @@ mod tests {
                 true,
             ),
             received_unix_nanos: 0,
+            recovery_request_id: None,
         }
     }
 
@@ -1744,6 +1741,7 @@ mod tests {
                         publication.snapshot.bars.clone(),
                     ),
                     received_unix_nanos: 0,
+                    recovery_request_id: None,
                 });
                 if result == Err(super::MarketWorkerSendError::Full) {
                     overflow_count += 1;
@@ -2153,6 +2151,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                 ),
                 received_unix_nanos: 0,
+                recovery_request_id: None,
             })
             .expect("covering snapshot sends");
 
@@ -2508,16 +2507,17 @@ mod tests {
         let MarketWorkerMessage::RuntimeSeriesPublication {
             event,
             received_unix_nanos,
+            ..
         } = snapshot_message(&mut fixture, 2)
         else {
             unreachable!("fixture publishes a snapshot");
         };
         assert!(
             covered_sender
-                .send(MarketWorkerMessage::RuntimeRecovery {
+                .send(MarketWorkerMessage::RuntimeSeriesPublication {
                     event,
-                    request_id: 8,
                     received_unix_nanos,
+                    recovery_request_id: Some(8),
                 })
                 .is_ok()
         );
@@ -2534,8 +2534,14 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeRecovery { request_id: 8, .. },
-                MarketWorkerMessage::RuntimeSeriesPublication { .. }
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    recovery_request_id: Some(8),
+                    ..
+                },
+                MarketWorkerMessage::RuntimeSeriesPublication {
+                    recovery_request_id: None,
+                    ..
+                }
             ]
         ));
 
@@ -2544,16 +2550,17 @@ mod tests {
         let MarketWorkerMessage::RuntimeSeriesPublication {
             event,
             received_unix_nanos,
+            ..
         } = snapshot_message(&mut stale_fixture, 2)
         else {
             unreachable!("fixture publishes a snapshot");
         };
         assert!(
             stale_sender
-                .send(MarketWorkerMessage::RuntimeRecovery {
+                .send(MarketWorkerMessage::RuntimeSeriesPublication {
                     event,
-                    request_id: 9,
                     received_unix_nanos,
+                    recovery_request_id: Some(9),
                 })
                 .is_ok()
         );
@@ -2569,7 +2576,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeRecovery { request_id: 9, .. },
+                MarketWorkerMessage::RuntimeSeriesPublication { recovery_request_id: Some(9), .. },
                 MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })
@@ -2692,6 +2699,7 @@ mod tests {
                 publication.snapshot.bars.clone(),
             ),
             received_unix_nanos: 0,
+            recovery_request_id: None,
         };
         sender
             .send(publication(2))

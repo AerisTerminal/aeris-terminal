@@ -3534,6 +3534,7 @@ impl MarketSummaryEntry {
                 MarketWorkerMessage::RuntimeSeriesPublication {
                     event,
                     received_unix_nanos,
+                    recovery_request_id: None,
                 } => self.apply_runtime_publication(event, received_unix_nanos),
                 MarketWorkerMessage::CatalogFailure { message } => self.message = Some(message),
                 _ => {}

@@ -76,6 +76,7 @@ impl PaneHarness {
         MarketWorkerMessage::RuntimeSeriesPublication {
             event,
             received_unix_nanos: 301_000_000_000,
+            recovery_request_id: None,
         }
     }
 
@@ -760,6 +761,7 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
     let MarketWorkerMessage::RuntimeSeriesPublication {
         event,
         received_unix_nanos,
+        ..
     } = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
     else {
         unreachable!("fixture publishes a canonical snapshot");
@@ -767,10 +769,10 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
     let epoch = event.epoch;
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeRecovery {
+        .send(MarketWorkerMessage::RuntimeSeriesPublication {
             event,
-            request_id: request_id + 1,
             received_unix_nanos,
+            recovery_request_id: Some(request_id + 1),
         })
         .expect("stale request");
     harness.pane.update(cx, |pane, cx| {
@@ -780,6 +782,7 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
     let MarketWorkerMessage::RuntimeSeriesPublication {
         event,
         received_unix_nanos,
+        ..
     } = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
     else {
         unreachable!("fixture publishes a canonical snapshot");
@@ -787,10 +790,10 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
     assert_eq!(event.epoch, epoch);
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeRecovery {
+        .send(MarketWorkerMessage::RuntimeSeriesPublication {
             event,
-            request_id,
             received_unix_nanos,
+            recovery_request_id: Some(request_id),
         })
         .expect("current recovery");
     harness.pane.update(cx, |pane, cx| {
@@ -1007,15 +1010,9 @@ fn pane_harness_interval_switch_covers_chart_until_replacement(cx: &mut TestAppC
 fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
-    let original = cx.read(|cx| {
-        harness
-            .pane
-            .read(cx)
-            .chart
-            .as_ref()
-            .expect("original chart")
-            .entity_id()
-    });
+    let original = cx
+        .read(|cx| harness.pane.read(cx).chart.as_ref().map(Entity::entity_id))
+        .expect("original chart");
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_interval(ChartInterval::Minute5, cx));
     });
@@ -1099,6 +1096,7 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
         .send(MarketWorkerMessage::RuntimeSeriesPublication {
             event: stale_delta,
             received_unix_nanos: 841_000_000_000,
+            recovery_request_id: None,
         })
         .expect("retired update");
     harness.pane.update(cx, |pane, cx| {
@@ -1383,6 +1381,7 @@ fn runtime_bar_snapshot_message(
             [bar].as_slice(),
         ),
         received_unix_nanos: 301_000_000_000,
+        recovery_request_id: None,
     }
 }
 
@@ -1418,6 +1417,7 @@ fn publish_runtime_bar_tail(
                 true,
             ),
             received_unix_nanos: 601_000_000_000,
+            recovery_request_id: None,
         })
         .expect("tail update");
     harness.pane.update(cx, |pane, cx| {

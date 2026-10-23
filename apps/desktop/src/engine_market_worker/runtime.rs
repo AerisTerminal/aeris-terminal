@@ -655,6 +655,7 @@ pub(super) fn deliver_runtime_series_publication(
         .send(MarketWorkerMessage::RuntimeSeriesPublication {
             event,
             received_unix_nanos,
+            recovery_request_id: None,
         })
         .map_err(|error| error.to_string())
 }

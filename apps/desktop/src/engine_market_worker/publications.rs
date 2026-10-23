@@ -104,10 +104,10 @@ pub(super) fn complete_pending_recovery(
             }
             endpoint
                 .messages
-                .send(MarketWorkerMessage::RuntimeRecovery {
+                .send(MarketWorkerMessage::RuntimeSeriesPublication {
                     event: event.clone(),
-                    request_id: command.request_id,
                     received_unix_nanos,
+                    recovery_request_id: Some(command.request_id),
                 })
                 .map_err(|error| error.to_string())?;
             endpoint.pending_recovery = None;

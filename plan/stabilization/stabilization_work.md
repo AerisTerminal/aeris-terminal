@@ -1963,6 +1963,14 @@ Status: pending
     recovery metadata-bearing runtime routes, other local outcomes, the
     transitional message/channel names and `fn enqueue` still remain;
     M6.6 and VAL-DSK-021/022 stay open.
+  - Part 8b3a (2026-10-24): recovery covering snapshots and ordinary series
+    publications share the canonical fenced snapshot/update queue entry. The
+    recovery projection carries its exact pending request ID alongside received
+    time, while ordinary bars carry no recovery ID; the pane keeps separate
+    request/lifecycle acceptance and ordinary publication acceptance. The
+    recovery request and publication FIFO/backpressure regressions cover both
+    projections. Provider-state metadata, the remaining local outcomes and
+    transitional message/channel names still block M6.6 and VAL-DSK-021/022.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
