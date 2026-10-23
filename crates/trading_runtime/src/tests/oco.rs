@@ -35,13 +35,13 @@ fn oco_group_status(directory: &TestDirectory) -> String {
 #[test]
 fn oco_pair_rests_as_two_working_members_of_one_active_group() {
     let directory = TestDirectory::new("oco-placement");
-    let service = start_service(&directory);
-    service
-        .register_instrument(instrument())
-        .expect("instrument registers");
-    service
-        .observe_market(observation(9_950, 10_000, 1, 1_000))
-        .expect("fresh quote");
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        9_950,
+        10_000,
+    );
     let [first, second] = service.place_oco(oco_pair()).expect("pair accepted");
     assert_eq!(
         (first.status, second.status),
@@ -73,13 +73,13 @@ fn oco_pair_rests_as_two_working_members_of_one_active_group() {
 #[test]
 fn cancelling_one_oco_member_leaves_the_sibling_working() {
     let directory = TestDirectory::new("oco-manual-cancel");
-    let service = start_service(&directory);
-    service
-        .register_instrument(instrument())
-        .expect("instrument registers");
-    service
-        .observe_market(observation(9_950, 10_000, 1, 1_000))
-        .expect("fresh quote");
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        9_950,
+        10_000,
+    );
     let [first, second] = service.place_oco(oco_pair()).expect("pair accepted");
     service
         .cancel_order(first.client_order_id.clone())

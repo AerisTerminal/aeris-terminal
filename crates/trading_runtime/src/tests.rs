@@ -825,6 +825,24 @@ pub(crate) fn push_live_quote(
     .expect("quote");
 }
 
+/// Starts the common deterministic service fixture with verified Terms, an open session,
+/// Live feed state, and a current quote installed by the trading owner's market inbox.
+pub(crate) fn routed_fixture(
+    directory: &TestDirectory,
+    instrument: &TradingInstrument,
+    route: aeris_trading::market::MarketRoute,
+    bid: i64,
+    ask: i64,
+) -> (TradingService, Arc<crate::clock::ManualClock>) {
+    let (service, clock, feed) = live_feed_service(directory);
+    bootstrap_live_feed(&feed, instrument, route);
+    push_live_quote(&feed, instrument, 1, bid, ask, instrument.price_scale);
+    service
+        .status()
+        .expect("owner drains verified fixture feed");
+    (service, clock)
+}
+
 #[test]
 fn snapshot_projects_registered_instruments_with_provider_symbols() {
     let directory = TestDirectory::new("snapshot-instruments");
