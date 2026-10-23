@@ -2280,6 +2280,57 @@ fn cancelling_a_held_leg_cancels_the_pending_entry_too() {
 }
 
 #[test]
+fn cancelling_pending_bracket_entry_cascades_to_every_held_leg() {
+    let directory = TestDirectory::new("pending-entry-cancel-cascade");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut entry = market_order("cancel-pending-entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = quantity(2);
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: bracket_template(),
+        })
+        .expect("pending bracket");
+    let pending = service.snapshot().expect("pending");
+    let legs = pending
+        .orders
+        .iter()
+        .filter(|order| order.status == OrderStatus::Inactive)
+        .map(|order| order.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(legs.len(), 3, "one stop and two targets");
+    service
+        .cancel_order(ClientOrderId::try_new("cancel-pending-entry").expect("entry id"))
+        .expect("entry cancelled");
+    let cancelled = service.snapshot().expect("cancelled");
+    assert_eq!(
+        cancelled.managed_brackets[0].status,
+        BracketViewStatus::Cancelled
+    );
+    for leg in legs {
+        assert_eq!(
+            cancelled
+                .orders
+                .iter()
+                .find(|order| order.id == leg)
+                .unwrap()
+                .status,
+            OrderStatus::Cancelled
+        );
+        assert_leg_event(
+            &cancelled,
+            &leg,
+            OrderEventKind::Cancelled,
+            aeris_trading::OrderEventReason::Cascade,
+        );
+    }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     let directory = TestDirectory::new("managed-bracket");
     let service = start_service(&directory);

@@ -2397,6 +2397,121 @@ fn verified_terms_persist_routes_and_recovered_orders_republish_interest() {
 }
 
 #[test]
+fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve_it() {
+    let directory = TestDirectory::new("migrated-hyperliquid-route");
+    let instrument = high_precision_crypto_instrument();
+    let (service, clock, _) = live_feed_service(&directory);
+    service
+        .register_instrument(instrument.clone())
+        .expect("legacy instrument");
+    let mut request = market_order("legacy-btc-limit", OrderSide::Buy, 1, 1_000);
+    request.instrument_id = instrument.instrument_id.clone();
+    request.quantity = FixedPoint::try_new(100_000_000, 8).unwrap();
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_900_000_000, 8).unwrap());
+    let order = service.place_order(request).expect("legacy resting order");
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = start_service_with_config(configuration);
+    let initial = restarted
+        .subscribe()
+        .expect("owner publication")
+        .recv_timeout(Duration::from_secs(2))
+        .expect("initial working set");
+    let unknown = initial
+        .event
+        .working_set
+        .order_feed_states
+        .iter()
+        .find(|status| status.order_id == order.id)
+        .expect("per-order feed state");
+    assert_eq!(
+        unknown.state,
+        FeedState::Unavailable {
+            reason: FeedReason::RouteUnknown
+        }
+    );
+    assert_eq!(unknown.message(), Some("feed unavailable (route unknown)"));
+    let feed = restarted
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("market inbox");
+    bootstrap_live_feed(&feed, &instrument, migrated_btc_route(&instrument));
+    restarted.status().expect("verified Terms processed");
+    let resolved = restarted.subscribe().expect("resolved publication");
+    let update = resolved
+        .recv_timeout(Duration::from_secs(2))
+        .expect("resolved");
+    assert_eq!(
+        update
+            .event
+            .working_set
+            .order_feed_states
+            .iter()
+            .find(|status| status.order_id == order.id)
+            .unwrap()
+            .state,
+        FeedState::Live
+    );
+    let persisted: String = rusqlite::Connection::open(config(&directory).database_path)
+        .unwrap()
+        .query_row(
+            "SELECT market_route_json FROM instruments WHERE id=?1",
+            [instrument.instrument_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&persisted).unwrap()["provider_symbol"],
+        "BTC"
+    );
+    feed.push(MarketFeedEvent::Quote(TradingQuote {
+        instrument_id: instrument.instrument_id,
+        bid: FixedPoint::try_new(9_800_000_000, 8).unwrap(),
+        ask: FixedPoint::try_new(9_900_000_000, 8).unwrap(),
+        bid_size: None,
+        ask_size: None,
+        last: None,
+        provider_id: "hyperliquid".into(),
+        provider_generation: 1,
+        source_sequence: Some(1),
+        exchange_unix_nanos: None,
+        received_unix_nanos: 1_000_000_000_001,
+    }))
+    .expect("quote");
+    restarted.status().expect("execution");
+    assert_eq!(
+        restarted
+            .snapshot()
+            .expect("filled")
+            .orders
+            .iter()
+            .find(|candidate| candidate.id == order.id)
+            .unwrap()
+            .status,
+        OrderStatus::Filled
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+fn migrated_btc_route(instrument: &TradingInstrument) -> MarketRoute {
+    MarketRoute {
+        instrument_id: instrument.instrument_id.clone(),
+        provider_id: "hyperliquid".into(),
+        provider_symbol: "BTC".into(),
+        display_symbol: "BTC-USDC".into(),
+        venue_id: "HYPERLIQUID".into(),
+        entitlement_id: None,
+        price_scale: 8,
+        quantity_scale: 8,
+    }
+}
+
+#[test]
 fn pane_free_quotes_fill_stops_update_marks_and_survive_restart() {
     let directory = TestDirectory::new("position-feed-interest");
     let (service, clock) = feed_service(&directory);

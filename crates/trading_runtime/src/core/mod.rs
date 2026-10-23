@@ -73,7 +73,7 @@ use aeris_trading::{
 };
 pub use groups::model::{MovePlannedLeg, PlannedLeg};
 pub use publication::{
-    MARK_PUBLICATION_INTERVAL, MAXIMUM_SUBSCRIPTIONS, SUBSCRIPTION_QUEUE_CAPACITY,
+    MARK_PUBLICATION_INTERVAL, MAXIMUM_SUBSCRIPTIONS, OrderFeedStatus, SUBSCRIPTION_QUEUE_CAPACITY,
     SubscriptionUpdate, TradingEvent, TradingEventCause, TradingSubscription,
     WORKING_SET_FILL_LIMIT, WorkingSet,
 };

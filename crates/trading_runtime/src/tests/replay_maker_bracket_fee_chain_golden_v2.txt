@@ -1,0 +1,35 @@
+maker entry and three held legs revision=5 orders=[sim-order-1:working,sim-order-2:inactive,sim-order-3:inactive,sim-order-4:inactive] events=[sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[] pnl=0@2/0@2/5000000@2
+maker fill activates legs and charges entry fee revision=7 orders=[sim-order-1:filled,sim-order-2:working,sim-order-3:working,sim-order-4:working] events=[sim-event-8,sim-event-7,sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-5] pnl=0@2/-2500@2/4997490@2
+restart preserves active legs revision=7 orders=[sim-order-1:filled,sim-order-2:working,sim-order-3:working,sim-order-4:working] events=[sim-event-8,sim-event-7,sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-5] pnl=0@2/-2500@2/4997490@2
+stop fills and cascades targets with exit fee revision=9 orders=[sim-order-1:filled,sim-order-2:filled,sim-order-3:cancelled,sim-order-4:cancelled] events=[sim-event-12,sim-event-11,sim-event-10,sim-event-9,sim-event-8,sim-event-7,sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-10,sim-fill-5] pnl=-22500@2/0@2/4977480@2
+second restart preserves fee chain revision=9 orders=[sim-order-1:filled,sim-order-2:filled,sim-order-3:cancelled,sim-order-4:cancelled] events=[sim-event-12,sim-event-11,sim-event-10,sim-event-9,sim-event-8,sim-event-7,sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-10,sim-fill-5] pnl=-22500@2/0@2/4977480@2
+
+revision=9
+order sim-order-1 maker-golden buy limit gtc 2@0 2@0 9900@2 - filled 2000 aeris-sim:fixture:1:2:2000
+order sim-order-2 bracket-stop-952efbf245945a3d sell stop gtc 2@0 2@0 - 9700@2 filled 2000 aeris-sim:fixture:1:2:2000
+order sim-order-3 bracket-target-ad72b1cba11122c0 sell limit gtc 1@0 0@0 10100@2 - cancelled 2000 aeris-sim:fixture:1:2:2000
+order sim-order-4 bracket-target-4d6d5dd3f746df51 sell limit gtc 1@0 0@0 10300@2 - cancelled 2000 aeris-sim:fixture:1:2:2000
+event sim-event-12 sim-order-4 12 cancelled 5000 Some("cancelled with its bracket") cascade aeris-sim:fixture:1:2:2000
+event sim-event-11 sim-order-3 11 cancelled 5000 Some("cancelled with its bracket") cascade aeris-sim:fixture:1:2:2000
+event sim-event-10 sim-order-2 10 filled 4000 Some("touch fill") touch_fill aeris-sim:fixture:1:4:4000
+event sim-event-9 sim-order-2 9 triggered 4000 Some("stop triggered at touch") - aeris-sim:fixture:1:4:4000
+event sim-event-8 sim-order-4 8 activated 3000 Some("activated at the entry fill") local_managed aeris-sim:fixture:1:2:2000
+event sim-event-7 sim-order-3 7 activated 3000 Some("activated at the entry fill") local_managed aeris-sim:fixture:1:2:2000
+event sim-event-6 sim-order-2 6 activated 3000 Some("activated at the entry fill") local_managed aeris-sim:fixture:1:2:2000
+event sim-event-5 sim-order-1 5 filled 3000 Some("touch fill") touch_fill aeris-sim:fixture:1:3:3000
+event sim-event-4 sim-order-4 4 accepted 2000 Some("LOCAL-MANAGED scale-out target 2") local_managed aeris-sim:fixture:1:2:2000
+event sim-event-3 sim-order-3 3 accepted 2000 Some("LOCAL-MANAGED scale-out target 1") local_managed aeris-sim:fixture:1:2:2000
+event sim-event-2 sim-order-2 2 accepted 2000 Some("LOCAL-MANAGED protective stop") local_managed aeris-sim:fixture:1:2:2000
+event sim-event-1 sim-order-1 1 accepted 2000 Some("accepted by local simulated venue") - aeris-sim:fixture:1:2:2000
+fill sim-fill-10 sim-order-2 aeris-sim-1 instrument:fixture:CME:ESZ6 sell 9675@2 2@0 4000 aeris-sim:fixture:1:4:4000
+fill sim-fill-5 sim-order-1 aeris-sim-1 instrument:fixture:CME:ESZ6 buy 9900@2 2@0 3000 aeris-sim:fixture:1:3:3000
+ledger deposit-aeris-sim-1 aeris-sim-1 deposit 5000000@2 - 5000
+ledger fee-sim-fill-5 aeris-sim-1 commission -10@2 sim-fill-5 3000
+ledger pnl-sim-fill-10 aeris-sim-1 realized_pnl -22500@2 sim-fill-10 4000
+ledger fee-sim-fill-10 aeris-sim-1 commission -10@2 sim-fill-10 4000
+position aeris-sim-1 instrument:fixture:CME:ESZ6 0@0 - -22500@2 0@2 4000
+pnl aeris-sim-1 USD -22500@2 0@2 4977480@2
+fill_pnl sim-fill-10 -22500@2
+trade_pnl sim-fill-10 -22500@2
+managed_brackets=[BracketView { bracket_id: "maker-golden", template: BracketStrategyTemplate { template_id: "maker-golden", revision: 1, name: "Managed bracket", stop_offset_ticks: 8, targets: [BracketTarget { offset_ticks: 8, quantity_percent: 50 }, BracketTarget { offset_ticks: 16, quantity_percent: 50 }], trailing_stop: None, break_even: None, enabled: true }, entry_client_order_id: ClientOrderId("maker-golden"), stop_client_order_id: Some(ClientOrderId("bracket-stop-952efbf245945a3d")), target_client_order_ids: [ClientOrderId("bracket-target-ad72b1cba11122c0"), ClientOrderId("bracket-target-4d6d5dd3f746df51")], status: Completed, entry_price: Some(FixedPoint { units: 9900, scale: 2 }) }]
+risk_locks=[]

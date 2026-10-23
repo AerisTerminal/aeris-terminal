@@ -10,7 +10,8 @@
 
 use crate::service::Command;
 use crate::{OrderGroup, PositionPnl, RecoveryNotice, RiskLock};
-use aeris_trading::{AccountPnl, Fill, Order, Position, TradingAccount};
+use aeris_trading::market::{FeedReason, FeedState};
+use aeris_trading::{AccountPnl, Fill, Order, OrderId, Position, TradingAccount};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -36,6 +37,8 @@ pub struct WorkingSet {
     pub revision: u64,
     pub accounts: Vec<TradingAccount>,
     pub orders: Vec<Order>,
+    /// Feed readiness for each open order, derived from the owner's verified routes and feed.
+    pub order_feed_states: Vec<OrderFeedStatus>,
     pub order_groups: Vec<OrderGroup>,
     pub positions: Vec<Position>,
     /// The newest fills, oldest first within the window.
@@ -45,6 +48,26 @@ pub struct WorkingSet {
     pub risk_locks: Vec<RiskLock>,
     /// Startup repairs the running process performed, published until they are acknowledged.
     pub recovery_notices: Vec<RecoveryNotice>,
+}
+
+/// A per-order feed projection; never an independent feed or route authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderFeedStatus {
+    pub order_id: OrderId,
+    pub state: FeedState,
+}
+
+impl OrderFeedStatus {
+    /// Human-readable diagnostic for a migrated order that cannot yet execute.
+    #[must_use]
+    pub fn message(&self) -> Option<&'static str> {
+        match self.state {
+            FeedState::Unavailable {
+                reason: FeedReason::RouteUnknown,
+            } => Some("feed unavailable (route unknown)"),
+            _ => None,
+        }
+    }
 }
 
 /// What changed to produce a publication.
@@ -362,16 +385,27 @@ impl crate::TradingCore {
             .cloned()
             .collect::<Vec<_>>();
         fills.reverse();
+        let orders = self
+            .state
+            .orders
+            .values()
+            .filter(|order| order.status.is_open())
+            .cloned()
+            .collect::<Vec<_>>();
+        let order_feed_states = orders
+            .iter()
+            .map(|order| OrderFeedStatus {
+                order_id: order.id.clone(),
+                state: self
+                    .quote_book
+                    .feed_state(&order.instrument_id, &self.state.market_routes),
+            })
+            .collect();
         Ok(WorkingSet {
             revision: self.state.revision,
             accounts: self.state.accounts.values().cloned().collect(),
-            orders: self
-                .state
-                .orders
-                .values()
-                .filter(|order| order.status.is_open())
-                .cloned()
-                .collect(),
+            orders,
+            order_feed_states,
             order_groups: self
                 .state
                 .order_groups

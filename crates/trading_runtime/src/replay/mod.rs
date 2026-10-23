@@ -954,6 +954,124 @@ fn replay_bracket_stop_after_restart_golden() {
             .trim_end()
     );
 }
+
+/// One transcript binds the maker entry, held-leg activation, stop cascade, both
+/// commissions and two durable recoveries rather than testing them in isolation.
+fn maker_bracket_fee_chain_scenario() -> String {
+    let directory = TestDirectory::new("maker-bracket-fee-golden");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    harness
+        .set_fee_schedule(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            per_contract_schedule(5),
+        )
+        .expect("per-contract fee");
+    let mut trace = String::new();
+    harness
+        .observe_market(observation(10_000, 10_025, 1, 1_000))
+        .expect("first quote");
+    let mut entry = market_order("maker-golden", OrderSide::Buy, 2, 2_000);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    entry.limit_price = Some(FixedPoint::try_new(9_900, 2).expect("limit"));
+    entry.quantity = quantity(2);
+    harness
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: BracketStrategyTemplate {
+                template_id: "maker-golden".into(),
+                revision: 1,
+                name: "Maker stop and targets".into(),
+                stop_offset_ticks: 8,
+                targets: vec![
+                    BracketTarget {
+                        offset_ticks: 8,
+                        quantity_percent: 50,
+                    },
+                    BracketTarget {
+                        offset_ticks: 16,
+                        quantity_percent: 50,
+                    },
+                ],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("resting bracket");
+    assert_eq!(harness.snapshot().unwrap().fills.len(), 0);
+    record("maker entry and three held legs", &harness, &mut trace);
+    let entry_fills = harness
+        .observe_market(observation(9_875, 9_900, 3, 3_000))
+        .expect("maker quote");
+    assert_eq!(entry_fills.len(), 1);
+    assert_eq!(entry_fills[0].price.units(), 9_900);
+    assert_group_status(&harness, "maker-golden", "active");
+    record(
+        "maker fill activates legs and charges entry fee",
+        &harness,
+        &mut trace,
+    );
+
+    let active = harness.snapshot().expect("active");
+    harness.restart().expect("restart with active legs");
+    assert_restart_preserves(&active, &harness.snapshot().expect("recovered"));
+    record("restart preserves active legs", &harness, &mut trace);
+    let exit_fills = harness
+        .observe_market(observation(9_675, 9_700, 4, 4_000))
+        .expect("stop quote");
+    assert_eq!(exit_fills.len(), 1);
+    assert_eq!(exit_fills[0].price.units(), 9_675);
+    assert_group_status(&harness, "maker-golden", "completed");
+    let flat = harness.snapshot().expect("flat");
+    assert_eq!(flat.positions[0].net_quantity.units(), 0);
+    assert!(flat.orders.iter().all(|order| !order.status.is_open()));
+    assert_ledger_chain(
+        &harness,
+        &[
+            (LedgerEntryKind::Deposit, 5_000_000),
+            (LedgerEntryKind::Commission, -10),
+            (LedgerEntryKind::RealizedPnl, -22_500),
+            (LedgerEntryKind::Commission, -10),
+        ],
+    );
+    for target in flat.orders.iter().filter(|order| {
+        order.order_type == OrderType::Limit && order.client_order_id.as_str() != "maker-golden"
+    }) {
+        assert!(flat.order_events.iter().any(|event| {
+            event.order_id == target.id
+                && event.kind == OrderEventKind::Cancelled
+                && event.reason == Some(aeris_trading::OrderEventReason::Cascade)
+        }));
+    }
+    record(
+        "stop fills and cascades targets with exit fee",
+        &harness,
+        &mut trace,
+    );
+    harness.restart().expect("second restart");
+    assert_restart_preserves(&flat, &harness.snapshot().expect("second recovery"));
+    assert_eq!(
+        harness.snapshot().unwrap().ledger_entries,
+        flat.ledger_entries
+    );
+    record("second restart preserves fee chain", &harness, &mut trace);
+    format!("{trace}\n{}", harness.transcript())
+}
+
+#[test]
+fn replay_maker_bracket_fee_chain_golden_v2() {
+    let first = maker_bracket_fee_chain_scenario();
+    assert_eq!(first, maker_bracket_fee_chain_scenario());
+    assert_eq!(
+        first.trim_end(),
+        include_str!("../tests/replay_maker_bracket_fee_chain_golden_v2.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+    );
+}
+
 #[test]
 fn replay_multi_effect_quote_failed_commit_keeps_memory_and_disk_unchanged() {
     let directory = TestDirectory::new("multi-effect-quote-failure");
