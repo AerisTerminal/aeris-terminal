@@ -4025,9 +4025,6 @@ impl WorkspaceSurface {
                 event,
                 received_unix_nanos,
             } => self.apply_runtime_series_publication(event, received_unix_nanos, cx),
-            MarketWorkerMessage::Diagnostics(snapshot) => {
-                Self::report_market_diagnostics(&snapshot);
-            }
             MarketWorkerMessage::Recovery {
                 generation,
                 request_id,
@@ -4141,14 +4138,6 @@ impl WorkspaceSurface {
             diagnostic!("Aeris pane received an unexpected runtime price-alert event");
         }
     }
-
-    #[cfg(feature = "diagnostics")]
-    fn report_market_diagnostics(snapshot: &aeris_observability::FeedDiagnosticsSnapshot) {
-        diagnostic!("desktop market diagnostics: {snapshot:?}");
-    }
-
-    #[cfg(not(feature = "diagnostics"))]
-    fn report_market_diagnostics(_: &aeris_observability::FeedDiagnosticsSnapshot) {}
 
     fn apply_selected_instrument(
         &mut self,

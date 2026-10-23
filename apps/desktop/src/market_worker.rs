@@ -15,7 +15,6 @@ use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert, MarketRuntimeEvent,
 };
 use aeris_observability::FeedConnectionState;
-use aeris_observability::FeedDiagnosticsSnapshot;
 use std::{
     collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
@@ -282,7 +281,6 @@ pub enum MarketWorkerMessage {
         event: aeris_market_runtime::MarketConsumerEvent,
         generation: u64,
     },
-    Diagnostics(Box<FeedDiagnosticsSnapshot>),
     /// The covering snapshot retains the coordinator consumer epoch until the
     /// pane accepts the request and projects it for the chart.
     RuntimeRecovery {
@@ -445,7 +443,7 @@ impl MarketWorkerSender {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(MarketWorkerSendError::Disconnected);
         }
-        // Diagnostics use the bounded control reserve and share FIFO ordering;
+        // App-scoped controls use the bounded reserve and share FIFO ordering;
         // a saturated mailbox reports backpressure instead of evicting events.
         let limit = if is_market_publication(&message) {
             self.mailbox.capacity
@@ -1530,7 +1528,6 @@ mod tests {
         MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeSnapshot,
         SeriesTailOperation,
     };
-    use aeris_observability::{FeedDiagnostics, FeedIdentity};
     use aeris_study_sdk::builtins;
     use std::collections::VecDeque;
     use std::num::{NonZeroU64, NonZeroUsize};
@@ -2045,69 +2042,35 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_preserve_fifo_order_and_report_backpressure() {
+    fn app_scoped_failures_preserve_fifo_order_and_report_backpressure() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        let snapshot = |generation| {
-            let mut diagnostics = FeedDiagnostics::new(
-                FeedIdentity::try_new("rithmic", "advanced_trade_public", "production")
-                    .expect("identity validates"),
-                None,
-            );
-            diagnostics
-                .begin_session(generation, 0)
-                .expect("session starts");
-            diagnostics
-                .try_snapshot(1, 1)
-                .expect("snapshot succeeds")
-                .expect("first snapshot publishes")
+        let failure = |generation: u64| MarketWorkerMessage::CatalogFailure {
+            message: generation.to_string(),
         };
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
-                    NonZeroU64::MIN,
-                ))))
-                .is_ok()
-        );
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
-                    NonZeroU64::new(2).expect("generation is nonzero"),
-                ))))
-                .is_ok()
-        );
+        assert!(sender.send(failure(1)).is_ok());
+        assert!(sender.send(failure(2)).is_ok());
         let (messages, _) = receiver.drain();
         assert_eq!(messages.len(), 2);
         for (index, message) in messages.iter().enumerate() {
-            let MarketWorkerMessage::Diagnostics(snapshot) = message else {
-                panic!("diagnostics must remain ordered");
+            let MarketWorkerMessage::CatalogFailure { message } = message else {
+                panic!("app-scoped failures must remain ordered");
             };
-            assert_eq!(
-                snapshot.session_generation.map(NonZeroU64::get),
-                Some(index as u64 + 1)
-            );
+            assert_eq!(message, &(index + 1).to_string());
         }
         sender
-            .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
-                NonZeroU64::MIN,
-            ))))
-            .expect("first diagnostic enters bounded queue");
+            .send(failure(1))
+            .expect("first failure enters bounded queue");
         sender
-            .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
-                NonZeroU64::new(2).expect("generation is nonzero"),
-            ))))
-            .expect("second diagnostic enters bounded queue");
+            .send(failure(2))
+            .expect("second failure enters bounded queue");
         for generation in 3..=10 {
             sender
-                .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
-                    NonZeroU64::new(generation).expect("generation is nonzero"),
-                ))))
-                .expect("diagnostic enters bounded control reserve");
+                .send(failure(generation))
+                .expect("failure enters bounded control reserve");
         }
         assert_eq!(
-            sender.send(MarketWorkerMessage::Diagnostics(Box::new(snapshot(
-                NonZeroU64::new(11).expect("generation is nonzero"),
-            )))),
+            sender.send(failure(11)),
             Err(super::MarketWorkerSendError::Full)
         );
         assert_eq!(sender.occupancy(), (10, 2));
@@ -2117,13 +2080,13 @@ mod tests {
             .into_iter()
             .chain(later)
             .map(|message| {
-                let MarketWorkerMessage::Diagnostics(snapshot) = message else {
-                    panic!("diagnostics must remain ordered");
+                let MarketWorkerMessage::CatalogFailure { message } = message else {
+                    panic!("app-scoped failures must remain ordered");
                 };
-                snapshot.session_generation.map(NonZeroU64::get)
+                message.parse::<u64>().expect("fixture sequence")
             })
             .collect::<Vec<_>>();
-        assert_eq!(observed, (1..=10).map(Some).collect::<Vec<_>>());
+        assert_eq!(observed, (1..=10).collect::<Vec<_>>());
     }
 
     #[test]
@@ -2485,7 +2448,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_keep_fifo_order_with_market_publications() {
+    fn app_scoped_failures_keep_fifo_order_with_market_publications() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
@@ -2498,21 +2461,11 @@ mod tests {
         };
         let source = *publication.snapshot.bars.last().expect("last bar");
         assert!(sender.send(snapshot).is_ok());
-        let mut diagnostics = FeedDiagnostics::new(
-            FeedIdentity::try_new("rithmic", "advanced_trade_public", "production")
-                .expect("identity validates"),
-            None,
-        );
-        diagnostics
-            .begin_session(NonZeroU64::MIN, 0)
-            .expect("session starts");
-        let snapshot = diagnostics
-            .try_snapshot(1, 1)
-            .expect("snapshot succeeds")
-            .expect("snapshot publishes");
         assert!(
             sender
-                .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)))
+                .send(MarketWorkerMessage::CatalogFailure {
+                    message: "fixture".into(),
+                })
                 .is_ok()
         );
         let mut next = source;
@@ -2537,7 +2490,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Diagnostics(_),
+                MarketWorkerMessage::CatalogFailure { .. },
                 MarketWorkerMessage::RuntimeSeriesPublication { .. }
             ]
         ));

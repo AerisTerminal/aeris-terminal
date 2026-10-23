@@ -1806,6 +1806,11 @@ Status: pending
     request-fencing tests and a GPUI stale/current request regression cover the
     change. Catalog/screener, diagnostics and alert-sync still need Part 7;
     Part 8, VAL-DSK-021/022 and guarded GUI remain open.
+  - Part 7e: removed the diagnostic snapshot message and pane log handler:
+    no production code produced that message. Retained the bounded control
+    reserve's FIFO, mixed-publication ordering and explicit overflow tests
+    using the actual app-scoped catalog failure route. Catalog/screener and
+    alert-sync still need Part 7; Part 8 and VAL-DSK-021/022 remain open.
   - Before Part 7b, parallel-suite timing follow-up: the study calculation
     worker now publishes its completion before replying, so an immediately
     following calculation cannot mistake an already-finished worker for a
@@ -2403,6 +2408,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M6.6 Part 7b refactor(desktop): provider state retains its coordinator envelope across pending selection and queue delivery; pane projection checks provider and committed generation, with bridge and GPUI regressions. Deleted the duplicate pushed-event connection conversion; local startup controls remain explicit. M6.6 and VAL-DSK-021/022 remain open.
 - 2026-10-23 M6.6 Part 7c fix(desktop): verified catalog terms now flow through the one session-status publisher after the catalog reply, retaining its clock, selection generation and backpressure retry instead of a second best-effort status send. The existing pane generation/instrument projection remains; Part 8 removes its message variant. Remaining Part 7 routes, VAL-DSK-021/022 and guarded GUI remain open.
 - 2026-10-23 M6.6 Part 7d refactor(desktop): covering recovery snapshots retain their coordinator consumer epoch to pane projection and exact chart request installation; removed the duplicate worker-built success bootstrap. Local failure and supersession controls retain generation/request fences. The worker and GPUI request/ordering/backpressure regressions pass; catalog, screener, diagnostics, alert-sync and Part 8 remain.
+- 2026-10-23 M6.6 Part 7e refactor(desktop): removed the unproduced diagnostic mailbox route and pane logger; real app-scoped catalog failure controls retain FIFO order with market publications and report bounded backpressure. Catalog/screener, alert-sync and Part 8 remain.
 
 ## 7. Known gaps / deferred
 
