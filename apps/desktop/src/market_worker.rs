@@ -5,8 +5,7 @@
 use aeris_application::ReplayRecoveryCommand;
 use aeris_application::{ReplaySnapshot, ReplayStreamUpdate};
 use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
-    ProviderMarketScreen, ScreenProviderMarkets, SearchProviderInstruments,
+    InstallProviderInstrument, ScreenProviderMarkets, SearchProviderInstruments,
     SelectProviderInstrument,
 };
 use aeris_market_data::ChartInterval;
@@ -94,29 +93,6 @@ pub struct EngineWorkerStartup {
     pub worker_label: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderCatalogCommand {
-    Search,
-    Selection,
-}
-
-pub enum ProviderCatalogEvent {
-    CatalogReady {
-        provider: String,
-    },
-    SearchCompleted(ProviderInstrumentSearchResult),
-    SelectionInstalled {
-        command_generation: u64,
-        instrument: InstallProviderInstrument,
-    },
-    CommandRejected {
-        rejection: ProviderCatalogRejected,
-        command: ProviderCatalogCommand,
-    },
-    ScreenCompleted(ProviderMarketScreen),
-    ScreenRejected(ProviderCatalogRejected),
-}
-
 /// Whether a provider-verified selection carries current terms for the same
 /// instrument. A provisional descriptor yields to it; a different
 /// instrument's selection never replaces the charted one.
@@ -129,55 +105,6 @@ pub fn verified_terms_supersede(
         && current.instrument_id == verified.instrument_id
         && verified.selection_generation >= current.selection_generation
         && verified.session_generation >= current.session_generation
-}
-
-#[must_use]
-pub fn classify_provider_catalog_event(
-    event: MarketRuntimeEvent,
-) -> (Option<ProviderCatalogEvent>, Option<MarketRuntimeEvent>) {
-    match event {
-        MarketRuntimeEvent::CatalogReady { provider } => {
-            (Some(ProviderCatalogEvent::CatalogReady { provider }), None)
-        }
-        // Consumer ownership, provider identity and callback generation are
-        // already fenced before catalog events enter the runtime-owned consumer
-        // outbox. Desktop only translates the accepted callback into its
-        // presentation command shape.
-        MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
-            (Some(ProviderCatalogEvent::SearchCompleted(result)), None)
-        }
-        MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
-            let instrument = selection.instrument;
-            (
-                Some(ProviderCatalogEvent::SelectionInstalled {
-                    command_generation: selection.command_generation,
-                    instrument,
-                }),
-                None,
-            )
-        }
-        MarketRuntimeEvent::ProviderCatalogRejected {
-            rejection,
-            selection,
-        } => (
-            Some(ProviderCatalogEvent::CommandRejected {
-                rejection,
-                command: if selection {
-                    ProviderCatalogCommand::Selection
-                } else {
-                    ProviderCatalogCommand::Search
-                },
-            }),
-            None,
-        ),
-        MarketRuntimeEvent::ProviderMarketScreen(screen) => {
-            (Some(ProviderCatalogEvent::ScreenCompleted(screen)), None)
-        }
-        MarketRuntimeEvent::ProviderMarketScreenRejected(rejection) => {
-            (Some(ProviderCatalogEvent::ScreenRejected(rejection)), None)
-        }
-        event => (None, Some(event)),
-    }
 }
 
 pub struct MarketWorkerPublication {
@@ -308,7 +235,9 @@ pub enum MarketWorkerMessage {
         message: String,
         transport_rtt_nanos: Option<u64>,
     },
-    ProviderCatalog(ProviderCatalogEvent),
+    /// Catalog callbacks retain their coordinator-issued consumer epoch until
+    /// the owning pane or screener projects the presentation event.
+    RuntimeCatalog(aeris_market_runtime::MarketConsumerEvent),
     MarketSessionStatus {
         generation: u64,
         status: aeris_contracts::MarketSessionStatus,
@@ -1533,8 +1462,7 @@ mod tests {
     use super::{
         ChartViewportUpdate, ConsumerResourceClass, MarketDataWorker, MarketPublicationGeneration,
         MarketRecoveryFailure, MarketWorkerCommand, MarketWorkerMessage, PendingUiDiagnostics,
-        ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
-        ui_diagnostics_channel,
+        UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
     use crate::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
     use aeris_contracts::{
@@ -1550,6 +1478,7 @@ mod tests {
         MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeSnapshot,
         SeriesTailOperation,
     };
+
     use aeris_study_sdk::builtins;
     use std::collections::VecDeque;
     use std::num::{NonZeroU64, NonZeroUsize};
@@ -1562,6 +1491,25 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    fn catalog_rejection(
+        command_generation: u64,
+        reason: ProviderCatalogRejectionReason,
+        selection: bool,
+    ) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeCatalog(FixtureMarketEvents::default().catalog(
+            MarketRuntimeEvent::ProviderCatalogRejected {
+                rejection: ProviderCatalogRejected {
+                    consumer_id: 1,
+                    provider: "rithmic".to_string(),
+                    provider_generation: Some(1),
+                    command_generation,
+                    reason,
+                },
+                selection,
+            },
+        ))
+    }
 
     fn tail_operation(message: &MarketWorkerMessage) -> Option<SeriesTailOperation> {
         match message {
@@ -2798,37 +2746,22 @@ mod tests {
     #[test]
     fn latest_rithmic_catalog_result_is_conflated_without_displacing_market_state() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let generation = NonZeroU64::MIN;
         assert!(
             sender
-                .send(MarketWorkerMessage::ProviderCatalog(
-                    ProviderCatalogEvent::CommandRejected {
-                        rejection: ProviderCatalogRejected {
-                            consumer_id: 1,
-                            provider: "rithmic".to_string(),
-                            provider_generation: Some(generation.get()),
-                            command_generation: 1,
-                            reason: ProviderCatalogRejectionReason::SupersededSearch,
-                        },
-                        command: ProviderCatalogCommand::Search,
-                    },
+                .send(catalog_rejection(
+                    1,
+                    ProviderCatalogRejectionReason::SupersededSearch,
+                    false,
                 ))
                 .is_ok()
         );
         let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
         assert!(
             sender
-                .send(MarketWorkerMessage::ProviderCatalog(
-                    ProviderCatalogEvent::CommandRejected {
-                        rejection: ProviderCatalogRejected {
-                            consumer_id: 1,
-                            provider: "rithmic".to_string(),
-                            provider_generation: Some(generation.get()),
-                            command_generation: latest_generation.get() as u64,
-                            reason: ProviderCatalogRejectionReason::InstrumentUnavailable,
-                        },
-                        command: ProviderCatalogCommand::Selection,
-                    },
+                .send(catalog_rejection(
+                    latest_generation.get() as u64,
+                    ProviderCatalogRejectionReason::InstrumentUnavailable,
+                    true,
                 ))
                 .is_ok()
         );
@@ -2837,25 +2770,20 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::ProviderCatalog(
-                    ProviderCatalogEvent::CommandRejected {
-                        rejection: ProviderCatalogRejected {
-                            command_generation: first_generation,
-                            ..
-                        },
-                        command: ProviderCatalogCommand::Search,
-                    }
-                ),
-                MarketWorkerMessage::ProviderCatalog(
-                    ProviderCatalogEvent::CommandRejected {
-                        rejection: ProviderCatalogRejected {
-                            command_generation,
-                            reason,
-                            ..
-                        },
-                        command: ProviderCatalogCommand::Selection,
-                    }
-                )
+                MarketWorkerMessage::RuntimeCatalog(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::ProviderCatalogRejected {
+                        rejection: ProviderCatalogRejected { command_generation: first_generation, .. },
+                        selection: false,
+                    },
+                    ..
+                }),
+                MarketWorkerMessage::RuntimeCatalog(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::ProviderCatalogRejected {
+                        rejection: ProviderCatalogRejected { command_generation, reason, .. },
+                        selection: true,
+                    },
+                    ..
+                })
             ] if *first_generation == 1
                 && *command_generation == latest_generation.get() as u64
                 && *reason == ProviderCatalogRejectionReason::InstrumentUnavailable
@@ -2865,7 +2793,6 @@ mod tests {
     #[test]
     fn series_state_survives_catalog_rejection_in_the_bounded_mailbox() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let generation = NonZeroU64::MIN;
         let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
         assert!(
             sender
@@ -2877,17 +2804,10 @@ mod tests {
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::ProviderCatalog(
-                    ProviderCatalogEvent::CommandRejected {
-                        rejection: ProviderCatalogRejected {
-                            consumer_id: 1,
-                            provider: "rithmic".to_string(),
-                            provider_generation: Some(generation.get()),
-                            command_generation: latest_generation.get() as u64,
-                            reason: ProviderCatalogRejectionReason::SubscriptionRejected,
-                        },
-                        command: ProviderCatalogCommand::Selection,
-                    },
+                .send(catalog_rejection(
+                    latest_generation.get() as u64,
+                    ProviderCatalogRejectionReason::SubscriptionRejected,
+                    true,
                 ))
                 .is_ok()
         );
@@ -2905,7 +2825,7 @@ mod tests {
         ));
         assert!(matches!(
             messages[1],
-            MarketWorkerMessage::ProviderCatalog(_)
+            MarketWorkerMessage::RuntimeCatalog(_)
         ));
     }
 

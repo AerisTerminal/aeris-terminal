@@ -2,12 +2,12 @@
 
 use super::{
     EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, WorkerEndpoint, classify_provider_catalog_event,
-    complete_pending_recovery, initialize_catalog_endpoint, initialize_endpoint,
-    initialize_market_screen_endpoint, mpsc, process_command,
+    MarketWorkerCommand, MarketWorkerMessage, WorkerEndpoint, complete_pending_recovery,
+    initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
+    process_command,
 };
 use aeris_desktop::market_worker::{
-    MarketWorkerSendError, MarketWorkerSender, ProviderCatalogEvent, verified_terms_supersede,
+    MarketWorkerSendError, MarketWorkerSender, verified_terms_supersede,
 };
 use aeris_observability::diagnostic;
 use aeris_trading::market::MarketRoute;
@@ -425,11 +425,15 @@ fn apply_received_event(
         .role
         .demands_series()
         .then_some(record.endpoint.active_generation);
-    let (catalog, event) = classify_provider_catalog_event(event);
-    if let Some(catalog) = catalog {
-        return Ok(deliver_provider_catalog_event(record, catalog));
+    if is_catalog_event(&event) {
+        return Ok(deliver_provider_catalog_event(
+            record,
+            aeris_market_runtime::MarketConsumerEvent {
+                epoch: consumer_epoch,
+                value: event,
+            },
+        ));
     }
-    let Some(event) = event else { return Ok(false) };
     let endpoint = &mut record.endpoint;
     // A screen consumer owns no series, so any other event is not addressed to its presentation.
     if record.role == EndpointRole::MarketScreen {
@@ -490,18 +494,18 @@ fn apply_received_event(
 
 /// Delivers one provider catalog result to its pane and reports whether the
 /// worker's selected product changed.
-fn deliver_provider_catalog_event(
+pub(super) fn deliver_provider_catalog_event(
     record: &mut EndpointRecord,
-    event: ProviderCatalogEvent,
+    event: aeris_market_runtime::MarketConsumerEvent,
 ) -> bool {
     let mut changed = false;
-    if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
+    if let MarketRuntimeEvent::ProviderInstrumentSelection(selection) = &event.value
         && record.role == EndpointRole::Market
-        && verified_terms_supersede(&record.product, instrument)
+        && verified_terms_supersede(&record.product, &selection.instrument)
     {
         // Verified Terms supersede the provisional selected descriptor, not
         // a different pane selection. Ticket demand uses the same identity.
-        record.product = instrument.clone();
+        record.product = selection.instrument.clone();
         // The verified terms may change the calendar without changing the
         // instrument ID. Retry through the single session-status publisher
         // after this catalog reply, including when its mailbox was full.
@@ -511,7 +515,7 @@ fn deliver_provider_catalog_event(
     let endpoint = &record.endpoint;
     match endpoint
         .messages
-        .send(MarketWorkerMessage::ProviderCatalog(event))
+        .send(MarketWorkerMessage::RuntimeCatalog(event))
     {
         Ok(()) => changed,
         // A released pane cannot receive this catalog result; its command
@@ -525,6 +529,18 @@ fn deliver_provider_catalog_event(
             changed
         }
     }
+}
+
+fn is_catalog_event(event: &MarketRuntimeEvent) -> bool {
+    matches!(
+        event,
+        MarketRuntimeEvent::CatalogReady { .. }
+            | MarketRuntimeEvent::ProviderInstrumentSearchResult(_)
+            | MarketRuntimeEvent::ProviderInstrumentSelection(_)
+            | MarketRuntimeEvent::ProviderCatalogRejected { .. }
+            | MarketRuntimeEvent::ProviderMarketScreen(_)
+            | MarketRuntimeEvent::ProviderMarketScreenRejected(_)
+    )
 }
 
 fn deliver_fenced_pane_event(
@@ -1329,9 +1345,15 @@ mod tests {
         terms.session_generation = 2;
         assert!(deliver_provider_catalog_event(
             &mut records[0],
-            ProviderCatalogEvent::SelectionInstalled {
-                command_generation: 2,
-                instrument: terms.clone(),
+            Fenced {
+                epoch: EpochSequence::<ConsumerTag>::default().next(),
+                value: MarketRuntimeEvent::ProviderInstrumentSelection(
+                    aeris_market_runtime::MarketProviderInstrumentSelection {
+                        consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                        command_generation: 2,
+                        instrument: terms.clone(),
+                    },
+                ),
             },
         ));
         assert_eq!(records[0].session_status_sent, None);
@@ -1344,9 +1366,10 @@ mod tests {
         assert_eq!(queued.len(), 9);
         assert!(matches!(
             queued.last(),
-            Some(MarketWorkerMessage::ProviderCatalog(
-                ProviderCatalogEvent::SelectionInstalled { .. }
-            ))
+            Some(MarketWorkerMessage::RuntimeCatalog(Fenced {
+                value: MarketRuntimeEvent::ProviderInstrumentSelection(_),
+                ..
+            }))
         ));
         publish_session_statuses(&market, &mut records, false, &clock);
         let (messages, _) = receiver.drain();

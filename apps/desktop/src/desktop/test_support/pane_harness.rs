@@ -2819,12 +2819,16 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     };
     harness
         .publications
-        .send(MarketWorkerMessage::ProviderCatalog(
-            ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
-                provider: request.provider,
-                search_generation: request.search_generation,
-                ..ProviderInstrumentSearchResult::default()
-            }),
+        .send(MarketWorkerMessage::RuntimeCatalog(
+            harness.market_events.catalog(
+                aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
+                    ProviderInstrumentSearchResult {
+                        provider: request.provider,
+                        search_generation: request.search_generation,
+                        ..ProviderInstrumentSearchResult::default()
+                    },
+                ),
+            ),
         ))
         .expect("fixture search completion enters mailbox");
     harness.pane.update(cx, |pane, cx| {
@@ -2957,13 +2961,17 @@ fn complete_fixture_search(
 ) {
     harness
         .publications
-        .send(MarketWorkerMessage::ProviderCatalog(
-            ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
-                provider: request.provider.clone(),
-                search_generation: request.search_generation,
-                instruments: vec![instrument],
-                ..ProviderInstrumentSearchResult::default()
-            }),
+        .send(MarketWorkerMessage::RuntimeCatalog(
+            harness.market_events.catalog(
+                aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
+                    ProviderInstrumentSearchResult {
+                        provider: request.provider.clone(),
+                        search_generation: request.search_generation,
+                        instruments: vec![instrument],
+                        ..ProviderInstrumentSearchResult::default()
+                    },
+                ),
+            ),
         ))
         .expect("fixture search completion enters mailbox");
 }
@@ -2988,11 +2996,18 @@ fn pane_harness_verified_terms_replace_the_provisional_chart_descriptor(cx: &mut
     for instrument in [other, verified.clone()] {
         harness
             .publications
-            .send(MarketWorkerMessage::ProviderCatalog(
-                ProviderCatalogEvent::SelectionInstalled {
-                    command_generation: 1,
-                    instrument,
-                },
+            .send(MarketWorkerMessage::RuntimeCatalog(
+                harness.market_events.catalog(
+                    aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(
+                        aeris_market_runtime::MarketProviderInstrumentSelection {
+                            consumer_id: aeris_market_runtime::MarketConsumerId(
+                                std::num::NonZeroU64::MIN,
+                            ),
+                            command_generation: 1,
+                            instrument,
+                        },
+                    ),
+                ),
             ))
             .expect("verified terms enter mailbox");
     }

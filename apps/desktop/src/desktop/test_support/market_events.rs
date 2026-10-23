@@ -34,6 +34,14 @@ impl Default for FixtureMarketEvents {
 
 impl FixtureMarketEvents {
     #[must_use]
+    pub fn catalog(&self, event: MarketRuntimeEvent) -> MarketConsumerEvent {
+        Fenced {
+            epoch: self.envelope.epoch,
+            value: event,
+        }
+    }
+
+    #[must_use]
     pub fn trade_tape(&self, mut snapshot: MarketTradeTapeSnapshot) -> MarketConsumerEvent {
         snapshot.consumer_id = self.consumer_id;
         Fenced {

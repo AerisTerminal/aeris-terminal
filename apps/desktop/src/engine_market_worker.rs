@@ -42,12 +42,9 @@ pub(super) use aeris_market_runtime::{
 };
 use aeris_observability::FeedConnectionState;
 
-#[cfg(test)]
-use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_desktop::market_worker::{
     MarketDataWorker, MarketRecoveryFailure, MarketWorkerCommand, MarketWorkerMessage,
-    MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
-    market_worker_channel,
+    MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -1030,23 +1027,6 @@ mod tests {
         assert!(record.endpoint.depth_visible);
     }
 
-    fn handle_rithmic_catalog_event(
-        endpoint: &mut WorkerEndpoint,
-        event: MarketRuntimeEvent,
-    ) -> Option<MarketRuntimeEvent> {
-        let (catalog, event) = classify_provider_catalog_event(event);
-        match catalog {
-            Some(event) => {
-                endpoint
-                    .messages
-                    .send(MarketWorkerMessage::ProviderCatalog(event))
-                    .expect("fixture catalog result enters the pane mailbox");
-                None
-            }
-            None => event,
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn runtime_snapshot(
         consumer_id: u64,
@@ -1341,10 +1321,12 @@ mod tests {
         assert_eq!(startup.product, product);
         assert_eq!(startup.interval, ChartInterval::Minute5);
 
-        assert!(
-            handle_rithmic_catalog_event(
-                &mut record.endpoint,
-                MarketRuntimeEvent::ProviderInstrumentSearchResult(
+        let epoch = EpochSequence::<ConsumerTag>::default().next();
+        assert!(!runtime::deliver_provider_catalog_event(
+            &mut record,
+            Fenced {
+                epoch,
+                value: MarketRuntimeEvent::ProviderInstrumentSearchResult(
                     ProviderInstrumentSearchResult {
                         consumer_id: 41,
                         provider: "rithmic".to_string(),
@@ -1357,25 +1339,26 @@ mod tests {
                             ..ProviderInstrumentSummary::default()
                         }],
                     },
-                ),
-            )
-            .is_none()
-        );
+                )
+            },
+        ));
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::ProviderCatalog(
-                ProviderCatalogEvent::SearchCompleted(result)
-            )] if result.search_generation == 3
+            [MarketWorkerMessage::RuntimeCatalog(Fenced {
+                epoch: received_epoch,
+                value: MarketRuntimeEvent::ProviderInstrumentSearchResult(result),
+            })] if *received_epoch == epoch && result.search_generation == 3
         ));
 
         let mut selected = product.clone();
         selected.selection_generation = 5;
-        assert!(
-            handle_rithmic_catalog_event(
-                &mut record.endpoint,
-                MarketRuntimeEvent::ProviderInstrumentSelection(
+        assert!(runtime::deliver_provider_catalog_event(
+            &mut record,
+            Fenced {
+                epoch,
+                value: MarketRuntimeEvent::ProviderInstrumentSelection(
                     MarketProviderInstrumentSelection {
                         consumer_id: MarketConsumerId(
                             NonZeroU64::new(41).expect("nonzero consumer")
@@ -1383,20 +1366,19 @@ mod tests {
                         instrument: selected,
                         command_generation: 4,
                     }
-                ),
-            )
-            .is_none()
-        );
+                )
+            },
+        ));
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::ProviderCatalog(
-                ProviderCatalogEvent::SelectionInstalled {
-                    command_generation: 4,
-                    instrument,
-                }
-            )] if instrument.selection_generation == 5
+            [MarketWorkerMessage::RuntimeCatalog(Fenced {
+                epoch: received_epoch,
+                value: MarketRuntimeEvent::ProviderInstrumentSelection(
+                    MarketProviderInstrumentSelection { command_generation: 4, instrument, .. }
+                ),
+            })] if *received_epoch == epoch && instrument.selection_generation == 5
         ));
 
         drop(record);

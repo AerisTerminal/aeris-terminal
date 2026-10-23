@@ -4102,8 +4102,8 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RuntimeProviderState { event, generation } => {
                 self.apply_runtime_provider_state(event, generation, cx);
             }
-            MarketWorkerMessage::ProviderCatalog(event) => {
-                self.apply_provider_catalog_event(event, cx);
+            MarketWorkerMessage::RuntimeCatalog(event) => {
+                self.apply_runtime_catalog_event(event, cx);
             }
             MarketWorkerMessage::MarketSessionStatus { generation, status } => {
                 self.apply_fenced_market_session_status(generation, status, cx);
@@ -5053,12 +5053,14 @@ impl WorkspaceSurface {
         self.apply_market_connection_message(generation, connection, state.transport_rtt_nanos, cx);
     }
 
-    fn apply_provider_catalog_event(
+    fn apply_runtime_catalog_event(
         &mut self,
-        event: ProviderCatalogEvent,
+        event: aeris_market_runtime::MarketConsumerEvent,
         cx: &mut Context<Self>,
     ) {
-        self.apply_catalog_event(event, cx);
+        if let Some(event) = project_provider_catalog_event(event.value) {
+            self.apply_catalog_event(event, cx);
+        }
     }
 
     fn apply_catalog_results(

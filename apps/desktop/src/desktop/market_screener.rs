@@ -703,8 +703,10 @@ impl MarketScreener {
         let (messages, disconnected) = worker.drain_messages_up_to(SCREENER_MESSAGES_PER_POLL);
         for message in messages {
             match message {
-                MarketWorkerMessage::ProviderCatalog(event) => {
-                    outcome.changed |= self.apply_catalog_event(event, &mut outcome.opened);
+                MarketWorkerMessage::RuntimeCatalog(event) => {
+                    if let Some(event) = project_provider_catalog_event(event.value) {
+                        outcome.changed |= self.apply_catalog_event(event, &mut outcome.opened);
+                    }
                 }
                 MarketWorkerMessage::CatalogFailure { message } => {
                     self.pending_screen = None;

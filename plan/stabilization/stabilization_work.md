@@ -1825,6 +1825,16 @@ Status: pending
     unrelated timing dependency needs owner investigation; it is not
     proof of deterministic test behavior. Catalog/screener and Part 8
     remain open; M6.6 and VAL-DSK-021/022 are not closed.
+  - Part 7g: catalog search, selection and market-screen callbacks now remain
+    coordinator-fenced through the bounded endpoint mailbox and are projected
+    only by the pane or screener. The old worker-built ProviderCatalog variant
+    and conversion route are deleted. The presentation-only catalog event
+    shape moved from the worker into the desktop projection owner. Existing
+    pane search, verified-terms and rejection regressions use canonical
+    consumer events; the worker regression checks the exact retained consumer
+    epoch and request sequence, and screen callbacks check request identity.
+    App-scoped catalog failures remain explicit local controls; Part 8 must
+    collapse the remaining message/mailbox model and prove VAL-DSK-021/022.
   - Parallel-suite publication timing follow-up: the trading owner's command
     reply precedes the end-of-turn publication. The revision-step fixture
     now uses the subsequent owner status command as a publication barrier,
@@ -2436,6 +2446,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M6.6 Part 7e refactor(desktop): removed the unproduced diagnostic mailbox route and pane logger; real app-scoped catalog failure controls retain FIFO order with market publications and report bounded backpressure. Catalog/screener, alert-sync and Part 8 remain.
 - 2026-10-24 M6.6 Part 7f fix(desktop): correlate local alert-sync results with the latest accepted pane command sequence; reject stale success and failure before notice mutation. Catalog/screener and Part 8 remain.
 - 2026-10-24 M6.6 timing follow-up test(trading): use a subsequent owner command as the publication completion barrier for every_revision_changing_step_is_published; the test no longer races a five-second wait after an early command reply. Catalog/screener and Part 8 remain.
+- 2026-10-24 M6.6 Part 7g refactor(desktop): retained coordinator consumer envelopes for catalog and screener replies to presentation; removed the old worker-built catalog conversion and moved the view projection to desktop. Part 8 and VAL-DSK-021/022 remain open.
 - 2026-10-23 UI feat(design-system): platform theme presets (Aeris, Tokyo Night, Catppuccin, GitHub, One, Dracula, Solarized, Gruvbox; light and dark) compile from platform.css into `ThemePreset`/`AerisTheme::resolve` and are picked in the profile menu; chart_integration pins theme-following chart colors to a non-Aeris preset's tokens so Aeris Charts never knows presets. Chart settings gain persisted axis border and axis text colors (appearance tags 28/29, empty follows the theme). Aeris Charts pinned to 2ed6e82 (wheel zoom/pan). Restriction: presets live only in platform.css and the design system; the engine keeps its own defaults. Time-axis labels still follow the chart text color, and the selected preset is not persisted (neither is the color mode).
 - 2026-10-23 UI fix(desktop): preset picker swatch dots sit inside their ring by an equal padding instead of flex-centering a fixed size, so they no longer drift off-center by half a pixel.
 - 2026-10-23 UI style(design-system): no stabilization item. The Aeris theme follows the updated `themes.md`: light `border-secondary` `#0a0a0a1a`, light hover/active `#0a0a0a0d`; dark `surface` `#171717`, translucent dark `surface-secondary` `#fafafa0f`, dark borders `#fafafa1a`/`#fafafa26`, text `#fafafa`, muted `#fafafa40`, hover `#fafafa13`. The Aeris-only popover layer returns: `popover_surface`, menu rows and tooltips use `surface-popover` with a `border-popover-highlight` inner edge and a 1px solid `border-popover` outer ring; presets resolve the tokens to `surface-secondary`, transparent and `border-secondary`. `CSS.md` and the website's `platform.css` carry the same Aeris tokens. Restriction recorded in section 5.

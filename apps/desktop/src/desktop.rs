@@ -148,8 +148,7 @@ use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
     MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
-    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
-    verified_terms_supersede,
+    PendingUiDiagnostics, UiDiagnosticsFeedback, verified_terms_supersede,
 };
 use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
 use aeris_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
@@ -170,6 +169,9 @@ use aeris_terminal_ui::{
 };
 use assets::UiIcon as HugeIcon;
 use big_trades_dialog::big_trades_dialog_layer;
+use catalog_projection::{
+    ProviderCatalogCommand, ProviderCatalogEvent, project_provider_catalog_event,
+};
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, SETTINGS_CONTROL_WIDTH, chart_context_menu_layer,
@@ -3853,6 +3855,7 @@ fn initialize_chart_chrome(
     }
 }
 
+mod catalog_projection;
 mod workspace_surface;
 
 fn catalog_rejection_message(

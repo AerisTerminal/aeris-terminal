@@ -7,23 +7,24 @@ use super::{
     ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuAction,
     InstrumentMenuEntry, InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN,
     PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
-    ProviderConnectionPresentation, SidePanel, SidePanelVisibility, SymbolInputAction,
-    SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
-    TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter, TimeSalesSideFilter,
-    TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState,
-    WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-    WorkspaceMaximizeTransition, active_workspace_after_close, bounded_status_detail,
-    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
-    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_menu_extent,
-    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    ProviderCatalogEvent, ProviderConnectionPresentation, SidePanel, SidePanelVisibility,
+    SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP,
+    TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter,
+    TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
+    WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
+    WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
+    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    catalog_rejection_message, chart_position_id, chart_price_fixed_point,
+    chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
+    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
+    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, counted, current_instrument_menu_index,
     desktop_key_bindings, durable_workspace_viewport, first_selectable_instrument_index,
     fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
-    overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
+    overlay_height, price_axis_flyout_rows, price_axis_root_rows, project_provider_catalog_event,
+    publication_chart_state, reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
     should_finish_chrome_overlay_close, stabilized_connection_state, symbol_input_action,
     symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
@@ -3081,8 +3082,8 @@ fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
         provider: "rithmic".into(),
     };
     assert!(matches!(
-        aeris_desktop::market_worker::classify_provider_catalog_event(event).0,
-        Some(aeris_desktop::market_worker::ProviderCatalogEvent::CatalogReady { provider }) if provider == "rithmic"
+        project_provider_catalog_event(event),
+        Some(ProviderCatalogEvent::CatalogReady { provider }) if provider == "rithmic"
     ));
 }
 
@@ -3103,8 +3104,8 @@ fn catalog_rejection_lane_comes_from_the_runtime_not_the_reason() {
             selection,
         };
         assert!(matches!(
-            aeris_desktop::market_worker::classify_provider_catalog_event(event).0,
-            Some(aeris_desktop::market_worker::ProviderCatalogEvent::CommandRejected {
+            project_provider_catalog_event(event),
+            Some(ProviderCatalogEvent::CommandRejected {
                 command,
                 ..
             }) if command == expected
