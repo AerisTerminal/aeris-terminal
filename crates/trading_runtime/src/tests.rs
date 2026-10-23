@@ -111,9 +111,15 @@ fn simulated_currency_mismatch_is_typed_before_an_order_fact() {
 #[test]
 fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
     let directory = TestDirectory::new("unknown-grid-warning");
-    let service = start_service(&directory);
     let mut instrument = instrument();
     instrument.contract.price_grid = aeris_instruments::PriceGrid::Unknown;
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument,
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     service.register_instrument(instrument).expect("instrument");
     let broker_id = TradingAccountId::try_new("warning-demo").expect("id");
     service
@@ -372,7 +378,13 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
 #[test]
 fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
     let directory = TestDirectory::new("stale-order-revision");
-    let service = start_service(&directory);
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument");
