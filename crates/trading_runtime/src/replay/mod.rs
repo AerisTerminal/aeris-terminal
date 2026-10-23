@@ -3,16 +3,65 @@
 
 use super::*;
 use aeris_trading::market::{
-    FeedState, InstrumentTerms, MarketFeedEvent, MarketRoute, TradingQuote,
+    FeedReason, FeedState, InstrumentTerms, MarketFeedEvent, MarketRoute, TradingQuote,
 };
 use aeris_trading::{FeeModel, LedgerEntryKind};
 use std::fmt::Write;
+
+/// The replay feed's provider identity. Verified Terms, sessions, feed states and quotes
+/// all carry it, and the registered instrument's contract provenance matches it, so
+/// re-registering Terms after a restart stays an idempotent no-op.
+const REPLAY_PROVIDER: &str = "replay-feed";
+const REPLAY_VENUE: &str = "REPLAY";
+/// Receipt time for the harness's inert book quotes: it predates every scenario's recovery
+/// floor, so an observation sourced from the book can mark positions but never execute an
+/// order, while admission and observation gating still see a current, fresh quote.
+const INERT_QUOTE_RECEIVED: i64 = 1;
+/// The rebased owner clock for scenario execution: every fixture observation time sits
+/// above it, so fixture fills clear both the recovery floor and the acceptance-time fence.
+const REPLAY_CLOCK_FLOOR: i64 = 1_000;
+
+/// The replay instrument's verified route: its provider identity and symbols come from the
+/// registered contract provenance, so the Terms-derived instrument is byte-identical.
+fn replay_route(instrument: &TradingInstrument) -> MarketRoute {
+    MarketRoute {
+        provider_id: REPLAY_PROVIDER.to_string(),
+        instrument_id: instrument.instrument_id.clone(),
+        provider_symbol: instrument.contract.provenance.provider_symbol.clone(),
+        display_symbol: instrument.contract.provenance.display_symbol.clone(),
+        venue_id: REPLAY_VENUE.to_string(),
+        entitlement_id: None,
+        price_scale: instrument.price_scale,
+        quantity_scale: instrument.quantity_scale,
+    }
+}
+
+/// Verified Terms for the replay instrument, mirroring what the market runtime delivers
+/// for a subscribed instrument.
+fn replay_terms(instrument: &TradingInstrument) -> InstrumentTerms {
+    InstrumentTerms {
+        route: replay_route(instrument),
+        instrument_class: instrument.contract.instrument_class,
+        price_grid: instrument.contract.price_grid,
+        point_value: instrument.contract.point_value,
+        quantity_increment: instrument.contract.order_quantity_increment,
+        currency: instrument.contract.currency.clone(),
+        expiry: instrument.contract.expiry,
+        first_notice: instrument.contract.first_notice,
+        last_trade: instrument.contract.last_trade,
+        session_hours: instrument.contract.session_hours.clone(),
+        session_generation: 1,
+    }
+}
 
 /// Single-threaded replay of the production core against a real, private SQLite file.
 struct ReplayHarness {
     core: Option<TradingCore>,
     configuration: TradingServiceConfig,
+    instrument: Option<TradingInstrument>,
     feed_ready: bool,
+    /// Bid and ask units of the quote the owner book currently retains, if any.
+    book_quote: Option<(i64, i64)>,
 }
 
 impl ReplayHarness {
@@ -31,7 +80,9 @@ impl ReplayHarness {
         Ok(Self {
             core: Some(core),
             configuration,
+            instrument: None,
             feed_ready: false,
+            book_quote: None,
         })
     }
 
@@ -39,73 +90,141 @@ impl ReplayHarness {
         // Releasing the SQLite connection is part of the restart, not merely reloading state.
         drop(self.core.take());
         self.core = Self::new(self.configuration.clone())?.core;
+        // The route is durable, but the session, feed state and retained quote are owner
+        // memory: a restarted epoch re-primes them before its first admission or fill.
         self.feed_ready = false;
+        self.book_quote = None;
+        if self.instrument.is_some() {
+            self.ensure_route();
+        }
         Ok(())
+    }
+
+    fn instrument(&self) -> &TradingInstrument {
+        self.instrument
+            .as_ref()
+            .expect("replay instrument registered")
+    }
+
+    fn apply_feed_controls(&mut self, controls: Vec<MarketFeedEvent>) {
+        self.core
+            .as_mut()
+            .expect("replay core is open")
+            .apply_market_batch(crate::core::market::feed::MarketFeedBatch {
+                quotes: Vec::new(),
+                controls,
+                resync: false,
+            });
+    }
+
+    fn apply_feed_quote(&mut self, quote: TradingQuote) {
+        self.core
+            .as_mut()
+            .expect("replay core is open")
+            .apply_market_batch(crate::core::market::feed::MarketFeedBatch {
+                quotes: vec![quote],
+                controls: Vec::new(),
+                resync: false,
+            });
+    }
+
+    /// Registers the verified route, an open session and the Live feed state through the
+    /// real owner feed path, exactly as the market runtime delivers them for a subscribed
+    /// instrument. Called lazily so every process epoch re-primes its owner-memory feed.
+    fn ensure_route(&mut self) {
+        if self.feed_ready {
+            return;
+        }
+        let instrument = self.instrument().clone();
+        let id = instrument.instrument_id.clone();
+        self.apply_feed_controls(vec![
+            MarketFeedEvent::Terms(replay_terms(&instrument)),
+            super::market_feed::live_session(id.clone(), 1),
+            super::market_feed::feed_state(id, 1, FeedState::Live),
+        ]);
+        self.feed_ready = true;
+    }
+
+    /// Ensures the owner book holds one verified quote so admission and observation gating
+    /// pass. The quote's receipt predates the recovery floor: its own book observation can
+    /// mark positions but never execute an order, so scenario fills keep coming from their
+    /// fixture observations exactly as the frozen transcripts recorded them.
+    fn ensure_book_quote(&mut self, bid: i64, ask: i64) {
+        self.ensure_route();
+        match self.book_quote {
+            Some(retained) if retained == (bid, ask) => return,
+            // A different retained quote could cross the order being admitted; drop it
+            // so the replacement is the only quote placement can see.
+            Some(_) => self.resume_live_without_quote(),
+            None => {}
+        }
+        let scale = self.instrument().price_scale;
+        let (bid, ask) = (
+            FixedPoint::try_new(bid, scale).expect("inert bid"),
+            FixedPoint::try_new(ask, scale).expect("inert ask"),
+        );
+        self.feed_book_quote(bid, ask);
+    }
+
+    fn feed_book_quote(&mut self, bid: FixedPoint, ask: FixedPoint) {
+        let id = self.instrument().instrument_id.clone();
+        self.apply_feed_quote(TradingQuote {
+            instrument_id: id,
+            bid,
+            ask,
+            bid_size: None,
+            ask_size: None,
+            last: None,
+            provider_id: REPLAY_PROVIDER.to_string(),
+            provider_generation: 1,
+            source_sequence: Some(1),
+            exchange_unix_nanos: None,
+            received_unix_nanos: INERT_QUOTE_RECEIVED,
+        });
+        self.book_quote = Some((bid.units(), ask.units()));
+    }
+
+    /// A provider resume drops the retained quote and returns the feed to Live, so a
+    /// market order placed after an observation waits for its fill quote instead of
+    /// filling at the retained book price at placement.
+    fn resume_live_without_quote(&mut self) {
+        let id = self.instrument().instrument_id.clone();
+        self.apply_feed_controls(vec![
+            super::market_feed::feed_state(
+                id.clone(),
+                1,
+                FeedState::Unavailable {
+                    reason: FeedReason::Recovering,
+                },
+            ),
+            super::market_feed::feed_state(id, 1, FeedState::Live),
+        ]);
+        self.book_quote = None;
     }
 
     /// Delivers one quote through the real market-event path so flatten and reverse price from
     /// the owner's verified quote book exactly like production; the direct-observation command
     /// bypasses the book and cannot price them.
-    fn feed_quote(
-        &mut self,
-        instrument: &TradingInstrument,
-        observation: &SimulatedMarketObservation,
-    ) -> Result<(), String> {
-        let id = observation.instrument_id.clone();
-        let mut controls = Vec::new();
-        if !self.feed_ready {
-            controls.push(MarketFeedEvent::Terms(InstrumentTerms {
-                route: MarketRoute {
-                    provider_id: "replay-feed".to_string(),
-                    instrument_id: id.clone(),
-                    provider_symbol: "REPLAY".to_string(),
-                    display_symbol: "REPLAY".to_string(),
-                    venue_id: "REPLAY".to_string(),
-                    entitlement_id: None,
-                    price_scale: 2,
-                    quantity_scale: 0,
-                },
-                instrument_class: instrument.contract.instrument_class,
-                price_grid: instrument.contract.price_grid,
-                point_value: instrument.contract.point_value,
-                quantity_increment: instrument.contract.order_quantity_increment,
-                currency: instrument.contract.currency.clone(),
-                expiry: instrument.contract.expiry,
-                first_notice: instrument.contract.first_notice,
-                last_trade: instrument.contract.last_trade,
-                session_hours: instrument.contract.session_hours.clone(),
-                session_generation: 1,
-            }));
-            controls.push(super::market_feed::live_session(id.clone(), 1));
-            controls.push(super::market_feed::feed_state(
-                id.clone(),
-                1,
-                FeedState::Live,
-            ));
-        }
+    fn feed_quote(&mut self, observation: &SimulatedMarketObservation) -> Result<(), String> {
+        self.core
+            .as_ref()
+            .ok_or_else(|| "replay core is stopped".to_string())?;
+        self.ensure_route();
         let quote = TradingQuote {
-            instrument_id: id,
+            instrument_id: observation.instrument_id.clone(),
             bid: observation.bid,
             ask: observation.ask,
             bid_size: None,
             ask_size: None,
             last: None,
-            provider_id: "replay-feed".to_string(),
+            provider_id: REPLAY_PROVIDER.to_string(),
             provider_generation: 1,
             source_sequence: Some(observation.provenance.source_sequence),
             exchange_unix_nanos: None,
             received_unix_nanos: observation.provenance.observed_unix_nanos,
         };
-        let core = self
-            .core
-            .as_mut()
-            .ok_or_else(|| "replay core is stopped".to_string())?;
-        core.apply_market_batch(crate::core::market::feed::MarketFeedBatch {
-            quotes: vec![quote],
-            controls,
-            resync: false,
-        });
-        self.feed_ready = true;
+        self.apply_feed_quote(quote);
+        self.book_quote = Some((observation.bid.units(), observation.ask.units()));
         Ok(())
     }
 
@@ -171,6 +290,14 @@ impl ReplayHarness {
         &mut self,
         observation: SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
+        self.ensure_route();
+        if self.book_quote.is_none() {
+            // Observation gating needs a current verified quote in the book. The inert
+            // quote carries this observation's prices, so the fixture observation that
+            // follows it still supplies every fill with its own recorded provenance.
+            let (bid, ask) = (observation.bid, observation.ask);
+            self.feed_book_quote(bid, ask);
+        }
         self.command(|reply| Command::Observe(observation, reply))
     }
 
@@ -233,6 +360,9 @@ impl ReplayHarness {
             let now = 10_000 + i64::try_from(step).expect("bounded replay steps");
             match value % 4 {
                 0 => {
+                    // The resting limit needs a current verified quote at admission; the
+                    // inert book quote never executes anything itself.
+                    self.ensure_book_quote(10_000, 10_025);
                     let mut order = market_order(
                         &format!("seed-{seed}-{step}"),
                         OrderSide::Buy,
@@ -502,9 +632,10 @@ fn start_golden_service(
 fn start_golden_service_with_instrument(
     directory: &TestDirectory,
     clock: std::sync::Arc<crate::clock::ManualClock>,
-    instrument: TradingInstrument,
+    mut instrument: TradingInstrument,
 ) -> ReplayHarness {
     let mut configuration = config(directory);
+    let manual_clock = clock.clone();
     configuration.clock = clock;
     configuration.retention.maximum_fills = 64;
     configuration.retention.maximum_order_events = 64;
@@ -522,9 +653,20 @@ fn start_golden_service_with_instrument(
             starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
         })
         .expect("account registers");
+    // The replay feed owns the instrument's provider identity: verified Terms derive a
+    // byte-identical instrument, so registering it afterwards is an idempotent no-op and the
+    // instrument's one registration revision comes from its verified route.
+    instrument.contract.provenance.provider_id = REPLAY_PROVIDER.to_string();
+    service.instrument = Some(instrument.clone());
+    service.ensure_route();
     service
         .register_instrument(instrument)
         .expect("instrument registers");
+    // Registrations stamp the durable deposit at the scenario's own clock; execution
+    // fencing needs the owner clock below every fixture observation time, so restart into
+    // the rebased clock before the scenario runs.
+    manual_clock.set_wall_unix_nanos(REPLAY_CLOCK_FLOOR);
+    service.restart().expect("rebase restart");
     service
 }
 
@@ -596,13 +738,14 @@ fn crypto_stop_restart_accounting_scenario() -> String {
     let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
     let (mut harness, crypto) = crypto_replay_harness(&directory, clock.clone());
     let mut trace = String::new();
-    let entry_quote = crypto_replay_quote(&crypto, 10_000, 10_025, 1, 1_000);
-    harness
-        .observe_market(entry_quote.clone())
-        .expect("fresh quote");
     let mut entry = market_order("crypto-entry", OrderSide::Buy, 2, 2_000);
     entry.instrument_id = crypto.instrument_id.clone();
+    // A market entry waits as a Live order without a retained quote, exactly like
+    // production; the fixture observation still supplies its fill.
     harness.place_order(entry).expect("buy accepted");
+    harness
+        .observe_market(crypto_replay_quote(&crypto, 10_000, 10_025, 1, 1_000))
+        .expect("fresh quote");
     let entry_fills = harness
         .observe_market(crypto_replay_quote(&crypto, 10_000, 10_025, 3, 3_000))
         .expect("market buy fills");
@@ -742,11 +885,11 @@ fn fee_round_trip_scenario() -> String {
         .expect("fee schedule");
     let mut trace = String::new();
     harness
-        .observe_market(observation(10_000, 10_025, 1, 1_000))
-        .expect("fresh quote");
-    harness
         .place_order(market_order("fee-entry", OrderSide::Buy, 2, 2_000))
         .expect("buy accepted");
+    harness
+        .observe_market(observation(10_000, 10_025, 1, 1_000))
+        .expect("fresh quote");
     let entry_fills = harness
         .observe_market(observation(10_000, 10_025, 3, 3_000))
         .expect("entry fill");
@@ -757,7 +900,10 @@ fn fee_round_trip_scenario() -> String {
     );
     record("taker entry pays commission", &harness, &mut trace);
 
-    clock.set_wall_unix_nanos(6_000);
+    // The exit waits for its fill quote: a provider resume drops the retained book quote
+    // so the market order does not fill at placement, and the clock stays below the exit
+    // quote's observation time so the fixture fill clears the acceptance fence.
+    harness.resume_live_without_quote();
     harness
         .place_order(market_order("fee-exit", OrderSide::Sell, 4, 4_000))
         .expect("sell accepted");
@@ -872,11 +1018,10 @@ fn bracket_stop_after_restart_scenario() -> String {
     let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
     let mut harness = start_golden_service(&directory, clock.clone());
     let mut trace = String::new();
-    harness
-        .observe_market(observation(9_975, 10_000, 1, 1_000))
-        .expect("fresh quote");
     let mut entry = market_order("golden-bracket", OrderSide::Buy, 2, 2_000);
     entry.quantity = quantity(2);
+    // The bracket's market entry waits for the fixture fill observation; its held legs
+    // are inactive until that fill, so the whole group places while no quote is retained.
     harness
         .place_inline_bracket(PlaceInlineBracket {
             entry,
@@ -901,6 +1046,9 @@ fn bracket_stop_after_restart_scenario() -> String {
             },
         })
         .expect("bracket placed");
+    harness
+        .observe_market(observation(9_975, 10_000, 1, 1_000))
+        .expect("fresh quote");
     let entry_fills = harness
         .observe_market(observation(9_975, 10_000, 3, 3_000))
         .expect("entry fills");
@@ -910,6 +1058,9 @@ fn bracket_stop_after_restart_scenario() -> String {
 
     let before_restart = harness.snapshot().expect("before restart");
     harness.restart().expect("restart with an active bracket");
+    // The recovered epoch's quote floor is fixed at its open; the frozen transcript stamps
+    // the cascade cancels at the later owner clock.
+    clock.set_wall_unix_nanos(5_000);
     assert_restart_preserves(&before_restart, &harness.snapshot().expect("recovered"));
     record("restart preserves the active bracket", &harness, &mut trace);
 
@@ -960,7 +1111,7 @@ fn replay_bracket_stop_after_restart_golden() {
 fn maker_bracket_fee_chain_scenario() -> String {
     let directory = TestDirectory::new("maker-bracket-fee-golden");
     let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
-    let mut harness = start_golden_service(&directory, clock);
+    let mut harness = start_golden_service(&directory, clock.clone());
     harness
         .set_fee_schedule(
             TradingAccountId::try_new("aeris-sim-1").expect("account"),
@@ -1016,6 +1167,9 @@ fn maker_bracket_fee_chain_scenario() -> String {
 
     let active = harness.snapshot().expect("active");
     harness.restart().expect("restart with active legs");
+    // The recovered epoch's quote floor is fixed at its open; the frozen transcript stamps
+    // the cascade cancels at the later owner clock.
+    clock.set_wall_unix_nanos(5_000);
     assert_restart_preserves(&active, &harness.snapshot().expect("recovered"));
     record("restart preserves active legs", &harness, &mut trace);
     let exit_fills = harness
@@ -1170,9 +1324,13 @@ fn replay_failed_stop_fill_keeps_target_and_bracket_working_until_replay() {
 
 fn script_place_touch_modify_cancel_flatten(
     service: &mut ReplayHarness,
+    clock: &crate::clock::ManualClock,
     account: &TradingAccountId,
     trace: &mut String,
 ) {
+    // A resting limit needs a current verified quote at admission; the inert book quote
+    // never executes anything itself.
+    service.ensure_book_quote(10_000, 10_025);
     let mut limit = market_order("touch-limit", OrderSide::Buy, 1, 1_000);
     limit.order_type = OrderType::Limit;
     limit.time_in_force = TimeInForce::GoodTillCancelled;
@@ -1196,6 +1354,9 @@ fn script_place_touch_modify_cancel_flatten(
     resting.time_in_force = TimeInForce::GoodTillCancelled;
     resting.limit_price = Some(FixedPoint::try_new(10_500, 2).expect("resting price"));
     service.place_order(resting).expect("resting order");
+    // The frozen transcript stamps the modify and cancel at the owner clock, not the
+    // fixture times the commands themselves carry.
+    clock.set_wall_unix_nanos(5_000);
     service
         .modify_order(ModifyOrder {
             client_order_id: ClientOrderId::try_new("modify-cancel").expect("client id"),
@@ -1212,7 +1373,7 @@ fn script_place_touch_modify_cancel_flatten(
         .expect("cancel resting order");
     record("cancel", service, trace);
     service
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 6, 6_000))
+        .feed_quote(&observation(10_100, 10_125, 6, 6_000))
         .expect("flatten quote");
     service
         .flatten(FlattenScope {
@@ -1229,8 +1390,11 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
     let mut service = start_golden_service(&directory, clock.clone());
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     let mut trace = String::new();
-    script_place_touch_modify_cancel_flatten(&mut service, &account, &mut trace);
+    script_place_touch_modify_cancel_flatten(&mut service, &clock, &account, &mut trace);
 
+    // The bracket's market entry waits for its fixture fill observation, so a provider
+    // resume drops the retained flatten quote before the group places.
+    service.resume_live_without_quote();
     let template = BracketStrategyTemplate {
         template_id: "golden-bracket".to_string(),
         revision: 1,
@@ -1256,7 +1420,7 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
     record("bracket active", &service, &mut trace);
     clock.set_wall_unix_nanos(8_000);
     service
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 9, 9_000))
+        .feed_quote(&observation(10_100, 10_125, 9, 9_000))
         .expect("bracket flatten quote");
     service
         .flatten(FlattenScope {
@@ -1273,7 +1437,7 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
         .observe_market(observation(10_000, 10_025, 11, 11_000))
         .expect("reverse entry fills");
     service
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 12, 12_000))
+        .feed_quote(&observation(10_100, 10_125, 12, 12_000))
         .expect("reverse quote");
     service
         .reverse_position(account.clone(), instrument().instrument_id)
@@ -1317,7 +1481,7 @@ fn replay_failed_flatten_commit_keeps_memory_and_disk_at_last_commit() {
         .observe_market(observation(9_975, 10_000, 2, 2_000))
         .expect("buy fills");
     harness
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 3, 3_000))
+        .feed_quote(&observation(10_100, 10_125, 3, 3_000))
         .expect("flatten quote");
     let before = harness.snapshot().expect("before flatten");
     harness.crash_during_commit(1);
@@ -1336,6 +1500,11 @@ fn replay_failed_flatten_commit_keeps_memory_and_disk_at_last_commit() {
         "a failed flatten commit leaves owner memory untouched"
     );
     harness.restart().expect("restart");
+    // Quote marks are owner memory: replaying the same verified quote restores the
+    // projection, so the comparison isolates the durable facts.
+    harness
+        .feed_quote(&observation(10_100, 10_125, 3, 3_000))
+        .expect("replayed flatten quote");
     assert_eq!(
         harness.snapshot().expect("disk unchanged"),
         before,
@@ -1344,7 +1513,7 @@ fn replay_failed_flatten_commit_keeps_memory_and_disk_at_last_commit() {
     // The quote book is owner memory: after a restart a fresh verified quote must arrive
     // before the position can be flattened.
     harness
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 4, 6_000))
+        .feed_quote(&observation(10_100, 10_125, 4, 6_000))
         .expect("post-restart quote");
     let flattened = harness
         .flatten(FlattenScope {
@@ -1375,7 +1544,7 @@ fn replay_failed_reverse_commit_leaves_the_position_untouched() {
         .observe_market(observation(9_975, 10_000, 2, 2_000))
         .expect("buy fills");
     harness
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 3, 3_000))
+        .feed_quote(&observation(10_100, 10_125, 3, 3_000))
         .expect("reverse quote");
     let before = harness.snapshot().expect("before reverse");
     harness.crash_during_commit(1);
@@ -1392,13 +1561,18 @@ fn replay_failed_reverse_commit_leaves_the_position_untouched() {
     );
     assert_eq!(unchanged.positions[0].net_quantity.units(), 1);
     harness.restart().expect("restart");
+    // Quote marks are owner memory: replaying the same verified quote restores the
+    // projection, so the comparison isolates the durable facts.
+    harness
+        .feed_quote(&observation(10_100, 10_125, 3, 3_000))
+        .expect("replayed reverse quote");
     assert_eq!(
         harness.snapshot().expect("disk unchanged"),
         before,
         "a failed reverse commit leaves the database untouched"
     );
     harness
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 4, 6_000))
+        .feed_quote(&observation(10_100, 10_125, 4, 6_000))
         .expect("post-restart quote");
     let reversed = harness
         .reverse_position(account.clone(), instrument().instrument_id)
@@ -1427,7 +1601,7 @@ fn replay_failed_kill_switch_commit_keeps_memory_and_disk_at_last_commit() {
         .observe_market(observation(9_975, 10_000, 2, 2_000))
         .expect("buy fills");
     harness
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 3, 3_000))
+        .feed_quote(&observation(10_100, 10_125, 3, 3_000))
         .expect("kill quote");
     let before = harness.snapshot().expect("before kill");
     harness.crash_during_commit(1);
@@ -1443,6 +1617,11 @@ fn replay_failed_kill_switch_commit_keeps_memory_and_disk_at_last_commit() {
         "a failed kill commit leaves owner memory untouched, including the lock"
     );
     harness.restart().expect("restart");
+    // Quote marks are owner memory: replaying the same verified quote restores the
+    // projection, so the comparison isolates the durable facts.
+    harness
+        .feed_quote(&observation(10_100, 10_125, 3, 3_000))
+        .expect("replayed kill quote");
     assert_eq!(
         harness.snapshot().expect("disk unchanged"),
         before,
@@ -1451,7 +1630,7 @@ fn replay_failed_kill_switch_commit_keeps_memory_and_disk_at_last_commit() {
     // The quote book is owner memory: after a restart a fresh verified quote must arrive
     // before the position can be flattened.
     harness
-        .feed_quote(&instrument(), &observation(10_100, 10_125, 4, 6_000))
+        .feed_quote(&observation(10_100, 10_125, 4, 6_000))
         .expect("post-restart quote");
     let killed = harness
         .kill_switch(Some(account), "atomic kill".to_string(), 7_000)
@@ -1546,6 +1725,7 @@ fn replay_restart_preserves_committed_transcript() {
     pending.order_type = OrderType::Limit;
     pending.time_in_force = TimeInForce::GoodTillCancelled;
     pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    harness.ensure_book_quote(10_000, 10_025);
     harness.place_order(pending).expect("place");
     let before = harness.transcript();
     harness.restart().expect("reopen same sqlite file");
@@ -1563,6 +1743,7 @@ fn replay_failed_commit_keeps_memory_and_disk_at_last_commit() {
     pending.order_type = OrderType::Limit;
     pending.time_in_force = TimeInForce::GoodTillCancelled;
     pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    harness.ensure_book_quote(10_000, 10_025);
     assert!(harness.place_order(pending).is_err());
     assert_eq!(harness.transcript(), before, "failed commit changed memory");
     harness.restart().expect("reopen after failed commit");
@@ -1579,6 +1760,7 @@ fn replay_failed_accept_cancel_and_amend_keep_publications_and_replay_once() {
         pending.order_type = OrderType::Limit;
         pending.time_in_force = TimeInForce::GoodTillCancelled;
         pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+        harness.ensure_book_quote(10_000, 10_025);
         if operation != "accept" {
             harness
                 .place_order(pending.clone())
@@ -1616,6 +1798,8 @@ fn replay_failed_accept_cancel_and_amend_keep_publications_and_replay_once() {
             before,
             "{operation}: disk"
         );
+        // The retained quote is owner memory; the reopened epoch needs a fresh one.
+        harness.ensure_book_quote(10_000, 10_025);
         apply(&mut harness).expect("replay once");
         let committed = harness.snapshot().expect("committed");
         assert_ne!(committed, before);
@@ -1731,7 +1915,10 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
 
     let directory = TestDirectory::new("broker-report-rollback");
     let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
-    let mut harness = start_golden_service(&directory, clock);
+    let mut harness = start_golden_service(&directory, clock.clone());
+    // Broker lifecycle facts are stamped at the owner clock; no simulated fill needs the
+    // rebased execution floor here.
+    clock.set_wall_unix_nanos(5_000);
     let account_id = TradingAccountId::try_new("replay-demo").expect("id");
     harness
         .register_account(TradingAccount {
@@ -1842,6 +2029,7 @@ fn replay_failed_cancel_all_rolls_back_bracket_and_multiple_orders() {
     entry.order_type = OrderType::Limit;
     entry.time_in_force = TimeInForce::GoodTillCancelled;
     entry.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    harness.ensure_book_quote(10_000, 10_025);
     harness
         .place_inline_bracket(PlaceInlineBracket {
             entry,
@@ -1891,6 +2079,7 @@ fn replay_failed_cancel_and_amend_keep_memory_and_disk_at_last_commit() {
         pending.order_type = OrderType::Limit;
         pending.time_in_force = TimeInForce::GoodTillCancelled;
         pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+        harness.ensure_book_quote(10_000, 10_025);
         harness.place_order(pending).expect("place");
         let before = harness.transcript();
         harness.crash_during_commit(2);
@@ -1930,6 +2119,7 @@ fn replay_cancel_and_amend_first_commit_failure_rolls_back_revision() {
         pending.order_type = OrderType::Limit;
         pending.time_in_force = TimeInForce::GoodTillCancelled;
         pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+        harness.ensure_book_quote(10_000, 10_025);
         harness.place_order(pending).expect("place");
         let before = harness.transcript();
         harness.crash_during_commit(1);
@@ -2334,6 +2524,9 @@ fn protection_tracks_the_position_through_close_scale_in_and_reversal() {
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     let instrument_id = instrument().instrument_id;
     let quote = |sequence: u64, time: i64| observation(9_975, 10_000, sequence, time);
+    // The bracket's limit entry prices at 10_000: hold an inert book quote above it so
+    // admission passes and the entry does not fill at its placement.
+    harness.ensure_book_quote(10_000, 10_025);
     harness
         .observe_market(quote(1, 1_000))
         .expect("fresh quote");
@@ -2355,6 +2548,9 @@ fn protection_tracks_the_position_through_close_scale_in_and_reversal() {
         (4, 4),
         "stop 4 and targets 2+2 after the fill"
     );
+    // Each manual market order waits for its fill observation instead of the retained
+    // book quote, so a provider resume precedes every placement.
+    harness.resume_live_without_quote();
     harness
         .place_order(manual_market("coverage-sell-1", OrderSide::Sell, 1, 4))
         .expect("manual sell accepted");
@@ -2365,6 +2561,7 @@ fn protection_tracks_the_position_through_close_scale_in_and_reversal() {
         "both roles shrink to the position"
     );
     for (step, quantity) in [(6_u64, 1_i64), (8, 2)] {
+        harness.resume_live_without_quote();
         harness
             .place_order(manual_market(
                 &format!("coverage-buy-{step}"),
@@ -2402,6 +2599,7 @@ fn assert_reversal_completes_every_group(
         }),
         "scale-in grows protection with a typed event"
     );
+    harness.resume_live_without_quote();
     harness
         .place_order(manual_market("coverage-reverse", OrderSide::Sell, 7, 10))
         .expect("reversal accepted");
