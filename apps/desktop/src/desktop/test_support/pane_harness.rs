@@ -3535,9 +3535,9 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
         });
         harness
             .publications
-            .send(MarketWorkerMessage::StudyRegistrationFailed {
+            .send(MarketWorkerMessage::StudyRegistrationOutcome {
                 request_sequence: sequence,
-                message: "private-credential-sentinel".into(),
+                result: Err("private-credential-sentinel".into()),
             })
             .expect("fixture study failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
@@ -3573,11 +3573,28 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
             },
         );
     });
+    for result in [
+        Ok(StudyInstanceId::try_from_u64(1).expect("fixture identity")),
+        Err("retired-registration-error".to_string()),
+    ] {
+        harness
+            .publications
+            .send(MarketWorkerMessage::StudyRegistrationOutcome {
+                request_sequence: 1,
+                result,
+            })
+            .expect("retired study outcome enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+            assert!(pane.studies.pending.contains_key(&3));
+            assert_eq!(pane.studies.active.len(), 0);
+        });
+    }
     harness
         .publications
-        .send(MarketWorkerMessage::StudyRegistered {
+        .send(MarketWorkerMessage::StudyRegistrationOutcome {
             request_sequence: 3,
-            study_id: StudyInstanceId::try_from_u64(3).expect("fixture identity"),
+            result: Ok(StudyInstanceId::try_from_u64(3).expect("fixture identity")),
         })
         .expect("fixture registration enters mailbox");
     harness.pane.update(cx, |pane, cx| {

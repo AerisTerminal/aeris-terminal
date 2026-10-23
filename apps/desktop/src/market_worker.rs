@@ -242,16 +242,13 @@ pub enum MarketWorkerMessage {
         sequence: u64,
         succeeded: bool,
     },
-    StudyRegistered {
+    /// Local study registration acknowledgement, fenced by its pending request sequence.
+    StudyRegistrationOutcome {
         request_sequence: u64,
-        study_id: StudyInstanceId,
+        result: Result<StudyInstanceId, String>,
     },
     StudyReinitialized {
         study_id: StudyInstanceId,
-    },
-    StudyRegistrationFailed {
-        request_sequence: u64,
-        message: String,
     },
     StudyReinitializationFailed {
         study_id: StudyInstanceId,
@@ -687,9 +684,8 @@ impl MarketDataWorker {
 
     /// Queues one trusted native study registration without blocking GPUI.
     ///
-    /// The returned sequence is acknowledged by either `StudyRegistered` or
-    /// `StudyRegistrationFailed`, so callers never infer runtime ownership from
-    /// whether an output happened to be ready immediately.
+    /// The returned sequence is acknowledged by `StudyRegistrationOutcome`,
+    /// so callers never infer runtime ownership from immediate output.
     ///
     /// # Errors
     /// Returns the complete request when the bounded command mailbox is full or

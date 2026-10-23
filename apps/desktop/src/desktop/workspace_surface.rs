@@ -4112,17 +4112,16 @@ impl WorkspaceSurface {
             MarketWorkerMessage::MarketSessionStatus { generation, status } => {
                 self.apply_fenced_market_session_status(generation, status, cx);
             }
-            MarketWorkerMessage::StudyRegistered {
+            MarketWorkerMessage::StudyRegistrationOutcome {
                 request_sequence,
-                study_id,
-            } => self.apply_study_registered(request_sequence, study_id, cx),
+                result,
+            } => match result {
+                Ok(study_id) => self.apply_study_registered(request_sequence, study_id, cx),
+                Err(message) => self.apply_study_registration_failed(request_sequence, message, cx),
+            },
             MarketWorkerMessage::StudyReinitialized { study_id } => {
                 self.apply_study_reinitialized(study_id, cx);
             }
-            MarketWorkerMessage::StudyRegistrationFailed {
-                request_sequence,
-                message,
-            } => self.apply_study_registration_failed(request_sequence, message, cx),
             MarketWorkerMessage::StudyReinitializationFailed {
                 study_id,
                 message: _,

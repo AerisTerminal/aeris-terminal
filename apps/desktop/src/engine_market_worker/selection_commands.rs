@@ -383,22 +383,14 @@ fn register_study(
     endpoint: &WorkerEndpoint,
     request: aeris_desktop::market_worker::StudyRegistrationRequest,
 ) -> Result<(), String> {
-    match market.register_study(client_id, endpoint.consumer_id, request.registration) {
-        Ok(study_id) => endpoint
-            .messages
-            .send(MarketWorkerMessage::StudyRegistered {
-                request_sequence: request.sequence,
-                study_id,
-            })
-            .map_err(|error| error.to_string()),
-        Err(message) => endpoint
-            .messages
-            .send(MarketWorkerMessage::StudyRegistrationFailed {
-                request_sequence: request.sequence,
-                message,
-            })
-            .map_err(|error| error.to_string()),
-    }
+    let result = market.register_study(client_id, endpoint.consumer_id, request.registration);
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::StudyRegistrationOutcome {
+            request_sequence: request.sequence,
+            result,
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn remove_study(
