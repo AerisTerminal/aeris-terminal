@@ -91,9 +91,15 @@ mod publication;
 #[test]
 fn simulated_currency_mismatch_is_typed_before_an_order_fact() {
     let directory = TestDirectory::new("currency-admission");
-    let service = start_service(&directory);
     let mut instrument = instrument();
     instrument.contract.currency = "EUR".into();
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument,
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     service.register_instrument(instrument).expect("instrument");
     let mut request = market_order("currency-mismatch", OrderSide::Buy, 1, 1_000);
     request.order_type = OrderType::Limit;
@@ -277,22 +283,14 @@ fn idle_manual_clock_owner_does_not_run_timer_before_deadline() {
 #[test]
 fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     let directory = TestDirectory::new("cancel-command-time");
-    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
-    let mut configuration = config(&directory);
-    configuration.clock = clock.clone();
-    let service = TradingService::start(configuration).expect("service starts");
+    let (service, clock, feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
+    // An open ticket keeps the quote subscribed after the last order is cancelled.
     service
-        .register_account(TradingAccount {
-            id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
-            display_name: "SIM test".into(),
-            environment: AccountEnvironment::Simulated,
-            venue_id: "aeris-sim".into(),
-            broker_ref: None,
-            currency: "USD".into(),
-            currency_scale: 2,
-            starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
-        })
-        .expect("account");
+        .set_ticket_interest(vec![market_feed::route()])
+        .expect("ticket interest");
+    push_live_quote(&feed, &instrument(), 1, 10_000, 10_025, 2);
+    service.status().expect("quote drains");
     service
         .register_instrument(instrument())
         .expect("instrument");
@@ -323,6 +321,9 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
         .expect("cancel event");
     assert_eq!(event.event_unix_nanos, 1_090_000_000_000);
     clock.set_wall_unix_nanos(1_002_000_000_000);
+    // Command time stays clamped at 1_090s, so admission needs a quote received by then.
+    push_live_quote(&feed, &instrument(), 90_000, 10_000, 10_025, 2);
+    service.status().expect("fresh quote drains");
     let mut second = market_order("clock-limit-2", OrderSide::Buy, 2, 1_002_000_000_000);
     second.order_type = OrderType::Limit;
     second.time_in_force = TimeInForce::GoodTillCancelled;
@@ -460,16 +461,19 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
 #[test]
 fn stale_revision_after_fill_returns_the_terminal_order_without_a_new_fact() {
     let directory = TestDirectory::new("filled-stale-order");
-    let service = start_service(&directory);
+    let (service, _clock, feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument");
     let accepted = service
         .place_order(market_order("filled-stale", OrderSide::Buy, 1, 1_000))
         .expect("accepted");
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("filled");
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
+        1,
+        "filled"
+    );
     let before = service.snapshot().expect("filled snapshot");
     let current = before
         .orders
@@ -515,7 +519,13 @@ fn stale_revision_after_fill_returns_the_terminal_order_without_a_new_fact() {
 #[test]
 fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_restart() {
     let directory = TestDirectory::new("client-id-reuse");
-    let service = start_service(&directory);
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument");
@@ -826,6 +836,27 @@ pub(crate) fn push_live_quote(
     ask: i64,
     price_scale: u8,
 ) {
+    push_live_quote_at(
+        feed,
+        instrument,
+        sequence,
+        bid,
+        ask,
+        price_scale,
+        1_000_000_000_000 + i64::try_from(sequence).expect("sequence") * 1_000_000,
+    );
+}
+
+/// Pushes one Live quote received at an explicit owner-clock time.
+pub(crate) fn push_live_quote_at(
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+    sequence: u64,
+    bid: i64,
+    ask: i64,
+    price_scale: u8,
+    received_unix_nanos: i64,
+) {
     feed.push(MarketFeedEvent::Quote(TradingQuote {
         instrument_id: instrument.instrument_id.clone(),
         bid: FixedPoint::try_new(bid, price_scale).expect("bid"),
@@ -837,8 +868,7 @@ pub(crate) fn push_live_quote(
         provider_generation: 1,
         source_sequence: Some(sequence),
         exchange_unix_nanos: None,
-        received_unix_nanos: 1_000_000_000_000
-            + i64::try_from(sequence).expect("sequence") * 1_000_000,
+        received_unix_nanos,
     }))
     .expect("quote");
 }
@@ -852,13 +882,123 @@ pub(crate) fn routed_fixture(
     bid: i64,
     ask: i64,
 ) -> (TradingService, Arc<crate::clock::ManualClock>) {
-    let (service, clock, feed) = live_feed_service(directory);
-    bootstrap_live_feed(&feed, instrument, route);
+    let (service, clock, _feed) = quoted_fixture(directory, instrument, route, bid, ask);
+    (service, clock)
+}
+
+/// [`routed_fixture`] that also returns the owner inbox for later quotes.
+pub(crate) fn quoted_fixture(
+    directory: &TestDirectory,
+    instrument: &TradingInstrument,
+    route: aeris_trading::market::MarketRoute,
+    bid: i64,
+    ask: i64,
+) -> (
+    TradingService,
+    Arc<crate::clock::ManualClock>,
+    Arc<crate::core::market::feed::MarketFeedInbox>,
+) {
+    let (service, clock, feed) = awaiting_quote_fixture(directory, instrument, route);
     push_live_quote(&feed, instrument, 1, bid, ask, instrument.price_scale);
     service
         .status()
         .expect("owner drains verified fixture feed");
-    (service, clock)
+    (service, clock, feed)
+}
+
+/// Starts the deterministic service fixture with verified Terms, an open session and Live feed
+/// state but no quote yet, so a market entry stays Working until the owner's next quote.
+pub(crate) fn awaiting_quote_fixture(
+    directory: &TestDirectory,
+    instrument: &TradingInstrument,
+    route: aeris_trading::market::MarketRoute,
+) -> (
+    TradingService,
+    Arc<crate::clock::ManualClock>,
+    Arc<crate::core::market::feed::MarketFeedInbox>,
+) {
+    let (service, clock, feed) = live_feed_service(directory);
+    bootstrap_live_feed(&feed, instrument, route);
+    service
+        .status()
+        .expect("owner drains verified fixture feed");
+    (service, clock, feed)
+}
+
+/// Reopens the fixture store on the same clock; the market runtime republishes the session
+/// and Live state for the persisted route, but no quote has arrived yet.
+pub(crate) fn reopen_awaiting_quote(
+    directory: &TestDirectory,
+    clock: &Arc<crate::clock::ManualClock>,
+    instrument: &TradingInstrument,
+    route: aeris_trading::market::MarketRoute,
+) -> (
+    TradingService,
+    Arc<crate::core::market::feed::MarketFeedInbox>,
+) {
+    let mut configuration = config(directory);
+    configuration.clock = clock.clone();
+    let service = start_service_with_config(configuration);
+    let feed = service
+        .attach_market_feed(Arc::new(market_feed::RecordedInterest::default()))
+        .expect("feed");
+    bootstrap_live_feed(&feed, instrument, route);
+    service.status().expect("owner drains reopened feed");
+    (service, feed)
+}
+
+/// Delivers one Live quote through the owner inbox and returns the fills it executed, in
+/// execution order.
+pub(crate) fn deliver_quote(
+    service: &TradingService,
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+    sequence: u64,
+    bid: i64,
+    ask: i64,
+) -> Vec<Fill> {
+    deliver_quote_at(
+        service,
+        feed,
+        instrument,
+        sequence,
+        bid,
+        ask,
+        1_000_000_000_000 + i64::try_from(sequence).expect("sequence") * 1_000_000,
+    )
+}
+
+/// Delivers one Live quote received at an explicit owner-clock time and returns its fills.
+pub(crate) fn deliver_quote_at(
+    service: &TradingService,
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+    sequence: u64,
+    bid: i64,
+    ask: i64,
+    received_unix_nanos: i64,
+) -> Vec<Fill> {
+    let before = service.snapshot().expect("snapshot before quote").fills;
+    push_live_quote_at(
+        feed,
+        instrument,
+        sequence,
+        bid,
+        ask,
+        instrument.price_scale,
+        received_unix_nanos,
+    );
+    service.status().expect("owner applies quote");
+    // Snapshots list the newest fill first; report the quote's fills in execution order.
+    let mut fills = service
+        .snapshot()
+        .expect("snapshot after quote")
+        .fills
+        .into_iter()
+        .filter(|fill| !before.contains(fill))
+        .collect::<Vec<_>>();
+    fills.reverse();
+    fills
 }
 
 #[test]
@@ -913,17 +1053,19 @@ fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
 #[test]
 fn refreshed_contract_terms_keep_one_instrument_and_an_open_position() {
     let directory = TestDirectory::new("metadata-refresh-position");
-    let service = start_service(&directory);
     let first = instrument();
+    let (service, _clock, feed) = awaiting_quote_fixture(&directory, &first, market_feed::route());
     service
         .register_instrument(first.clone())
         .expect("initial registration");
     service
         .place_order(market_order("before-refresh", OrderSide::Buy, 1, 1_000))
         .expect("entry accepted");
-    service
-        .observe_market(observation(9_999, 10_000, 2, 2_000))
-        .expect("entry fills");
+    assert_eq!(
+        deliver_quote(&service, &feed, &first, 2, 9_999, 10_000).len(),
+        1,
+        "entry fills"
+    );
 
     let mut refreshed = first.clone();
     refreshed.contract.provenance.session_generation = 2;
@@ -939,9 +1081,10 @@ fn refreshed_contract_terms_keep_one_instrument_and_an_open_position() {
 #[test]
 fn practice_order_rejects_contract_with_another_currency() {
     let directory = TestDirectory::new("contract-currency");
-    let service = start_service(&directory);
     let mut non_usd = instrument();
     non_usd.contract.currency = "EUR".into();
+    let (service, _clock, _feed) =
+        awaiting_quote_fixture(&directory, &non_usd, market_feed::route());
     service
         .register_instrument(non_usd)
         .expect("source currency remains registered");
@@ -956,8 +1099,8 @@ fn practice_order_rejects_contract_with_another_currency() {
 #[test]
 fn future_and_equity_practice_round_trips_use_their_point_values() {
     let directory = TestDirectory::new("contract-pnl");
-    let service = start_service(&directory);
     let future = instrument();
+    let (service, _clock, feed) = awaiting_quote_fixture(&directory, &future, market_feed::route());
     assert_eq!(
         tick_value(&future, 2).expect("ES tick value"),
         FixedPoint::try_new(1_250, 2).expect("$12.50")
@@ -973,35 +1116,46 @@ fn future_and_equity_practice_round_trips_use_their_point_values() {
     service
         .register_instrument(equity.clone())
         .expect("AAPL registers");
+    let mut equity_route = market_feed::route();
+    equity_route.instrument_id = equity.instrument_id.clone();
+    equity_route.provider_symbol = "AAPL".into();
+    equity_route.display_symbol = "AAPL".into();
+    // Open tickets keep both quotes subscribed while the other instrument trades.
+    service
+        .set_ticket_interest(vec![market_feed::route(), equity_route.clone()])
+        .expect("ticket interest");
+    bootstrap_live_feed(&feed, &equity, equity_route);
+    service.status().expect("AAPL feed drains");
 
     let es_buy = market_order("es-buy", OrderSide::Buy, 1, 1_000);
     service.place_order(es_buy).expect("ES buy");
-    service
-        .observe_market(observation(9_999, 10_000, 2, 2_000))
-        .expect("ES entry fill");
-    service
+    assert_eq!(
+        deliver_quote(&service, &feed, &future, 2, 9_999, 10_000).len(),
+        1,
+        "ES entry fill"
+    );
+    // The exit fills at placement against the owner's current quote.
+    deliver_quote(&service, &feed, &future, 4, 10_400, 10_401);
+    let es_exit = service
         .place_order(market_order("es-sell", OrderSide::Sell, 3, 3_000))
         .expect("ES sell");
-    service
-        .observe_market(observation(10_400, 10_401, 4, 4_000))
-        .expect("ES exit fill");
+    assert_eq!(es_exit.status, OrderStatus::Filled, "ES exit fill");
 
     let mut stock_buy = market_order("aapl-buy", OrderSide::Buy, 1, 1_000);
     stock_buy.instrument_id = equity.instrument_id.clone();
     stock_buy.quantity = FixedPoint::try_new(10, 0).expect("ten shares");
     service.place_order(stock_buy).expect("AAPL buy");
-    let mut stock_entry = observation(33_099, 33_100, 2, 2_000);
-    stock_entry.instrument_id = equity.instrument_id.clone();
-    service
-        .observe_market(stock_entry)
-        .expect("AAPL entry fill");
+    assert_eq!(
+        deliver_quote(&service, &feed, &equity, 2, 33_099, 33_100).len(),
+        1,
+        "AAPL entry fill"
+    );
+    deliver_quote(&service, &feed, &equity, 4, 33_200, 33_201);
     let mut stock_sell = market_order("aapl-sell", OrderSide::Sell, 3, 3_000);
     stock_sell.instrument_id = equity.instrument_id.clone();
     stock_sell.quantity = FixedPoint::try_new(10, 0).expect("ten shares");
-    service.place_order(stock_sell).expect("AAPL sell");
-    let mut stock_exit = observation(33_200, 33_201, 4, 4_000);
-    stock_exit.instrument_id = equity.instrument_id.clone();
-    service.observe_market(stock_exit).expect("AAPL exit fill");
+    let stock_exit = service.place_order(stock_sell).expect("AAPL sell");
+    assert_eq!(stock_exit.status, OrderStatus::Filled, "AAPL exit fill");
 
     let snapshot = service.snapshot().expect("round-trip snapshot");
     let realized = |id: &InstrumentId| {
@@ -1221,7 +1375,8 @@ fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
     // fill pays maker basis points, each evaluated exactly and rounded once at the account
     // currency scale.
     let directory = TestDirectory::new("fee-maker-taker");
-    let service = start_service(&directory);
+    let (service, _clock, feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1242,9 +1397,7 @@ fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
     service
         .place_order(market_order("fee-taker", OrderSide::Buy, 1, 1_000))
         .expect("taker accepted");
-    let taker_fills = service
-        .observe_market(observation(10_000, 10_001, 1, 1_001))
-        .expect("taker fill");
+    let taker_fills = deliver_quote(&service, &feed, &instrument(), 1, 10_000, 10_001);
     assert_eq!(taker_fills.len(), 1);
 
     // Maker: the resting limit fills when the ask drops to 99.75; 1 bps of 4_987.50 rounds
@@ -1253,9 +1406,7 @@ fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
     resting.order_type = OrderType::Limit;
     resting.limit_price = Some(FixedPoint::try_new(9_975, 2).expect("limit"));
     service.place_order(resting).expect("resting accepted");
-    let maker_fills = service
-        .observe_market(observation(9_950, 9_975, 3, 3_001))
-        .expect("maker fill");
+    let maker_fills = deliver_quote(&service, &feed, &instrument(), 3, 9_950, 9_975);
     assert_eq!(maker_fills.len(), 1);
 
     let snapshot = service.snapshot().expect("snapshot");
@@ -1663,10 +1814,8 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
     // is rebuilt from the durable history across a restart.
     use crate::clock::Clock;
     let directory = TestDirectory::new("equity-samples");
-    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
-    let mut configuration = config(&directory);
-    configuration.clock = clock.clone();
-    let service = start_service_with_config(configuration);
+    let (service, clock, feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1686,13 +1835,15 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
 
     // One sample per fill, even when equity is unchanged.
     clock.advance(Duration::from_secs(1));
-    let now = clock.wall_unix_nanos();
+    let accepted_at = clock.wall_unix_nanos();
     service
-        .place_order(market_order("eq-fill", OrderSide::Buy, 1, now))
+        .place_order(market_order("eq-fill", OrderSide::Buy, 1, accepted_at))
         .expect("order accepted");
-    service
-        .observe_market(observation(10_000, 10_001, 1, now))
-        .expect("fill");
+    // A quote is eligible only after the order's acceptance time.
+    clock.advance(Duration::from_millis(1));
+    let now = clock.wall_unix_nanos();
+    let fills = deliver_quote_at(&service, &feed, &instrument(), 1, 10_000, 10_001, now);
+    assert_eq!(fills.len(), 1, "fill");
     let after_fill = service.snapshot().expect("post-fill snapshot");
     assert_eq!(after_fill.equity_samples.len(), initial + 1);
     assert_eq!(
@@ -1733,9 +1884,8 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
     }
 
     // A quote move changes unrealized, so the next timer tick samples once.
-    service
-        .observe_market(observation(10_050, 10_051, 2, clock.wall_unix_nanos()))
-        .expect("quote move");
+    let moved_at = clock.wall_unix_nanos();
+    deliver_quote_at(&service, &feed, &instrument(), 2, 10_050, 10_051, moved_at);
     clock.advance(Duration::from_secs(61));
     service.status().expect("changed tick");
     let after_move = service.snapshot().expect("changed snapshot");
@@ -1778,7 +1928,8 @@ fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
     // VAL-TRD-055: the ESZ6 override charges 2.50 per contract while the future class model
     // would charge 1.00, and the schedule and its fees survive a restart byte-exact.
     let directory = TestDirectory::new("fee-override-restart");
-    let service = start_service(&directory);
+    let (service, clock, inbox) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1802,9 +1953,11 @@ fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
     service
         .place_order(market_order("fee-override", OrderSide::Buy, 1, 1_000))
         .expect("accepted");
-    service
-        .observe_market(observation(10_000, 10_001, 1, 1_001))
-        .expect("fill");
+    assert_eq!(
+        deliver_quote(&service, &inbox, &instrument(), 1, 10_000, 10_001).len(),
+        1,
+        "fill"
+    );
     let before = service.snapshot().expect("snapshot");
     assert_eq!(before.fee_schedules, vec![(account.clone(), schedule)]);
     let fees = before
@@ -1818,16 +1971,19 @@ fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let service = TradingService::start(config(&directory)).expect("service reopens");
+    let (service, inbox) =
+        reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     let recovered = service.snapshot().expect("recovered snapshot");
     assert_eq!(recovered.fee_schedules, before.fee_schedules);
     assert_eq!(recovered.ledger_entries, before.ledger_entries);
     service
         .place_order(market_order("fee-override-exit", OrderSide::Sell, 2, 2_000))
         .expect("exit accepted");
-    service
-        .observe_market(observation(10_000, 10_001, 2, 2_001))
-        .expect("exit fill");
+    assert_eq!(
+        deliver_quote(&service, &inbox, &instrument(), 2, 10_000, 10_001).len(),
+        1,
+        "exit fill"
+    );
     let fees = service
         .snapshot()
         .expect("snapshot")
@@ -2080,16 +2236,19 @@ fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger
 #[test]
 fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_deleted() {
     let directory = TestDirectory::new("position-preflight");
-    let service = start_service(&directory);
+    let (service, clock, feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument registers");
     service
         .place_order(market_order("legacy-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry accepted");
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("entry fills");
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
+        1,
+        "entry fills"
+    );
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
@@ -2112,15 +2271,21 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
         .expect("legacy corruption injected");
     drop(connection);
 
-    let reopened = TradingService::start(config(&directory)).expect("service reopens");
+    let (reopened, feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     reopened
         .place_order(market_order("must-not-fill", OrderSide::Buy, 3, 3_000))
         .expect("order itself is accepted");
-    let error = reopened
-        .observe_market(observation(10_024, 10_025, 4, 4_000))
-        .expect_err("invalid existing position blocks before fill commit");
-    assert!(error.contains("position average is unavailable"));
+    assert_eq!(
+        deliver_quote(&reopened, &feed, &instrument(), 4, 10_024, 10_025),
+        []
+    );
     let snapshot = reopened.snapshot().expect("snapshot");
+    let error = snapshot
+        .market_observation_error
+        .as_deref()
+        .expect("invalid existing position blocks before fill commit");
+    assert!(error.contains("position average is unavailable"));
     let order = snapshot
         .orders
         .iter()
@@ -2158,7 +2323,13 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
 #[test]
 fn confirmed_practice_account_delete_purges_open_state_and_is_durable() {
     let directory = TestDirectory::new("practice-account-delete");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        9_975,
+        10_000,
+    );
     let created = service
         .create_practice_account(CreatePracticeAccount {
             display_name: "Disposable".to_string(),
@@ -2178,10 +2349,14 @@ fn confirmed_practice_account_delete_purges_open_state_and_is_durable() {
         .expect("working order accepted");
     let mut market = market_order("delete-position", OrderSide::Buy, 1, 1_100);
     market.account_id = created.id.clone();
-    service.place_order(market).expect("market order accepted");
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("market order fills");
+    assert_eq!(
+        service
+            .place_order(market)
+            .expect("market order accepted")
+            .status,
+        OrderStatus::Filled,
+        "market order fills against the owner quote"
+    );
     let before = service.snapshot().expect("snapshot before deletion");
     assert!(
         before
@@ -2273,7 +2448,8 @@ fn cancelling_a_held_leg_cancels_the_pending_entry_too() {
     // Regression: a pending bracket terminated through a held leg left its working entry
     // naked; the cascade must retire the entry with the group.
     let directory = TestDirectory::new("held-leg-cascade");
-    let service = start_service(&directory);
+    let (service, _clock, _feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -2320,7 +2496,8 @@ fn cancelling_a_held_leg_cancels_the_pending_entry_too() {
 #[test]
 fn cancelling_pending_bracket_entry_cascades_to_every_held_leg() {
     let directory = TestDirectory::new("pending-entry-cancel-cascade");
-    let service = start_service(&directory);
+    let (service, _clock, _feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument");
@@ -2371,7 +2548,8 @@ fn cancelling_pending_bracket_entry_cascades_to_every_held_leg() {
 #[test]
 fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     let directory = TestDirectory::new("managed-bracket");
-    let service = start_service(&directory);
+    let (service, _clock, feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -2389,9 +2567,8 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     assert_eq!(awaiting.status, BracketViewStatus::AwaitingEntry);
     assert!(awaiting.stop_client_order_id.is_none());
 
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("entry fills");
+    let entry_fills = deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000);
+    assert_eq!(entry_fills.len(), 1, "entry fills");
     let active = service.snapshot().expect("active snapshot");
     let bracket = &active.managed_brackets[0];
     assert_eq!(bracket.status, BracketViewStatus::Active);
@@ -2409,9 +2586,8 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
             && order.quantity == FixedPoint::try_new(2, 0).expect("quantity")
     }));
 
-    service
-        .observe_market(observation(10_200, 10_225, 3, 3_000))
-        .expect("first target fills");
+    let target_fills = deliver_quote(&service, &feed, &instrument(), 3, 10_200, 10_225);
+    assert_eq!(target_fills.len(), 1, "first target fills");
     let scaled = service.snapshot().expect("scaled snapshot");
     assert!(
         scaled.completed_trade_pnl.is_empty(),
@@ -2440,9 +2616,8 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     );
     assert_eq!(stop.stop_price, Some(price(10_025)));
 
-    service
-        .observe_market(observation(10_000, 10_025, 4, 4_000))
-        .expect("stop fills");
+    let stop_fills = deliver_quote(&service, &feed, &instrument(), 4, 10_000, 10_025);
+    assert_eq!(stop_fills.len(), 1, "stop fills");
     let complete = service.snapshot().expect("complete snapshot");
     assert_eq!(complete.completed_trade_pnl.len(), 1);
     assert_eq!(
@@ -2477,7 +2652,13 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
 #[test]
 fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
     let directory = TestDirectory::new("stop-entry-bracket");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = quoted_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        9_975,
+        10_000,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -2491,9 +2672,11 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
         })
         .expect("bracket accepted");
 
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("market below the entry");
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000),
+        [],
+        "market below the entry"
+    );
     let resting = service.snapshot().expect("resting snapshot");
     assert_eq!(
         resting.managed_brackets[0].status,
@@ -2501,9 +2684,11 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
     );
     assert!(resting.fills.is_empty(), "the entry waits for its price");
 
-    service
-        .observe_market(observation(10_075, 10_100, 3, 3_000))
-        .expect("market reaches the entry");
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument(), 3, 10_075, 10_100).len(),
+        1,
+        "market reaches the entry"
+    );
     let armed = service.snapshot().expect("armed snapshot");
     assert_eq!(armed.managed_brackets[0].status, BracketViewStatus::Active);
     assert_eq!(
@@ -2531,7 +2716,13 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
 #[test]
 fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
     let directory = TestDirectory::new("resting-limit-price");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = quoted_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     service.register_instrument(instrument()).expect("terms");
     let place_limit = |id, side, limit| {
         let mut order = market_order(id, side, 1, 1_000);
@@ -2541,9 +2732,11 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
         service.place_order(order).expect("limit accepted")
     };
     let buy = place_limit("resting-buy", OrderSide::Buy, 9_900);
-    service
-        .observe_market(observation(9_775, 9_800, 2, 2_000))
-        .expect("ask crosses the buy limit");
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument(), 2, 9_775, 9_800).len(),
+        1,
+        "ask crosses the buy limit"
+    );
     let snapshot = service.snapshot().expect("buy fill");
     assert_eq!(
         snapshot
@@ -2555,9 +2748,11 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
         price(9_900)
     );
     let sell = place_limit("resting-sell", OrderSide::Sell, 10_200);
-    service
-        .observe_market(observation(10_300, 10_325, 3, 3_000))
-        .expect("bid crosses the sell limit");
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument(), 3, 10_300, 10_325).len(),
+        1,
+        "bid crosses the sell limit"
+    );
     let snapshot = service.snapshot().expect("sell fill");
     assert_eq!(
         snapshot
@@ -2574,7 +2769,13 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
 #[test]
 fn crossed_limits_execute_by_price_then_acceptance_sequence() {
     let directory = TestDirectory::new("limit-priority");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = quoted_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_025,
+        10_050,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument");
@@ -2590,9 +2791,7 @@ fn crossed_limits_execute_by_price_then_acceptance_sequence() {
         request.limit_price = Some(price(limit));
         placed.push(service.place_order(request).expect("limit"));
     }
-    let fills = service
-        .observe_market(observation(9_775, 9_800, 2, 2_000))
-        .expect("quote crosses all three");
+    let fills = deliver_quote(&service, &feed, &instrument(), 2, 9_775, 9_800);
     assert_eq!(
         fills.iter().map(|fill| &fill.order_id).collect::<Vec<_>>(),
         vec![&placed[1].id, &placed[2].id, &placed[0].id]
@@ -2603,17 +2802,25 @@ fn crossed_limits_execute_by_price_then_acceptance_sequence() {
 #[test]
 fn crossed_stops_precede_limits_in_trigger_price_order() {
     let directory = TestDirectory::new("stop-priority");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = quoted_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        9_975,
+        10_000,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument");
     let mut placed = Vec::new();
-    for (id, kind, level) in [
-        ("limit-first", OrderType::Limit, 10_500),
-        ("high-stop", OrderType::Stop, 10_200),
-        ("low-stop", OrderType::Stop, 10_100),
+    // A resting buy limit above valid buy stops would be marketable against any quote the
+    // stops accept, so the gap quote crosses a resting sell limit instead.
+    for (id, side, kind, level) in [
+        ("limit-first", OrderSide::Sell, OrderType::Limit, 10_250),
+        ("high-stop", OrderSide::Buy, OrderType::Stop, 10_200),
+        ("low-stop", OrderSide::Buy, OrderType::Stop, 10_100),
     ] {
-        let mut request = market_order(id, OrderSide::Buy, 1, 1_000);
+        let mut request = market_order(id, side, 1, 1_000);
         request.order_type = kind;
         request.time_in_force = TimeInForce::GoodTillCancelled;
         match kind {
@@ -2623,9 +2830,7 @@ fn crossed_stops_precede_limits_in_trigger_price_order() {
         }
         placed.push(service.place_order(request).expect("order"));
     }
-    let fills = service
-        .observe_market(observation(10_275, 10_300, 2, 2_000))
-        .expect("quote crosses all three");
+    let fills = deliver_quote(&service, &feed, &instrument(), 2, 10_275, 10_300);
     assert_eq!(
         fills.iter().map(|fill| &fill.order_id).collect::<Vec<_>>(),
         vec![&placed[2].id, &placed[1].id, &placed[0].id]
@@ -2639,8 +2844,8 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
         [("future", 50, 5_000, 12_500), ("crypto", 1, 100, 250)]
     {
         let directory = TestDirectory::new(label);
-        let service = start_service(&directory);
         let mut terms = instrument();
+        let mut route = market_feed::route();
         if label == "crypto" {
             terms.instrument_id = InstrumentId::try_new("hyperliquid:perp:BTC").expect("id");
             terms.contract.instrument_class = aeris_instruments::InstrumentClass::CryptoPerpetual;
@@ -2650,9 +2855,14 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
             terms.contract.provenance.provider_id = "hyperliquid".into();
             terms.contract.provenance.provider_symbol = "BTC".into();
             terms.contract.provenance.display_symbol = "BTC".into();
+            route.instrument_id = terms.instrument_id.clone();
+            route.provider_symbol = "BTC".into();
+            route.display_symbol = "BTC".into();
+            route.venue_id = "HYPERLIQUID".into();
         }
         terms.contract.point_value =
             Some(InstrumentDecimal::try_new(point_value, 0).expect("point value"));
+        let (service, _clock, feed) = awaiting_quote_fixture(&directory, &terms, route);
         service
             .register_instrument(terms.clone())
             .expect("instrument");
@@ -2660,25 +2870,28 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
         buy.instrument_id = terms.instrument_id.clone();
         buy.quantity = contracts(2);
         service.place_order(buy).expect("buy");
-        let mut entry = observation(499_975, 500_000, 2, 2_000);
-        entry.instrument_id = terms.instrument_id.clone();
-        service.observe_market(entry).expect("entry fill");
-        let mut mark = observation(500_050, 500_075, 3, 3_000);
-        mark.instrument_id = terms.instrument_id.clone();
-        service.observe_market(mark).expect("mark");
+        assert_eq!(
+            deliver_quote(&service, &feed, &terms, 2, 499_975, 500_000).len(),
+            1,
+            "entry fill"
+        );
+        deliver_quote(&service, &feed, &terms, 3, 500_050, 500_075);
         assert_eq!(
             service.snapshot().expect("marked").positions[0]
                 .unrealized_pnl
                 .units(),
             expected_mark
         );
+        // The exit fills at placement against the owner's current quote.
+        deliver_quote(&service, &feed, &terms, 5, 500_125, 500_150);
         let mut sell = market_order("multiplier-sell", OrderSide::Sell, 4, 4_000);
-        sell.instrument_id = terms.instrument_id.clone();
+        sell.instrument_id = terms.instrument_id;
         sell.quantity = contracts(2);
-        service.place_order(sell).expect("sell");
-        let mut exit = observation(500_125, 500_150, 5, 5_000);
-        exit.instrument_id = terms.instrument_id;
-        service.observe_market(exit).expect("exit fill");
+        assert_eq!(
+            service.place_order(sell).expect("sell").status,
+            OrderStatus::Filled,
+            "exit fill"
+        );
         assert_eq!(
             service.snapshot().expect("closed").positions[0]
                 .realized_pnl
@@ -2692,7 +2905,8 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
 #[test]
 fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved() {
     let directory = TestDirectory::new("planned-bracket-legs");
-    let service = start_service(&directory);
+    let route = market_feed::route();
+    let (service, clock, _feed) = quoted_fixture(&directory, &instrument(), route, 9_975, 10_000);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -2756,16 +2970,16 @@ fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved()
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = start_service(&directory);
+    let (restarted, feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(
         held_bracket_legs(&restored),
         moved_legs,
         "the held legs survive a restart at their moved prices"
     );
-    restarted
-        .observe_market(observation(10_100, 10_125, 3, 3_000))
-        .expect("market reaches the entry");
+    let entry_fills = deliver_quote(&restarted, &feed, &instrument(), 3, 10_100, 10_125);
+    assert_eq!(entry_fills.len(), 1, "market reaches the entry");
     let armed = restarted.snapshot().expect("armed snapshot");
     assert!(
         armed
