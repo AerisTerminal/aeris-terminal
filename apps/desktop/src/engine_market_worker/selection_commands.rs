@@ -360,21 +360,16 @@ fn reinitialize_study(
     endpoint: &WorkerEndpoint,
     request: aeris_desktop::market_worker::StudyReinitializationRequest,
 ) -> Result<(), String> {
-    match market.reinitialize_study(client_id, request.study_id, request.registration) {
-        Ok(_) => endpoint
-            .messages
-            .send(MarketWorkerMessage::StudyReinitialized {
-                study_id: request.study_id,
-            })
-            .map_err(|error| error.to_string()),
-        Err(message) => endpoint
-            .messages
-            .send(MarketWorkerMessage::StudyReinitializationFailed {
-                study_id: request.study_id,
-                message,
-            })
-            .map_err(|error| error.to_string()),
-    }
+    let result = market
+        .reinitialize_study(client_id, request.study_id, request.registration)
+        .map(|_| ());
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::StudyReinitializationOutcome {
+            study_id: request.study_id,
+            result,
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn register_study(

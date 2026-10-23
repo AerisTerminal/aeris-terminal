@@ -2021,6 +2021,74 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
 }
 
 #[gpui::test]
+fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
+    let original = workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+        .expect("study fixture");
+    let mut replacement = original.clone();
+    replacement.visible = false;
+    harness.pane.update(cx, |pane, _| {
+        let product = pane.product.as_ref().expect("selected instrument");
+        let series = engine_market_worker::series_key(product, ChartInterval::Minute1)
+            .expect("selected series");
+        pane.studies.active.push(RuntimeStudyState {
+            study_id,
+            persisted: original.clone(),
+            resolved_chart_series: Some(series.clone()),
+        });
+        pane.studies.begin_reinitialization(
+            study_id,
+            PendingStudyReinitialization {
+                series,
+                replacement_persisted: Some(replacement.clone()),
+            },
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::StudyReinitializationOutcome {
+            study_id,
+            result: Err("private-provider-rejection".into()),
+        })
+        .expect("reinitialization failure");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.studies.active[0].persisted, original);
+        assert!(!pane.studies.reinitializing.contains_key(&study_id));
+        assert!(!pane.studies.suppressing_outputs.contains(&study_id));
+    });
+    harness.pane.update(cx, |pane, _| {
+        let product = pane.product.as_ref().expect("selected instrument");
+        let series = engine_market_worker::series_key(product, ChartInterval::Minute1)
+            .expect("selected series");
+        pane.studies.begin_reinitialization(
+            study_id,
+            PendingStudyReinitialization {
+                series,
+                replacement_persisted: Some(replacement.clone()),
+            },
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::StudyReinitializationOutcome {
+            study_id,
+            result: Ok(()),
+        })
+        .expect("reinitialization success");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.studies.active[0].persisted, replacement);
+        assert!(!pane.studies.reinitializing.contains_key(&study_id));
+        assert!(pane.chart_persistence_dirty);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestAppContext) {
     use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketStudyRemoved};
     use std::num::NonZeroU64;

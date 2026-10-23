@@ -4119,13 +4119,13 @@ impl WorkspaceSurface {
                 Ok(study_id) => self.apply_study_registered(request_sequence, study_id, cx),
                 Err(message) => self.apply_study_registration_failed(request_sequence, message, cx),
             },
-            MarketWorkerMessage::StudyReinitialized { study_id } => {
-                self.apply_study_reinitialized(study_id, cx);
+            MarketWorkerMessage::StudyReinitializationOutcome { study_id, result } => {
+                if result.is_ok() {
+                    self.apply_study_reinitialized(study_id, cx);
+                } else {
+                    self.apply_study_reinitialization_failure(study_id, cx);
+                }
             }
-            MarketWorkerMessage::StudyReinitializationFailed {
-                study_id,
-                message: _,
-            } => self.apply_study_reinitialization_failure(study_id, cx),
             MarketWorkerMessage::StudyRemovalFailed {
                 study_id,
                 message: _,

@@ -1955,6 +1955,14 @@ Status: pending
     failure/success GPUI regression exercises both branches and late outcomes.
     Metadata-bearing runtime variants, remaining local outcomes, transitional
     message/channel names and `fn enqueue` still prevent VAL-DSK-021/022 closure.
+  - Part 8b2d (2026-10-24): study reinitialization success and failure share
+    one local result route. The pane retains the previous durable settings on
+    failure, clears pending state, and applies a successful retried replacement
+    through its existing study owner; runtime error detail never enters a pane
+    notice. The GPUI fixture exercises both results in order. Provider/bar/
+    recovery metadata-bearing runtime routes, other local outcomes, the
+    transitional message/channel names and `fn enqueue` still remain;
+    M6.6 and VAL-DSK-021/022 stay open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
@@ -2497,6 +2505,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 UI style(design-system): no stabilization item. The Aeris theme follows the updated `themes.md`: light `border-secondary` `#0a0a0a1a`, light hover/active `#0a0a0a0d`; dark `surface` `#171717`, translucent dark `surface-secondary` `#fafafa0f`, dark borders `#fafafa1a`/`#fafafa26`, text `#fafafa`, muted `#fafafa40`, hover `#fafafa13`. The Aeris-only popover layer returns: `popover_surface`, menu rows and tooltips use `surface-popover` with a `border-popover-highlight` inner edge and a 1px solid `border-popover` outer ring; presets resolve the tokens to `surface-secondary`, transparent and `border-secondary`. `CSS.md` and the website's `platform.css` carry the same Aeris tokens. Restriction recorded in section 5.
 - 2026-10-24 M6.6 Part 8a refactor(desktop): extracted the one bounded pane projection queue from market_worker, removed its bespoke enqueue, and preserved runtime-event FIFO, the control reserve, wake continuation and overflow in a 10,000-event regression. The old message type remains to collapse in Part 8b; M6.6 and VAL-DSK-021/022 remain unchecked.
 - 2026-10-24 M6.6 Part 8b2c refactor(desktop): merged study registration success/failure into one request-sequence-fenced outcome; GPUI covers redacted failure, success and retired outcomes. Metadata-bearing fenced runtime entries, remaining local outcomes and final mailbox/type deletion remain; M6.6 stays unchecked.
+- 2026-10-24 M6.6 Part 8b2d refactor(desktop): merged study reinitialization success/failure into one local result, preserving failure's unchanged persisted settings and a retry's successful replacement; GPUI checks both outcomes. Metadata-bearing fenced runtime entries, other local outcomes and message/type deletion remain; M6.6 and VAL-DSK-021/022 stay unchecked.
 
 ## 7. Known gaps / deferred
 

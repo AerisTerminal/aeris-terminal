@@ -247,12 +247,10 @@ pub enum MarketWorkerMessage {
         request_sequence: u64,
         result: Result<StudyInstanceId, String>,
     },
-    StudyReinitialized {
+    /// Local reinitialization result for the active study.
+    StudyReinitializationOutcome {
         study_id: StudyInstanceId,
-    },
-    StudyReinitializationFailed {
-        study_id: StudyInstanceId,
-        message: String,
+        result: Result<(), String>,
     },
     StudyRemovalFailed {
         study_id: StudyInstanceId,
