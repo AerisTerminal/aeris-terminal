@@ -209,9 +209,26 @@ impl QuoteRecorder {
 #[derive(Default)]
 pub struct FeedTarget {
     inbox: Mutex<Option<Arc<MarketFeedInbox>>>,
+    suppressed_quote_instrument: Mutex<Option<String>>,
 }
 
 impl FeedTarget {
+    /// Keeps a real instrument's Terms and session but withholds its quotes from the
+    /// trading owner for the paper probe's negative no-quote admission run.
+    pub fn suppress_quotes_for(&self, instrument: &str) {
+        *self
+            .suppressed_quote_instrument
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(instrument.to_string());
+    }
+
+    fn suppresses(&self, event: &MarketFeedEvent) -> bool {
+        matches!(event, MarketFeedEvent::Quote(quote)
+            if self.suppressed_quote_instrument.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref() == Some(quote.instrument_id.as_str()))
+    }
+
     pub fn attach(&self, inbox: Arc<MarketFeedInbox>) {
         *self.inbox.lock().unwrap_or_else(PoisonError::into_inner) = Some(inbox);
     }
@@ -233,6 +250,9 @@ pub fn attach_trading_feed(
 ) -> ProbeResult<()> {
     let events = Box::new(move |event: MarketFeedEvent| {
         recorder.record(&event);
+        if target.suppresses(&event) {
+            return;
+        }
         let inbox = target
             .inbox
             .lock()

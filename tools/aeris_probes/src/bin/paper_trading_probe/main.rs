@@ -13,6 +13,7 @@ pub struct Options {
     pub root: PathBuf,
     pub out: PathBuf,
     pub no_fees: bool,
+    pub no_quote: bool,
 }
 
 impl Options {
@@ -20,6 +21,7 @@ impl Options {
         let mut root = None;
         let mut out = None;
         let mut no_fees = false;
+        let mut no_quote = false;
         let mut arguments = arguments.into_iter();
         while let Some(flag) = arguments.next() {
             match flag.as_str() {
@@ -32,13 +34,19 @@ impl Options {
                     out = Some(PathBuf::from(value));
                 }
                 "--no-fees" if !no_fees => no_fees = true,
+                "--no-quote" if !no_quote => no_quote = true,
                 _ => return Err("unknown, duplicate or unsafe probe option"),
             }
         }
         let root = root.ok_or("--validation-root is required")?;
         let out = out.ok_or("--out is required")?;
         validate_paths(&root, &out)?;
-        Ok(Self { root, out, no_fees })
+        Ok(Self {
+            root,
+            out,
+            no_fees,
+            no_quote,
+        })
     }
 }
 
@@ -51,14 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         root: options.root.clone(),
     })
     .map_err(|error| ProbeError::Runtime(error.to_string()))?;
-    // The probe sources are not committed while the milestone is under development;
-    // the worktree state stays on the envelope as evidence without gating the outcome.
-    let envelope = Envelope::collect_with_policy(
-        "paper_trading",
-        options.root.clone(),
-        options.out.clone(),
-        false,
-    )?;
+    let envelope = Envelope::collect("paper_trading", options.root.clone(), options.out.clone())?;
     let started_at = aeris_probes::utc_now().to_rfc3339();
     let mut evidence = Evidence::new();
     let result = scenario::run(root, &options, &mut evidence);

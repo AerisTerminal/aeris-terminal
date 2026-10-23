@@ -197,9 +197,7 @@ impl Drop for TradingGuard {
 /// Durable recovered state compared across the in-run restart. Volatile mark and timer
 /// projections (`market_observation_error`, `account_pnl` unrealized, `equity_samples`,
 /// `recovery_notices`, position `unrealized_pnl`) are excluded by design. The durable
-/// `revision` write counter is recorded in evidence but excluded from identity: replayed
-/// Terms re-registration after the restart legitimately advances it without changing any
-/// trading fact.
+/// revision is compared separately: identical verified Terms must not rewrite it.
 struct StateDigest {
     instruments: Vec<TradingInstrument>,
     accounts: Vec<TradingAccount>,
@@ -403,6 +401,9 @@ fn run_with_market(
 ) -> ProbeResult<()> {
     let recorder = Arc::new(QuoteRecorder::new());
     let target = Arc::new(FeedTarget::default());
+    if options.no_quote {
+        target.suppress_quotes_for(SOL_ID);
+    }
     aeris_probes::feed::attach_trading_feed(
         market_service,
         Arc::clone(&recorder),
@@ -487,6 +488,10 @@ fn scenario(
     let account = practice_account(&trading, evidence)?;
     apply_fee_schedule(&trading, &account, evidence, options.no_fees)?;
 
+    if options.no_quote {
+        return no_quote_rejection(&trading, &account, &sol, generation, recorder, evidence);
+    }
+
     let mut probe = Probe {
         trading,
         account,
@@ -511,6 +516,48 @@ fn scenario(
     probe.ledger_identity()?;
     probe.export()?;
     probe.finish(guard)
+}
+
+fn no_quote_rejection(
+    trading: &TradingService,
+    account: &TradingAccount,
+    sol: &InstrumentId,
+    generation: u64,
+    recorder: &QuoteRecorder,
+    evidence: &mut Evidence,
+) -> ProbeResult<()> {
+    wait_for("SOL live feed without an owner quote", QUOTE_WAIT, || {
+        Ok((recorder.feed_state(SOL_ID) == Some(FeedState::Live)).then_some(()))
+    })?;
+    market(trading.status())?;
+    let mut order = base_order(
+        "m512-never-quoted-sol",
+        &account.id,
+        sol,
+        fixed(SOL_QUANTITY)?,
+        generation,
+    )?;
+    order.limit_price = Some(fixed((100_000_000, 8))?);
+    let rejection = trading.place_order(order);
+    let snapshot = market(trading.snapshot())?;
+    evidence.check(
+        "no_quote_rejected",
+        rejection.as_ref().is_err_and(|error| {
+            error.contains(&aeris_trading::RejectReason::QuoteUnavailable.to_string())
+        }) && snapshot.orders.is_empty()
+            && snapshot.fills.is_empty(),
+        json!({
+            "instrument": SOL_ID,
+            "owner_quote_suppressed": true,
+            "feed_live": recorder.feed_state(SOL_ID) == Some(FeedState::Live),
+            "rejection": rejection.err(),
+            "orders": snapshot.orders.len(),
+            "fills": snapshot.fills.len(),
+        }),
+    )?;
+    Err(ProbeError::Invariant(
+        "no-quote negative mode verified QuoteUnavailable".to_string(),
+    ))
 }
 
 /// The live probe context after preparation: one scenario step per method.
@@ -760,7 +807,7 @@ impl Probe<'_> {
         let expected_expiry = prices::next_utc_midnight(order.accepted_unix_nanos)
             .ok_or_else(|| ProbeError::Invariant("day deadline overflowed".to_string()))?;
         self.evidence.check(
-            "day_expiry_utc_midnight",
+            "day_expiry_utc_midnight_scheduled",
             order.status == OrderStatus::Working
                 && order.expires_at_unix_nanos == Some(expected_expiry),
             json!({
@@ -870,6 +917,7 @@ impl Probe<'_> {
         let trading = start_trading(self.root.path())?;
         aeris_probes::feed::wire_trading_feed(market_service, &trading, target)
             .map_err(|error| ProbeError::Runtime(format!("post-restart feed wiring: {error}")))?;
+        let restart_started_at = unix_nanos_now();
         let epoch = self.recorder.advance_epoch();
         trading
             .set_ticket_interest(vec![self.btc_route.clone()])
@@ -880,13 +928,14 @@ impl Probe<'_> {
         guard.replace(trading.clone());
         self.trading = trading;
 
+        self.quotes_resume(epoch, restart_started_at, pre_unrealized, &subscription)?;
         let post_snapshot = self.snapshot()?;
         let post_revision = post_snapshot.revision;
         let post = digest(&post_snapshot);
         let differences = pre.differences(&post);
         self.evidence.check(
             "restart_state_identical",
-            differences.is_empty(),
+            differences.is_empty() && post_revision == pre_revision,
             json!({
                 "differences": differences,
                 "pre_revision": pre_revision,
@@ -898,8 +947,7 @@ impl Probe<'_> {
                 "ledger_entries": post.ledger_entries.len(),
                 "planned_legs": post.planned_legs.len(),
             }),
-        )?;
-        self.quotes_resume(epoch, pre_unrealized, &subscription)
+        )
     }
 
     /// Quotes resume into the recovered owner without any UI state: the first quote of
@@ -907,12 +955,14 @@ impl Probe<'_> {
     fn quotes_resume(
         &mut self,
         epoch: u64,
+        restart_started_at: i64,
         pre_unrealized: Option<FixedPoint>,
         subscription: &TradingSubscription,
     ) -> ProbeResult<()> {
         let first_quote = wait_for("BTC quote after restart", QUOTE_WAIT, || {
             Ok(self.recorder.first_quote_in_epoch(epoch, BTC_ID))
         })?;
+        let arrival_ms = (first_quote - restart_started_at) / 1_000_000;
         let mut marks = 0_u32;
         let mut other_events = 0_u32;
         let mut unrealized_changed = false;
@@ -938,13 +988,17 @@ impl Probe<'_> {
         }
         self.evidence.check(
             "quotes_resume_without_ui",
-            marks > 0 && (unrealized_changed || marks >= 2),
+            (0..=30_000).contains(&arrival_ms) && marks > 0 && (unrealized_changed || marks >= 2),
             json!({
                 "mark_events": marks,
                 "other_events": other_events,
                 "unrealized_changed": unrealized_changed,
                 "pre_unrealized_units": pre_unrealized.map(FixedPoint::units),
                 "first_quote_age_ms": (unix_nanos_now() - first_quote) / 1_000_000,
+                "first_quote_received_unix_nanos": first_quote,
+                "restart_started_unix_nanos": restart_started_at,
+                "first_quote_arrival_ms": arrival_ms,
+                "series_demand_installed": false,
                 "recorder_debug": self.recorder.debug_state(&[BTC_ID, SOL_ID]),
             }),
         )
@@ -953,6 +1007,33 @@ impl Probe<'_> {
     /// Flattens the open position and cancels every working order, ending flat.
     fn flatten_all(&mut self) -> ProbeResult<()> {
         let outcome = market(self.trading.flatten(FlattenScope::default()))?;
+        let sell_fills = outcome
+            .fills
+            .iter()
+            .filter(|fill| fill.side == OrderSide::Sell)
+            .map(|fill| {
+                let recorded = self.recorder.quote_at(
+                    fill.instrument_id.as_str(),
+                    fill.provenance.observed_unix_nanos,
+                );
+                let matches = recorded.is_some_and(|quote| {
+                    fill.price == quote.bid
+                        && fill.provenance.session_generation == quote.provider_generation
+                });
+                json!({
+                    "instrument": fill.instrument_id.as_str(),
+                    "fill_price_units": fill.price.units(),
+                    "recorded_bid_units": recorded.map(|quote| quote.bid.units()),
+                    "quote_received_unix_nanos": recorded.map(|quote| quote.received_unix_nanos),
+                    "matches": matches,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.evidence.check(
+            "flatten_sells_at_recorded_bid",
+            !sell_fills.is_empty() && sell_fills.iter().all(|fill| fill["matches"] == true),
+            json!({ "sell_fills": sell_fills }),
+        )?;
         wait_for("flat positions", Duration::from_secs(10), || {
             Ok(market(self.trading.snapshot())?
                 .positions
@@ -1086,31 +1167,100 @@ impl Probe<'_> {
         )
     }
 
-    /// Durable export into the validation root, with the JSON surface parseable.
+    /// Durable replacement into the validation root, with exact fill and CSV parity.
     fn export(&mut self) -> ProbeResult<()> {
         let directory = self.root.path().join("export");
         std::fs::create_dir_all(&directory)?;
+        aeris_platform_runtime::fs::write_file_durably(
+            &directory.join("executions.json"),
+            b"previous complete export\n",
+        )?;
         market(self.trading.export(directory.clone()))?;
         let mut exported = Vec::new();
-        let mut export_ok = true;
+        let mut files_nonempty = true;
         for name in ["executions.json", "user_records.json", "executions.csv"] {
             let path = directory.join(name);
             let bytes = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
             if bytes == 0 {
-                export_ok = false;
-            }
-            if name == "executions.json" {
-                let parsed = std::fs::read(&path)
-                    .ok()
-                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok());
-                if parsed.is_none() {
-                    export_ok = false;
-                }
+                files_nonempty = false;
             }
             exported.push(json!({"file": name, "bytes": bytes}));
         }
-        self.evidence
-            .check("export_written", export_ok, json!({"files": exported}))
+        let executions = std::fs::read(directory.join("executions.json"))
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Vec<serde_json::Value>>(&body).ok());
+        let records = std::fs::read(directory.join("user_records.json"))
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Vec<serde_json::Value>>(&body).ok());
+        let csv = std::fs::read_to_string(directory.join("executions.csv")).ok();
+        let snapshot = self.snapshot()?;
+        let fill_parity = executions.as_ref().is_some_and(|rows| {
+            rows.len() == snapshot.fills.len()
+                && rows.iter().all(|row| {
+                    snapshot.fills.iter().any(|fill| {
+                        row["id"].as_str() == Some(fill.id.as_str())
+                            && row["order_id"].as_str() == Some(fill.order_id.as_str())
+                            && row["account_id"].as_str() == Some(fill.account_id.as_str())
+                            && row["instrument_id"].as_str() == Some(fill.instrument_id.as_str())
+                            && row["side"].as_str() == Some(fill.side.as_str())
+                            && row["price"]["units"].as_i64() == Some(fill.price.units())
+                            && row["price"]["scale"].as_u64() == Some(u64::from(fill.price.scale()))
+                            && row["quantity"]["units"].as_i64() == Some(fill.quantity.units())
+                            && row["quantity"]["scale"].as_u64()
+                                == Some(u64::from(fill.quantity.scale()))
+                            && row["execution_unix_nanos"].as_i64()
+                                == Some(fill.execution_unix_nanos)
+                            && row["provenance"]["observed_unix_nanos"].as_i64()
+                                == Some(fill.provenance.observed_unix_nanos)
+                    })
+                })
+        });
+        let csv_parity = csv
+            .as_ref()
+            .zip(executions.as_ref())
+            .is_some_and(|(csv, rows)| {
+                csv.lines().skip(1).count() == rows.len()
+                    && csv.lines().skip(1).zip(rows).all(|(line, row)| {
+                        line == format!(
+                            "{},{},{},{},{},{},{},{},{},{}",
+                            row["id"].as_str().unwrap_or_default(),
+                            row["order_id"].as_str().unwrap_or_default(),
+                            row["account_id"].as_str().unwrap_or_default(),
+                            row["instrument_id"].as_str().unwrap_or_default(),
+                            row["side"].as_str().unwrap_or_default(),
+                            row["price"]["units"],
+                            row["price"]["scale"],
+                            row["quantity"]["units"],
+                            row["quantity"]["scale"],
+                            row["execution_unix_nanos"]
+                        )
+                    })
+            });
+        let staged_files = std::fs::read_dir(&directory)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with('.')
+                        && Path::new(name)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+                })
+            })
+            .count();
+        self.evidence.check(
+            "export_atomic_parity",
+            files_nonempty && fill_parity && csv_parity && records.is_some() && staged_files == 0,
+            json!({
+                "files": exported,
+                "fill_rows": executions.as_ref().map(Vec::len),
+                "snapshot_fills": snapshot.fills.len(),
+                "user_record_rows": records.as_ref().map(Vec::len),
+                "fill_parity": fill_parity,
+                "csv_parity": csv_parity,
+                "staged_files": staged_files,
+                "previous_export_replaced": true,
+            }),
+        )
     }
 
     /// Records run metrics and shuts the trading owner down inside its bound.
