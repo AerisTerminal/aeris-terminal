@@ -45,6 +45,33 @@ const BTC_QUANTITY: (i64, u8) = (20_000_000, 8); // 0.2 BTC
 const SOL_QUANTITY: (i64, u8) = (100_000_000, 8); // 1 SOL
 const STARTING_EQUITY: (i64, u8) = (10_000_000, 2); // $100,000.00
 
+fn is_disconnected_admission_rejection(feed_left_live: bool, error: &str) -> bool {
+    feed_left_live
+        && (error.contains("stale")
+            || error.contains("live market quote unavailable")
+            || error.contains("market session unknown"))
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::is_disconnected_admission_rejection;
+
+    #[test]
+    fn reconnect_session_transition_is_a_rejection_only_after_feed_left_live() {
+        for error in [
+            "market session unknown",
+            "live market quote unavailable",
+            "stale market quote",
+        ] {
+            assert!(is_disconnected_admission_rejection(true, error));
+            assert!(!is_disconnected_admission_rejection(false, error));
+        }
+        for error in ["off-grid price", "insufficient funds", "market closed"] {
+            assert!(!is_disconnected_admission_rejection(true, error));
+        }
+    }
+}
+
 fn fixed(value: (i64, u8)) -> ProbeResult<FixedPoint> {
     FixedPoint::try_new(value.0, value.1).map_err(|error| ProbeError::Runtime(error.to_string()))
 }
@@ -856,14 +883,18 @@ impl Probe<'_> {
         });
         let result = match rejection {
             Err(error) => {
-                let recognized =
-                    error.contains("stale") || error.contains("live market quote unavailable");
+                // A reconnect can retire the session before admission observes the
+                // Stale feed. That transition rejects as session unknown, while a
+                // missing quote on a still-live session must still reject as such.
+                let reconnecting = observed_not_live && error.contains("market session unknown");
+                let recognized = is_disconnected_admission_rejection(observed_not_live, &error);
                 self.evidence.check(
                     "stale_or_closed_rejections",
                     recognized,
                     json!({
                         "error": error,
                         "sol_feed_left_live_observed": observed_not_live,
+                        "reconnecting_session_unknown": reconnecting,
                         "sol_last_quote_age_ms": stale_since
                             .map(|quote| (unix_nanos_now() - quote.received_unix_nanos) / 1_000_000),
                     }),
