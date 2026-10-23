@@ -298,10 +298,8 @@ impl TerminalApp {
             }
             TradingHotkey::FlattenAccount => {
                 let account = account.ok_or("Choose a trading account first")?;
-                self.trading_order_frame(cx)
-                    .ok_or("No order book for this instrument yet")?;
                 Ok(format!(
-                    "Cancel working orders and close every position on {account} at the current bid and ask."
+                    "Cancel working orders and close every position on {account} at the trading owner's current quotes."
                 ))
             }
             TradingHotkey::KillSwitch => Ok(
@@ -372,15 +370,12 @@ impl TerminalApp {
                 );
             }
             TradingHotkey::FlattenAccount => {
-                if let Some(frame) = self.trading_order_frame(cx) {
-                    aeris_desktop::trading::flatten_simulated_account_for(
-                        self.lifecycle.trading(),
-                        self.lifecycle.trading_feedback(),
-                        &frame,
-                        self.trading_order_entry(cx).0,
-                        cx,
-                    );
-                }
+                aeris_desktop::trading::flatten_simulated_account(
+                    self.lifecycle.trading(),
+                    self.lifecycle.trading_feedback(),
+                    self.trading_order_entry(cx).0,
+                    cx,
+                );
             }
             TradingHotkey::KillSwitch => {
                 aeris_desktop::trading::kill_simulated_accounts(

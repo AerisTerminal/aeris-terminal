@@ -4808,6 +4808,96 @@ fn reverse_closes_and_reopens_the_exact_opposite_position() {
 }
 
 #[test]
+fn account_flatten_closes_two_positions_without_desktop_interest_in_second_instrument() {
+    let directory = TestDirectory::new("account-flatten-chartless");
+    let (service, clock, feed) = live_feed_service(&directory);
+    let btc = instrument();
+    let mut eth = instrument();
+    eth.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:CLZ6").expect("second instrument");
+    let eth_route = aeris_trading::market::MarketRoute {
+        provider_id: "fixture".into(),
+        instrument_id: eth.instrument_id.clone(),
+        provider_symbol: "CLZ6".into(),
+        display_symbol: "CLZ6".into(),
+        venue_id: "CME".into(),
+        entitlement_id: None,
+        price_scale: 2,
+        quantity_scale: 0,
+    };
+    service.register_instrument(btc.clone()).expect("btc");
+    service.register_instrument(eth.clone()).expect("eth");
+    service
+        .set_ticket_interest(vec![market_feed::route(), eth_route.clone()])
+        .expect("initial desktop interest");
+    bootstrap_live_feed(&feed, &btc, market_feed::route());
+    bootstrap_live_feed(&feed, &eth, eth_route);
+    service.status().expect("feed drains");
+    service
+        .place_order(market_order("btc-entry", OrderSide::Buy, 1, 1_000))
+        .expect("btc buy");
+    let mut eth_order = market_order("eth-entry", OrderSide::Buy, 2, 1_001);
+    eth_order.instrument_id = eth.instrument_id.clone();
+    service.place_order(eth_order).expect("eth buy");
+    push_live_quote(&feed, &btc, 2, 9_975, 10_000, 2);
+    push_live_quote(&feed, &eth, 2, 7_975, 8_000, 2);
+    service.status().expect("both entries fill");
+    assert_eq!(service.snapshot().expect("snapshot").fills.len(), 2);
+
+    // The desktop now shows BTC alone. Open positions retain owner-managed quote demand.
+    service
+        .set_ticket_interest(vec![market_feed::route()])
+        .expect("desktop closes eth chart");
+    push_live_quote(&feed, &btc, 3, 10_100, 10_125, 2);
+    push_live_quote(&feed, &eth, 3, 8_100, 8_125, 2);
+    service.status().expect("owner quotes drain");
+    let outcome = service
+        .flatten(FlattenScope {
+            account: Some(TradingAccountId::try_new("aeris-sim-1").expect("account")),
+            instrument: None,
+        })
+        .expect("account flatten");
+    assert_eq!(outcome.unpriced, []);
+    assert_eq!(outcome.fills.len(), 2);
+    for (instrument_id, bid) in [(&btc.instrument_id, 10_100), (&eth.instrument_id, 8_100)] {
+        assert_eq!(
+            outcome
+                .fills
+                .iter()
+                .filter(|fill| &fill.instrument_id == instrument_id
+                    && fill.price == FixedPoint::try_new(bid, 2).expect("bid"))
+                .count(),
+            1,
+            "exactly one closing fill at the owner's bid"
+        );
+    }
+    let snapshot = service.snapshot().expect("flat snapshot");
+    assert_eq!(snapshot.fills.len(), 4);
+    assert!(
+        snapshot
+            .positions
+            .iter()
+            .all(|position| position.net_quantity.units() == 0)
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = TradingService::start(configuration).expect("service restarts");
+    let restored = restarted.snapshot().expect("restored");
+    assert_eq!(restored.fills.len(), 4);
+    assert!(
+        restored
+            .positions
+            .iter()
+            .all(|position| position.net_quantity.units() == 0)
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
 fn flatten_scope_isolates_one_account_instrument_pair() {
     let directory = TestDirectory::new("flatten-scope");
     let (service, _clock, feed) = live_feed_service(&directory);

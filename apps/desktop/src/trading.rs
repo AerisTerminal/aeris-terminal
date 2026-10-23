@@ -940,17 +940,27 @@ fn display_quantity_units(quantity: u64, scale: u8) -> Option<i64> {
         .and_then(|units| i64::try_from(units).ok())
 }
 
-/// Flattens the simulated account using the current best bid and ask off the UI thread.
+/// Flattens every instrument of the selected account using the trading owner's quotes.
 pub fn flatten_simulated_account(
     service: &TradingService,
     feedback: &TradingFeedback,
-    frame: &aeris_market_data::OrderBookFrame,
+    account_key: Option<String>,
     cx: &mut gpui::App,
 ) {
-    flatten_simulated_account_for(service, feedback, frame, None, cx);
+    let Some(scope) = account_flatten_scope(account_key) else {
+        feedback.record(Err("Flatten requires a selected account".to_string()));
+        return;
+    };
+    let service = service.clone();
+    let feedback = feedback.clone();
+    cx.background_executor()
+        .spawn(async move {
+            feedback.record(flatten_feedback("Flattened", service.flatten(scope)));
+        })
+        .detach();
 }
 
-/// Flattens one selected simulated account using the current BBO off the UI thread.
+/// Flattens only the selected instrument of a simulated account.
 pub fn flatten_simulated_account_for(
     service: &TradingService,
     feedback: &TradingFeedback,
@@ -979,6 +989,15 @@ pub fn flatten_simulated_account_for(
         .detach();
 }
 
+fn account_flatten_scope(
+    account_key: Option<String>,
+) -> Option<aeris_trading_runtime::FlattenScope> {
+    Some(aeris_trading_runtime::FlattenScope {
+        account: Some(aeris_trading::TradingAccountId::try_new(account_key?).ok()?),
+        instrument: None,
+    })
+}
+
 /// Prepares the selected account and instrument identities.
 #[must_use]
 pub fn prepare_flatten_for(
@@ -995,7 +1014,21 @@ pub fn prepare_flatten_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_usd_equity, prepare_simulated_order};
+    use super::{account_flatten_scope, parse_usd_equity, prepare_simulated_order};
+
+    #[test]
+    fn account_flatten_command_targets_all_instruments_but_only_the_selected_account() {
+        let account = aeris_trading::TradingAccountId::try_new("aeris-sim-2").expect("account");
+        assert_eq!(
+            account_flatten_scope(Some(account.as_str().to_string())),
+            Some(aeris_trading_runtime::FlattenScope {
+                account: Some(account),
+                instrument: None,
+            })
+        );
+        assert_eq!(account_flatten_scope(None), None);
+        assert_eq!(account_flatten_scope(Some(String::new())), None);
+    }
 
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
