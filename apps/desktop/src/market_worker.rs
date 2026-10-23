@@ -13,8 +13,7 @@ use aeris_market_data::ChartInterval;
 use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
-    MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
-    MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
+    MarketPriceAlertTrigger, MarketRuntimeEvent,
 };
 use aeris_observability::FeedConnectionState;
 use aeris_observability::FeedDiagnosticsSnapshot;
@@ -275,9 +274,9 @@ pub enum MarketWorkerMessage {
     },
     /// Canonical depth stays in its coordinator envelope until pane projection.
     RuntimeOrderBook(aeris_market_runtime::MarketConsumerEvent),
-    StudyOutput(MarketStudyOutputSnapshot),
-    StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
-    StudyRemoved(MarketStudyRemoved),
+    /// Tape and study events retain the coordinator consumer fence through presentation.
+    RuntimeTradeTape(aeris_market_runtime::MarketConsumerEvent),
+    RuntimeStudy(aeris_market_runtime::MarketConsumerEvent),
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
     Recovery {
         generation: u64,
@@ -304,7 +303,6 @@ pub enum MarketWorkerMessage {
         generation: u64,
         status: aeris_contracts::MarketSessionStatus,
     },
-    TradeTape(MarketTradeTapeSnapshot),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     PriceAlertSyncFailed,
     PriceAlertSyncSucceeded,
@@ -470,8 +468,11 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
         message,
         MarketWorkerMessage::RuntimeSeriesPublication { .. }
             | MarketWorkerMessage::RuntimeOrderBook(_)
-            | MarketWorkerMessage::StudyOutput(_)
-            | MarketWorkerMessage::TradeTape(_)
+            | MarketWorkerMessage::RuntimeStudy(aeris_market_runtime::fence::Fenced {
+                value: MarketRuntimeEvent::StudyOutputSnapshot(_),
+                ..
+            })
+            | MarketWorkerMessage::RuntimeTradeTape(_)
     )
 }
 
@@ -3054,18 +3055,25 @@ mod tests {
             quantity_scale: 0,
             trades: Arc::from([]),
         };
+        let events = FixtureMarketEvents::default();
         sender
-            .send(MarketWorkerMessage::TradeTape(snapshot(2)))
+            .send(MarketWorkerMessage::RuntimeTradeTape(
+                events.trade_tape(snapshot(2)),
+            ))
             .expect("first tape queues");
         sender
-            .send(MarketWorkerMessage::TradeTape(snapshot(3)))
+            .send(MarketWorkerMessage::RuntimeTradeTape(
+                events.trade_tape(snapshot(3)),
+            ))
             .expect("newer tape queues behind it");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::TradeTape(first), MarketWorkerMessage::TradeTape(second)]
-                if first.revision == 2 && second.revision == 3
+            [MarketWorkerMessage::RuntimeTradeTape(first), MarketWorkerMessage::RuntimeTradeTape(second)]
+                if matches!(&first.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 2)
+                    && matches!(&second.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 3)
+                    && first.epoch == second.epoch
         ));
     }
 

@@ -454,6 +454,13 @@ fn apply_received_event(
     if is_series_status(&event)
         || is_bar_publication(&event)
         || matches!(event, MarketRuntimeEvent::OrderBookSnapshot(_))
+        || matches!(
+            event,
+            MarketRuntimeEvent::TradeTapeSnapshot(_)
+                | MarketRuntimeEvent::StudyOutputSnapshot(_)
+                | MarketRuntimeEvent::StudyOutputsInvalidated(_)
+                | MarketRuntimeEvent::StudyRemoved(_)
+        )
     {
         deliver_fenced_pane_event(
             endpoint,
@@ -537,6 +544,10 @@ fn deliver_fenced_pane_event(
             deliver_runtime_series_publication(endpoint, event, received_unix_nanos)
         }
         MarketRuntimeEvent::OrderBookSnapshot(_) => deliver_runtime_order_book(endpoint, event),
+        MarketRuntimeEvent::TradeTapeSnapshot(_) => deliver_runtime_trade_tape(endpoint, event),
+        MarketRuntimeEvent::StudyOutputSnapshot(_)
+        | MarketRuntimeEvent::StudyOutputsInvalidated(_)
+        | MarketRuntimeEvent::StudyRemoved(_) => deliver_runtime_study(endpoint, event),
         _ => Err("unexpected fenced pane event".into()),
     }
 }
@@ -602,6 +613,59 @@ pub(super) fn deliver_runtime_order_book(
     endpoint
         .messages
         .send(MarketWorkerMessage::RuntimeOrderBook(event))
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn deliver_runtime_trade_tape(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    let MarketRuntimeEvent::TradeTapeSnapshot(snapshot) = &event.value else {
+        return Err("unexpected runtime trade-tape event".into());
+    };
+    if snapshot.consumer_id.0.get() != endpoint.consumer_id {
+        return Err("engine trade-tape consumer mismatched".into());
+    }
+    if snapshot.generation.0.get() < endpoint.active_generation {
+        return Ok(());
+    }
+    if snapshot.generation.0.get() > endpoint.active_generation {
+        return Err("engine trade-tape generation advanced unexpectedly".into());
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeTradeTape(event))
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn deliver_runtime_study(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    let (consumer_id, generation) = match &event.value {
+        MarketRuntimeEvent::StudyOutputSnapshot(snapshot) => {
+            (snapshot.consumer_id, snapshot.generation)
+        }
+        MarketRuntimeEvent::StudyOutputsInvalidated(invalidated) => {
+            (invalidated.consumer_id, invalidated.generation)
+        }
+        MarketRuntimeEvent::StudyRemoved(removed) => (removed.consumer_id, removed.generation),
+        _ => return Err("unexpected runtime study event".into()),
+    };
+    if consumer_id.0.get() != endpoint.consumer_id {
+        return Err("engine study consumer mismatched".into());
+    }
+    if let Some(generation) = generation {
+        if generation.0.get() < endpoint.active_generation {
+            return Ok(());
+        }
+        if generation.0.get() > endpoint.active_generation {
+            return Err("engine study generation advanced unexpectedly".into());
+        }
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeStudy(event))
         .map_err(|error| error.to_string())
 }
 

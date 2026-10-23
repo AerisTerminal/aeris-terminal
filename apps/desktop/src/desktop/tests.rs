@@ -817,6 +817,14 @@ mod timeframe_input {
         }
     }
 
+    fn tape_message(
+        snapshot: aeris_market_runtime::MarketTradeTapeSnapshot,
+    ) -> MarketWorkerMessage {
+        MarketWorkerMessage::RuntimeTradeTape(
+            aeris_desktop::test_support::FixtureMarketEvents::default().trade_tape(snapshot),
+        )
+    }
+
     fn deliver_market_message(
         surface: &Entity<WorkspaceSurface>,
         publications: &MarketWorkerSender,
@@ -900,10 +908,7 @@ mod timeframe_input {
                 );
             });
         });
-        deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 1, 1, 3)),
-            cx,
-        );
+        deliver(tape_message(order_flow_tape(&product, 1, 1, 3)), cx);
         let one_minute = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
@@ -922,7 +927,7 @@ mod timeframe_input {
         let mut rewritten = order_flow_tape(&product, five_minutes, 2, 5);
         rewritten.rewrite_generation = 1;
         rewritten.provider_generation = 9;
-        deliver(MarketWorkerMessage::TradeTape(rewritten), cx);
+        deliver(tape_message(rewritten), cx);
         assert_eq!(
             applied_ordinal(&one_minute, 1, cx),
             Some(3),
@@ -934,7 +939,7 @@ mod timeframe_input {
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute15, cx);
         let mut old_tape = order_flow_tape(&product, five_minutes, 3, 6);
         old_tape.provider_generation = 9;
-        deliver(MarketWorkerMessage::TradeTape(old_tape), cx);
+        deliver(tape_message(old_tape), cx);
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
         deliver(
@@ -946,14 +951,14 @@ mod timeframe_input {
         // Even a higher revision from the retired selection cannot replace the
         // new binding's tape while the old chart is still on screen.
         deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, five_minutes, 99, 99)),
+            tape_message(order_flow_tape(&product, five_minutes, 99, 99)),
             cx,
         );
         // A new selection may move to another provider session whose generation
         // starts lower than the previous one's. The selection fence, not the
         // provider's unrelated epoch, decides whether its tape is current.
         deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, fifteen_minutes, 1, 6)),
+            tape_message(order_flow_tape(&product, fifteen_minutes, 1, 6)),
             cx,
         );
         publish_snapshot_at_selection(&surface, fifteen_minutes, cx);
@@ -965,7 +970,7 @@ mod timeframe_input {
             "the replacement chart rebuilds its order flow from the retained tape"
         );
         deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, fifteen_minutes, 2, 7)),
+            tape_message(order_flow_tape(&product, fifteen_minutes, 2, 7)),
             cx,
         );
         assert_eq!(applied_ordinal(&replacement, 15, cx), Some(7));

@@ -8,7 +8,7 @@ use aeris_market_runtime::{
     CanonicalMarketSeriesSnapshot, MarketConsumerEvent, MarketConsumerId, MarketDemandError,
     MarketDemandErrorScope, MarketGenerationId, MarketOrderBookSnapshot, MarketProviderGeneration,
     MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate,
-    SeriesTailOperation,
+    MarketStudyRemoved, MarketTradeTapeSnapshot, SeriesTailOperation,
     fence::{ConsumerTag, EpochSequence, Fenced},
 };
 
@@ -33,6 +33,24 @@ impl Default for FixtureMarketEvents {
 }
 
 impl FixtureMarketEvents {
+    #[must_use]
+    pub fn trade_tape(&self, mut snapshot: MarketTradeTapeSnapshot) -> MarketConsumerEvent {
+        snapshot.consumer_id = self.consumer_id;
+        Fenced {
+            epoch: self.envelope.epoch,
+            value: MarketRuntimeEvent::TradeTapeSnapshot(snapshot),
+        }
+    }
+
+    #[must_use]
+    pub fn study_removed(&self, mut removed: MarketStudyRemoved) -> MarketConsumerEvent {
+        removed.consumer_id = self.consumer_id;
+        Fenced {
+            epoch: self.envelope.epoch,
+            value: MarketRuntimeEvent::StudyRemoved(removed),
+        }
+    }
+
     #[must_use]
     pub fn order_book(
         &self,

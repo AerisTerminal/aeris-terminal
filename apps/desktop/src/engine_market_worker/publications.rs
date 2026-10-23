@@ -31,45 +31,6 @@ pub(super) fn apply_pushed_event(
             )?;
             Ok(())
         }
-        MarketRuntimeEvent::TradeTapeSnapshot(snapshot) => {
-            if snapshot.consumer_id.0.get() != consumer_id {
-                return Err("engine trade-tape consumer mismatched".to_string());
-            }
-            if snapshot.generation.0.get() != active_generation {
-                return Ok(());
-            }
-            messages
-                .send(MarketWorkerMessage::TradeTape(snapshot))
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        MarketRuntimeEvent::StudyOutputSnapshot(snapshot) => {
-            if snapshot.consumer_id.0.get() != consumer_id {
-                return Err("engine study-output consumer mismatched".to_string());
-            }
-            messages
-                .send(MarketWorkerMessage::StudyOutput(snapshot))
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        MarketRuntimeEvent::StudyOutputsInvalidated(invalidated) => {
-            if invalidated.consumer_id.0.get() != consumer_id {
-                return Err("engine study-invalidation consumer mismatched".to_string());
-            }
-            messages
-                .send(MarketWorkerMessage::StudyOutputsInvalidated(invalidated))
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        MarketRuntimeEvent::StudyRemoved(removed) => {
-            if removed.consumer_id.0.get() != consumer_id {
-                return Err("engine study-removal consumer mismatched".to_string());
-            }
-            messages
-                .send(MarketWorkerMessage::StudyRemoved(removed))
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
         MarketRuntimeEvent::PriceAlertTriggered(trigger) => {
             if trigger.consumer_id.0.get() != consumer_id {
                 return Err("engine price-alert identity mismatched".to_string());

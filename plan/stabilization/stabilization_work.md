@@ -1749,6 +1749,21 @@ Status: pending
     order_book_mailbox_preserves_newer_frames_after_earlier_frames and
     order_book_mailbox_does_not_reinterpret_session_generations. Tape and
     study publications remain for Part 6b; M6.6 and VAL-DSK-021/022 stay open.
+  - Part 6b: trade tape and study output/invalidation/removal now keep the
+    coordinator consumer envelope through the bounded mailbox to the pane.
+    The worker checks exact consumer and selection generation (while allowing
+    generation-free consumer-scoped study lifecycle publications), and the
+    pane retains its committed-selection and revision guards. Deleted the
+    old tape/study conversion arms and mailbox variants in the same change.
+    Tape and study-output publications retain the market capacity; study
+    invalidations/removals retain the control reserve and are not discarded
+    by background-market suppression. Migrated
+    trade_tape_publication_is_consumer_and_generation_fenced,
+    trade_tape_mailbox_preserves_emission_order_per_runtime_generation,
+    pane_harness_retired_study_removal_cannot_delete_current_study and the
+    order-flow tape switch regression; added
+    study_publications_keep_the_consumer_envelope_and_selection_fence.
+    Parts 7-8 and VAL-DSK-021/022 remain open.
   - Before Part 6b, the two parallel-suite timing flakes from the M5 probe
     follow-up were repaired at their test owners: ordinary study fixture
     calculations await the isolated worker's reply without a wall-clock
@@ -2326,6 +2341,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M5 route-bypass migration: the replay harness registers the instrument through verified replay-feed Terms and re-primes session/Live after every restart; all 25 replay tests pass with and without the bypasses. `simulated_golden_v2.txt` changes only revisions (-1 from flatten on) and owner-book quote sequences (1/2/3 to 2/4/5); no order, event, fill or P&L value changed. No test depends on the bypasses now.
 - 2026-10-23 M5 route-bypass removal fix(trading): deleted the three test-only route bypasses; added route-less admission (QuoteUnavailable while RouteUnknown), never-fills and fills-after-verified-Terms regressions. Test builds now use production route gating.
 - 2026-10-23 M6.6 preflight test(desktop): stabilize study state-limit, subtree checkpoint and cached offline-lease fixtures - ordinary study unit tests wait for the worker while the explicit timeout test opts into the unchanged 50 ms production deadline; the cached account view is set before its startup request. The desktop poll policy is unchanged. M6.6 Part 6b follows.
+- 2026-10-23 M6.6 Part 6b refactor(desktop): tape and study publications retain the coordinator consumer envelope to GPUI, with exact worker consumer/selection checks and pane-side committed-generation guards; their old pushed-event conversion and mailbox variants are deleted. Study lifecycle control reserve is retained. M6.6 Parts 7-8 and the GUI pass remain open.
 
 ## 7. Known gaps / deferred
 

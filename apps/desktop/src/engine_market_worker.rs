@@ -3069,32 +3069,97 @@ mod tests {
             quantity_scale: 0,
             trades: Arc::from([]),
         };
-        let context = PushedEventContext {
-            consumer_id: 1,
-            active_generation: 2,
-            realtime: true,
-            instrument: &product,
+        let endpoint = series_endpoint(sender, 1, 2);
+        let deliver = |snapshot| {
+            runtime::deliver_runtime_trade_tape(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::TradeTapeSnapshot(snapshot)),
+            )
+        };
+        let mut future = snapshot(3, 10);
+        assert_eq!(
+            deliver(future.clone()),
+            Err("engine trade-tape generation advanced unexpectedly".into())
+        );
+        future.consumer_id = MarketConsumerId(NonZeroU64::new(2).expect("consumer"));
+        assert_eq!(
+            deliver(future),
+            Err("engine trade-tape consumer mismatched".into())
+        );
+        assert_eq!(deliver(snapshot(1, 8)), Ok(()));
+        assert_eq!(deliver(snapshot(2, 9)), Ok(()));
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RuntimeTradeTape(Fenced {
+                value: MarketRuntimeEvent::TradeTapeSnapshot(snapshot),
+                ..
+            })] if snapshot.revision == 9
+        ));
+    }
+
+    #[test]
+    fn study_publications_keep_the_consumer_envelope_and_selection_fence() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(4).expect("capacity"));
+        let endpoint = series_endpoint(sender, 1, 2);
+        let removed =
+            |consumer, generation: Option<u64>| aeris_market_runtime::MarketStudyRemoved {
+                consumer_id: MarketConsumerId(NonZeroU64::new(consumer).expect("consumer")),
+                generation: generation.map(|generation| {
+                    MarketGenerationId(NonZeroU64::new(generation).expect("generation"))
+                }),
+                study_ids: vec![],
+            };
+        let deliver = |removed| {
+            runtime::deliver_runtime_study(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::StudyRemoved(removed)),
+            )
         };
         assert_eq!(
-            apply_pushed_event(
-                MarketRuntimeEvent::TradeTapeSnapshot(snapshot(1, 8)),
-                &context,
-                &sender,
-            ),
-            Ok(())
+            deliver(removed(2, Some(2))),
+            Err("engine study consumer mismatched".into())
         );
         assert_eq!(
-            apply_pushed_event(
-                MarketRuntimeEvent::TradeTapeSnapshot(snapshot(2, 9)),
-                &context,
-                &sender,
+            deliver(removed(1, Some(3))),
+            Err("engine study generation advanced unexpectedly".into())
+        );
+        assert_eq!(deliver(removed(1, Some(1))), Ok(()));
+        assert_eq!(deliver(removed(1, None)), Ok(()));
+        assert_eq!(deliver(removed(1, Some(2))), Ok(()));
+        assert_eq!(
+            runtime::deliver_runtime_study(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::StudyOutputsInvalidated(
+                    aeris_market_runtime::MarketStudyOutputsInvalidated {
+                        consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                        generation: Some(MarketGenerationId(
+                            NonZeroU64::new(2).expect("generation"),
+                        )),
+                        study_ids: vec![],
+                    },
+                )),
             ),
             Ok(())
         );
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::TradeTape(snapshot)] if snapshot.revision == 9
+            [
+                MarketWorkerMessage::RuntimeStudy(Fenced {
+                    value: MarketRuntimeEvent::StudyRemoved(first),
+                    ..
+                }),
+                MarketWorkerMessage::RuntimeStudy(Fenced {
+                    value: MarketRuntimeEvent::StudyRemoved(second),
+                    ..
+                }),
+                MarketWorkerMessage::RuntimeStudy(Fenced {
+                    value: MarketRuntimeEvent::StudyOutputsInvalidated(_),
+                    ..
+                })
+            ] if first.generation.is_none()
+                && second.generation.is_some_and(|generation| generation.0.get() == 2)
         ));
     }
 

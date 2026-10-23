@@ -4035,16 +4035,10 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RuntimeOrderBook(event) => {
                 self.apply_runtime_order_book(event, cx);
             }
-            MarketWorkerMessage::TradeTape(snapshot) => self.apply_trade_tape(snapshot, cx),
-            MarketWorkerMessage::StudyOutput(snapshot) => {
-                self.apply_study_output_message(&snapshot, cx);
+            MarketWorkerMessage::RuntimeTradeTape(event) => {
+                self.apply_runtime_trade_tape(event, cx);
             }
-            MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
-                self.apply_study_invalidation_message(&invalidated, cx);
-            }
-            MarketWorkerMessage::StudyRemoved(removed) => {
-                self.apply_study_removal_message(&removed, cx);
-            }
+            MarketWorkerMessage::RuntimeStudy(event) => self.apply_runtime_study(event, cx),
             MarketWorkerMessage::StudyRegistered {
                 request_sequence,
                 study_id,
@@ -4158,6 +4152,37 @@ impl WorkspaceSurface {
             self.apply_trade_tape_to_chart(&snapshot, cx);
             self.trade_tape = Some(snapshot);
             cx.notify();
+        }
+    }
+
+    fn apply_runtime_trade_tape(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let aeris_market_runtime::MarketRuntimeEvent::TradeTapeSnapshot(snapshot) = event.value {
+            self.apply_trade_tape(snapshot, cx);
+        } else {
+            diagnostic!("Aeris pane received an unexpected runtime trade-tape event");
+        }
+    }
+
+    fn apply_runtime_study(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event.value {
+            aeris_market_runtime::MarketRuntimeEvent::StudyOutputSnapshot(snapshot) => {
+                self.apply_study_output_message(&snapshot, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::StudyOutputsInvalidated(invalidated) => {
+                self.apply_study_invalidation_message(&invalidated, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(removed) => {
+                self.apply_study_removal_message(&removed, cx);
+            }
+            _ => diagnostic!("Aeris pane received an unexpected runtime study event"),
         }
     }
 

@@ -1943,14 +1943,15 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
             resolved_chart_series: None,
         });
     });
+    let events = FixtureMarketEvents::default();
     let removed = |generation| {
-        MarketWorkerMessage::StudyRemoved(MarketStudyRemoved {
+        MarketWorkerMessage::RuntimeStudy(events.study_removed(MarketStudyRemoved {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: Some(MarketGenerationId(
                 NonZeroU64::new(generation).expect("generation"),
             )),
             study_ids: vec![study_id],
-        })
+        }))
     };
     harness
         .publications
