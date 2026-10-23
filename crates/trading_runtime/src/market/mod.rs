@@ -2,6 +2,8 @@ pub(crate) mod feed;
 pub(crate) mod gating;
 #[cfg(test)]
 mod placement_atomicity_tests;
+#[cfg(test)]
+mod route_gating_tests;
 
 use super::{Command, respond};
 use aeris_instruments::{ContractMetadata, InstrumentId, InstrumentMetadataProvenance, PriceGrid};
@@ -56,15 +58,6 @@ impl TradingCore {
         &self,
         instrument: &TradingInstrument,
     ) -> Result<(), aeris_trading::RejectReason> {
-        #[cfg(test)]
-        if !self
-            .state
-            .market_routes
-            .contains_key(&instrument.instrument_id)
-        {
-            // Direct-observation fixtures have no provider feed; real Terms always carry a route.
-            return Ok(());
-        }
         if matches!(
             self.quote_book
                 .feed_state(&instrument.instrument_id, &self.state.market_routes),
@@ -83,14 +76,6 @@ impl TradingCore {
         instrument: &TradingInstrument,
     ) -> Result<(), aeris_trading::RejectReason> {
         self.check_practice_session(instrument)?;
-        #[cfg(test)]
-        if !self
-            .state
-            .market_routes
-            .contains_key(&instrument.instrument_id)
-        {
-            return Ok(());
-        }
         self.quote_book.check_quote(
             &instrument.instrument_id,
             self.command_now,
@@ -720,14 +705,6 @@ impl TradingCore {
             && order.expires_at_unix_nanos.is_none()
         {
             return false;
-        }
-        #[cfg(test)]
-        if !self
-            .state
-            .market_routes
-            .contains_key(&observation.instrument_id)
-        {
-            return true;
         }
         observation.provenance.observed_unix_nanos
             > order

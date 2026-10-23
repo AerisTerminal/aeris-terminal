@@ -2557,7 +2557,7 @@ fn hyperliquid_quote(
 
 /// Removes the persisted verified route, modeling a V20-migrated legacy instrument that has
 /// not yet received its Terms.
-fn null_persisted_route(directory: &TestDirectory, instrument: &TradingInstrument) {
+pub(crate) fn null_persisted_route(directory: &TestDirectory, instrument: &TradingInstrument) {
     rusqlite::Connection::open(config(directory).database_path)
         .unwrap()
         .execute(

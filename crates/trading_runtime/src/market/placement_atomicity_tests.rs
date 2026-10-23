@@ -5,7 +5,7 @@ use aeris_trading::market::{FeedState, MarketFeedEvent};
 use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::time::Duration;
 
-fn open_core(configuration: &TradingServiceConfig) -> TradingCore {
+pub(super) fn open_core(configuration: &TradingServiceConfig) -> TradingCore {
     let (sender, _receiver) = mpsc::sync_channel(1);
     TradingCore::open(
         &configuration.database_path,
