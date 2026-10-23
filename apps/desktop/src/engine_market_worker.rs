@@ -45,9 +45,9 @@ use aeris_observability::FeedConnectionState;
 #[cfg(test)]
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_desktop::market_worker::{
-    MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
-    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup,
-    classify_provider_catalog_event, market_worker_channel,
+    MarketDataWorker, MarketRecoveryFailure, MarketWorkerCommand, MarketWorkerMessage,
+    MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
+    market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -1973,8 +1973,10 @@ mod tests {
             false,
         ));
 
+        let fenced = fenced_event(snapshot.clone());
+        let epoch = fenced.epoch;
         assert!(
-            complete_pending_recovery(&snapshot, &product, &mut record.endpoint, 1_000_000_000)
+            complete_pending_recovery(&fenced, &product, &mut record.endpoint, 1_000_000_000)
                 .expect("pushed recovery completes")
         );
         assert!(record.endpoint.pending_recovery.is_none());
@@ -1982,11 +1984,14 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Recovery {
-                generation: 3,
+            [MarketWorkerMessage::RuntimeRecovery {
+                event: aeris_market_runtime::fence::Fenced {
+                    epoch: delivered_epoch,
+                    value: MarketRuntimeEvent::SeriesSnapshot(snapshot)
+                },
                 request_id: 9,
-                result: Ok(bootstrap),
-            }] if bootstrap.generation.publication_generation() == 1
+                received_unix_nanos: 1_000_000_000,
+            }] if *delivered_epoch == epoch && snapshot.publication_generation == 1 && snapshot.generation.0.get() == 3
         ));
     }
 
@@ -2023,7 +2028,7 @@ mod tests {
             [MarketWorkerMessage::Recovery {
                 generation: 3,
                 request_id: 9,
-                result: Err(MarketRecoveryFailure::Superseded),
+                failure: MarketRecoveryFailure::Superseded,
             }]
         ));
 
@@ -2047,14 +2052,24 @@ mod tests {
             elapsed_millis: None,
         });
         assert!(
-            complete_pending_recovery(&event, &product, &mut record.endpoint, 1_000_000_000)
-                .is_err()
+            complete_pending_recovery(
+                &fenced_event(event.clone()),
+                &product,
+                &mut record.endpoint,
+                1_000_000_000
+            )
+            .is_err()
         );
         assert_eq!(record.endpoint.pending_recovery, Some(pending));
         assert_eq!(pane.worker.drain_messages().0.len(), count);
         assert!(
-            complete_pending_recovery(&event, &product, &mut record.endpoint, 1_000_000_000)
-                .expect("retry delivers failure")
+            complete_pending_recovery(
+                &fenced_event(event.clone()),
+                &product,
+                &mut record.endpoint,
+                1_000_000_000
+            )
+            .expect("retry delivers failure")
         );
         assert!(record.endpoint.pending_recovery.is_none());
         assert!(matches!(
@@ -2062,7 +2077,7 @@ mod tests {
             [MarketWorkerMessage::Recovery {
                 generation: 3,
                 request_id: 9,
-                result: Err(MarketRecoveryFailure::Failed(_)),
+                failure: MarketRecoveryFailure::Failed(_),
             }]
         ));
     }
@@ -2101,8 +2116,13 @@ mod tests {
         ));
 
         assert!(
-            !complete_pending_recovery(&snapshot, &product, &mut record.endpoint, 1_000_000_000)
-                .expect("new snapshot is not consumed by old recovery")
+            !complete_pending_recovery(
+                &fenced_event(snapshot),
+                &product,
+                &mut record.endpoint,
+                1_000_000_000
+            )
+            .expect("new snapshot is not consumed by old recovery")
         );
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
@@ -2111,7 +2131,7 @@ mod tests {
             [MarketWorkerMessage::Recovery {
                 generation: 3,
                 request_id: 9,
-                result: Err(MarketRecoveryFailure::Superseded),
+                failure: MarketRecoveryFailure::Superseded,
             }]
         ));
     }
@@ -2172,7 +2192,7 @@ mod tests {
             [MarketWorkerMessage::Recovery {
                 generation: 7,
                 request_id: 10,
-                result: Err(MarketRecoveryFailure::Superseded),
+                failure: MarketRecoveryFailure::Superseded,
             }]
         ));
 
@@ -2933,8 +2953,13 @@ mod tests {
         let event = MarketRuntimeEvent::DemandError(error.clone());
 
         assert!(
-            !complete_pending_recovery(&event, &product, &mut record.endpoint, 1_000_000_000)
-                .expect("older-history error is not a recovery outcome"),
+            !complete_pending_recovery(
+                &fenced_event(event),
+                &product,
+                &mut record.endpoint,
+                1_000_000_000
+            )
+            .expect("older-history error is not a recovery outcome"),
             "an older-history failure cannot fail the current-series recovery"
         );
         assert!(record.endpoint.pending_recovery.is_some());

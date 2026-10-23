@@ -448,9 +448,14 @@ fn apply_received_event(
         }
         return Ok(false);
     }
+    let event = aeris_market_runtime::MarketConsumerEvent {
+        epoch: consumer_epoch,
+        value: event,
+    };
     if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
         return Ok(false);
     }
+    let event = event.value;
     if is_series_status(&event)
         || is_bar_publication(&event)
         || matches!(event, MarketRuntimeEvent::OrderBookSnapshot(_))

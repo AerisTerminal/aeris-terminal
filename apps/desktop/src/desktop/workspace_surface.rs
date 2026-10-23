@@ -3793,14 +3793,60 @@ impl WorkspaceSurface {
         &mut self,
         generation: u64,
         request_id: u64,
-        result: Result<Box<MarketWorkerBootstrap>, MarketRecoveryFailure>,
+        failure: MarketRecoveryFailure,
         cx: &mut Context<Self>,
     ) {
         // A recovery result is a lifecycle outcome, not an incremental bar.
         // The still-displayed series cannot settle a replacement request.
         if self.chart_pane_controller.accept_series_state(generation) {
-            self.apply_recovery(request_id, result, cx);
+            self.apply_recovery(request_id, Err(failure), cx);
         }
+    }
+
+    fn apply_runtime_recovery(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        request_id: u64,
+        received_unix_nanos: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let aeris_market_runtime::MarketRuntimeEvent::SeriesSnapshot(snapshot) = event.value else {
+            diagnostic!("Aeris pane received an unexpected recovery event");
+            return;
+        };
+        let generation = snapshot.generation.0.get();
+        if !self.chart_pane_controller.accept_series_state(generation)
+            || self
+                .product
+                .as_ref()
+                .is_none_or(|product| product.provider != snapshot.snapshot.series.provider_id)
+        {
+            return;
+        }
+        let replay = match engine_market_worker::replay_runtime_snapshot(
+            &snapshot,
+            self.product.as_ref(),
+            received_unix_nanos,
+        ) {
+            Ok(replay) => replay,
+            Err(error) => {
+                self.apply_recovery(request_id, Err(MarketRecoveryFailure::Failed(error)), cx);
+                return;
+            }
+        };
+        let (subscription_id, worker_label) =
+            engine_market_worker::worker_identity(&snapshot.snapshot.series.provider_id);
+        self.apply_recovery(
+            request_id,
+            Ok(Box::new(MarketWorkerBootstrap {
+                generation: MarketPublicationGeneration::from_snapshot(&replay)
+                    .with_selection_generation(generation),
+                snapshot: replay,
+                subscription_id: subscription_id.to_string(),
+                worker_label: worker_label.to_string(),
+            })),
+            cx,
+        );
     }
 
     fn apply_recovery(
@@ -3985,8 +4031,13 @@ impl WorkspaceSurface {
             MarketWorkerMessage::Recovery {
                 generation,
                 request_id,
-                result,
-            } => self.apply_recovery_message(generation, request_id, result, cx),
+                failure,
+            } => self.apply_recovery_message(generation, request_id, failure, cx),
+            MarketWorkerMessage::RuntimeRecovery {
+                event,
+                request_id,
+                received_unix_nanos,
+            } => self.apply_runtime_recovery(event, request_id, received_unix_nanos, cx),
             MarketWorkerMessage::CatalogFailure { message: _ } => {
                 Self::post_symbol_search_notice(
                     "The market catalog is unavailable. Try again later.",
@@ -4031,9 +4082,7 @@ impl WorkspaceSurface {
                 self.apply_provider_catalog_event(event, cx);
             }
             MarketWorkerMessage::MarketSessionStatus { generation, status } => {
-                if self.chart_pane_controller.accept_publication(generation) {
-                    self.apply_market_session_status(status, cx);
-                }
+                self.apply_fenced_market_session_status(generation, status, cx);
             }
             MarketWorkerMessage::RuntimeOrderBook(event) => {
                 self.apply_runtime_order_book(event, cx);
@@ -4066,6 +4115,17 @@ impl WorkspaceSurface {
             }
             MarketWorkerMessage::PriceAlertSyncFailed => Self::apply_price_alert_sync(false, cx),
             MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),
+        }
+    }
+
+    fn apply_fenced_market_session_status(
+        &mut self,
+        generation: u64,
+        status: aeris_contracts::MarketSessionStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_pane_controller.accept_publication(generation) {
+            self.apply_market_session_status(status, cx);
         }
     }
 

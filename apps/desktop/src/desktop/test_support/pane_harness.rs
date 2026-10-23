@@ -709,14 +709,82 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
         .send(MarketWorkerMessage::Recovery {
             generation: 1,
             request_id,
-            result: Err(aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
+            failure: aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
                 "retired private recovery failure".into(),
-            )),
+            ),
         })
         .expect("retired recovery");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.chart_state, before);
+        assert_eq!(pane.chart_failure, None);
+    });
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness
+        .publications
+        .send(harness.fixture_recovering(1, "fixture stream invalid"))
+        .expect("recovery state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let request_id = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::Recovery { command, .. } => Some(command.request_id),
+            _ => None,
+        })
+        .expect("recovery request");
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let MarketWorkerMessage::RuntimeSeriesPublication {
+        event,
+        received_unix_nanos,
+    } = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
+    else {
+        unreachable!("fixture publishes a canonical snapshot");
+    };
+    let epoch = event.epoch;
+    harness
+        .publications
+        .send(MarketWorkerMessage::RuntimeRecovery {
+            event,
+            request_id: request_id + 1,
+            received_unix_nanos,
+        })
+        .expect("stale request");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Recovering);
+    });
+    let MarketWorkerMessage::RuntimeSeriesPublication {
+        event,
+        received_unix_nanos,
+    } = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
+    else {
+        unreachable!("fixture publishes a canonical snapshot");
+    };
+    assert_eq!(event.epoch, epoch);
+    harness
+        .publications
+        .send(MarketWorkerMessage::RuntimeRecovery {
+            event,
+            request_id,
+            received_unix_nanos,
+        })
+        .expect("current recovery");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Ready);
         assert_eq!(pane.chart_failure, None);
     });
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
@@ -1747,9 +1815,9 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
         .send(MarketWorkerMessage::Recovery {
             generation: 1,
             request_id,
-            result: Err(aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
+            failure: aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
                 "private old recovery failure".into(),
-            )),
+            ),
         })
         .expect("old recovery");
     harness.pane.update(cx, |pane, cx| {

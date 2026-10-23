@@ -283,10 +283,17 @@ pub enum MarketWorkerMessage {
         generation: u64,
     },
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
+    /// The covering snapshot retains the coordinator consumer epoch until the
+    /// pane accepts the request and projects it for the chart.
+    RuntimeRecovery {
+        event: aeris_market_runtime::MarketConsumerEvent,
+        request_id: u64,
+        received_unix_nanos: i64,
+    },
     Recovery {
         generation: u64,
         request_id: u64,
-        result: Result<Box<MarketWorkerBootstrap>, MarketRecoveryFailure>,
+        failure: MarketRecoveryFailure,
     },
     /// A catalog or screen endpoint has no chart selection generation.
     CatalogFailure {
@@ -2706,7 +2713,7 @@ mod tests {
                 .send(MarketWorkerMessage::Recovery {
                     generation: 1,
                     request_id: 7,
-                    result: Err(MarketRecoveryFailure::Failed("recovery failed".to_string())),
+                    failure: MarketRecoveryFailure::Failed("recovery failed".to_string()),
                 })
                 .is_ok()
         );
@@ -2737,16 +2744,23 @@ mod tests {
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         let mut bar = *bootstrap.snapshot.bars().last().expect("last bar").value();
-        let next_publication_generation = bootstrap.generation.publication_generation() + 1;
+        let next_publication_generation = bootstrap.generation.publication_generation() + 2;
         bar.source_sequence += 1;
         bar.exchange_timestamp_seconds += 60;
         bar.exchange_timestamp_unix_nanos = bar.exchange_timestamp_seconds * 1_000_000_000;
+        let MarketWorkerMessage::RuntimeSeriesPublication {
+            event,
+            received_unix_nanos,
+        } = snapshot_message(&mut fixture, 2)
+        else {
+            unreachable!("fixture publishes a snapshot");
+        };
         assert!(
             covered_sender
-                .send(MarketWorkerMessage::Recovery {
-                    generation: 1,
+                .send(MarketWorkerMessage::RuntimeRecovery {
+                    event,
                     request_id: 8,
-                    result: Ok(Box::new(bootstrap)),
+                    received_unix_nanos,
                 })
                 .is_ok()
         );
@@ -2763,22 +2777,26 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Recovery { request_id: 8, .. },
+                MarketWorkerMessage::RuntimeRecovery { request_id: 8, .. },
                 MarketWorkerMessage::RuntimeSeriesPublication { .. }
             ]
         ));
 
         let (stale_sender, stale_receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut stale_fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let stale_bootstrap = stale_fixture
-            .publish_snapshot(2)
-            .expect("new snapshot publishes");
+        let MarketWorkerMessage::RuntimeSeriesPublication {
+            event,
+            received_unix_nanos,
+        } = snapshot_message(&mut stale_fixture, 2)
+        else {
+            unreachable!("fixture publishes a snapshot");
+        };
         assert!(
             stale_sender
-                .send(MarketWorkerMessage::Recovery {
-                    generation: 1,
+                .send(MarketWorkerMessage::RuntimeRecovery {
+                    event,
                     request_id: 9,
-                    result: Ok(Box::new(stale_bootstrap)),
+                    received_unix_nanos,
                 })
                 .is_ok()
         );
@@ -2794,7 +2812,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Recovery { request_id: 9, .. },
+                MarketWorkerMessage::RuntimeRecovery { request_id: 9, .. },
                 MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })

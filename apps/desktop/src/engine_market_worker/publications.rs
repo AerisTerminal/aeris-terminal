@@ -1,10 +1,9 @@
 //! Publications.
 
 use super::{
-    ChartInterval, InstallProviderInstrument, MarketDemandErrorScope, MarketPublicationGeneration,
-    MarketRecoveryFailure, MarketRuntimeEvent, MarketService, MarketWorkerBootstrap,
-    MarketWorkerMessage, ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams, demand_error,
-    replay_runtime_snapshot, series_key, worker_identity,
+    ChartInterval, InstallProviderInstrument, MarketDemandErrorScope, MarketRecoveryFailure,
+    MarketRuntimeEvent, MarketService, MarketWorkerMessage, ReplayRecoveryCommand, WorkerEndpoint,
+    chart_demand_streams, demand_error, replay_runtime_snapshot, series_key,
 };
 use aeris_observability::diagnostic;
 
@@ -35,7 +34,7 @@ pub(super) fn send_recovery(
             .send(MarketWorkerMessage::Recovery {
                 generation: endpoint.active_generation,
                 request_id: previous.request_id,
-                result: Err(MarketRecoveryFailure::Superseded),
+                failure: MarketRecoveryFailure::Superseded,
             })
             .map_err(|error| error.to_string())?;
     }
@@ -57,7 +56,7 @@ pub(super) fn send_recovery(
             .send(MarketWorkerMessage::Recovery {
                 generation: endpoint.active_generation,
                 request_id: command.request_id,
-                result: Err(MarketRecoveryFailure::Failed(error)),
+                failure: MarketRecoveryFailure::Failed(error),
             })
             .map_err(|error| error.to_string())?;
         endpoint.pending_recovery = None;
@@ -75,7 +74,7 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
         .send(MarketWorkerMessage::Recovery {
             generation: endpoint.active_generation,
             request_id: pending.request_id,
-            result: Err(MarketRecoveryFailure::Superseded),
+            failure: MarketRecoveryFailure::Superseded,
         })
         .map_err(|error| error.to_string())?;
     endpoint.pending_recovery = None;
@@ -83,7 +82,7 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
 }
 
 pub(super) fn complete_pending_recovery(
-    event: &MarketRuntimeEvent,
+    event: &aeris_market_runtime::MarketConsumerEvent,
     product: &InstallProviderInstrument,
     endpoint: &mut WorkerEndpoint,
     received_unix_nanos: i64,
@@ -91,7 +90,7 @@ pub(super) fn complete_pending_recovery(
     let Some(command) = endpoint.pending_recovery else {
         return Ok(false);
     };
-    match event {
+    match &event.value {
         MarketRuntimeEvent::SeriesSnapshot(snapshot)
             if snapshot.consumer_id.0.get() == endpoint.consumer_id
                 && snapshot.generation.0.get() == endpoint.active_generation
@@ -103,20 +102,12 @@ pub(super) fn complete_pending_recovery(
             if replay.bars().is_empty() {
                 return Err("runtime snapshot is empty".to_string());
             }
-            let generation = MarketPublicationGeneration::from_snapshot(&replay)
-                .with_selection_generation(endpoint.active_generation);
-            let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
             endpoint
                 .messages
-                .send(MarketWorkerMessage::Recovery {
-                    generation: endpoint.active_generation,
+                .send(MarketWorkerMessage::RuntimeRecovery {
+                    event: event.clone(),
                     request_id: command.request_id,
-                    result: Ok(Box::new(MarketWorkerBootstrap {
-                        snapshot: replay,
-                        subscription_id: subscription_id.to_string(),
-                        generation,
-                        worker_label: worker_label.to_string(),
-                    })),
+                    received_unix_nanos,
                 })
                 .map_err(|error| error.to_string())?;
             endpoint.pending_recovery = None;
@@ -132,7 +123,7 @@ pub(super) fn complete_pending_recovery(
                 .send(MarketWorkerMessage::Recovery {
                     generation: endpoint.active_generation,
                     request_id: command.request_id,
-                    result: Err(MarketRecoveryFailure::Failed(demand_error(error))),
+                    failure: MarketRecoveryFailure::Failed(demand_error(error)),
                 })
                 .map_err(|error| error.to_string())?;
             endpoint.pending_recovery = None;

@@ -23,7 +23,7 @@ pub(super) fn fence_recovery_command(
         .send(MarketWorkerMessage::Recovery {
             generation: selection_generation.unwrap_or(endpoint.active_generation),
             request_id: command.request_id,
-            result: Err(MarketRecoveryFailure::Superseded),
+            failure: MarketRecoveryFailure::Superseded,
         })
         .map_err(|error| error.to_string())?;
     Ok(None)
