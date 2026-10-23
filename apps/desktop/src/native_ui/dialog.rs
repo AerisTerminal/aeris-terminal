@@ -370,7 +370,6 @@ impl RenderOnce for Dialog {
             .when(movable.is_none(), |panel| panel.max_w(relative(1.0)))
             .flex()
             .flex_col()
-            .shadow_lg()
             .occlude()
             .when_some(self.focus, |panel, focus| panel.track_focus(&focus))
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())

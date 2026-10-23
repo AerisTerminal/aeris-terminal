@@ -1,5 +1,6 @@
 use super::big_trades_dialog::{
-    DropdownChoice, SettingDropdown, setting_row as described_row, settings_group, settings_groups,
+    DropdownChoice, SettingDropdown, described_setting_row, setting_block, setting_input,
+    settings_group, settings_groups,
 };
 use super::*;
 
@@ -128,6 +129,7 @@ fn text_control(
     input.map_or_else(
         || {
             div()
+                .w(design_rems(SETTINGS_CONTROL_WIDTH))
                 .h(px(32.0))
                 .flex()
                 .items_center()
@@ -142,9 +144,8 @@ fn text_control(
         },
         |input| {
             div()
-                .h(px(32.0))
                 .opacity(if enabled { 1.0 } else { 0.55 })
-                .child(Input::new(input).platform(theme).flex_1())
+                .child(setting_input(input, theme))
                 .into_any_element()
         },
     )
@@ -181,13 +182,12 @@ fn setting_control(
     }
 }
 
-/// Host-owned style row shown for every study, independent of its SDK settings.
-fn line_thickness_row(
+fn line_thickness_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let choices = SettingDropdown {
+    SettingDropdown {
         menu: "study_line_width",
         label: "Line thickness",
         open_menu: dialog.menu.as_deref(),
@@ -200,16 +200,12 @@ fn line_thickness_row(
             })
             .collect(),
     }
-    .render(app, WorkspaceSurface::set_study_settings_line_width, theme);
-    described_row(
-        "Line thickness",
-        "Stroke width of every line this study draws.",
-        choices,
-        theme,
-    )
+    .render(app, WorkspaceSurface::set_study_settings_line_width, theme)
 }
 
-/// A swatch that opens the color picker for one study line. Picks change only the draft.
+/// A swatch that opens the color picker for one study line. Picks change only the draft. A study
+/// with several lines shows each line as a bare swatch named by its tooltip, so every swatch fits
+/// on the thickness row; a single line shows its hex code.
 fn output_color_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -223,20 +219,21 @@ fn output_color_control(
         .as_ref()
         .filter(|picker| picker.target == output_index);
     let toggle = app.clone();
-    let mut control = div().relative().flex().child(
-        color_swatch_button(
-            ("study_output_color", output_index),
-            draft.label.clone(),
-            &value,
-            open_picker.is_some(),
-            theme,
-        )
-        .on_press(move |_, window, cx| {
+    let id = ("study_output_color", output_index);
+    let open = open_picker.is_some();
+    let button = if dialog.output_colors.len() > 1 {
+        color_dot_button(id, draft.label.clone(), &value, open, theme)
+    } else {
+        color_swatch_button(id, draft.label.clone(), &value, open, theme)
+    };
+    let mut control = div()
+        .relative()
+        .flex()
+        .child(button.on_press(move |_, window, cx| {
             toggle.update(cx, |surface, surface_cx| {
                 surface.toggle_study_dialog_color_picker(output_index, window, surface_cx);
             });
-        }),
-    );
+        }));
     if let Some(picker) = open_picker {
         let select = app.clone();
         let dismiss = app.clone();
@@ -261,35 +258,21 @@ fn output_color_control(
     control.into_any_element()
 }
 
-/// Host-owned color row: one labeled swatch per line the study draws.
-fn output_colors_row(
+/// Host-owned style row shown for every study, independent of its SDK settings: the thickness
+/// of every line and, beside it, one swatch per line the study draws.
+fn lines_row(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let swatches = div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .children(dialog.output_colors.iter().map(|draft| {
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(gpui_color(theme.colors.text_secondary))
-                        .child(draft.label.clone()),
-                )
-                .child(output_color_control(app, dialog, draft, theme))
-        }))
-        .into_any_element();
-    described_row(
-        "Line colors",
-        "Color of each line this study draws.",
-        swatches,
+    let swatches = dialog
+        .output_colors
+        .iter()
+        .map(|draft| output_color_control(app, dialog, draft, theme));
+    setting_block(
+        "Lines",
+        "Thickness of every line and the color of each, in legend order.",
+        std::iter::once(line_thickness_control(app, dialog, theme)).chain(swatches),
         theme,
     )
 }
@@ -314,48 +297,18 @@ fn setting_row(
         spec.presentation.enabled_when.as_ref(),
         cx,
     );
-    let colors = theme.colors;
-    let hint = constraint_hint(&spec.presentation.control);
-    Some(
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .py_2()
-            .child(
-                div().flex().items_start().justify_between().gap_3().child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(platform_font_weight(TypographyRole::Strong))
-                                .text_color(gpui_color(colors.text_default))
-                                .child(spec.presentation.label.clone()),
-                        )
-                        .children(spec.presentation.description.as_ref().map(|description| {
-                            div()
-                                .text_xs()
-                                .text_color(gpui_color(colors.text_muted))
-                                .child(description.clone())
-                        }))
-                        .children(hint.map(|hint| {
-                            div()
-                                .text_xs()
-                                .text_color(gpui_color(colors.text_muted))
-                                .child(hint)
-                        })),
-                ),
-            )
-            .child(setting_control(
-                app, dialog, control_id, spec, enabled, theme,
-            ))
-            .into_any_element(),
-    )
+    let details = spec
+        .presentation
+        .description
+        .iter()
+        .map(|description| SharedString::from(description.clone()))
+        .chain(constraint_hint(&spec.presentation.control).map(SharedString::from));
+    Some(described_setting_row(
+        spec.presentation.label.clone(),
+        details,
+        setting_control(app, dialog, control_id, spec, enabled, theme),
+        theme,
+    ))
 }
 
 fn study_settings_body(
@@ -388,13 +341,15 @@ fn study_settings_body(
         }
         last_group = Some(group);
     }
-    let style_rows = std::iter::once(line_thickness_row(app, dialog, theme))
-        .chain((!dialog.output_colors.is_empty()).then(|| output_colors_row(app, dialog, theme)));
     body = body.child(settings_groups(
         groups
             .into_iter()
             .map(|(title, rows)| settings_group(title, rows, theme))
-            .chain(std::iter::once(settings_group("Style", style_rows, theme))),
+            .chain(std::iter::once(settings_group(
+                "Style",
+                [lines_row(app, dialog, theme)],
+                theme,
+            ))),
         theme,
     ));
     if let Some(message) = &dialog.message {

@@ -25,7 +25,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars and the large
   workspace panels) use `popover_surface` from `native_ui/theme.rs`, the Theme System
   `.ui-popover`: an opaque `surface-secondary` fill and a 1px `border-secondary` edge, with no
-  inner highlight.
+  inner highlight. No floating layer casts a shadow.
 - Tooltips (`terminal_ui::tooltip`) use the same popover look: `surface-secondary`, a 1px
   `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
@@ -36,13 +36,19 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   settings dialogs and the header account menu) are popover layers too. Their settings sit in
   titled groups with no card fill, no outlined blocks and no hairlines between rows; consecutive
   groups are split by a 1px `border` divider (`settings_groups`), as the Theme System splits
-  grouped popup content. Size and style settings are dropdowns, not tab groups.
+  grouped popup content. Size and style settings are dropdowns, not tab groups. A setting row
+  puts its label and description on the left and a compact control on the right
+  (`SETTINGS_CONTROL_WIDTH` for dropdowns, fields and hex swatches); never stretch a control
+  across the row. Colors set together sit side by side: a pair shows each color's name
+  (`named_color_button`), and a study's line colors are bare swatches named by their tooltips
+  (`color_dot_button`) on the same row as the line-thickness dropdown.
 - A neutral badge is a `radius-large` `surface-secondary` pill with a 1px `border-subtle` edge and
   `text-secondary`; tinted badges pair a `-subtle` fill with its text color.
 - Nothing inside a popover layer rests on plain `surface` in dark mode. Fields and setting rows use
   `field_surface` (`surface`, `surface-secondary` in dark) with `field_border` (`border`,
   `border-secondary` in dark, as the Theme System inputs and trade-ticket fields), and buttons use
-  the `Secondary` variant.
+  the `Secondary` variant, except a panel's own add or connect action (New practice account,
+  Connect), which uses `Default`.
 - Button labels always use the normal platform weight, trade buttons included.
 - A fill resolved with `.over(..)` is opaque only over an opaque backdrop. Resolve a translucent
   fill over the opaque surface beneath it first.

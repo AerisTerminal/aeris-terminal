@@ -2292,7 +2292,7 @@ pub(super) fn color_swatch_dot(value: &str, theme: &AerisTheme) -> Div {
 
 /// Width of every settings control trigger, color swatches and dropdowns alike, so the
 /// controls in a column line up.
-const SETTINGS_CONTROL_WIDTH: f32 = 120.0;
+pub(super) const SETTINGS_CONTROL_WIDTH: f32 = 120.0;
 
 /// The secondary button that shows a color's swatch and hex code and opens its picker.
 pub(super) fn color_swatch_button(
@@ -2318,6 +2318,49 @@ pub(super) fn color_swatch_button(
                 .text_color(gpui_color(colors.text_muted))
                 .child(value.to_ascii_uppercase()),
         )
+}
+
+/// The secondary button that shows a color's swatch beside the color's name, for rows that set
+/// a pair of related colors (up and down, bid and ask) side by side.
+pub(super) fn named_color_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    value: &str,
+    open: bool,
+    theme: &AerisTheme,
+) -> Button {
+    let label = label.into();
+    Button::new(id, theme)
+        .variant(ButtonVariant::Secondary)
+        .open(open)
+        .aria_label(label.clone())
+        .leading(color_swatch_dot(value, theme))
+        .child(
+            div()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_secondary))
+                .child(label),
+        )
+}
+
+/// A square secondary button holding only a color's swatch, named by its tooltip, for rows
+/// that set many colors at once (one per study line).
+pub(super) fn color_dot_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    value: &str,
+    open: bool,
+    theme: &AerisTheme,
+) -> Button {
+    let label = label.into();
+    Button::new(id, theme)
+        .variant(ButtonVariant::Secondary)
+        .w(design_rems(ButtonSize::Default.logical_height()))
+        .open(open)
+        .aria_label(label.clone())
+        .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .leading(color_swatch_dot(value, theme))
 }
 
 /// A color's swatch button and, while open, its picker. A locked color cannot open.

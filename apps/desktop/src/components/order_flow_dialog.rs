@@ -3,7 +3,8 @@
 //! Apply hands them to the chart's order-flow settings owner.
 
 use super::big_trades_dialog::{
-    SettingDropdown, dropdown_choices, setting_row, settings_group, settings_groups,
+    SettingDropdown, control_strip, dropdown_choices, setting_input, setting_row, settings_group,
+    settings_groups,
 };
 use super::*;
 
@@ -550,11 +551,13 @@ impl WorkspaceSurface {
     }
 }
 
-/// A swatch that opens the color picker for one order-flow color. Picks change only the draft.
+/// A swatch that opens the color picker for one order-flow color. Picks change only the draft. A
+/// `named` swatch shows the color's name instead of its hex code, for paired colors.
 fn color_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &OrderFlowDialogState,
     target: OrderFlowColorTarget,
+    named: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
     let value = dialog.effective_color(target);
@@ -563,20 +566,20 @@ fn color_control(
         .as_ref()
         .filter(|picker| picker.target == target);
     let toggle = app.clone();
-    let mut control = div().relative().flex().child(
-        color_swatch_button(
-            ("order_flow_color", target as usize),
-            target.label(),
-            &value,
-            open_picker.is_some(),
-            theme,
-        )
-        .on_press(move |_, window, cx| {
+    let id = ("order_flow_color", target as usize);
+    let button = if named {
+        named_color_button(id, target.label(), &value, open_picker.is_some(), theme)
+    } else {
+        color_swatch_button(id, target.label(), &value, open_picker.is_some(), theme)
+    };
+    let mut control = div()
+        .relative()
+        .flex()
+        .child(button.on_press(move |_, window, cx| {
             toggle.update(cx, |surface, surface_cx| {
                 surface.toggle_order_flow_dialog_color_picker(target, window, surface_cx);
             });
-        }),
-    );
+        }));
     if let Some(picker) = open_picker {
         let select = app.clone();
         let dismiss = app.clone();
@@ -601,7 +604,7 @@ fn color_control(
     control.into_any_element()
 }
 
-/// One row of labelled swatches, one per target.
+/// One row of swatches side by side, one per target; several targets show their names.
 fn colors_row(
     app: &Entity<WorkspaceSurface>,
     dialog: &OrderFlowDialogState,
@@ -610,29 +613,15 @@ fn colors_row(
     targets: &[OrderFlowColorTarget],
     theme: &AerisTheme,
 ) -> AnyElement {
-    let swatches = targets.iter().map(|&target| {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(gpui_color(theme.colors.text_secondary))
-                    .child(target.label()),
-            )
-            .child(color_control(app, dialog, target, theme))
-    });
+    let named = targets.len() > 1;
     setting_row(
         label,
         description,
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .children(swatches)
-            .into_any_element(),
+        control_strip(
+            targets
+                .iter()
+                .map(|&target| color_control(app, dialog, target, named, theme)),
+        ),
         theme,
     )
 }
@@ -643,15 +632,7 @@ fn number_row(
     input: &Entity<InputState>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    setting_row(
-        label,
-        description,
-        div()
-            .h(px(32.0))
-            .child(Input::new(input).platform(theme).flex_1())
-            .into_any_element(),
-        theme,
-    )
+    setting_row(label, description, setting_input(input, theme), theme)
 }
 
 fn cumulative_delta_groups(

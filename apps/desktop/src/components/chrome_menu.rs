@@ -33,6 +33,8 @@ pub(super) fn chrome_menu_extent(
     ChromeMenuExtent { width, list_height }
 }
 
+/// The symbol and indicator menu body. The chrome overlay panel around it draws the shared
+/// popover surface, so the body has no fill of its own.
 pub(super) fn chrome_menu_surface(
     colors: &aeris_design_system::ThemeColors,
     extent: ChromeMenuExtent,
@@ -47,7 +49,6 @@ pub(super) fn chrome_menu_surface(
         .max_h_full()
         .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
         .overflow_hidden()
-        .bg(gpui_color(colors.surface))
         .font_family(aeris_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_secondary))

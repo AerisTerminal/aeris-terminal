@@ -206,46 +206,26 @@ fn provider_heading(
 fn rithmic_card(view: &rithmic_login::RithmicLoginView, theme: &AerisTheme) -> impl IntoElement {
     let connected = view.connected();
     let busy = view.busy();
-    let actions = if connected {
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new("accounts_rithmic_change", theme)
-                    .variant(ButtonVariant::Ghost)
-                    .label("Change")
-                    .button_size(ButtonSize::Lg)
-                    .disabled(busy)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(ConnectRithmic), cx);
-                    }),
-            )
-            .child(
-                Button::new("accounts_rithmic_disconnect", theme)
-                    .variant(ButtonVariant::Outline)
-                    .label("Disconnect")
-                    .button_size(ButtonSize::Lg)
-                    .loading(busy)
-                    .disabled(busy)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(DisconnectRithmic), cx);
-                    }),
-            )
+    // A different login is a disconnect followed by a new connection, so a connected card
+    // offers only Disconnect.
+    let action = if connected {
+        Button::new("accounts_rithmic_disconnect", theme)
+            .variant(ButtonVariant::Outline)
+            .label("Disconnect")
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(DisconnectRithmic), cx);
+            })
     } else {
-        div().flex_none().child(
-            Button::new("accounts_rithmic_connect", theme)
-                .variant(ButtonVariant::Default)
-                .label("Connect")
-                .button_size(ButtonSize::Lg)
-                .loading(busy)
-                .disabled(busy)
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(ConnectRithmic), cx);
-                }),
-        )
-    };
+        Button::new("accounts_rithmic_connect", theme)
+            .variant(ButtonVariant::Default)
+            .label("Connect")
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(ConnectRithmic), cx);
+            })
+    }
+    .button_size(ButtonSize::Lg)
+    .loading(busy)
+    .disabled(busy);
     card("accounts_rithmic")
         .child(
             div()
@@ -253,7 +233,7 @@ fn rithmic_card(view: &rithmic_login::RithmicLoginView, theme: &AerisTheme) -> i
                 .items_center()
                 .gap_2()
                 .child(provider_heading("Rithmic", view.detail(), connected, theme))
-                .child(actions),
+                .child(div().flex_none().child(action)),
         )
         .children(view.message.as_ref().map(|message| {
             div()
@@ -314,7 +294,7 @@ fn practice_accounts(
     let open = app.clone();
     list.child(
         Button::new("accounts_new_practice_account", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Default)
             .icon(header_icon(HugeIcon::Add))
             .label("New practice account")
             .button_size(ButtonSize::Lg)

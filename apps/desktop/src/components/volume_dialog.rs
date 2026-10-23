@@ -1,5 +1,6 @@
 use super::big_trades_dialog::{
-    SettingDropdown, dropdown_choices, setting_row, settings_group, settings_groups,
+    SettingDropdown, control_strip, dropdown_choices, setting_input, setting_row, settings_group,
+    settings_groups,
 };
 use super::*;
 
@@ -13,11 +14,13 @@ const AVERAGE_KIND_CHOICES: [(&str, VolumeAverageKind); 2] = [
     ("EMA", VolumeAverageKind::Exponential),
 ];
 
-/// A swatch that opens the color picker for one volume color. Picks change only the draft.
+/// A swatch that opens the color picker for one volume color. Picks change only the draft. A
+/// `named` swatch shows the color's name instead of its hex code, for paired colors.
 fn color_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &VolumeDialogState,
     target: VolumeColorTarget,
+    named: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
     let value = target.color(&dialog.draft);
@@ -26,20 +29,20 @@ fn color_control(
         .as_ref()
         .filter(|picker| picker.target == target);
     let toggle = app.clone();
-    let mut control = div().relative().flex().child(
-        color_swatch_button(
-            ("volume_color", target as usize),
-            target.label(),
-            &value,
-            open_picker.is_some(),
-            theme,
-        )
-        .on_press(move |_, window, cx| {
+    let id = ("volume_color", target as usize);
+    let button = if named {
+        named_color_button(id, target.label(), &value, open_picker.is_some(), theme)
+    } else {
+        color_swatch_button(id, target.label(), &value, open_picker.is_some(), theme)
+    };
+    let mut control = div()
+        .relative()
+        .flex()
+        .child(button.on_press(move |_, window, cx| {
             toggle.update(cx, |surface, surface_cx| {
                 surface.toggle_volume_dialog_color_picker(target, window, surface_cx);
             });
-        }),
-    );
+        }));
     if let Some(picker) = open_picker {
         let select = app.clone();
         let dismiss = app.clone();
@@ -64,27 +67,6 @@ fn color_control(
     control.into_any_element()
 }
 
-fn labeled_color(
-    app: &Entity<WorkspaceSurface>,
-    dialog: &VolumeDialogState,
-    target: VolumeColorTarget,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(
-            div()
-                .text_sm()
-                .text_color(gpui_color(theme.colors.text_secondary))
-                .child(target.label()),
-        )
-        .child(color_control(app, dialog, target, theme))
-        .into_any_element()
-}
-
 fn columns_row(
     app: &Entity<WorkspaceSurface>,
     dialog: &VolumeDialogState,
@@ -93,13 +75,10 @@ fn columns_row(
     setting_row(
         "Columns",
         "Each column takes the color of the bar that traded it.",
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(labeled_color(app, dialog, VolumeColorTarget::Up, theme))
-            .child(labeled_color(app, dialog, VolumeColorTarget::Down, theme))
-            .into_any_element(),
+        control_strip([
+            color_control(app, dialog, VolumeColorTarget::Up, true, theme),
+            color_control(app, dialog, VolumeColorTarget::Down, true, theme),
+        ]),
         theme,
     )
 }
@@ -177,10 +156,7 @@ fn average_length_row(dialog: &VolumeDialogState, theme: &AerisTheme) -> AnyElem
     setting_row(
         "Length",
         "Number of bars averaged, from 1 to 500.",
-        div()
-            .h(px(32.0))
-            .child(Input::new(&dialog.average_length).platform(theme).flex_1())
-            .into_any_element(),
+        setting_input(&dialog.average_length, theme),
         theme,
     )
 }
@@ -193,7 +169,7 @@ fn average_color_row(
     setting_row(
         "Average color",
         "Color of the moving-average line.",
-        labeled_color(app, dialog, VolumeColorTarget::Average, theme),
+        color_control(app, dialog, VolumeColorTarget::Average, false, theme),
         theme,
     )
 }

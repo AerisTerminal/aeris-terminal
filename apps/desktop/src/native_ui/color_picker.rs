@@ -14,6 +14,7 @@ use super::{
     input::{Input, InputState},
     menu::{ANCHOR_GAP, PopupAnimationOrigin, animate_popup_from_origin},
     popup_fit::fit_to_window,
+    rem_scale::design_rems,
     theme::{gpui_color, platform_border_width, popover_surface},
 };
 
@@ -24,8 +25,9 @@ const PANEL_WIDTH: f32 = 232.0;
 const PANEL_PADDING: f32 = 12.0;
 const FIELD_HEIGHT: f32 = 132.0;
 const SLIDER_HEIGHT: f32 = 10.0;
-/// The hex row matches the 28 px `Default` button height.
-const HEX_ROW_HEIGHT: f32 = 28.0;
+/// The hex row is the `Default` button height, in design rems like the button, so the preview,
+/// the field and Set stay the same height inside a rem-scaled panel.
+const HEX_ROW_HEIGHT: f32 = ButtonSize::Default.logical_height();
 const SWATCH_SIZE: f32 = 20.0;
 const RECOMMENDED_COLORS: [&str; 8] = [
     "#6B7280", "#335CFF", "#FF7A45", "#FB3748", "#18B66A", "#F5A623", "#7C4DFF", "#45B8F2",
@@ -407,7 +409,8 @@ fn slider_outline(theme: &AerisTheme) -> gpui::Div {
 const HANDLE_SIZE: f32 = 14.0;
 const HANDLE_HOLE: f32 = 6.0;
 
-/// A solid disc with a centered hole that shows the selected color.
+/// A solid disc with a centered hole that shows the selected color, edged so it stays visible
+/// over light colors without a shadow.
 fn handle_disc(color: Hsla, theme: &AerisTheme) -> gpui::Div {
     div()
         .absolute()
@@ -416,8 +419,9 @@ fn handle_disc(color: Hsla, theme: &AerisTheme) -> gpui::Div {
         .items_center()
         .justify_center()
         .rounded_full()
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(theme.colors.border_secondary))
         .bg(gpui_color(theme.colors.primary_foreground))
-        .shadow_sm()
         .child(div().size(px(HANDLE_HOLE)).rounded_full().bg(color))
 }
 
@@ -444,7 +448,7 @@ fn hex_input_row(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
     let submit_input = input.clone();
     let submit_handler = picking.handler.clone();
     div()
-        .h(px(HEX_ROW_HEIGHT))
+        .h(design_rems(HEX_ROW_HEIGHT))
         .flex()
         .items_center()
         .gap_2()
@@ -453,7 +457,7 @@ fn hex_input_row(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
         .text_sm()
         .child(
             div()
-                .size(px(HEX_ROW_HEIGHT))
+                .size(design_rems(HEX_ROW_HEIGHT))
                 .flex_none()
                 .flex()
                 .items_center()

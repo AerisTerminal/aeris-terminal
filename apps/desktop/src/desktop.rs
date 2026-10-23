@@ -173,9 +173,9 @@ use assets::UiIcon as HugeIcon;
 use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
-    ChartSettingsTemplateView, ChartSettingsView, chart_context_menu_layer,
-    chart_settings_menu_layer, clamp_panel_origin_within, color_swatch_button, overlay_height,
-    price_axis_menu_layer,
+    ChartSettingsTemplateView, ChartSettingsView, SETTINGS_CONTROL_WIDTH, chart_context_menu_layer,
+    chart_settings_menu_layer, clamp_panel_origin_within, color_dot_button, color_swatch_button,
+    named_color_button, overlay_height, price_axis_menu_layer,
 };
 #[cfg(test)]
 use chart_context_menus::{

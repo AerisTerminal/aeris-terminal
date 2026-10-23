@@ -57,39 +57,107 @@ pub(super) fn settings_groups(
     stack.into_any_element()
 }
 
-/// One setting inside a [`settings_group`] card: label and description above its control.
+fn setting_label(
+    label: impl Into<SharedString>,
+    details: impl IntoIterator<Item = SharedString>,
+    theme: &AerisTheme,
+) -> Div {
+    let colors = theme.colors;
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_default))
+                .child(label.into()),
+        )
+        .children(details.into_iter().map(|detail| {
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child(detail)
+        }))
+}
+
+/// One setting inside a [`settings_group`]: label and details on the left and its compact
+/// control on the right, the chart settings panel's row layout.
+pub(super) fn described_setting_row(
+    label: impl Into<SharedString>,
+    details: impl IntoIterator<Item = SharedString>,
+    control: AnyElement,
+    theme: &AerisTheme,
+) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .py_2()
+        .child(setting_label(label, details, theme))
+        .child(div().flex_none().child(control))
+        .into_any_element()
+}
+
 pub(super) fn setting_row(
     label: &'static str,
     description: &'static str,
     control: AnyElement,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
+    described_setting_row(label, [SharedString::from(description)], control, theme)
+}
+
+/// A setting whose controls need the full row width (several swatches beside a dropdown):
+/// label and description above one line of controls.
+pub(super) fn setting_block(
+    label: &'static str,
+    description: &'static str,
+    controls: impl IntoIterator<Item = AnyElement>,
+    theme: &AerisTheme,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap_2()
         .py_2()
+        .child(setting_label(
+            label,
+            [SharedString::from(description)],
+            theme,
+        ))
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_default))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(description),
-                ),
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .children(controls),
         )
-        .child(control)
+        .into_any_element()
+}
+
+/// Several controls side by side in a setting row's control slot.
+pub(super) fn control_strip(controls: impl IntoIterator<Item = AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .children(controls)
+        .into_any_element()
+}
+
+/// A number or text field in a setting row, as wide as the dropdowns and swatches.
+pub(super) fn setting_input(input: &Entity<InputState>, theme: &AerisTheme) -> AnyElement {
+    div()
+        .w(design_rems(SETTINGS_CONTROL_WIDTH))
+        .h(px(32.0))
+        .flex()
+        .child(Input::new(input).platform(theme).flex_1())
         .into_any_element()
 }
 
@@ -109,8 +177,8 @@ pub(super) struct SettingDropdown<'a, T> {
 }
 
 impl<T: Clone + 'static> SettingDropdown<'_, T> {
-    /// A full-width secondary trigger showing the current choice and, while open, its menu.
-    /// Picking a choice closes the dropdown before `choose` applies it.
+    /// A secondary trigger as wide as the swatches, showing the current choice and, while open,
+    /// its menu. Picking a choice closes the dropdown before `choose` applies it.
     pub(super) fn render(
         self,
         app: &Entity<WorkspaceSurface>,
@@ -130,7 +198,6 @@ impl<T: Clone + 'static> SettingDropdown<'_, T> {
             theme,
         )
         .variant(ButtonVariant::Secondary)
-        .button_size(ButtonSize::Lg)
         .trigger()
         .full_width()
         .open(open)
@@ -180,16 +247,21 @@ impl<T: Clone + 'static> SettingDropdown<'_, T> {
             }))
         });
         let dismiss = app.clone();
-        MenuAnchor::new(
-            SharedString::from(format!("indicator_setting_{menu}_anchor")),
-            trigger,
-        )
-        .full_width()
-        .menu(panel)
-        .on_dismiss(move |_, cx| {
-            dismiss.update(cx, WorkspaceSurface::close_indicator_settings_menu);
-        })
-        .into_any_element()
+        div()
+            .w(design_rems(SETTINGS_CONTROL_WIDTH))
+            .flex_none()
+            .child(
+                MenuAnchor::new(
+                    SharedString::from(format!("indicator_setting_{menu}_anchor")),
+                    trigger,
+                )
+                .full_width()
+                .menu(panel)
+                .on_dismiss(move |_, cx| {
+                    dismiss.update(cx, WorkspaceSurface::close_indicator_settings_menu);
+                }),
+            )
+            .into_any_element()
     }
 }
 
@@ -232,10 +304,7 @@ fn minimum_volume_row(dialog: &BigTradesDialogState, theme: &AerisTheme) -> AnyE
     setting_row(
         "Minimum volume",
         "Total volume of one aggressive order, summed across its fills.",
-        div()
-            .h(px(32.0))
-            .child(Input::new(&dialog.minimum_volume).platform(theme).flex_1())
-            .into_any_element(),
+        setting_input(&dialog.minimum_volume, theme),
         theme,
     )
 }
