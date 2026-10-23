@@ -460,6 +460,7 @@ fn apply_received_event(
                 | MarketRuntimeEvent::StudyOutputSnapshot(_)
                 | MarketRuntimeEvent::StudyOutputsInvalidated(_)
                 | MarketRuntimeEvent::StudyRemoved(_)
+                | MarketRuntimeEvent::PriceAlertTriggered(_)
         )
     {
         deliver_fenced_pane_event(
@@ -548,8 +549,40 @@ fn deliver_fenced_pane_event(
         MarketRuntimeEvent::StudyOutputSnapshot(_)
         | MarketRuntimeEvent::StudyOutputsInvalidated(_)
         | MarketRuntimeEvent::StudyRemoved(_) => deliver_runtime_study(endpoint, event),
+        MarketRuntimeEvent::PriceAlertTriggered(_) => deliver_runtime_price_alert(endpoint, event),
         _ => Err("unexpected fenced pane event".into()),
     }
+}
+
+fn deliver_runtime_price_alert(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    deliver_runtime_price_alert_with_notification(
+        endpoint,
+        event,
+        super::publications::dispatch_native_price_alert,
+    )
+}
+
+fn deliver_runtime_price_alert_with_notification(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+    notify: impl FnOnce(&super::MarketPriceAlertTrigger),
+) -> Result<(), String> {
+    let MarketRuntimeEvent::PriceAlertTriggered(trigger) = &event.value else {
+        return Err("unexpected runtime price-alert event".into());
+    };
+    if trigger.consumer_id.0.get() != endpoint.consumer_id {
+        return Err("engine price-alert identity mismatched".into());
+    }
+    // A price alert is consumer-scoped, not bound to the pane's current chart
+    // selection. Keep its runtime envelope and let the pane match its alert ID.
+    notify(trigger);
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimePriceAlert(event))
+        .map_err(|error| error.to_string())
 }
 
 fn is_series_status(event: &MarketRuntimeEvent) -> bool {
@@ -678,7 +711,6 @@ fn forward_runtime_publication(
     let result = apply_pushed_event(
         event,
         &PushedEventContext {
-            consumer_id: endpoint.consumer_id,
             active_generation: endpoint.active_generation,
             realtime: true,
             instrument: product,
@@ -919,6 +951,62 @@ mod tests {
     };
     use aeris_trading_runtime::clock::ManualClock;
     use std::num::{NonZeroU64, NonZeroUsize};
+
+    #[test]
+    fn alert_publication_keeps_consumer_fence_and_rejects_wrong_identity() {
+        let (mut pane, record) = super::super::worker_endpoint(
+            1,
+            2,
+            super::super::default_hyperliquid_product(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let epoch = epochs.next();
+        let alert = |consumer_id| Fenced {
+            epoch,
+            value: MarketRuntimeEvent::PriceAlertTriggered(
+                aeris_market_runtime::MarketPriceAlertTrigger {
+                    consumer_id: MarketConsumerId(NonZeroU64::new(consumer_id).expect("consumer")),
+                    alert_id: "fixture-alert".into(),
+                    instrument: record.product.clone(),
+                    threshold_price: 100,
+                    observed_price: 101,
+                    condition: aeris_contracts::PriceAlertCondition::CrossingUp,
+                    frequency: aeris_contracts::PriceAlertFrequency::OnlyOnce,
+                    observed_unix_nanos: 1,
+                    remains_active: false,
+                },
+            ),
+        };
+        let mut notifications = 0;
+        assert!(
+            deliver_runtime_price_alert_with_notification(&record.endpoint, alert(42), |_| {
+                notifications += 1;
+            },)
+            .is_err()
+        );
+        assert_eq!(notifications, 0);
+        assert!(pane.worker.drain_messages().0.is_empty());
+
+        deliver_runtime_price_alert_with_notification(&record.endpoint, alert(41), |_| {
+            notifications += 1;
+        })
+        .expect("alert reaches its consumer");
+        assert_eq!(notifications, 1);
+        let (messages, _) = pane.worker.drain_messages();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RuntimePriceAlert(Fenced {
+                epoch: delivered_epoch,
+                value: MarketRuntimeEvent::PriceAlertTriggered(trigger),
+            })] if *delivered_epoch == epoch
+                && trigger.consumer_id.0.get() == 41
+                && trigger.alert_id == "fixture-alert"
+        ));
+    }
 
     #[test]
     fn failed_runtime_series_keeps_its_consumer_fence_in_the_pane_mailbox() {

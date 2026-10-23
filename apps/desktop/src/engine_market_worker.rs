@@ -800,9 +800,8 @@ fn provider_presentation(
         .find(|descriptor| descriptor.id == provider)
 }
 
-/// Identity every pushed engine event is checked against.
+/// Selected product context for provider-state presentation.
 struct PushedEventContext<'a> {
-    consumer_id: u64,
     active_generation: u64,
     realtime: bool,
     instrument: &'a InstallProviderInstrument,
@@ -2507,7 +2506,6 @@ mod tests {
                 transport_rtt_nanos: None,
             }),
             &PushedEventContext {
-                consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
                 instrument: &product,

@@ -15,7 +15,6 @@ pub(super) fn apply_pushed_event(
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     let &PushedEventContext {
-        consumer_id,
         active_generation,
         realtime,
         instrument,
@@ -31,22 +30,12 @@ pub(super) fn apply_pushed_event(
             )?;
             Ok(())
         }
-        MarketRuntimeEvent::PriceAlertTriggered(trigger) => {
-            if trigger.consumer_id.0.get() != consumer_id {
-                return Err("engine price-alert identity mismatched".to_string());
-            }
-            dispatch_native_price_alert(&trigger);
-            messages
-                .send(MarketWorkerMessage::PriceAlertTriggered(trigger))
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
         MarketRuntimeEvent::Fault(fault) => Err(fault.redacted_detail),
         _ => Err("engine returned an unexpected pushed market event".to_string()),
     }
 }
 
-fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
+pub(super) fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
     let (title, description) = crate::desktop::price_alert_trigger_text(trigger);
     let notification = aeris_platform_runtime::NativeUserNotification::try_new(
         "Aeris price alert",

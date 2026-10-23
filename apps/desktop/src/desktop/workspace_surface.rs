@@ -4058,8 +4058,14 @@ impl WorkspaceSurface {
                 study_id,
                 message: _,
             } => self.apply_study_removal_failure(study_id, cx),
-            MarketWorkerMessage::PriceAlertTriggered(trigger) => {
-                self.apply_price_alert_trigger(&trigger, cx);
+            MarketWorkerMessage::RuntimePriceAlert(event) => {
+                if let aeris_market_runtime::MarketRuntimeEvent::PriceAlertTriggered(trigger) =
+                    event.value
+                {
+                    self.apply_price_alert_trigger(&trigger, cx);
+                } else {
+                    diagnostic!("Aeris pane received an unexpected runtime price-alert event");
+                }
             }
             MarketWorkerMessage::PriceAlertSyncFailed => Self::apply_price_alert_sync(false, cx),
             MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),

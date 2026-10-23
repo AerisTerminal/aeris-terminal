@@ -12,8 +12,7 @@ use aeris_contracts::{
 use aeris_market_data::ChartInterval;
 use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use aeris_market_runtime::{
-    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
-    MarketPriceAlertTrigger, MarketRuntimeEvent,
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert, MarketRuntimeEvent,
 };
 use aeris_observability::FeedConnectionState;
 use aeris_observability::FeedDiagnosticsSnapshot;
@@ -303,7 +302,9 @@ pub enum MarketWorkerMessage {
         generation: u64,
         status: aeris_contracts::MarketSessionStatus,
     },
-    PriceAlertTriggered(MarketPriceAlertTrigger),
+    /// A consumer-scoped alert remains in the coordinator envelope until the pane
+    /// matches its own registered alert identity.
+    RuntimePriceAlert(aeris_market_runtime::MarketConsumerEvent),
     PriceAlertSyncFailed,
     PriceAlertSyncSucceeded,
     StudyRegistered {

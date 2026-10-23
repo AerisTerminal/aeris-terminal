@@ -1764,6 +1764,15 @@ Status: pending
     order-flow tape switch regression; added
     study_publications_keep_the_consumer_envelope_and_selection_fence.
     Parts 7-8 and VAL-DSK-021/022 remain open.
+  - Part 7a: price-alert triggers now retain the coordinator consumer envelope
+    through the bounded pane queue. The worker rejects a mismatched consumer
+    before native notification or mailbox delivery; the pane matches its owned
+    alert ID before changing presentation. Deleted the old alert-trigger
+    conversion and mailbox variant in the same change. The deterministic
+    alert_publication_keeps_consumer_fence_and_rejects_wrong_identity test
+    checks both rejection and exact-envelope delivery. Connection, session,
+    recovery, catalog, screener, diagnostics and local alert-sync outcomes
+    remain for Part 7; Part 8 and VAL-DSK-021/022 remain open.
   - Before Part 6b, the two parallel-suite timing flakes from the M5 probe
     follow-up were repaired at their test owners: ordinary study fixture
     calculations await the isolated worker's reply without a wall-clock
@@ -2342,6 +2351,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M5 route-bypass removal fix(trading): deleted the three test-only route bypasses; added route-less admission (QuoteUnavailable while RouteUnknown), never-fills and fills-after-verified-Terms regressions. Test builds now use production route gating.
 - 2026-10-23 M6.6 preflight test(desktop): stabilize study state-limit, subtree checkpoint and cached offline-lease fixtures - ordinary study unit tests wait for the worker while the explicit timeout test opts into the unchanged 50 ms production deadline; the cached account view is set before its startup request. The desktop poll policy is unchanged. M6.6 Part 6b follows.
 - 2026-10-23 M6.6 Part 6b refactor(desktop): tape and study publications retain the coordinator consumer envelope to GPUI, with exact worker consumer/selection checks and pane-side committed-generation guards; their old pushed-event conversion and mailbox variants are deleted. Study lifecycle control reserve is retained. M6.6 Parts 7-8 and the GUI pass remain open.
+- 2026-10-23 M6.6 Part 7a refactor(desktop): price-alert triggers retain their coordinator consumer envelope until the pane matches its alert identity; the old trigger message is removed. A wrong-consumer fixture does not notify or enqueue, while a matching fixture preserves the exact fence. Other Part 7 routes, Part 8 and milestone GUI evidence remain open.
 
 ## 7. Known gaps / deferred
 
