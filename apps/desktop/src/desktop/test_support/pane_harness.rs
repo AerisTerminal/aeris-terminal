@@ -2006,10 +2006,10 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
     });
     harness
         .publications
-        .send(MarketWorkerMessage::CatalogSwitchFailed {
+        .send(MarketWorkerMessage::CatalogSwitchOutcome {
             sequence: request.sequence,
             browser_generation: request.browser_generation,
-            detail: "catalog failed".into(),
+            result: Err("catalog failed".into()),
         })
         .expect("catalog failure");
     harness.pane.update(cx, |pane, cx| {
@@ -3130,10 +3130,10 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
         };
         harness
             .publications
-            .send(MarketWorkerMessage::CatalogSwitchFailed {
+            .send(MarketWorkerMessage::CatalogSwitchOutcome {
                 sequence: request.sequence,
                 browser_generation: request.browser_generation,
-                detail: "private-credential-sentinel".into(),
+                result: Err("private-credential-sentinel".into()),
             })
             .expect("fixture failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
@@ -3174,11 +3174,10 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     };
     harness
         .publications
-        .send(MarketWorkerMessage::CatalogSwitchCommitted {
+        .send(MarketWorkerMessage::CatalogSwitchOutcome {
             sequence: request.sequence,
             browser_generation: request.browser_generation,
-            instrument,
-            interval: ChartInterval::Minute1,
+            result: Ok((instrument, ChartInterval::Minute1)),
         })
         .expect("fixture commit enters mailbox");
     harness.pane.update(cx, |pane, cx| {

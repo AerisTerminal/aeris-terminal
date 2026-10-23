@@ -860,11 +860,10 @@ pub(super) fn apply_selection_outcome(
                         record
                             .endpoint
                             .messages
-                            .send(MarketWorkerMessage::CatalogSwitchCommitted {
+                            .send(MarketWorkerMessage::CatalogSwitchOutcome {
                                 sequence,
                                 browser_generation,
-                                instrument: selected,
-                                interval,
+                                result: Ok((selected, interval)),
                             })
                             .map_err(|error| error.to_string())?;
                     } else {
@@ -909,10 +908,10 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::CatalogSwitchFailed {
+                        .send(MarketWorkerMessage::CatalogSwitchOutcome {
                             sequence,
                             browser_generation,
-                            detail: format!("{error:?}"),
+                            result: Err(format!("{error:?}")),
                         })
                         .map_err(|send| send.to_string())?;
                 } else {

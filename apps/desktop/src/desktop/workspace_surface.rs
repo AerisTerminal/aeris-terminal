@@ -4084,17 +4084,22 @@ impl WorkspaceSurface {
                 generation,
                 instrument,
             } => self.apply_selected_instrument(generation, instrument),
-            MarketWorkerMessage::CatalogSwitchCommitted {
+            MarketWorkerMessage::CatalogSwitchOutcome {
                 sequence,
                 browser_generation,
-                instrument,
-                interval,
-            } => self.apply_catalog_switch(sequence, browser_generation, instrument, interval, cx),
-            MarketWorkerMessage::CatalogSwitchFailed {
-                sequence,
-                browser_generation,
-                detail: _,
-            } => self.reject_catalog_switch(sequence, browser_generation, cx),
+                result,
+            } => match result {
+                Ok((instrument, interval)) => {
+                    self.apply_catalog_switch(
+                        sequence,
+                        browser_generation,
+                        instrument,
+                        interval,
+                        cx,
+                    );
+                }
+                Err(_) => self.reject_catalog_switch(sequence, browser_generation, cx),
+            },
             MarketWorkerMessage::Connection {
                 generation,
                 state,

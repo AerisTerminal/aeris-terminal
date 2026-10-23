@@ -270,16 +270,11 @@ pub enum MarketWorkerMessage {
         generation: u64,
         instrument: InstallProviderInstrument,
     },
-    CatalogSwitchCommitted {
+    /// Catalog selection reply, fenced by both pane request and browser generation.
+    CatalogSwitchOutcome {
         sequence: u64,
         browser_generation: u64,
-        instrument: InstallProviderInstrument,
-        interval: ChartInterval,
-    },
-    CatalogSwitchFailed {
-        sequence: u64,
-        browser_generation: u64,
-        detail: String,
+        result: Result<(InstallProviderInstrument, ChartInterval), String>,
     },
 }
 

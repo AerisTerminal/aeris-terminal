@@ -1941,6 +1941,13 @@ Status: pending
     migration: metadata-bearing fenced runtime entries, other local outcomes,
     `MarketWorkerMessage`, transitional channel aliases and `fn enqueue`
     remain. M6.6 and VAL-DSK-021/022 stay open.
+  - Part 8b2b (2026-10-24): catalog-switch success and failure now share
+    one local outcome, retaining the exact pane sequence and browser generation.
+    The pane projects successful descriptors or a sanitized failure only after
+    the same existing pending-request checks. The catalog pending-switch and
+    redacted-notice GPUI regressions cover both branches; the remaining
+    metadata-bearing runtime variants, other local outcomes and transitional
+    message names still prevent VAL-DSK-021/022 closure.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
