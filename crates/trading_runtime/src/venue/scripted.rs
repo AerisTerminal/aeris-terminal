@@ -59,6 +59,14 @@ fn setup(
         Ok(VenueRequest::Reconcile { broker_account, deals_since_unix_nanos: None })
             if broker_account == BROKER_ACCOUNT
     ));
+    let feed = service
+        .attach_market_feed(std::sync::Arc::new(
+            crate::tests::market_feed::RecordedInterest::default(),
+        ))
+        .expect("market feed");
+    crate::tests::bootstrap_live_feed(&feed, &instrument(), crate::tests::market_feed::route());
+    crate::tests::push_live_quote(&feed, &instrument(), 1, 10_000, 10_025, 2);
+    service.status().expect("owner drains verified feed");
     (directory, service, receiver)
 }
 
@@ -1312,11 +1320,14 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
 #[test]
 fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
     let directory = TestDirectory::new("venue-global");
-    let service = start_service(&directory);
+    let (service, _clock) = crate::tests::routed_fixture(
+        &directory,
+        &instrument(),
+        crate::tests::market_feed::route(),
+        10_000,
+        10_025,
+    );
     service.register_account(broker()).expect("account");
-    service
-        .register_instrument(instrument())
-        .expect("instrument");
     let simulated = TradingAccountId::try_new("aeris-sim-1").expect("simulated");
     let mut resting = market_order("sim-resting", OrderSide::Buy, 1, 1_000);
     resting.order_type = OrderType::Limit;
