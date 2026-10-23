@@ -501,6 +501,7 @@ fn scenario(
         recorder,
         evidence,
         no_fees: options.no_fees,
+        first_post_restart_quote: None,
         root,
     };
     probe.wait_live_quotes()?;
@@ -570,6 +571,7 @@ struct Probe<'a> {
     recorder: &'a QuoteRecorder,
     evidence: &'a mut Evidence,
     no_fees: bool,
+    first_post_restart_quote: Option<i64>,
     root: &'a DataRoot,
 }
 
@@ -962,6 +964,7 @@ impl Probe<'_> {
         let first_quote = wait_for("BTC quote after restart", QUOTE_WAIT, || {
             Ok(self.recorder.first_quote_in_epoch(epoch, BTC_ID))
         })?;
+        self.first_post_restart_quote = Some(first_quote);
         let arrival_ms = (first_quote - restart_started_at) / 1_000_000;
         let mut marks = 0_u32;
         let mut other_events = 0_u32;
@@ -1019,12 +1022,16 @@ impl Probe<'_> {
                 let matches = recorded.is_some_and(|quote| {
                     fill.price == quote.bid
                         && fill.provenance.session_generation == quote.provider_generation
+                        && self.first_post_restart_quote.is_some_and(|first| {
+                            quote.received_unix_nanos >= first && fill.execution_unix_nanos >= first
+                        })
                 });
                 json!({
                     "instrument": fill.instrument_id.as_str(),
                     "fill_price_units": fill.price.units(),
                     "recorded_bid_units": recorded.map(|quote| quote.bid.units()),
                     "quote_received_unix_nanos": recorded.map(|quote| quote.received_unix_nanos),
+                    "first_post_restart_quote_unix_nanos": self.first_post_restart_quote,
                     "matches": matches,
                 })
             })
