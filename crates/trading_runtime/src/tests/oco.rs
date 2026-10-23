@@ -104,5 +104,7 @@ fn cancelling_one_oco_member_leaves_the_sibling_working() {
         "cancelled",
         "the group retires once no member remains open"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }

@@ -1658,6 +1658,10 @@ fn ranged_history_change_reuses_state_and_recomputes_only_repaired_rows() {
     runtime
         .execute_ready(&engine, study)
         .expect("covering execution succeeds");
+    assert!(
+        !runtime.execution_isolated(),
+        "the completed worker is reusable"
+    );
     assert_eq!(committed_test_state(&mut runtime, study).executions, 1);
     assert_eq!(
         runtime
@@ -1942,6 +1946,10 @@ fn assert_study_outputs_equal_full_snapshot(
 #[test]
 fn failing_studies_do_not_starve_independent_work_or_advance_dependents() {
     let mut fixture = failure_isolation_fixture();
+    assert!(
+        !fixture.runtime.execution_isolated(),
+        "the fixture's completed worker is reusable"
+    );
     let revised = bar(3, 120, 12_000);
     fixture
         .engine

@@ -283,6 +283,25 @@ fn idle_manual_clock_owner_does_not_run_timer_before_deadline() {
 }
 
 #[test]
+fn production_shutdown_deadline_expires_while_owner_is_blocked() {
+    let directory = TestDirectory::new("shutdown-deadline");
+    let service = start_service(&directory);
+    let (ready, started) = std::sync::mpsc::sync_channel(0);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    service
+        .commands
+        .send(Command::BlockOwnerForTest(ready, Arc::clone(&barrier)))
+        .expect("block owner");
+    started.recv().expect("owner reached barrier");
+    assert_eq!(
+        service.shutdown(Duration::ZERO),
+        Err("trading owner shutdown deadline expired".to_string())
+    );
+    barrier.wait();
+    service.join_expired_shutdown_for_test();
+}
+
+#[test]
 fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     let directory = TestDirectory::new("cancel-command-time");
     let (service, clock, feed) =
@@ -4259,7 +4278,7 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
     );
     let events = service.snapshot().expect("before restart").order_events;
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let restarted = start_service(&directory);
     assert_eq!(
@@ -4270,7 +4289,7 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
         events
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -5465,7 +5484,7 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
             .contains("news/session restriction")
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let restarted = start_service(&directory);
     assert!(
@@ -5474,7 +5493,7 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
             .contains("news/session restriction")
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 

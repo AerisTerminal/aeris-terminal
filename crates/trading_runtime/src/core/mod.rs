@@ -1296,6 +1296,29 @@ impl TradingService {
     /// # Errors
     /// Returns an error for overload, a repeated shutdown, timeout, or worker panic.
     pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
+        self.shutdown_with_deadline(Some(timeout))
+    }
+
+    /// Fixture shutdown waits for the owner to finish its queued checkpoint, independent of
+    /// how long the parallel test scheduler leaves the owner thread unscheduled.
+    #[cfg(test)]
+    pub(crate) fn shutdown_after_owner_exit_for_test(&self) -> Result<(), String> {
+        self.shutdown_with_deadline(None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn join_expired_shutdown_for_test(&self) {
+        self.runtime
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("owner thread")
+            .join()
+            .expect("owner checkpoints after release");
+    }
+
+    fn shutdown_with_deadline(&self, timeout: Option<Duration>) -> Result<(), String> {
         if self.runtime.stopping.swap(true, Ordering::AcqRel) {
             return Err("trading owner shutdown is already in progress".to_string());
         }
@@ -1317,7 +1340,7 @@ impl TradingService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
                 .is_none_or(thread::JoinHandle::is_finished);
-            if finished {
+            if finished || timeout.is_none() {
                 let worker = self
                     .runtime
                     .worker
@@ -1338,11 +1361,13 @@ impl TradingService {
                     .take();
                 return result;
             }
-            let elapsed = clock::Clock::monotonic(&shutdown_clock);
-            if elapsed >= timeout {
-                return Err("trading owner shutdown deadline expired".to_string());
+            if let Some(timeout) = timeout {
+                let elapsed = clock::Clock::monotonic(&shutdown_clock);
+                if elapsed >= timeout {
+                    return Err("trading owner shutdown deadline expired".to_string());
+                }
+                thread::sleep(Duration::from_millis(5).min(timeout.saturating_sub(elapsed)));
             }
-            thread::sleep(Duration::from_millis(5).min(timeout.saturating_sub(elapsed)));
         }
     }
 

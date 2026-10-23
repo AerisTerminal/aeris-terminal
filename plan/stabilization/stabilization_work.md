@@ -1773,6 +1773,20 @@ Status: pending
     checks both rejection and exact-envelope delivery. Connection, session,
     recovery, catalog, screener, diagnostics and local alert-sync outcomes
     remain for Part 7; Part 8 and VAL-DSK-021/022 remain open.
+  - Before Part 7b, parallel-suite timing follow-up: the study calculation
+    worker now publishes its completion before replying, so an immediately
+    following calculation cannot mistake an already-finished worker for a
+    timed-out one. The ranged-history and independent-failure regressions
+    assert the completed worker is reusable; the dedicated slow-calculation
+    test still enables the production 50 ms deadline. Three trading fixtures
+    (working exposure, news restriction and OCO cancellation) now join their
+    owner on its explicit shutdown completion rather than racing a 2-second
+    wall-clock deadline under parallel scheduling. A separate blocked-owner
+    test proves the real production shutdown deadline still expires. Focused
+    study (40 passed, three ignored) and four trading tests passed; fmt,
+    workspace check, strict Clippy and three consecutive default-parallel
+    full workspace test runs passed (trading: 301 passed, seven ignored in
+    each). M6.6 and VAL-DSK-021/022 remain open.
   - Before Part 6b, the two parallel-suite timing flakes from the M5 probe
     follow-up were repaired at their test owners: ordinary study fixture
     calculations await the isolated worker's reply without a wall-clock

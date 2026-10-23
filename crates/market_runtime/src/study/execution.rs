@@ -121,8 +121,10 @@ impl Executor {
                         Ok(Err(detail)) => Err(bounded_execution_detail(detail)),
                         Err(_) => Err("native study panicked".into()),
                     };
-                    let _ = job.reply.try_send(result);
                     worker_finished.fetch_add(1, Ordering::Release);
+                    // Completion must be visible before the reply wakes the caller: the next
+                    // calculation can otherwise reject a finished worker as still busy.
+                    let _ = job.reply.try_send(result);
                 }
             })
             .map_err(|error| format!("study worker start failed: {error}"))?;
