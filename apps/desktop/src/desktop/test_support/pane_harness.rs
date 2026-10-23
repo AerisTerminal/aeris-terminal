@@ -85,13 +85,11 @@ impl PaneHarness {
         state: aeris_contracts::SeriesLoadState,
         detail: &str,
     ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeSeriesStatus(
-            self.market_events.readiness(generation, state, detail),
-        )
+        MarketWorkerMessage::Runtime(self.market_events.readiness(generation, state, detail))
     }
 
     fn fixture_recovering(&self, generation: u64, detail: &str) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeSeriesStatus(self.market_events.demand_error(
+        MarketWorkerMessage::Runtime(self.market_events.demand_error(
             generation,
             aeris_market_runtime::MarketDemandErrorScope::Series,
             detail,
@@ -235,13 +233,11 @@ impl PaneHarness {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
         self.publications
-            .send(MarketWorkerMessage::RuntimeSeriesStatus(
-                self.market_events.readiness(
-                    1,
-                    aeris_contracts::SeriesLoadState::Live,
-                    "disconnected fixture ready",
-                ),
-            ))
+            .send(MarketWorkerMessage::Runtime(self.market_events.readiness(
+                1,
+                aeris_contracts::SeriesLoadState::Live,
+                "disconnected fixture ready",
+            )))
             .expect("fixture readiness enters mailbox");
         self.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -511,7 +507,7 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
     });
     let events = FixtureMarketEvents::default();
     let frame = |generation, revision| {
-        MarketWorkerMessage::RuntimeOrderBook(events.order_book(
+        MarketWorkerMessage::Runtime(events.order_book(
             generation,
             OrderBookPublication {
                 provider_id: product.provider.clone(),
@@ -1497,7 +1493,7 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
     let readiness = |generation, state, detail: &str| {
-        MarketWorkerMessage::RuntimeSeriesStatus(events.readiness(generation, state, detail))
+        MarketWorkerMessage::Runtime(events.readiness(generation, state, detail))
     };
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_interval(ChartInterval::Minute5, cx));
@@ -1582,7 +1578,7 @@ fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAp
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
     let failed = |generation| {
-        MarketWorkerMessage::RuntimeSeriesStatus(events.readiness(
+        MarketWorkerMessage::Runtime(events.readiness(
             generation,
             SeriesLoadState::Failed,
             "market unavailable",
@@ -1641,11 +1637,7 @@ fn pane_harness_runtime_demand_error_projects_only_current_series(cx: &mut TestA
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
     let error = |generation, scope| {
-        MarketWorkerMessage::RuntimeSeriesStatus(events.demand_error(
-            generation,
-            scope,
-            "coverage unavailable",
-        ))
+        MarketWorkerMessage::Runtime(events.demand_error(generation, scope, "coverage unavailable"))
     };
     harness
         .publications
@@ -1735,7 +1727,7 @@ fn pane_harness_history_unavailable_holds_until_the_runtime_clears_it(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeSeriesStatus(
+        .send(MarketWorkerMessage::Runtime(
             harness.market_events.readiness_with_presentation(
                 1,
                 aeris_contracts::SeriesLoadState::Live,
@@ -2013,7 +2005,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
     });
     let events = FixtureMarketEvents::default();
     let removed = |generation| {
-        MarketWorkerMessage::RuntimeStudy(events.study_removed(MarketStudyRemoved {
+        MarketWorkerMessage::Runtime(events.study_removed(MarketStudyRemoved {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: Some(MarketGenerationId(
                 NonZeroU64::new(generation).expect("generation"),
@@ -2819,17 +2811,15 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     };
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeCatalog(
-            harness.market_events.catalog(
-                aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
-                    ProviderInstrumentSearchResult {
-                        provider: request.provider,
-                        search_generation: request.search_generation,
-                        ..ProviderInstrumentSearchResult::default()
-                    },
-                ),
+        .send(MarketWorkerMessage::Runtime(harness.market_events.catalog(
+            aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
+                ProviderInstrumentSearchResult {
+                    provider: request.provider,
+                    search_generation: request.search_generation,
+                    ..ProviderInstrumentSearchResult::default()
+                },
             ),
-        ))
+        )))
         .expect("fixture search completion enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2961,18 +2951,16 @@ fn complete_fixture_search(
 ) {
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeCatalog(
-            harness.market_events.catalog(
-                aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
-                    ProviderInstrumentSearchResult {
-                        provider: request.provider.clone(),
-                        search_generation: request.search_generation,
-                        instruments: vec![instrument],
-                        ..ProviderInstrumentSearchResult::default()
-                    },
-                ),
+        .send(MarketWorkerMessage::Runtime(harness.market_events.catalog(
+            aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
+                ProviderInstrumentSearchResult {
+                    provider: request.provider.clone(),
+                    search_generation: request.search_generation,
+                    instruments: vec![instrument],
+                    ..ProviderInstrumentSearchResult::default()
+                },
             ),
-        ))
+        )))
         .expect("fixture search completion enters mailbox");
 }
 
@@ -2996,19 +2984,17 @@ fn pane_harness_verified_terms_replace_the_provisional_chart_descriptor(cx: &mut
     for instrument in [other, verified.clone()] {
         harness
             .publications
-            .send(MarketWorkerMessage::RuntimeCatalog(
-                harness.market_events.catalog(
-                    aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(
-                        aeris_market_runtime::MarketProviderInstrumentSelection {
-                            consumer_id: aeris_market_runtime::MarketConsumerId(
-                                std::num::NonZeroU64::MIN,
-                            ),
-                            command_generation: 1,
-                            instrument,
-                        },
-                    ),
+            .send(MarketWorkerMessage::Runtime(harness.market_events.catalog(
+                aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(
+                    aeris_market_runtime::MarketProviderInstrumentSelection {
+                        consumer_id: aeris_market_runtime::MarketConsumerId(
+                            std::num::NonZeroU64::MIN,
+                        ),
+                        command_generation: 1,
+                        instrument,
+                    },
                 ),
-            ))
+            )))
             .expect("verified terms enter mailbox");
     }
     harness.pane.update(cx, |pane, cx| {

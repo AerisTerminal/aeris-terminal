@@ -1920,6 +1920,18 @@ Status: pending
     10,000-event budget/order/overflow regression; existing bridge and pane
     coverage still runs. M6.6 and VAL-DSK-021/022 remain open until the
     parallel message model is removed and the literal checks pass.
+  - Part 8b1 (2026-10-24): six duplicate payload variants for coordinator
+    series status, depth, tape, study, catalog and alerts are replaced by one
+    `Runtime(MarketConsumerEvent)` queue entry. The pane dispatches by the
+    coordinator event type, retaining its consumer envelope and the existing
+    selection/operation fences; the screener projects only catalog events.
+    The bounded queue classifies publication capacity by canonical event
+    type instead of desktop variant names, with a regression for tape
+    backpressure, readiness/catalog control reserve and background
+    suppression. Bars, provider state and recovery still carry their
+    additional presentation metadata; local outcomes and transitional
+    `MarketWorkerMessage` names remain for the next Part 8b step.
+    M6.6 and VAL-DSK-021/022 remain open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

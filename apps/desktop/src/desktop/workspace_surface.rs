@@ -4045,9 +4045,7 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         match message {
-            MarketWorkerMessage::RuntimeSeriesStatus(event) => {
-                self.apply_runtime_series_status(event, cx);
-            }
+            MarketWorkerMessage::Runtime(event) => self.apply_fenced_runtime_event(event, cx),
             MarketWorkerMessage::RuntimeSeriesPublication {
                 event,
                 received_unix_nanos,
@@ -4102,19 +4100,9 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RuntimeProviderState { event, generation } => {
                 self.apply_runtime_provider_state(event, generation, cx);
             }
-            MarketWorkerMessage::RuntimeCatalog(event) => {
-                self.apply_runtime_catalog_event(event, cx);
-            }
             MarketWorkerMessage::MarketSessionStatus { generation, status } => {
                 self.apply_fenced_market_session_status(generation, status, cx);
             }
-            MarketWorkerMessage::RuntimeOrderBook(event) => {
-                self.apply_runtime_order_book(event, cx);
-            }
-            MarketWorkerMessage::RuntimeTradeTape(event) => {
-                self.apply_runtime_trade_tape(event, cx);
-            }
-            MarketWorkerMessage::RuntimeStudy(event) => self.apply_runtime_study(event, cx),
             MarketWorkerMessage::StudyRegistered {
                 request_sequence,
                 study_id,
@@ -4134,13 +4122,46 @@ impl WorkspaceSurface {
                 study_id,
                 message: _,
             } => self.apply_study_removal_failure(study_id, cx),
-            MarketWorkerMessage::RuntimePriceAlert(event) => {
-                self.apply_runtime_price_alert(event, cx);
-            }
             MarketWorkerMessage::PriceAlertSync {
                 sequence,
                 succeeded,
             } => self.apply_current_price_alert_sync(sequence, succeeded, cx),
+        }
+    }
+
+    fn apply_fenced_runtime_event(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match &event.value {
+            aeris_market_runtime::MarketRuntimeEvent::SeriesState(_)
+            | aeris_market_runtime::MarketRuntimeEvent::DemandError(_) => {
+                self.apply_runtime_series_status(event, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::OrderBookSnapshot(_) => {
+                self.apply_runtime_order_book(event, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::TradeTapeSnapshot(_) => {
+                self.apply_runtime_trade_tape(event, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::StudyOutputSnapshot(_)
+            | aeris_market_runtime::MarketRuntimeEvent::StudyOutputsInvalidated(_)
+            | aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(_) => {
+                self.apply_runtime_study(event, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::PriceAlertTriggered(_) => {
+                self.apply_runtime_price_alert(event, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::CatalogReady { .. }
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(_)
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(_)
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderCatalogRejected { .. }
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScreen(_)
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScreenRejected(_) => {
+                self.apply_runtime_catalog_event(event, cx);
+            }
+            _ => diagnostic!("Aeris pane received an unexpected fenced runtime event"),
         }
     }
 

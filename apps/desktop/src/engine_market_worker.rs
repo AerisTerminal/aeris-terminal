@@ -1286,7 +1286,7 @@ mod tests {
                         assert!(!snapshot.snapshot.bars.is_empty());
                         return;
                     }
-                    MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                    MarketWorkerMessage::Runtime(Fenced {
                         value:
                             MarketRuntimeEvent::SeriesState(MarketSeriesState {
                                 state: SeriesLoadState::Failed,
@@ -1346,7 +1346,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeCatalog(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::ProviderInstrumentSearchResult(result),
             })] if *received_epoch == epoch && result.search_generation == 3
@@ -1373,7 +1373,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeCatalog(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::ProviderInstrumentSelection(
                     MarketProviderInstrumentSelection { command_generation: 4, instrument, .. }
@@ -1692,7 +1692,7 @@ mod tests {
             .0
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::SeriesState(state),
                     ..
                 }) => {
@@ -2723,7 +2723,7 @@ mod tests {
             receiver.drain().0.as_slice(),
             [
                 MarketWorkerMessage::RuntimeSeriesPublication { .. },
-                MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
                         state: SeriesLoadState::Live,
                         ..
@@ -2871,7 +2871,7 @@ mod tests {
         );
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 value: MarketRuntimeEvent::DemandError(MarketDemandError {
                     code: EngineFaultCode::Retryable,
                     ..
@@ -2895,7 +2895,7 @@ mod tests {
         );
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 value: MarketRuntimeEvent::DemandError(MarketDemandError {
                     code: EngineFaultCode::Permanent,
                     detail,
@@ -2958,7 +2958,7 @@ mod tests {
         assert!(
             matches!(
                 messages.as_slice(),
-                [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+                [MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::DemandError(MarketDemandError {
                         scope: MarketDemandErrorScope::OlderHistory,
                         ..
@@ -3046,7 +3046,7 @@ mod tests {
         let frame = messages
             .into_iter()
             .find_map(|message| match message {
-                MarketWorkerMessage::RuntimeOrderBook(Fenced {
+                MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::OrderBookSnapshot(snapshot),
                     ..
                 }) => runtime_order_book_frame(&snapshot, &product, 1),
@@ -3126,7 +3126,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeTradeTape(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 value: MarketRuntimeEvent::TradeTapeSnapshot(snapshot),
                 ..
             })] if snapshot.revision == 9
@@ -3181,15 +3181,15 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeStudy(Fenced {
+                MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::StudyRemoved(first),
                     ..
                 }),
-                MarketWorkerMessage::RuntimeStudy(Fenced {
+                MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::StudyRemoved(second),
                     ..
                 }),
-                MarketWorkerMessage::RuntimeStudy(Fenced {
+                MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::StudyOutputsInvalidated(_),
                     ..
                 })

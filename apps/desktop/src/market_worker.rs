@@ -193,19 +193,14 @@ pub enum MarketRecoveryFailure {
 }
 
 pub enum MarketWorkerMessage {
-    /// Coordinator-fenced readiness and demand failures are projected by the
-    /// pane only under its exact lifecycle selection generation.
-    RuntimeSeriesStatus(aeris_market_runtime::MarketConsumerEvent),
+    /// Coordinator events retain their consumer fence through the bounded
+    /// queue; the pane projects each event at its owning presentation boundary.
+    Runtime(aeris_market_runtime::MarketConsumerEvent),
     /// Coordinator-fenced bars; the pane converts them only after selection acceptance.
     RuntimeSeriesPublication {
         event: aeris_market_runtime::MarketConsumerEvent,
         received_unix_nanos: i64,
     },
-    /// Canonical depth stays in its coordinator envelope until pane projection.
-    RuntimeOrderBook(aeris_market_runtime::MarketConsumerEvent),
-    /// Tape and study events retain the coordinator consumer fence through presentation.
-    RuntimeTradeTape(aeris_market_runtime::MarketConsumerEvent),
-    RuntimeStudy(aeris_market_runtime::MarketConsumerEvent),
     /// Coordinator provider state, retained with its consumer epoch and the
     /// selection that was active when the endpoint accepted it.
     RuntimeProviderState {
@@ -239,16 +234,10 @@ pub enum MarketWorkerMessage {
         message: String,
         transport_rtt_nanos: Option<u64>,
     },
-    /// Catalog callbacks retain their coordinator-issued consumer epoch until
-    /// the owning pane or screener projects the presentation event.
-    RuntimeCatalog(aeris_market_runtime::MarketConsumerEvent),
     MarketSessionStatus {
         generation: u64,
         status: aeris_contracts::MarketSessionStatus,
     },
-    /// A consumer-scoped alert remains in the coordinator envelope until the pane
-    /// matches its own registered alert identity.
-    RuntimePriceAlert(aeris_market_runtime::MarketConsumerEvent),
     PriceAlertSync {
         sequence: u64,
         succeeded: bool,
@@ -302,12 +291,12 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
         MarketWorkerMessage::RuntimeSeriesPublication { .. }
-            | MarketWorkerMessage::RuntimeOrderBook(_)
-            | MarketWorkerMessage::RuntimeStudy(aeris_market_runtime::fence::Fenced {
-                value: MarketRuntimeEvent::StudyOutputSnapshot(_),
+            | MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
+                value: MarketRuntimeEvent::OrderBookSnapshot(_)
+                    | MarketRuntimeEvent::StudyOutputSnapshot(_)
+                    | MarketRuntimeEvent::TradeTapeSnapshot(_),
                 ..
             })
-            | MarketWorkerMessage::RuntimeTradeTape(_)
     )
 }
 
@@ -1279,7 +1268,7 @@ mod tests {
         reason: ProviderCatalogRejectionReason,
         selection: bool,
     ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeCatalog(FixtureMarketEvents::default().catalog(
+        MarketWorkerMessage::Runtime(FixtureMarketEvents::default().catalog(
             MarketRuntimeEvent::ProviderCatalogRejected {
                 rejection: ProviderCatalogRejected {
                     consumer_id: 1,
@@ -1328,13 +1317,13 @@ mod tests {
                 top_of_book_only: frame.top_of_book_only,
             },
         );
-        MarketWorkerMessage::RuntimeOrderBook(event)
+        MarketWorkerMessage::Runtime(event)
     }
 
     fn book_snapshot(
         message: &MarketWorkerMessage,
     ) -> Option<&aeris_market_runtime::MarketOrderBookSnapshot> {
-        let MarketWorkerMessage::RuntimeOrderBook(event) = message else {
+        let MarketWorkerMessage::Runtime(event) = message else {
             return None;
         };
         let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = &event.value else {
@@ -1418,9 +1407,7 @@ mod tests {
         state: aeris_contracts::SeriesLoadState,
         detail: &str,
     ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeSeriesStatus(
-            FixtureMarketEvents::default().readiness(1, state, detail),
-        )
+        MarketWorkerMessage::Runtime(FixtureMarketEvents::default().readiness(1, state, detail))
     }
 
     fn snapshot_generation(message: &MarketWorkerMessage) -> Option<u64> {
@@ -1729,10 +1716,10 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(first), ..
                 }),
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(second), ..
                 })
             ] if first.state == aeris_contracts::SeriesLoadState::Resolving
@@ -1791,6 +1778,77 @@ mod tests {
         }
         assert_eq!(next_applied, OUTBOX_EVENTS + 1);
         assert!(overflow_count > 0, "bounded queue must report backpressure");
+    }
+
+    #[test]
+    fn fenced_runtime_events_share_publication_capacity_without_suppressing_controls() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let tape = || {
+            MarketWorkerMessage::Runtime(FixtureMarketEvents::default().trade_tape(
+                MarketTradeTapeSnapshot {
+                    consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                    generation: MarketGenerationId(NonZeroU64::MIN),
+                    provider_id: "fixture".into(),
+                    instrument_id: "fixture:BTC".into(),
+                    entitlement_id: "fixture".into(),
+                    provider_generation: 1,
+                    revision: 1,
+                    source_watermark: 1,
+                    rewrite_generation: 0,
+                    price_scale: 2,
+                    quantity_scale: 3,
+                    trades: Arc::from([]),
+                },
+            ))
+        };
+        assert!(sender.send(tape()).is_ok());
+        assert_eq!(sender.send(tape()), Err(super::MarketWorkerSendError::Full));
+        sender
+            .send(status_message(
+                aeris_contracts::SeriesLoadState::Ready,
+                "ready",
+            ))
+            .expect("fenced readiness uses the control reserve");
+        sender
+            .send(catalog_rejection(
+                1,
+                ProviderCatalogRejectionReason::SubscriptionRejected,
+                false,
+            ))
+            .expect("fenced catalog uses the control reserve");
+        let (first, _) = receiver.drain_up_to(1);
+        assert!(matches!(
+            first.as_slice(),
+            [MarketWorkerMessage::Runtime(
+                aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::TradeTapeSnapshot(_),
+                    ..
+                }
+            )]
+        ));
+        let (remaining, _) = receiver.drain();
+        assert!(matches!(
+            remaining.as_slice(),
+            [
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::SeriesState(_),
+                    ..
+                }),
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
+                    value: MarketRuntimeEvent::ProviderCatalogRejected { .. },
+                    ..
+                })
+            ]
+        ));
+        sender
+            .send(tape())
+            .expect("next tape enters freed capacity");
+        receiver.set_market_publications_enabled(false);
+        sender
+            .send(tape())
+            .expect("background tape suppression is explicit");
+        assert!(receiver.drain().0.is_empty());
+        assert_eq!(sender.occupancy().0, 0);
     }
 
     #[test]
@@ -2273,7 +2331,7 @@ mod tests {
                     },
                     ..
                 },
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(
                         aeris_market_runtime::MarketSeriesState {
                             state: aeris_contracts::SeriesLoadState::Failed,
@@ -2308,7 +2366,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+            [MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                 value: MarketRuntimeEvent::SeriesState(state), ..
             })] if state.state == aeris_contracts::SeriesLoadState::Ready
                 && state.detail.as_deref() == Some("ready")
@@ -2370,7 +2428,7 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 },
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })
             ] if state.detail.as_deref() == Some("switching")
@@ -2400,10 +2458,10 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(terminal), ..
                 }),
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(obsolete), ..
                 })
             ] if terminal.state == aeris_contracts::SeriesLoadState::Failed
@@ -2435,7 +2493,7 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 7, .. },
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })
             ] if state.detail.as_deref() == Some("obsolete")
@@ -2518,7 +2576,7 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::RuntimeRecovery { request_id: 9, .. },
-                MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })
             ] if state.detail.as_deref() == Some("network changed")
@@ -2552,14 +2610,14 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeCatalog(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::ProviderCatalogRejected {
                         rejection: ProviderCatalogRejected { command_generation: first_generation, .. },
                         selection: false,
                     },
                     ..
                 }),
-                MarketWorkerMessage::RuntimeCatalog(aeris_market_runtime::fence::Fenced {
+                MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::ProviderCatalogRejected {
                         rejection: ProviderCatalogRejected { command_generation, reason, .. },
                         selection: true,
@@ -2597,7 +2655,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(
             messages[0],
-            MarketWorkerMessage::RuntimeSeriesStatus(aeris_market_runtime::fence::Fenced {
+            MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                 value: MarketRuntimeEvent::SeriesState(aeris_market_runtime::MarketSeriesState {
                     state: aeris_contracts::SeriesLoadState::Failed,
                     ..
@@ -2607,7 +2665,16 @@ mod tests {
         ));
         assert!(matches!(
             messages[1],
-            MarketWorkerMessage::RuntimeCatalog(_)
+            MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
+                value: MarketRuntimeEvent::ProviderCatalogRejected {
+                    rejection: ProviderCatalogRejected {
+                        command_generation: 2,
+                        ..
+                    },
+                    selection: true,
+                },
+                ..
+            })
         ));
     }
 
@@ -2759,20 +2826,16 @@ mod tests {
         };
         let events = FixtureMarketEvents::default();
         sender
-            .send(MarketWorkerMessage::RuntimeTradeTape(
-                events.trade_tape(snapshot(2)),
-            ))
+            .send(MarketWorkerMessage::Runtime(events.trade_tape(snapshot(2))))
             .expect("first tape queues");
         sender
-            .send(MarketWorkerMessage::RuntimeTradeTape(
-                events.trade_tape(snapshot(3)),
-            ))
+            .send(MarketWorkerMessage::Runtime(events.trade_tape(snapshot(3))))
             .expect("newer tape queues behind it");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeTradeTape(first), MarketWorkerMessage::RuntimeTradeTape(second)]
+            [MarketWorkerMessage::Runtime(first), MarketWorkerMessage::Runtime(second)]
                 if matches!(&first.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 2)
                     && matches!(&second.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 3)
                     && first.epoch == second.epoch

@@ -820,7 +820,7 @@ mod timeframe_input {
     fn tape_message(
         snapshot: aeris_market_runtime::MarketTradeTapeSnapshot,
     ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeTradeTape(
+        MarketWorkerMessage::Runtime(
             aeris_desktop::test_support::FixtureMarketEvents::default().trade_tape(snapshot),
         )
     }

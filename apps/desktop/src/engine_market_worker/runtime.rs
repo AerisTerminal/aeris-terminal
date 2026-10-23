@@ -513,10 +513,7 @@ pub(super) fn deliver_provider_catalog_event(
         changed = true;
     }
     let endpoint = &record.endpoint;
-    match endpoint
-        .messages
-        .send(MarketWorkerMessage::RuntimeCatalog(event))
-    {
+    match endpoint.messages.send(MarketWorkerMessage::Runtime(event)) {
         Ok(()) => changed,
         // A released pane cannot receive this catalog result; its command
         // channel closure retires the runtime consumer.
@@ -616,7 +613,7 @@ fn deliver_runtime_price_alert_with_notification(
     notify(trigger);
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimePriceAlert(event))
+        .send(MarketWorkerMessage::Runtime(event))
         .map_err(|error| error.to_string())
 }
 
@@ -680,7 +677,7 @@ pub(super) fn deliver_runtime_order_book(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeOrderBook(event))
+        .send(MarketWorkerMessage::Runtime(event))
         .map_err(|error| error.to_string())
 }
 
@@ -702,7 +699,7 @@ pub(super) fn deliver_runtime_trade_tape(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeTradeTape(event))
+        .send(MarketWorkerMessage::Runtime(event))
         .map_err(|error| error.to_string())
 }
 
@@ -733,7 +730,7 @@ pub(super) fn deliver_runtime_study(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeStudy(event))
+        .send(MarketWorkerMessage::Runtime(event))
         .map_err(|error| error.to_string())
 }
 
@@ -771,7 +768,7 @@ fn deliver_runtime_series_state(
     } else if state.generation.0.get() == endpoint.active_generation {
         endpoint
             .messages
-            .send(MarketWorkerMessage::RuntimeSeriesStatus(event))
+            .send(MarketWorkerMessage::Runtime(event))
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -795,7 +792,7 @@ fn deliver_runtime_demand_error(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeSeriesStatus(event))
+        .send(MarketWorkerMessage::Runtime(event))
         .map_err(|error| error.to_string())
 }
 
@@ -1008,7 +1005,7 @@ mod tests {
         let (messages, _) = pane.worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimePriceAlert(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 epoch: delivered_epoch,
                 value: MarketRuntimeEvent::PriceAlertTriggered(trigger),
             })] if *delivered_epoch == epoch
@@ -1047,7 +1044,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
                     state: super::super::SeriesLoadState::Failed,
@@ -1092,7 +1089,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesStatus(Fenced {
+            [MarketWorkerMessage::Runtime(Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::DemandError(_),
             })] if *received_epoch == epoch
@@ -1366,7 +1363,7 @@ mod tests {
         assert_eq!(queued.len(), 9);
         assert!(matches!(
             queued.last(),
-            Some(MarketWorkerMessage::RuntimeCatalog(Fenced {
+            Some(MarketWorkerMessage::Runtime(Fenced {
                 value: MarketRuntimeEvent::ProviderInstrumentSelection(_),
                 ..
             }))
