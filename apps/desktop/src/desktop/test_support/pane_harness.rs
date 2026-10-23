@@ -2,7 +2,8 @@
 
 use super::*;
 use aeris_desktop::market_worker::{
-    EngineWorkerStartup, MarketWorkerCommand, MarketWorkerSender, market_worker_channel,
+    EngineWorkerStartup, LocalSessionStatus, MarketWorkerCommand, MarketWorkerSender,
+    market_worker_channel,
 };
 use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
 use gpui::{TestAppContext, VisualTestContext};
@@ -442,9 +443,9 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
         .expect("selection request");
     harness
         .publications
-        .send(MarketWorkerMessage::MarketSessionStatus {
+        .send(MarketWorkerMessage::SessionStatus {
             generation: 1,
-            status: old_status.clone(),
+            status: LocalSessionStatus::MarketSession(old_status.clone()),
         })
         .expect("old status while pending");
     harness.pane.update(cx, |pane, cx| {
@@ -453,12 +454,12 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::MarketSessionStatus {
+        .send(MarketWorkerMessage::SessionStatus {
             generation: 1,
-            status: MarketSessionStatus {
+            status: LocalSessionStatus::MarketSession(MarketSessionStatus {
                 instrument_id: "uncommitted instrument".into(),
                 ..old_status.clone()
-            },
+            }),
         })
         .expect("catalog status ahead of selection");
     harness.pane.update(cx, |pane, cx| {
@@ -474,9 +475,9 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
         .expect("marker");
     harness
         .publications
-        .send(MarketWorkerMessage::MarketSessionStatus {
+        .send(MarketWorkerMessage::SessionStatus {
             generation: 1,
-            status: old_status.clone(),
+            status: LocalSessionStatus::MarketSession(old_status.clone()),
         })
         .expect("queued stale status");
     let new_status = MarketSessionStatus {
@@ -485,9 +486,9 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     };
     harness
         .publications
-        .send(MarketWorkerMessage::MarketSessionStatus {
+        .send(MarketWorkerMessage::SessionStatus {
             generation: sequence,
-            status: new_status.clone(),
+            status: LocalSessionStatus::MarketSession(new_status.clone()),
         })
         .expect("new status");
     harness.pane.update(cx, |pane, cx| {
@@ -641,9 +642,9 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             .expect("selection failure enters mailbox");
         harness
             .publications
-            .send(MarketWorkerMessage::MarketSessionStatus {
+            .send(MarketWorkerMessage::SessionStatus {
                 generation: 1,
-                status: old_status.clone(),
+                status: LocalSessionStatus::MarketSession(old_status.clone()),
             })
             .expect("previous chart status after rejected selection");
         harness.pane.update(cx, |pane, cx| {
@@ -3901,11 +3902,12 @@ fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAp
             _ => None,
         })
         .expect("selection");
-    let connection = |generation, state, rtt| MarketWorkerMessage::Connection {
+    let connection = |generation, state, rtt| MarketWorkerMessage::SessionStatus {
         generation,
-        state,
-        message: "fixture connection".into(),
-        transport_rtt_nanos: rtt,
+        status: LocalSessionStatus::Connection {
+            state,
+            transport_rtt_nanos: rtt,
+        },
     };
     let previous = cx.read(|cx| {
         let pane = harness.pane.read(cx);
@@ -3964,11 +3966,12 @@ fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_c
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::Connection {
+            .send(MarketWorkerMessage::SessionStatus {
                 generation: 1,
-                state: FeedConnectionState::Stopped,
-                message: "private-credential-sentinel".into(),
-                transport_rtt_nanos: None,
+                status: LocalSessionStatus::Connection {
+                    state: FeedConnectionState::Stopped,
+                    transport_rtt_nanos: None,
+                },
             })
             .expect("bounded mailbox accepts connection failure");
         harness.pane.update(cx, |pane, cx| {
@@ -3994,11 +3997,12 @@ fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_c
     });
     harness
         .publications
-        .send(MarketWorkerMessage::Connection {
+        .send(MarketWorkerMessage::SessionStatus {
             generation: 1,
-            state: FeedConnectionState::Streaming,
-            message: "private-credential-sentinel".into(),
-            transport_rtt_nanos: None,
+            status: LocalSessionStatus::Connection {
+                state: FeedConnectionState::Streaming,
+                transport_rtt_nanos: None,
+            },
         })
         .expect("bounded mailbox accepts connection recovery");
     harness.pane.update(cx, |pane, cx| {

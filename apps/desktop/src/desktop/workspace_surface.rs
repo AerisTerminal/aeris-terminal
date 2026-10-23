@@ -4102,17 +4102,24 @@ impl WorkspaceSurface {
                 }
                 Err(_) => self.reject_catalog_switch(sequence, browser_generation, cx),
             },
-            MarketWorkerMessage::Connection {
-                generation,
-                state,
-                message: _,
-                transport_rtt_nanos,
-            } => self.apply_market_connection_message(generation, state, transport_rtt_nanos, cx),
+            MarketWorkerMessage::SessionStatus { generation, status } => match status {
+                aeris_desktop::market_worker::LocalSessionStatus::Connection {
+                    state,
+                    transport_rtt_nanos,
+                } => {
+                    self.apply_market_connection_message(
+                        generation,
+                        state,
+                        transport_rtt_nanos,
+                        cx,
+                    );
+                }
+                aeris_desktop::market_worker::LocalSessionStatus::MarketSession(status) => {
+                    self.apply_fenced_market_session_status(generation, status, cx);
+                }
+            },
             MarketWorkerMessage::RuntimeProviderState { event, generation } => {
                 self.apply_runtime_provider_state(event, generation, cx);
-            }
-            MarketWorkerMessage::MarketSessionStatus { generation, status } => {
-                self.apply_fenced_market_session_status(generation, status, cx);
             }
             MarketWorkerMessage::StudyRegistrationOutcome {
                 request_sequence,

@@ -192,6 +192,16 @@ pub enum MarketRecoveryFailure {
     Failed(String),
 }
 
+/// Local connection and calendar presentation, stamped with the selection
+/// active when the worker produced it rather than the pane's current selection.
+pub enum LocalSessionStatus {
+    Connection {
+        state: FeedConnectionState,
+        transport_rtt_nanos: Option<u64>,
+    },
+    MarketSession(aeris_contracts::MarketSessionStatus),
+}
+
 pub enum MarketWorkerMessage {
     /// Coordinator events retain their consumer fence through the bounded
     /// queue; the pane projects each event at its owning presentation boundary.
@@ -223,15 +233,9 @@ pub enum MarketWorkerMessage {
         generation: u64,
         message: String,
     },
-    Connection {
+    SessionStatus {
         generation: u64,
-        state: FeedConnectionState,
-        message: String,
-        transport_rtt_nanos: Option<u64>,
-    },
-    MarketSessionStatus {
-        generation: u64,
-        status: aeris_contracts::MarketSessionStatus,
+        status: LocalSessionStatus,
     },
     PriceAlertSync {
         sequence: u64,
@@ -1214,9 +1218,10 @@ impl MarketWorkerRetirement {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartViewportUpdate, ConsumerResourceClass, MarketDataWorker, MarketPublicationGeneration,
-        MarketRecoveryFailure, MarketWorkerCommand, MarketWorkerMessage, PendingUiDiagnostics,
-        UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
+        ChartViewportUpdate, ConsumerResourceClass, LocalSessionStatus, MarketDataWorker,
+        MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
+        MarketWorkerMessage, PendingUiDiagnostics, UiDiagnosticsFeedback, market_worker_channel,
+        ui_diagnostics_channel,
     };
     use crate::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
     use aeris_contracts::{
@@ -1263,6 +1268,50 @@ mod tests {
                 selection,
             },
         ))
+    }
+
+    #[test]
+    fn local_connection_and_calendar_status_share_fifo_and_selection_stamp() {
+        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        sender
+            .send(MarketWorkerMessage::SessionStatus {
+                generation: 7,
+                status: LocalSessionStatus::Connection {
+                    state: aeris_observability::FeedConnectionState::Discovering,
+                    transport_rtt_nanos: None,
+                },
+            })
+            .expect("first status");
+        let calendar = MarketSessionStatus {
+            instrument_id: "fixture".into(),
+            phase: MarketSessionPhase::Closed,
+            source: MarketSessionSource::ProviderCalendar,
+            session_start_unix_nanos: None,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        };
+        sender
+            .send(MarketWorkerMessage::SessionStatus {
+                generation: 8,
+                status: LocalSessionStatus::MarketSession(calendar.clone()),
+            })
+            .expect("second status");
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                MarketWorkerMessage::SessionStatus {
+                    generation: 7,
+                    status: LocalSessionStatus::Connection { .. },
+                },
+                MarketWorkerMessage::SessionStatus {
+                    generation: 8,
+                    status: LocalSessionStatus::MarketSession(status),
+                },
+            ] if status == &calendar
+        ));
     }
 
     fn tail_operation(message: &MarketWorkerMessage) -> Option<SeriesTailOperation> {

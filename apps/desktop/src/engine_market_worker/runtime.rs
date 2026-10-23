@@ -7,7 +7,7 @@ use super::{
     process_command,
 };
 use aeris_desktop::market_worker::{
-    MarketWorkerSendError, MarketWorkerSender, verified_terms_supersede,
+    LocalSessionStatus, MarketWorkerSendError, MarketWorkerSender, verified_terms_supersede,
 };
 use aeris_observability::diagnostic;
 use aeris_trading::market::MarketRoute;
@@ -27,11 +27,12 @@ pub(super) fn run_workers(
         match record
             .endpoint
             .messages
-            .send(MarketWorkerMessage::Connection {
+            .send(MarketWorkerMessage::SessionStatus {
                 generation: record.endpoint.active_generation,
-                state: FeedConnectionState::Discovering,
-                message: "Connecting to market data".to_string(),
-                transport_rtt_nanos: None,
+                status: LocalSessionStatus::Connection {
+                    state: FeedConnectionState::Discovering,
+                    transport_rtt_nanos: None,
+                },
             }) {
             Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
                 // The UI may have retired the pane before the worker attaches.
@@ -254,9 +255,9 @@ fn publish_session_statuses(
         match record
             .endpoint
             .messages
-            .send(MarketWorkerMessage::MarketSessionStatus {
+            .send(MarketWorkerMessage::SessionStatus {
                 generation: record.endpoint.active_generation,
-                status,
+                status: LocalSessionStatus::MarketSession(status),
             }) {
             Ok(()) => {
                 record.session_status_sent = Some(record.product.instrument_id.clone());
@@ -1242,9 +1243,9 @@ mod tests {
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         let first = messages.into_iter().next().expect("first session status");
-        let MarketWorkerMessage::MarketSessionStatus {
+        let MarketWorkerMessage::SessionStatus {
             generation: first_generation,
-            status: first,
+            status: LocalSessionStatus::MarketSession(first),
         } = first
         else {
             panic!("expected first session status");
@@ -1257,9 +1258,9 @@ mod tests {
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         let second = messages.into_iter().next().expect("second session status");
-        let MarketWorkerMessage::MarketSessionStatus {
+        let MarketWorkerMessage::SessionStatus {
             generation: second_generation,
-            status: second,
+            status: LocalSessionStatus::MarketSession(second),
         } = second
         else {
             panic!("expected second session status");
@@ -1305,7 +1306,10 @@ mod tests {
         publish_session_statuses(&market, &mut records, false, &clock);
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::MarketSessionStatus { generation: 1, .. }]
+            [MarketWorkerMessage::SessionStatus {
+                generation: 1,
+                status: LocalSessionStatus::MarketSession(_),
+            }]
         ));
         assert!(records[0].session_status_sent.is_some());
         publish_session_statuses(&market, &mut records, false, &clock);
@@ -1377,7 +1381,10 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::MarketSessionStatus { generation: 1, status }]
+            [MarketWorkerMessage::SessionStatus {
+                generation: 1,
+                status: LocalSessionStatus::MarketSession(status),
+            }]
                 if status.instrument_id == terms.instrument_id
         ));
         assert_eq!(records[0].session_status_sent, Some(terms.instrument_id));

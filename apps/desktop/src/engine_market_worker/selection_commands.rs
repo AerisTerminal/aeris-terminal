@@ -56,11 +56,12 @@ pub(super) fn initialize_endpoint(
     match record
         .endpoint
         .messages
-        .send(MarketWorkerMessage::Connection {
+        .send(MarketWorkerMessage::SessionStatus {
             generation: record.endpoint.active_generation,
-            state: FeedConnectionState::Discovering,
-            message: "Connecting to market data".to_string(),
-            transport_rtt_nanos: None,
+            status: aeris_desktop::market_worker::LocalSessionStatus::Connection {
+                state: FeedConnectionState::Discovering,
+                transport_rtt_nanos: None,
+            },
         }) {
         Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
             // A retired pane may release the receiver before registration.

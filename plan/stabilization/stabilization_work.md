@@ -1971,6 +1971,14 @@ Status: pending
     recovery request and publication FIFO/backpressure regressions cover both
     projections. Provider-state metadata, the remaining local outcomes and
     transitional message/channel names still block M6.6 and VAL-DSK-021/022.
+  - Part 8b3b (2026-10-24): local connection and market-session statuses share
+    one generation-stamped session projection instead of separate mailbox
+    variants. The unused worker connection detail string is no longer carried
+    to the pane; exact committed-selection acceptance, transport RTT, calendar
+    retry on backpressure and notice behavior stay at their existing owners.
+    A mixed FIFO/selection-stamp queue regression and the existing pane and
+    worker tests cover both outcomes. Provider-state metadata, other local
+    outcomes and transitional names remain; M6.6 and VAL-DSK-021/022 stay open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
@@ -2514,6 +2522,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 M6.6 Part 8a refactor(desktop): extracted the one bounded pane projection queue from market_worker, removed its bespoke enqueue, and preserved runtime-event FIFO, the control reserve, wake continuation and overflow in a 10,000-event regression. The old message type remains to collapse in Part 8b; M6.6 and VAL-DSK-021/022 remain unchecked.
 - 2026-10-24 M6.6 Part 8b2c refactor(desktop): merged study registration success/failure into one request-sequence-fenced outcome; GPUI covers redacted failure, success and retired outcomes. Metadata-bearing fenced runtime entries, remaining local outcomes and final mailbox/type deletion remain; M6.6 stays unchecked.
 - 2026-10-24 M6.6 Part 8b2d refactor(desktop): merged study reinitialization success/failure into one local result, preserving failure's unchanged persisted settings and a retry's successful replacement; GPUI checks both outcomes. Metadata-bearing fenced runtime entries, other local outcomes and message/type deletion remain; M6.6 and VAL-DSK-021/022 stay unchecked.
+- 2026-10-24 M6.6 Part 8b3b refactor(desktop): merged local connection and calendar statuses into one generation-stamped pane projection, removed the unused connection detail from the queue, and retained per-selection/RTT/backpressure behavior with a mixed FIFO regression. Provider-state metadata, other local outcomes and final message/channel deletion remain; M6.6 stays unchecked.
 
 ## 7. Known gaps / deferred
 
