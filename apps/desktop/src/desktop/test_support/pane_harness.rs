@@ -719,13 +719,15 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
     let before = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(MarketWorkerMessage::Recovery {
-            generation: 1,
-            request_id,
-            failure: aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
-                "retired private recovery failure".into(),
-            ),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            aeris_desktop::market_worker::LocalCommandOutcome::Recovery {
+                generation: 1,
+                request_id,
+                failure: aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
+                    "retired private recovery failure".into(),
+                ),
+            },
+        ))
         .expect("retired recovery");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1852,13 +1854,15 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::Recovery {
-            generation: 1,
-            request_id,
-            failure: aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
-                "private old recovery failure".into(),
-            ),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            aeris_desktop::market_worker::LocalCommandOutcome::Recovery {
+                generation: 1,
+                request_id,
+                failure: aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
+                    "private old recovery failure".into(),
+                ),
+            },
+        ))
         .expect("old recovery");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);

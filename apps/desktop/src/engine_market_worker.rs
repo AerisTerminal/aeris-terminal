@@ -43,8 +43,8 @@ pub(super) use aeris_market_runtime::{
 use aeris_observability::FeedConnectionState;
 
 use aeris_desktop::market_worker::{
-    MarketDataWorker, MarketRecoveryFailure, MarketWorkerCommand, MarketWorkerMessage,
-    MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
+    LocalCommandOutcome, MarketDataWorker, MarketRecoveryFailure, MarketWorkerCommand,
+    MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -2014,11 +2014,13 @@ mod tests {
         assert!(record.endpoint.pending_recovery.is_none());
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::Recovery {
-                generation: 3,
-                request_id: 9,
-                failure: MarketRecoveryFailure::Superseded,
-            }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: 3,
+                    request_id: 9,
+                    failure: MarketRecoveryFailure::Superseded,
+                }
+            )]
         ));
 
         record.endpoint.pending_recovery = Some(pending);
@@ -2064,11 +2066,13 @@ mod tests {
         assert!(record.endpoint.pending_recovery.is_none());
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::Recovery {
-                generation: 3,
-                request_id: 9,
-                failure: MarketRecoveryFailure::Failed(_),
-            }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: 3,
+                    request_id: 9,
+                    failure: MarketRecoveryFailure::Failed(_),
+                }
+            )]
         ));
     }
 
@@ -2118,11 +2122,13 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Recovery {
-                generation: 3,
-                request_id: 9,
-                failure: MarketRecoveryFailure::Superseded,
-            }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: 3,
+                    request_id: 9,
+                    failure: MarketRecoveryFailure::Superseded,
+                }
+            )]
         ));
     }
 
@@ -2179,11 +2185,13 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Recovery {
-                generation: 7,
-                request_id: 10,
-                failure: MarketRecoveryFailure::Superseded,
-            }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: 7,
+                    request_id: 10,
+                    failure: MarketRecoveryFailure::Superseded,
+                }
+            )]
         ));
 
         let current = ReplayRecoveryCommand {

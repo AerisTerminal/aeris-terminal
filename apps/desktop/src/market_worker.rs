@@ -213,6 +213,12 @@ pub enum LocalFailureScope {
 /// Results of local pane commands, fenced by the request sequence or study identity
 /// at the GPUI owner rather than projected as coordinator publications.
 pub enum LocalCommandOutcome {
+    /// A locally completed recovery request, fenced by its selection and request identity.
+    Recovery {
+        generation: u64,
+        request_id: u64,
+        failure: MarketRecoveryFailure,
+    },
     PriceAlertSync {
         sequence: u64,
         succeeded: bool,
@@ -247,11 +253,6 @@ pub enum MarketWorkerMessage {
     RuntimeSelection {
         event: aeris_market_runtime::MarketConsumerEvent,
         generation: u64,
-    },
-    Recovery {
-        generation: u64,
-        request_id: u64,
-        failure: MarketRecoveryFailure,
     },
     /// Local failures share one projection; the scope determines the receiving owner.
     LocalFailure {
@@ -2070,6 +2071,15 @@ mod tests {
                 LocalCommandOutcome::StudyRemovalFailed { study_id },
             ))
             .expect("removal failure enters control reserve");
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: 9,
+                    request_id: 11,
+                    failure: MarketRecoveryFailure::Superseded,
+                },
+            ))
+            .expect("retired recovery enters control reserve");
         let (first, _) = receiver.drain_up_to(2);
         assert!(matches!(
             first.as_slice(),
@@ -2097,6 +2107,11 @@ mod tests {
                 MarketWorkerMessage::LocalCommandOutcome(
                     LocalCommandOutcome::StudyRemovalFailed { study_id: removed }
                 ),
+                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::Recovery {
+                    generation: 9,
+                    request_id: 11,
+                    failure: MarketRecoveryFailure::Superseded,
+                }),
             ] if *reinitialized == study_id && *removed == study_id
         ));
     }
@@ -2686,11 +2701,13 @@ mod tests {
         let (recovery_sender, recovery_receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             recovery_sender
-                .send(MarketWorkerMessage::Recovery {
-                    generation: 1,
-                    request_id: 7,
-                    failure: MarketRecoveryFailure::Failed("recovery failed".to_string()),
-                })
+                .send(MarketWorkerMessage::LocalCommandOutcome(
+                    LocalCommandOutcome::Recovery {
+                        generation: 1,
+                        request_id: 7,
+                        failure: MarketRecoveryFailure::Failed("recovery failed".to_string()),
+                    }
+                ))
                 .is_ok()
         );
         assert!(
@@ -2705,7 +2722,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Recovery { request_id: 7, .. },
+                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::Recovery { request_id: 7, .. }),
                 MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })

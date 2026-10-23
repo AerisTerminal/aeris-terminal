@@ -2,9 +2,10 @@
 
 use super::{
     ConsumerResourceClass, EndpointRecord, FeedConnectionState, InstallProviderInstrument,
-    MarketPriceAlert, MarketRecoveryFailure, MarketService, MarketWorkerCommand,
-    MarketWorkerMessage, ReplayRecoveryCommand, StreamRequirements, WorkerEndpoint,
-    cancel_pending_recovery, chart_demand_streams, chart_streams, retire_endpoint, send_recovery,
+    LocalCommandOutcome, MarketPriceAlert, MarketRecoveryFailure, MarketService,
+    MarketWorkerCommand, MarketWorkerMessage, ReplayRecoveryCommand, StreamRequirements,
+    WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams, retire_endpoint,
+    send_recovery,
 };
 use aeris_desktop::market_worker::MarketWorkerSendError;
 use aeris_market_runtime::{InstrumentRef, InstrumentRequest, SelectionRequest};
@@ -20,11 +21,13 @@ pub(super) fn fence_recovery_command(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::Recovery {
-            generation: selection_generation.unwrap_or(endpoint.active_generation),
-            request_id: command.request_id,
-            failure: MarketRecoveryFailure::Superseded,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::Recovery {
+                generation: selection_generation.unwrap_or(endpoint.active_generation),
+                request_id: command.request_id,
+                failure: MarketRecoveryFailure::Superseded,
+            },
+        ))
         .map_err(|error| error.to_string())?;
     Ok(None)
 }

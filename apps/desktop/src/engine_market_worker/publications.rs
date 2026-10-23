@@ -1,9 +1,10 @@
 //! Publications.
 
 use super::{
-    ChartInterval, InstallProviderInstrument, MarketDemandErrorScope, MarketRecoveryFailure,
-    MarketRuntimeEvent, MarketService, MarketWorkerMessage, ReplayRecoveryCommand, WorkerEndpoint,
-    chart_demand_streams, demand_error, replay_runtime_snapshot, series_key,
+    ChartInterval, InstallProviderInstrument, LocalCommandOutcome, MarketDemandErrorScope,
+    MarketRecoveryFailure, MarketRuntimeEvent, MarketService, MarketWorkerMessage,
+    ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams, demand_error,
+    replay_runtime_snapshot, series_key,
 };
 use aeris_observability::diagnostic;
 
@@ -31,11 +32,13 @@ pub(super) fn send_recovery(
     if let Some(previous) = endpoint.pending_recovery {
         endpoint
             .messages
-            .send(MarketWorkerMessage::Recovery {
-                generation: endpoint.active_generation,
-                request_id: previous.request_id,
-                failure: MarketRecoveryFailure::Superseded,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: endpoint.active_generation,
+                    request_id: previous.request_id,
+                    failure: MarketRecoveryFailure::Superseded,
+                },
+            ))
             .map_err(|error| error.to_string())?;
     }
     endpoint.pending_recovery = Some(command);
@@ -53,11 +56,13 @@ pub(super) fn send_recovery(
     if let Err(error) = demand {
         endpoint
             .messages
-            .send(MarketWorkerMessage::Recovery {
-                generation: endpoint.active_generation,
-                request_id: command.request_id,
-                failure: MarketRecoveryFailure::Failed(error),
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::Recovery {
+                    generation: endpoint.active_generation,
+                    request_id: command.request_id,
+                    failure: MarketRecoveryFailure::Failed(error),
+                },
+            ))
             .map_err(|error| error.to_string())?;
         endpoint.pending_recovery = None;
     }
@@ -71,11 +76,13 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
     };
     endpoint
         .messages
-        .send(MarketWorkerMessage::Recovery {
-            generation: endpoint.active_generation,
-            request_id: pending.request_id,
-            failure: MarketRecoveryFailure::Superseded,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::Recovery {
+                generation: endpoint.active_generation,
+                request_id: pending.request_id,
+                failure: MarketRecoveryFailure::Superseded,
+            },
+        ))
         .map_err(|error| error.to_string())?;
     endpoint.pending_recovery = None;
     Ok(())
@@ -120,11 +127,13 @@ pub(super) fn complete_pending_recovery(
         {
             endpoint
                 .messages
-                .send(MarketWorkerMessage::Recovery {
-                    generation: endpoint.active_generation,
-                    request_id: command.request_id,
-                    failure: MarketRecoveryFailure::Failed(demand_error(error)),
-                })
+                .send(MarketWorkerMessage::LocalCommandOutcome(
+                    LocalCommandOutcome::Recovery {
+                        generation: endpoint.active_generation,
+                        request_id: command.request_id,
+                        failure: MarketRecoveryFailure::Failed(demand_error(error)),
+                    },
+                ))
                 .map_err(|error| error.to_string())?;
             endpoint.pending_recovery = None;
             Ok(true)

@@ -4060,11 +4060,6 @@ impl WorkspaceSurface {
                     self.apply_runtime_series_publication(event, received_unix_nanos, cx);
                 }
             }
-            MarketWorkerMessage::Recovery {
-                generation,
-                request_id,
-                failure,
-            } => self.apply_recovery_message(generation, request_id, failure, cx),
             MarketWorkerMessage::LocalFailure { scope, message } => {
                 self.apply_local_failure(scope, message, cx);
             }
@@ -4127,6 +4122,11 @@ impl WorkspaceSurface {
     ) {
         use aeris_desktop::market_worker::LocalCommandOutcome;
         match outcome {
+            LocalCommandOutcome::Recovery {
+                generation,
+                request_id,
+                failure,
+            } => self.apply_recovery_message(generation, request_id, failure, cx),
             LocalCommandOutcome::PriceAlertSync {
                 sequence,
                 succeeded,
