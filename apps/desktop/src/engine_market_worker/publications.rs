@@ -1,39 +1,12 @@
 //! Publications.
 
 use super::{
-    ChartInterval, FeedConnectionState, InstallProviderInstrument, MarketDemandErrorScope,
-    MarketPublicationGeneration, MarketRecoveryFailure, MarketRuntimeEvent, MarketService,
-    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerSender, ProviderConnectionState,
-    ProviderState, PushedEventContext, ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams,
-    demand_error, provider_display_name, replay_runtime_snapshot, series_key, worker_identity,
+    ChartInterval, InstallProviderInstrument, MarketDemandErrorScope, MarketPublicationGeneration,
+    MarketRecoveryFailure, MarketRuntimeEvent, MarketService, MarketWorkerBootstrap,
+    MarketWorkerMessage, ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams, demand_error,
+    replay_runtime_snapshot, series_key, worker_identity,
 };
 use aeris_observability::diagnostic;
-
-pub(super) fn apply_pushed_event(
-    event: MarketRuntimeEvent,
-    context: &PushedEventContext<'_>,
-    messages: &MarketWorkerSender,
-) -> Result<(), String> {
-    let &PushedEventContext {
-        active_generation,
-        realtime,
-        instrument,
-    } = context;
-    match event {
-        MarketRuntimeEvent::ProviderState(state) => {
-            apply_provider_state(
-                &state,
-                instrument.provider.as_str(),
-                active_generation,
-                realtime,
-                messages,
-            )?;
-            Ok(())
-        }
-        MarketRuntimeEvent::Fault(fault) => Err(fault.redacted_detail),
-        _ => Err("engine returned an unexpected pushed market event".to_string()),
-    }
-}
 
 pub(super) fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
     let (title, description) = crate::desktop::price_alert_trigger_text(trigger);
@@ -45,53 +18,6 @@ pub(super) fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigg
         Ok(()) => {}
         Err(error) => diagnostic!("Aeris price alert notification was not delivered: {error}"),
     }
-}
-
-pub(super) fn apply_provider_state(
-    state: &ProviderState,
-    expected_provider: &str,
-    selection_generation: u64,
-    realtime: bool,
-    messages: &MarketWorkerSender,
-) -> Result<(), String> {
-    if state.provider != expected_provider {
-        return Err("engine provider state identity mismatched".to_string());
-    }
-    if !realtime {
-        return Ok(());
-    }
-    let provider_name = provider_display_name(expected_provider);
-    let provider_state = state.state;
-    let (connection, detail) = match provider_state {
-        ProviderConnectionState::Disconnected => (
-            FeedConnectionState::Disconnected,
-            format!("{provider_name} realtime is disconnected"),
-        ),
-        ProviderConnectionState::Connecting => (
-            FeedConnectionState::Discovering,
-            format!("{provider_name} realtime is connecting"),
-        ),
-        ProviderConnectionState::Online => (
-            FeedConnectionState::Streaming,
-            format!("{provider_name} history and realtime are current"),
-        ),
-        ProviderConnectionState::Recovering => (
-            FeedConnectionState::Recovering,
-            format!("{provider_name} realtime is recovering; retained history remains visible"),
-        ),
-        ProviderConnectionState::Failed => (
-            FeedConnectionState::Stopped,
-            format!("{provider_name} realtime stopped"),
-        ),
-    };
-    messages
-        .send(MarketWorkerMessage::Connection {
-            generation: selection_generation,
-            state: connection,
-            message: state.detail.clone().unwrap_or(detail),
-            transport_rtt_nanos: state.transport_rtt_nanos,
-        })
-        .map_err(|error| error.to_string())
 }
 
 pub(super) fn send_recovery(

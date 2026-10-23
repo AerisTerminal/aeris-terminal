@@ -4024,6 +4024,9 @@ impl WorkspaceSurface {
                 message: _,
                 transport_rtt_nanos,
             } => self.apply_market_connection_message(generation, state, transport_rtt_nanos, cx),
+            MarketWorkerMessage::RuntimeProviderState { event, generation } => {
+                self.apply_runtime_provider_state(event, generation, cx);
+            }
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
             }
@@ -4059,16 +4062,23 @@ impl WorkspaceSurface {
                 message: _,
             } => self.apply_study_removal_failure(study_id, cx),
             MarketWorkerMessage::RuntimePriceAlert(event) => {
-                if let aeris_market_runtime::MarketRuntimeEvent::PriceAlertTriggered(trigger) =
-                    event.value
-                {
-                    self.apply_price_alert_trigger(&trigger, cx);
-                } else {
-                    diagnostic!("Aeris pane received an unexpected runtime price-alert event");
-                }
+                self.apply_runtime_price_alert(event, cx);
             }
             MarketWorkerMessage::PriceAlertSyncFailed => Self::apply_price_alert_sync(false, cx),
             MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),
+        }
+    }
+
+    fn apply_runtime_price_alert(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let aeris_market_runtime::MarketRuntimeEvent::PriceAlertTriggered(trigger) = event.value
+        {
+            self.apply_price_alert_trigger(&trigger, cx);
+        } else {
+            diagnostic!("Aeris pane received an unexpected runtime price-alert event");
         }
     }
 
@@ -4932,6 +4942,37 @@ impl WorkspaceSurface {
             None
         };
         self.apply_connection_state(state, cx);
+    }
+
+    fn apply_runtime_provider_state(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let aeris_market_runtime::MarketRuntimeEvent::ProviderState(state) = event.value else {
+            diagnostic!("Aeris pane received an unexpected runtime provider event");
+            return;
+        };
+        if self
+            .product
+            .as_ref()
+            .is_none_or(|product| product.provider != state.provider)
+        {
+            return;
+        }
+        let connection = match state.state {
+            aeris_contracts::ProviderConnectionState::Disconnected => {
+                FeedConnectionState::Disconnected
+            }
+            aeris_contracts::ProviderConnectionState::Connecting => {
+                FeedConnectionState::Discovering
+            }
+            aeris_contracts::ProviderConnectionState::Online => FeedConnectionState::Streaming,
+            aeris_contracts::ProviderConnectionState::Recovering => FeedConnectionState::Recovering,
+            aeris_contracts::ProviderConnectionState::Failed => FeedConnectionState::Stopped,
+        };
+        self.apply_market_connection_message(generation, connection, state.transport_rtt_nanos, cx);
     }
 
     fn apply_provider_catalog_event(

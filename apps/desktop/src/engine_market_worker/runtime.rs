@@ -2,10 +2,9 @@
 
 use super::{
     EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
-    apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
-    initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
-    process_command,
+    MarketWorkerCommand, MarketWorkerMessage, WorkerEndpoint, classify_provider_catalog_event,
+    complete_pending_recovery, initialize_catalog_endpoint, initialize_endpoint,
+    initialize_market_screen_endpoint, mpsc, process_command,
 };
 use aeris_desktop::market_worker::{
     MarketWorkerSendError, MarketWorkerSender, ProviderCatalogEvent, verified_terms_supersede,
@@ -444,7 +443,10 @@ fn apply_received_event(
         // Another provider's state belongs to a selection this pane has not
         // adopted yet; anything else is left over from a replaced demand.
         if record.pending_selection.is_some() || record.initial_selection_pending {
-            record.pending_provider_state = Some(state.clone());
+            record.pending_provider_state = Some(aeris_market_runtime::MarketConsumerEvent {
+                epoch: consumer_epoch,
+                value: event,
+            });
         }
         return Ok(false);
     }
@@ -461,10 +463,12 @@ fn apply_received_event(
                 | MarketRuntimeEvent::StudyOutputsInvalidated(_)
                 | MarketRuntimeEvent::StudyRemoved(_)
                 | MarketRuntimeEvent::PriceAlertTriggered(_)
+                | MarketRuntimeEvent::ProviderState(_)
         )
     {
         deliver_fenced_pane_event(
             endpoint,
+            &record.product.provider,
             aeris_market_runtime::MarketConsumerEvent {
                 epoch: consumer_epoch,
                 value: event,
@@ -473,7 +477,11 @@ fn apply_received_event(
         )?;
         return Ok(false);
     }
-    forward_runtime_publication(event, endpoint, &record.product, generation);
+    let failure = match event {
+        MarketRuntimeEvent::Fault(fault) => fault.redacted_detail,
+        _ => "engine returned an unexpected pushed market event".into(),
+    };
+    report_failure(&endpoint.messages, generation, failure);
     Ok(false)
 }
 
@@ -534,6 +542,7 @@ fn deliver_provider_catalog_event(
 
 fn deliver_fenced_pane_event(
     endpoint: &WorkerEndpoint,
+    expected_provider: &str,
     event: aeris_market_runtime::MarketConsumerEvent,
     received_unix_nanos: i64,
 ) -> Result<(), String> {
@@ -550,8 +559,31 @@ fn deliver_fenced_pane_event(
         | MarketRuntimeEvent::StudyOutputsInvalidated(_)
         | MarketRuntimeEvent::StudyRemoved(_) => deliver_runtime_study(endpoint, event),
         MarketRuntimeEvent::PriceAlertTriggered(_) => deliver_runtime_price_alert(endpoint, event),
+        MarketRuntimeEvent::ProviderState(_) => {
+            deliver_runtime_provider_state(endpoint, expected_provider, event)
+        }
         _ => Err("unexpected fenced pane event".into()),
     }
+}
+
+pub(super) fn deliver_runtime_provider_state(
+    endpoint: &WorkerEndpoint,
+    expected_provider: &str,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    let MarketRuntimeEvent::ProviderState(state) = &event.value else {
+        return Err("unexpected runtime provider state".into());
+    };
+    if state.provider != expected_provider {
+        return Err("engine provider state identity mismatched".into());
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeProviderState {
+            event,
+            generation: endpoint.active_generation,
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn deliver_runtime_price_alert(
@@ -702,26 +734,6 @@ pub(super) fn deliver_runtime_study(
         .map_err(|error| error.to_string())
 }
 
-fn forward_runtime_publication(
-    event: MarketRuntimeEvent,
-    endpoint: &mut WorkerEndpoint,
-    product: &super::InstallProviderInstrument,
-    generation: Option<u64>,
-) {
-    let result = apply_pushed_event(
-        event,
-        &PushedEventContext {
-            active_generation: endpoint.active_generation,
-            realtime: true,
-            instrument: product,
-        },
-        &endpoint.messages,
-    );
-    if let Err(error) = result {
-        report_failure(&endpoint.messages, generation, error);
-    }
-}
-
 pub(super) fn deliver_runtime_series_event(
     endpoint: &WorkerEndpoint,
     event: aeris_market_runtime::MarketConsumerEvent,
@@ -800,17 +812,11 @@ fn adopt_selection_outcome(
     apply_selection_outcome(record, outcome)?;
     if record.pending_selection.is_none()
         && !record.initial_selection_pending
-        && let Some(state) = record.pending_provider_state.take()
+        && let Some(event) = record.pending_provider_state.take()
         && adopted
-        && state.provider == record.product.provider
+        && matches!(&event.value, MarketRuntimeEvent::ProviderState(state) if state.provider == record.product.provider)
     {
-        let generation = Some(record.endpoint.active_generation);
-        forward_runtime_publication(
-            MarketRuntimeEvent::ProviderState(state),
-            &mut record.endpoint,
-            &record.product,
-            generation,
-        );
+        deliver_runtime_provider_state(&record.endpoint, &record.product.provider, event)?;
     }
     if adopted
         && let Err(error) =
@@ -1427,9 +1433,15 @@ mod tests {
         )));
         assert!(messages.iter().any(|message| matches!(
             message,
-            MarketWorkerMessage::Connection {
+            MarketWorkerMessage::RuntimeProviderState {
                 generation: 8,
-                state: FeedConnectionState::Streaming,
+                event: Fenced {
+                    value: MarketRuntimeEvent::ProviderState(super::super::ProviderState {
+                        state: super::super::ProviderConnectionState::Online,
+                        ..
+                    }),
+                    ..
+                },
                 ..
             }
         )));

@@ -1773,6 +1773,17 @@ Status: pending
     checks both rejection and exact-envelope delivery. Connection, session,
     recovery, catalog, screener, diagnostics and local alert-sync outcomes
     remain for Part 7; Part 8 and VAL-DSK-021/022 remain open.
+  - Part 7b: provider connection states from the runtime retain their
+    coordinator consumer epoch through the pane queue. The worker checks the
+    selected provider and stamps its accepted pane generation, including a
+    state held across pending selection adoption; the pane checks both
+    provider identity and committed generation before projecting connection,
+    RTT or failure. Deleted the superseded runtime-to-Connection conversion
+    and pushed-event route. Locally generated startup connection controls
+    remain separate. Bridge and GPUI regressions cover envelope preservation,
+    provider mismatch, retired generation, RTT and pending adoption. Session,
+    recovery, catalog, screener, diagnostics and alert-sync remain for Part 7;
+    Part 8 and VAL-DSK-021/022 remain open.
   - Before Part 7b, parallel-suite timing follow-up: the study calculation
     worker now publishes its completion before replying, so an immediately
     following calculation cannot mistake an already-finished worker for a
@@ -2366,6 +2377,8 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M6.6 preflight test(desktop): stabilize study state-limit, subtree checkpoint and cached offline-lease fixtures - ordinary study unit tests wait for the worker while the explicit timeout test opts into the unchanged 50 ms production deadline; the cached account view is set before its startup request. The desktop poll policy is unchanged. M6.6 Part 6b follows.
 - 2026-10-23 M6.6 Part 6b refactor(desktop): tape and study publications retain the coordinator consumer envelope to GPUI, with exact worker consumer/selection checks and pane-side committed-generation guards; their old pushed-event conversion and mailbox variants are deleted. Study lifecycle control reserve is retained. M6.6 Parts 7-8 and the GUI pass remain open.
 - 2026-10-23 M6.6 Part 7a refactor(desktop): price-alert triggers retain their coordinator consumer envelope until the pane matches its alert identity; the old trigger message is removed. A wrong-consumer fixture does not notify or enqueue, while a matching fixture preserves the exact fence. Other Part 7 routes, Part 8 and milestone GUI evidence remain open.
+
+- 2026-10-23 M6.6 Part 7b refactor(desktop): provider state retains its coordinator envelope across pending selection and queue delivery; pane projection checks provider and committed generation, with bridge and GPUI regressions. Deleted the duplicate pushed-event connection conversion; local startup controls remain explicit. M6.6 and VAL-DSK-021/022 remain open.
 
 ## 7. Known gaps / deferred
 

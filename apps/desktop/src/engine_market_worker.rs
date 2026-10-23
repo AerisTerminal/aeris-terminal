@@ -21,11 +21,13 @@ use aeris_application::{
     ReplayTailOperation, ReplayTailUpdate,
 };
 use aeris_contracts::{
-    EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, WorkspacePaneKind, WorkspaceState,
+    EngineFaultCode, FailureStage, InstallProviderInstrument, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
-use aeris_contracts::{SeriesKey, SeriesLoadState, WorkspacePaneState, WorkspaceTabState};
+use aeris_contracts::{
+    ProviderConnectionState, ProviderState, SeriesKey, SeriesLoadState, WorkspacePaneState,
+    WorkspaceTabState,
+};
 use aeris_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -112,7 +114,7 @@ struct EndpointRecord {
     session_status_sent: Option<String>,
     /// The runtime publishes provider state for its current demand, which can
     /// name a pending selection's provider before its outcome is adopted.
-    pending_provider_state: Option<ProviderState>,
+    pending_provider_state: Option<aeris_market_runtime::MarketConsumerEvent>,
     endpoint: WorkerEndpoint,
 }
 
@@ -800,13 +802,6 @@ fn provider_presentation(
         .find(|descriptor| descriptor.id == provider)
 }
 
-/// Selected product context for provider-state presentation.
-struct PushedEventContext<'a> {
-    active_generation: u64,
-    realtime: bool,
-    instrument: &'a InstallProviderInstrument,
-}
-
 pub(crate) fn worker_identity(provider: &str) -> (&'static str, &'static str) {
     if provider == "hyperliquid" {
         (HYPERLIQUID_SUBSCRIPTION_ID, HYPERLIQUID_WORKER_LABEL)
@@ -916,11 +911,7 @@ use selection_commands::{
 
 #[path = "engine_market_worker/publications.rs"]
 mod publications;
-#[cfg(test)]
-use publications::apply_provider_state;
-use publications::{
-    apply_pushed_event, cancel_pending_recovery, complete_pending_recovery, send_recovery,
-};
+use publications::{cancel_pending_recovery, complete_pending_recovery, send_recovery};
 
 #[cfg(test)]
 mod tests {
@@ -942,6 +933,23 @@ mod tests {
             epoch: EpochSequence::<ConsumerTag>::default().next(),
             value,
         }
+    }
+
+    fn apply_provider_state(
+        state: &ProviderState,
+        expected_provider: &str,
+        selection_generation: u64,
+        realtime: bool,
+        messages: &MarketWorkerSender,
+    ) -> Result<(), String> {
+        if !realtime {
+            return Ok(());
+        }
+        runtime::deliver_runtime_provider_state(
+            &series_endpoint(messages.clone(), 1, selection_generation),
+            expected_provider,
+            fenced_event(MarketRuntimeEvent::ProviderState(state.clone())),
+        )
     }
 
     fn series_endpoint(
@@ -2484,12 +2492,17 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Connection {
+            [MarketWorkerMessage::RuntimeProviderState {
                 generation: 7,
-                state: FeedConnectionState::Recovering,
-                message,
-                transport_rtt_nanos: None,
-            }] if message.contains("retained history")
+                event: Fenced {
+                    value: MarketRuntimeEvent::ProviderState(ProviderState {
+                        state: ProviderConnectionState::Recovering,
+                        transport_rtt_nanos: None,
+                        ..
+                    }),
+                    ..
+                },
+            }]
         ));
     }
 
@@ -2497,28 +2510,32 @@ mod tests {
     fn newer_provider_session_reaches_the_connection_presentation() {
         let product = default_product("MNQ");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        apply_pushed_event(
-            MarketRuntimeEvent::ProviderState(ProviderState {
+        apply_provider_state(
+            &ProviderState {
                 provider: product.provider.clone(),
                 state: ProviderConnectionState::Online,
                 generation: product.session_generation + 1,
                 detail: None,
                 transport_rtt_nanos: None,
-            }),
-            &PushedEventContext {
-                active_generation: 7,
-                realtime: true,
-                instrument: &product,
             },
+            &product.provider,
+            7,
+            true,
             &sender,
         )
         .expect("new engine-owned provider session");
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Connection {
+            [MarketWorkerMessage::RuntimeProviderState {
                 generation: 7,
-                state: FeedConnectionState::Streaming,
+                event: Fenced {
+                    value: MarketRuntimeEvent::ProviderState(ProviderState {
+                        state: ProviderConnectionState::Online,
+                        ..
+                    }),
+                    ..
+                },
                 ..
             }]
         ));
@@ -2544,9 +2561,15 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Connection {
-                state: FeedConnectionState::Streaming,
-                transport_rtt_nanos: Some(12_500_000),
+            [MarketWorkerMessage::RuntimeProviderState {
+                event: Fenced {
+                    value: MarketRuntimeEvent::ProviderState(ProviderState {
+                        state: ProviderConnectionState::Online,
+                        transport_rtt_nanos: Some(12_500_000),
+                        ..
+                    }),
+                    ..
+                },
                 ..
             }]
         ));
@@ -2635,8 +2658,14 @@ mod tests {
         .expect("calendar provider state is forwarded");
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::Connection {
-                state: FeedConnectionState::Discovering,
+            [MarketWorkerMessage::RuntimeProviderState {
+                event: Fenced {
+                    value: MarketRuntimeEvent::ProviderState(ProviderState {
+                        state: ProviderConnectionState::Connecting,
+                        ..
+                    }),
+                    ..
+                },
                 ..
             }]
         ));
@@ -3359,6 +3388,36 @@ mod tests {
             worker_identity(&snapshot.snapshot.series.provider_id);
         assert_eq!(subscription_id, HYPERLIQUID_SUBSCRIPTION_ID);
         assert_eq!(worker_label, HYPERLIQUID_WORKER_LABEL);
+    }
+
+    #[test]
+    fn provider_state_keeps_coordinator_epoch_until_pane_projection() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let endpoint = series_endpoint(sender, 41, 8);
+        let event = fenced_event(MarketRuntimeEvent::ProviderState(ProviderState {
+            provider: "hyperliquid".into(),
+            state: ProviderConnectionState::Online,
+            generation: 3,
+            detail: None,
+            transport_rtt_nanos: Some(12_500_000),
+        }));
+        let epoch = event.epoch;
+        runtime::deliver_runtime_provider_state(&endpoint, "hyperliquid", event)
+            .expect("matching state");
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RuntimeProviderState {
+                event: Fenced {
+                    epoch: actual,
+                    value: MarketRuntimeEvent::ProviderState(ProviderState {
+                        transport_rtt_nanos: Some(12_500_000),
+                        ..
+                    }),
+                },
+                generation: 8,
+            }] if *actual == epoch
+        ));
     }
 
     #[test]

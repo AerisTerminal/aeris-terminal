@@ -3511,6 +3511,82 @@ fn pane_harness_removed_volume_settings_renders_once_and_readd_clears(cx: &mut T
 }
 
 #[gpui::test]
+fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selection(
+    cx: &mut TestAppContext,
+) {
+    use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let provider = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .as_ref()
+            .expect("product")
+            .provider
+            .clone()
+    });
+    let mut epochs = EpochSequence::<ConsumerTag>::default();
+    let connection =
+        |provider: String, generation, state, epoch| MarketWorkerMessage::RuntimeProviderState {
+            event: Fenced {
+                epoch,
+                value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
+                    aeris_contracts::ProviderState {
+                        provider,
+                        state,
+                        generation: 1,
+                        detail: Some("private-credential-sentinel".into()),
+                        transport_rtt_nanos: Some(12_500_000),
+                    },
+                ),
+            },
+            generation,
+        };
+    harness
+        .publications
+        .send(connection(
+            "wrong-provider".into(),
+            1,
+            aeris_contracts::ProviderConnectionState::Failed,
+            epochs.next(),
+        ))
+        .expect("wrong provider");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(pane.chart_failure, Some(ChartFailure::WorkerStopped));
+    });
+    harness
+        .publications
+        .send(connection(
+            provider.clone(),
+            0,
+            aeris_contracts::ProviderConnectionState::Failed,
+            epochs.next(),
+        ))
+        .expect("retired provider state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(pane.chart_failure, Some(ChartFailure::WorkerStopped));
+    });
+    harness
+        .publications
+        .send(connection(
+            provider,
+            1,
+            aeris_contracts::ProviderConnectionState::Online,
+            epochs.next(),
+        ))
+        .expect("current provider state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.connection_state, Some(FeedConnectionState::Streaming));
+        assert_eq!(pane.provider_transport_rtt_nanos, Some(12_500_000));
+    });
+}
+
+#[gpui::test]
 fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

@@ -276,6 +276,12 @@ pub enum MarketWorkerMessage {
     /// Tape and study events retain the coordinator consumer fence through presentation.
     RuntimeTradeTape(aeris_market_runtime::MarketConsumerEvent),
     RuntimeStudy(aeris_market_runtime::MarketConsumerEvent),
+    /// Coordinator provider state, retained with its consumer epoch and the
+    /// selection that was active when the endpoint accepted it.
+    RuntimeProviderState {
+        event: aeris_market_runtime::MarketConsumerEvent,
+        generation: u64,
+    },
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
     Recovery {
         generation: u64,
