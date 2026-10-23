@@ -196,9 +196,8 @@ impl TradingCore {
         update_peak(&mut cycle, fill, previous_quantity, next_quantity)?;
         let fill_cycle_id = cycle.cycle_id;
         let completed_pnl = (completed && cycle.pnl_known).then_some(cycle.realized_pnl);
-        let completed_risk = completed.then_some((cycle.risk_realized_pnl, cycle.peak_quantity));
         let mut rule_state = self.fill_rule_state(&fill.account_id)?;
-        let discipline_state = self.next_discipline_state(fill, completed_risk)?;
+        let discipline_state = self.next_discipline_state(fill);
         if completed {
             update_winner(rule_state.as_mut(), cycle.risk_realized_pnl)?;
             cycle.cycle_id = cycle

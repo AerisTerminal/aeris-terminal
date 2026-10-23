@@ -4534,9 +4534,9 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
 }
 
 #[test]
-fn tilt_rules_apply_size_reduction_and_restart_safe_rapid_loss_cooldown() {
-    let directory = TestDirectory::new("tilt-cooldown");
-    let (service, clock, feed) =
+fn losing_trades_never_cap_size_or_lock_the_account() {
+    let directory = TestDirectory::new("losses-do-not-lock");
+    let (service, _clock, feed) =
         awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
     service
         .register_instrument(instrument())
@@ -4572,51 +4572,14 @@ fn tilt_rules_apply_size_reduction_and_restart_safe_rapid_loss_cooldown() {
             .expect("exit accepted");
     };
     complete_losing_trade(&service, &feed, "loss-one", 1);
-    let mut larger = market_order("larger-after-loss", OrderSide::Buy, 5, 5);
-    larger.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-    assert!(
-        service
-            .place_order(larger)
-            .expect_err("size increase after a loss is reduced")
-            .contains("tilt size reduction")
-    );
     complete_losing_trade(&service, &feed, "loss-two", 6);
-    let locked = service.snapshot().expect("snapshot");
-    assert_eq!(locked.discipline_states[0].rapid_loss_count, 2);
-    let cooldown_until = locked.discipline_states[0]
-        .cooldown_until_unix_nanos
-        .expect("cooldown");
-    assert!(locked.risk_locks[0].reason.contains("rapid-loss cooldown"));
+    let mut larger = market_order("larger-after-losses", OrderSide::Buy, 10, 10);
+    larger.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     service
-        .shutdown(Duration::from_secs(2))
-        .expect("service stops");
-
-    let (restarted, _feed) =
-        reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
-    assert!(
-        restarted
-            .place_order(market_order(
-                "cooldown-reject",
-                OrderSide::Buy,
-                10,
-                cooldown_until - 1,
-            ))
-            .expect_err("cooldown survives restart")
-            .contains("risk-locked")
-    );
-    restarted
-        .place_order(market_order(
-            "cooldown-expired",
-            OrderSide::Buy,
-            11,
-            cooldown_until,
-        ))
-        .expect("cooldown expires at its exact boundary");
-    assert_eq!(
-        restarted.snapshot().expect("snapshot").discipline_states[0].cooldown_until_unix_nanos,
-        None
-    );
-    restarted
+        .place_order(larger)
+        .expect("a larger entry after two quick losses is accepted");
+    assert_eq!(service.snapshot().expect("snapshot").risk_locks, Vec::new());
+    service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 }

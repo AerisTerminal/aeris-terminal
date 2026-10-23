@@ -9,11 +9,10 @@ pub(crate) use position::{CostBasis, FillAccounting, TradeCycle};
 use super::{
     AccountEnvironment, AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate,
     FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind, Liquidity, MAXIMUM_SNAPSHOT_ITEMS,
-    Order, OrderEvent, Position, PositionPnl, ProtectionRole, RAPID_LOSS_COOLDOWN_NANOS,
-    RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter, SessionAdherenceReview,
-    TradeRoundTrip, TradingAccount, TradingAccountId, TradingCore, TradingSnapshot,
-    consistency_projection, negative_loss, nonnegative_difference, pnl_ticks, remaining_limit,
-    round_trip, subtract_fixed, tick_value,
+    Order, OrderEvent, Position, PositionPnl, ProtectionRole, RiskLock, RiskMeter,
+    SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingAccountId, TradingCore,
+    TradingSnapshot, consistency_projection, negative_loss, nonnegative_difference, pnl_ticks,
+    remaining_limit, round_trip, subtract_fixed, tick_value,
 };
 
 /// The durable per-position projection folded from pruned fills: the exact state after every
@@ -43,11 +42,7 @@ pub(crate) struct LedgerCheckpoint {
     pub at_unix_nanos: i64,
 }
 impl TradingCore {
-    pub(super) fn next_discipline_state(
-        &self,
-        fill: &Fill,
-        completed_trade: Option<(FixedPoint, FixedPoint)>,
-    ) -> Result<DisciplineState, String> {
+    pub(super) fn next_discipline_state(&self, fill: &Fill) -> DisciplineState {
         let mut state = self
             .state
             .discipline_states
@@ -57,34 +52,7 @@ impl TradingCore {
         if self.is_stop_fill(fill) {
             state.last_stop_fill_unix_nanos = Some(fill.execution_unix_nanos);
         }
-        let Some((pnl, peak_quantity)) = completed_trade else {
-            return Ok(state);
-        };
-        if pnl.units() >= 0 {
-            state.rapid_loss_count = 0;
-            state.loss_window_started_unix_nanos = None;
-            state.post_loss_quantity_cap = None;
-            return Ok(state);
-        }
-        let inside_window = state.loss_window_started_unix_nanos.is_some_and(|started| {
-            fill.execution_unix_nanos.saturating_sub(started) <= RAPID_LOSS_WINDOW_NANOS
-        });
-        if inside_window {
-            state.rapid_loss_count = state.rapid_loss_count.saturating_add(1);
-        } else {
-            state.rapid_loss_count = 1;
-            state.loss_window_started_unix_nanos = Some(fill.execution_unix_nanos);
-        }
-        state.last_loss_unix_nanos = Some(fill.execution_unix_nanos);
-        state.post_loss_quantity_cap = Some(peak_quantity);
-        if state.rapid_loss_count >= RAPID_LOSS_THRESHOLD {
-            state.cooldown_until_unix_nanos = Some(
-                fill.execution_unix_nanos
-                    .checked_add(RAPID_LOSS_COOLDOWN_NANOS)
-                    .ok_or_else(|| "tilt cooldown timestamp overflowed".to_string())?,
-            );
-        }
-        Ok(state)
+        state
     }
 
     pub(super) fn is_stop_fill(&self, fill: &Fill) -> bool {
@@ -431,26 +399,8 @@ impl TradingCore {
     }
 
     pub(super) fn projected_risk_locks(&self) -> Vec<RiskLock> {
-        let mut locks = self.state.risk_locks.values().cloned().collect::<Vec<_>>();
-        for state in self.state.discipline_states.values() {
-            let Some(until) = state.cooldown_until_unix_nanos else {
-                continue;
-            };
-            if locks.iter().any(|lock| lock.account_id == state.account_id) {
-                continue;
-            }
-            let profile = self.state.risk_profiles.get(&state.account_id);
-            locks.push(RiskLock {
-                account_id: state.account_id.clone(),
-                kind: crate::RiskLockKind::Manual,
-                reason: format!("rapid-loss cooldown active until {until}"),
-                locked_at_unix_nanos: state.last_loss_unix_nanos.unwrap_or(1),
-                profile_id: profile.map(|profile| profile.profile_id.clone()),
-                profile_version: profile.map(|profile| profile.version),
-            });
-        }
-        locks.sort_by(|left, right| left.account_id.cmp(&right.account_id));
-        locks
+        // The map is keyed by account, so its values are already in account order.
+        self.state.risk_locks.values().cloned().collect()
     }
 
     pub(super) fn position_pnl(&self) -> Result<Vec<PositionPnl>, String> {
@@ -554,14 +504,7 @@ impl TradingCore {
                         .state
                         .risk_locks
                         .get(&profile.account_id)
-                        .map(|lock| lock.reason.clone())
-                        .or_else(|| {
-                            self.state
-                                .discipline_states
-                                .get(&profile.account_id)
-                                .and_then(|state| state.cooldown_until_unix_nanos)
-                                .map(|until| format!("rapid-loss cooldown active until {until}"))
-                        }),
+                        .map(|lock| lock.reason.clone()),
                 }))
             })
             .filter_map(Result::transpose)

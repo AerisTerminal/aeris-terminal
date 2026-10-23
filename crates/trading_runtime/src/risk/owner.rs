@@ -211,56 +211,26 @@ impl TradingCore {
     }
 
     pub(super) fn check_discipline(
-        &mut self,
+        &self,
         command: &PlaceOrder,
     ) -> Result<Vec<RiskWarning>, String> {
         if self.strictly_reduces_position(command)? {
             return Ok(Vec::new());
         }
-        let Some(mut state) = self
+        let fast_reentry = self
             .state
             .discipline_states
             .get(&command.account_id)
-            .cloned()
-        else {
-            return Ok(Vec::new());
-        };
-        if let Some(until) = state.cooldown_until_unix_nanos {
-            if command.submitted_unix_nanos < until {
-                return Err(format!(
-                    "account is risk-locked: rapid-loss cooldown active until {until}"
-                ));
-            }
-            state.cooldown_until_unix_nanos = None;
-            state.rapid_loss_count = 0;
-            state.loss_window_started_unix_nanos = None;
-            if !self.quote_planning {
-                self.store.put_discipline_state(&state)?;
-            }
-            self.state
-                .discipline_states
-                .insert(command.account_id.clone(), state.clone());
-        }
-        if let Some(cap) = state.post_loss_quantity_cap {
-            let cap = cap
-                .exact_rescale(command.quantity.scale())
-                .map_err(|error| error.to_string())?;
-            if command.quantity.units() > cap.units() {
-                return Err(format!(
-                    "tilt size reduction limits the next entry to {} units at scale {}",
-                    cap.units(),
-                    cap.scale()
-                ));
-            }
-        }
-        let mut warnings = Vec::new();
-        if state.last_stop_fill_unix_nanos.is_some_and(|last_stop| {
-            let elapsed = command.submitted_unix_nanos.saturating_sub(last_stop);
-            (0..=FAST_STOP_REENTRY_NANOS).contains(&elapsed)
-        }) {
-            warnings.push(RiskWarning::FastStopReentry);
-        }
-        Ok(warnings)
+            .and_then(|state| state.last_stop_fill_unix_nanos)
+            .is_some_and(|last_stop| {
+                let elapsed = command.submitted_unix_nanos.saturating_sub(last_stop);
+                (0..=FAST_STOP_REENTRY_NANOS).contains(&elapsed)
+            });
+        Ok(if fast_reentry {
+            vec![RiskWarning::FastStopReentry]
+        } else {
+            Vec::new()
+        })
     }
 
     pub(super) fn strictly_reduces_position(&self, command: &PlaceOrder) -> Result<bool, String> {

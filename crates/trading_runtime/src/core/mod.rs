@@ -37,10 +37,7 @@ use crate::book::OrderBook;
 pub use crate::copier::{
     MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch,
 };
-pub use crate::discipline::{
-    DisciplineState, FAST_STOP_REENTRY_NANOS, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD,
-    RAPID_LOSS_WINDOW_NANOS,
-};
+pub use crate::discipline::{DisciplineState, FAST_STOP_REENTRY_NANOS};
 pub use crate::plan::{
     MAXIMUM_ALLOWED_SETUPS, MAXIMUM_CHECKLIST_ITEMS, MAXIMUM_PLAN_LEVELS, SessionAdherenceReview,
     SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,

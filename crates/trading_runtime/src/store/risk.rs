@@ -328,12 +328,6 @@ impl TradingStore {
         upsert_risk_rule_state(&transaction, state)?;
         transaction.commit().map_err(database_error)
     }
-
-    pub(crate) fn put_discipline_state(&self, state: &DisciplineState) -> Result<(), String> {
-        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
-        upsert_discipline_state(&transaction, state)?;
-        transaction.commit().map_err(database_error)
-    }
 }
 
 impl TradingStore {
@@ -592,41 +586,24 @@ impl TradingStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT account_id, rapid_loss_count, loss_window_started_unix_nanos,
-                    last_loss_unix_nanos, post_loss_quantity_units, post_loss_quantity_scale,
-                    last_stop_fill_unix_nanos, cooldown_until_unix_nanos
+                "SELECT account_id, last_stop_fill_unix_nanos
                  FROM discipline_states ORDER BY account_id",
             )
             .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u8>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, Option<u8>>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
             })
             .map_err(database_error)?;
         for row in rows {
-            let (account, count, window, last_loss, cap_units, cap_scale, last_stop, cooldown) =
-                row.map_err(database_error)?;
+            let (account, last_stop) = row.map_err(database_error)?;
             let account_id =
                 TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
             result.insert(
                 account_id.clone(),
                 DisciplineState {
                     account_id,
-                    rapid_loss_count: count,
-                    loss_window_started_unix_nanos: window,
-                    last_loss_unix_nanos: last_loss,
-                    post_loss_quantity_cap: optional_fixed(cap_units, cap_scale)?,
                     last_stop_fill_unix_nanos: last_stop,
-                    cooldown_until_unix_nanos: cooldown,
                 },
             );
         }
@@ -697,30 +674,21 @@ pub(super) fn upsert_discipline_state(
     connection: &Connection,
     state: &DisciplineState,
 ) -> Result<(), String> {
+    // The rapid-loss and post-loss cap columns are retired: they are written empty and
+    // never read, so a stored cooldown or size cap from an older build cannot block orders.
     connection
         .execute(
             "INSERT INTO discipline_states(account_id, rapid_loss_count,
                 loss_window_started_unix_nanos, last_loss_unix_nanos,
                 post_loss_quantity_units, post_loss_quantity_scale,
                 last_stop_fill_unix_nanos, cooldown_until_unix_nanos)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(account_id) DO UPDATE SET rapid_loss_count=excluded.rapid_loss_count,
-                loss_window_started_unix_nanos=excluded.loss_window_started_unix_nanos,
-                last_loss_unix_nanos=excluded.last_loss_unix_nanos,
-                post_loss_quantity_units=excluded.post_loss_quantity_units,
-                post_loss_quantity_scale=excluded.post_loss_quantity_scale,
+             VALUES (?1, 0, NULL, NULL, NULL, NULL, ?2, NULL)
+             ON CONFLICT(account_id) DO UPDATE SET rapid_loss_count=0,
+                loss_window_started_unix_nanos=NULL, last_loss_unix_nanos=NULL,
+                post_loss_quantity_units=NULL, post_loss_quantity_scale=NULL,
                 last_stop_fill_unix_nanos=excluded.last_stop_fill_unix_nanos,
-                cooldown_until_unix_nanos=excluded.cooldown_until_unix_nanos",
-            params![
-                state.account_id.as_str(),
-                state.rapid_loss_count,
-                state.loss_window_started_unix_nanos,
-                state.last_loss_unix_nanos,
-                state.post_loss_quantity_cap.map(FixedPoint::units),
-                state.post_loss_quantity_cap.map(FixedPoint::scale),
-                state.last_stop_fill_unix_nanos,
-                state.cooldown_until_unix_nanos,
-            ],
+                cooldown_until_unix_nanos=NULL",
+            params![state.account_id.as_str(), state.last_stop_fill_unix_nanos],
         )
         .map_err(database_error)?;
     Ok(())

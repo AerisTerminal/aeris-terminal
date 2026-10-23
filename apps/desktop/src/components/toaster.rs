@@ -807,8 +807,8 @@ impl Toaster {
         );
     }
 
-    /// Announces the fills and broker order ends in a trading snapshot that are news, on the
-    /// given stack. Returns whether any toast was added.
+    /// Announces the fills, broker order ends and risk-warned acceptances in a trading
+    /// snapshot that are news, on the given stack. Returns whether any toast was added.
     fn announce_trading(
         &mut self,
         snapshot: &aeris_trading_runtime::TradingSnapshot,
@@ -840,6 +840,14 @@ impl Toaster {
                     &snapshot.instruments,
                     &snapshot.accounts,
                 )
+                .or_else(|| {
+                    order_warning_notice(
+                        event,
+                        &snapshot.orders,
+                        &snapshot.instruments,
+                        &snapshot.accounts,
+                    )
+                })
             })
             .collect();
         let Some(host) = host else {
@@ -1087,21 +1095,7 @@ fn order_end_notice(
     let order = orders.iter().find(|order| order.id == event.order_id);
     let title = order.map_or_else(
         || format!("Broker {verb} an order"),
-        |order| {
-            let side = match order.side {
-                aeris_trading::OrderSide::Buy => "Buy",
-                aeris_trading::OrderSide::Sell => "Sell",
-            };
-            let symbol = instruments
-                .iter()
-                .find(|instrument| instrument.instrument_id == order.instrument_id)
-                .map_or(order.instrument_id.as_str(), |instrument| {
-                    instrument.contract.provenance.display_symbol.as_str()
-                });
-            let quantity =
-                market_price_text(order.quantity.units(), u32::from(order.quantity.scale()));
-            format!("Broker {verb} {side} {quantity} {symbol}")
-        },
+        |order| format!("Broker {verb} {}", order_label(order, instruments)),
     );
     // The owner stores the bare state name when the broker gave no explanation.
     let reason = event
@@ -1109,16 +1103,76 @@ fn order_end_notice(
         .as_deref()
         .filter(|detail| *detail != verb && *detail != "cancel rejected")
         .unwrap_or("The broker gave no reason");
-    let account = order.and_then(|order| {
-        accounts
-            .iter()
-            .find(|account| account.id == order.account_id)
-    });
-    let description = account.map_or_else(
-        || reason.to_string(),
-        |account| format!("{reason} · {}", account.display_name),
+    Some((tone, title, with_account(reason, order, accounts)))
+}
+
+/// "Risk warning on Buy 1 ESZ5" over the owner's warnings and the account, for an order the
+/// trading owner accepted with risk warnings on any venue; `None` for every other event.
+fn order_warning_notice(
+    event: &aeris_trading::OrderEvent,
+    orders: &[aeris_trading::Order],
+    instruments: &[aeris_trading_runtime::TradingInstrument],
+    accounts: &[aeris_trading::TradingAccount],
+) -> Option<(ToastTone, String, String)> {
+    if event.kind != aeris_trading::OrderEventKind::Accepted
+        || event.reason != Some(aeris_trading::OrderEventReason::RiskWarning)
+    {
+        return None;
+    }
+    let warnings = event.detail.as_deref()?;
+    let order = orders.iter().find(|order| order.id == event.order_id);
+    let title = order.map_or_else(
+        || "Risk warning".to_string(),
+        |order| format!("Risk warning on {}", order_label(order, instruments)),
     );
-    Some((tone, title, description))
+    Some((
+        ToastTone::Warning,
+        title,
+        with_account(&capitalized(warnings), order, accounts),
+    ))
+}
+
+/// "Buy 1 ESZ5": the order's side, quantity and display symbol.
+fn order_label(
+    order: &aeris_trading::Order,
+    instruments: &[aeris_trading_runtime::TradingInstrument],
+) -> String {
+    let side = match order.side {
+        aeris_trading::OrderSide::Buy => "Buy",
+        aeris_trading::OrderSide::Sell => "Sell",
+    };
+    let symbol = instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == order.instrument_id)
+        .map_or(order.instrument_id.as_str(), |instrument| {
+            instrument.contract.provenance.display_symbol.as_str()
+        });
+    let quantity = market_price_text(order.quantity.units(), u32::from(order.quantity.scale()));
+    format!("{side} {quantity} {symbol}")
+}
+
+fn with_account(
+    text: &str,
+    order: Option<&aeris_trading::Order>,
+    accounts: &[aeris_trading::TradingAccount],
+) -> String {
+    order
+        .and_then(|order| {
+            accounts
+                .iter()
+                .find(|account| account.id == order.account_id)
+        })
+        .map_or_else(
+            || text.to_string(),
+            |account| format!("{text} · {}", account.display_name),
+        )
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// The view that owns the toaster its stacks render and update.
@@ -1729,6 +1783,35 @@ mod tests {
                 observed_unix_nanos: NOW_UNIX,
             },
         }
+    }
+
+    #[test]
+    fn a_risk_warned_acceptance_is_announced_with_its_warnings() {
+        use aeris_trading::{OrderEventKind as Kind, OrderEventReason as Reason};
+        let notice = |event: &aeris_trading::OrderEvent| order_warning_notice(event, &[], &[], &[]);
+        assert_eq!(
+            notice(&order_event(
+                Kind::Accepted,
+                Some(Reason::RiskWarning),
+                "aeris-sim",
+                "fast re-entry within 60 seconds of a filled stop"
+            )),
+            Some((
+                ToastTone::Warning,
+                "Risk warning".to_string(),
+                "Fast re-entry within 60 seconds of a filled stop".to_string()
+            ))
+        );
+        assert_eq!(
+            notice(&order_event(
+                Kind::Accepted,
+                None,
+                "aeris-sim",
+                "accepted by local simulated venue"
+            )),
+            None,
+            "a plain acceptance is not news"
+        );
     }
 
     #[test]
