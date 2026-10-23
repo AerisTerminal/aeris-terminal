@@ -8,14 +8,22 @@ use super::*;
 use rusqlite::Connection;
 use std::time::Duration;
 
-/// Places a two-unit bracket whose market entry fills on the next quote, leaving an active
+/// Places a two-unit bracket whose resting entry fills on the next quote, leaving an active
 /// group with a full-size stop and two 50/50 targets.
 fn start_active_bracket(directory: &TestDirectory, entry_client: &str) -> TradingService {
-    let service = start_service(directory);
+    let (service, clock) = routed_fixture(
+        directory,
+        &instrument(),
+        market_feed::route(),
+        9_975,
+        10_025,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument registers");
     let mut entry = market_order(entry_client, OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.limit_price = Some(FixedPoint::try_new(10_000, 2).expect("entry limit"));
     entry.quantity = quantity(2);
     service
         .place_inline_bracket(PlaceInlineBracket {
@@ -23,10 +31,11 @@ fn start_active_bracket(directory: &TestDirectory, entry_client: &str) -> Tradin
             template: fixed_stop_bracket_template(),
         })
         .expect("bracket placed");
+    clock.advance(Duration::from_millis(2));
     let fills = service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .observe_market(observation(9_975, 10_000, 2, clock.wall_unix_nanos()))
         .expect("entry fills");
-    assert_eq!(fills.len(), 1, "the market entry fills on the quote");
+    assert_eq!(fills.len(), 1, "the resting entry fills on the quote");
     let snapshot = service.snapshot().expect("active snapshot");
     assert_eq!(
         snapshot.recovery_notices,
@@ -256,17 +265,32 @@ fn recovered_group_with_a_filled_stop_settles_once_with_a_notice() {
 
 /// A standalone protective order placed before the group model becomes a protection group at
 /// the next startup; the group retires when the order fills or is cancelled.
-fn start_migrated_protection(label: &str) -> (TestDirectory, TradingService) {
+fn start_migrated_protection(
+    label: &str,
+) -> (
+    TestDirectory,
+    TradingService,
+    Arc<crate::clock::ManualClock>,
+) {
     let directory = TestDirectory::new(label);
-    let service = start_service(&directory);
+    let (service, clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        9_975,
+        10_025,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument registers");
     let mut entry = market_order("protect-entry", OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.limit_price = Some(FixedPoint::try_new(10_000, 2).expect("entry limit"));
     entry.quantity = quantity(2);
     service.place_order(entry).expect("entry accepted");
+    clock.advance(Duration::from_millis(2));
     service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .observe_market(observation(9_975, 10_000, 2, clock.wall_unix_nanos()))
         .expect("entry fills");
     let mut protective = market_order("protect-stop", OrderSide::Sell, 3, 3_000);
     protective.order_type = OrderType::Stop;
@@ -280,7 +304,22 @@ fn start_migrated_protection(label: &str) -> (TestDirectory, TradingService) {
         })
         .expect("protective stop placed");
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
-    let migrated = start_service(&directory);
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let migrated = start_service_with_config(configuration);
+    let feed = migrated
+        .attach_market_feed(Arc::new(market_feed::RecordedInterest::default()))
+        .expect("feed");
+    feed.push(market_feed::live_session(instrument().instrument_id, 1))
+        .expect("session");
+    feed.push(market_feed::feed_state(
+        instrument().instrument_id,
+        1,
+        FeedState::Live,
+    ))
+    .expect("live");
+    push_live_quote(&feed, &instrument(), 3, 9_975, 10_025, 2);
+    migrated.status().expect("owner drains restored feed");
     let snapshot = migrated.snapshot().expect("migrated snapshot");
     assert_eq!(
         snapshot.recovery_notices,
@@ -292,14 +331,16 @@ fn start_migrated_protection(label: &str) -> (TestDirectory, TradingService) {
         "active",
         "the legacy protective order projects as an active group"
     );
-    (directory, migrated)
+    (directory, migrated, clock)
 }
 
 #[test]
 fn migrated_protection_group_completes_when_its_order_fills() {
-    let (directory, service) = start_migrated_protection("group-recovery-protection-fill");
+    let (directory, service, clock) = start_migrated_protection("group-recovery-protection-fill");
+    // A restored owner quote gates execution; the observed stop touch is a later quote.
+    clock.advance(Duration::from_millis(1));
     let fills = service
-        .observe_market(observation(9_750, 9_775, 4, 4_000))
+        .observe_market(observation(9_750, 9_775, 4, clock.wall_unix_nanos()))
         .expect("stop fills");
     assert_eq!(fills.len(), 1, "the protective stop fills at the touch");
     let snapshot = service.snapshot().expect("flat snapshot");
@@ -315,7 +356,8 @@ fn migrated_protection_group_completes_when_its_order_fills() {
 
 #[test]
 fn migrated_protection_group_cancels_with_its_order() {
-    let (directory, service) = start_migrated_protection("group-recovery-protection-cancel");
+    let (directory, service, _clock) =
+        start_migrated_protection("group-recovery-protection-cancel");
     service
         .cancel_order(ClientOrderId::try_new("protect-stop").expect("client id"))
         .expect("protective cancel");
