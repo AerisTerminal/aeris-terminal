@@ -173,7 +173,13 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
 #[test]
 fn owner_serializes_eight_submitters_and_recovers_exact_order_revisions() {
     let directory = TestDirectory::new("owner-concurrency");
-    let service = start_service(&directory);
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     service
         .register_instrument(instrument())
         .expect("instrument");
@@ -861,11 +867,13 @@ fn snapshot_projects_registered_instruments_with_provider_symbols() {
 #[test]
 fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
     let directory = TestDirectory::new("whole-unit-order");
-    let service = start_service(&directory);
     let mut contract = instrument();
     contract.quantity_scale = 8;
     contract.contract.order_quantity_increment =
         Some(InstrumentDecimal::try_new(100_000_000, 8).expect("one contract"));
+    let mut route = market_feed::route();
+    route.quantity_scale = 8;
+    let (service, _clock) = routed_fixture(&directory, &contract, route, 10_000, 10_025);
     service
         .register_instrument(contract)
         .expect("whole-unit instrument registers");
