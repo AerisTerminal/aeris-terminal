@@ -538,18 +538,17 @@ fn every_revision_changing_step_is_published() {
     push_live_quote(&feed, &instrument, 1, 9_975, 10_000, 2);
     service.status().expect("feed drains");
     let subscription = service.subscribe().expect("subscribe");
-    let initial = subscription
-        .recv_timeout(Duration::from_secs(5))
-        .expect("initial working set");
+    let initial = subscription.try_recv().expect("initial working set");
     let mut revision = initial.event.revision;
     let mut resting = market_order("step-order", OrderSide::Buy, 2, 2_000);
     resting.order_type = OrderType::Limit;
     resting.time_in_force = TimeInForce::GoodTillCancelled;
     resting.limit_price = Some(FixedPoint::try_new(9_800, 2).expect("limit"));
     service.place_order(resting).expect("resting order");
-    let placed = subscription
-        .recv_timeout(Duration::from_secs(5))
-        .expect("placement publishes");
+    // The command reply is sent inside handle, before the owner publishes at the end of
+    // its turn. A subsequent status reply proves the placement turn finished publishing.
+    service.status().expect("placement publication barrier");
+    let placed = subscription.try_recv().expect("placement publishes");
     assert_eq!(placed.event.cause, TradingEventCause::Command);
     assert!(placed.event.revision > revision);
     revision = placed.event.revision;
@@ -557,9 +556,8 @@ fn every_revision_changing_step_is_published() {
     service
         .cancel_order(ClientOrderId::try_new("step-order").expect("client id"))
         .expect("cancel");
-    let cancelled = subscription
-        .recv_timeout(Duration::from_secs(5))
-        .expect("cancellation publishes");
+    service.status().expect("cancellation publication barrier");
+    let cancelled = subscription.try_recv().expect("cancellation publishes");
     assert_eq!(cancelled.event.cause, TradingEventCause::Command);
     assert!(cancelled.event.revision > revision);
     assert_eq!(cancelled.event.working_set.orders.len(), 0);
