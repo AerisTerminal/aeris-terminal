@@ -1,6 +1,6 @@
 # Theme presets
 
-Every Theme Studio theme in one place: the default Aeris theme plus seven presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme.
+Every Theme Studio theme in one place: the default Aeris theme plus seven presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines.
 
 ## How to use
 
@@ -23,6 +23,17 @@ document.documentElement.classList.toggle('dark');      // light / dark
 
 Components pick the colours up through the variables, for example `background: var(--surface)`, `color: var(--text-default)` or `background: var(--primary)`.
 
+Floating layers (menus, dialogs, tooltips) should read the popover tokens with a fallback, so Aeris gets its popover fill and highlight edge while presets fall back to their secondary surface and border:
+
+```css
+.popover {
+  background-color: var(--surface-popover, var(--surface-secondary));
+  box-shadow:
+    inset 0 0 0 1px var(--border-popover-highlight, transparent),
+    0 0 0 1px var(--border-popover, var(--border-secondary));
+}
+```
+
 ## Themes
 
 | Theme | `data-theme` | Light | Dark |
@@ -38,7 +49,7 @@ Components pick the colours up through the variables, for example `background: v
 
 ## 1. Aeris (default)
 
-The default theme. It applies whenever no `data-theme` is set.
+The default theme. It applies whenever no `data-theme` is set. Dark mode uses a `#171717` surface, not pure black, to keep light text from blooming. Menus, dialogs and tooltips sit on `--surface-popover` with a 1px `--border-popover` outer edge and a 1px `--border-popover-highlight` inner edge. Those three tokens are scoped to `:not([data-theme])`, so presets never inherit them.
 
 ```css
 :root {
@@ -48,7 +59,7 @@ The default theme. It applies whenever no `data-theme` is set.
 
   /* Borders */
   --border: #0a0a0a33;
-  --border-secondary: #0a0a0a33;
+  --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
   --border-width: 1px;
 
@@ -69,8 +80,8 @@ The default theme. It applies whenever no `data-theme` is set.
   --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #0a0a0a14;
-  --active-bg: #0a0a0a1f;
+  --hover-bg: #0a0a0a0d;
+  --active-bg: #0a0a0a0d;
   --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */
@@ -163,35 +174,35 @@ The default theme. It applies whenever no `data-theme` is set.
 
 .dark {
   /* Surfaces */
-  --surface: #000000;
-  --surface-secondary: #171717;
+  --surface: #171717;
+  --surface-secondary: #fafafa0f;
 
   /* Borders */
-  --border: #2c2c2c;
-  --border-secondary: #404040;
+  --border: #fafafa1a;
+  --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
   --border-width: 1px;
 
   /* Text */
-  --text-default: #ededed;
+  --text-default: #fafafa;
   --text-secondary: #fafafa8c;
-  --text-muted: #fafafa59;
+  --text-muted: #fafafa40;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
   --text-interactive: #fafafa8c;
-  --text-hover: #ededed;
-  --text-active: #ededed;
+  --text-hover: #fafafa;
+  --text-active: #fafafa;
 
   /* Interaction states */
-  --hover-bg: #fafafa1f;
+  --hover-bg: #fafafa13;
   --active-bg: #fafafa26;
   --disabled-bg: #fafafa0d;
 
   /* Icons */
   --icon: #fafafa8c;
-  --icon-active: #ededed;
+  --icon-active: #fafafa;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -268,6 +279,20 @@ The default theme. It applies whenever no `data-theme` is set.
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
   --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+}
+
+/* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
+   var(--surface-popover, var(--surface-secondary)) and var(--border-popover, var(--border-secondary)). */
+:root:not([data-theme]) {
+  --surface-popover: #ffffff;
+  --border-popover: var(--border);
+  --border-popover-highlight: #ffffffcc;
+}
+
+.dark:not([data-theme]) {
+  --surface-popover: #262626;
+  --border-popover: #000000cc;
+  --border-popover-highlight: #ffffff1a;
 }
 ```
 

@@ -9,9 +9,15 @@ macro_rules! platform_color_registry {
         $expand! {
             surface => "surface",
             surface_secondary => "surface-secondary",
+            /// Floating-layer fill. Aeris declares it; presets fall back to `surface-secondary`.
+            surface_popover => "surface-popover",
             border => "border",
             border_secondary => "border-secondary",
             border_subtle => "border-subtle",
+            /// Floating-layer outer edge. Aeris declares it; presets fall back to `border-secondary`.
+            border_popover => "border-popover",
+            /// Floating-layer inner edge. Aeris declares it; presets fall back to transparent.
+            border_popover_highlight => "border-popover-highlight",
             text_default => "text-default",
             text_secondary => "text-secondary",
             text_muted => "text-muted",

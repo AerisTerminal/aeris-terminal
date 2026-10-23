@@ -295,7 +295,7 @@ impl MenuRow {
             kind,
             scale: MenuScale::BASE,
             theme: *theme,
-            resting_fill: theme.colors.surface_secondary,
+            resting_fill: theme.colors.surface_popover,
             label: label.into(),
             leading_icon: None,
             leading: None,
@@ -595,8 +595,8 @@ pub(crate) const ANCHOR_GAP: Pixels = px(4.0);
 
 /// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
 ///
-/// The panel owns the flat menu look (the `border-secondary` popover hairline,
-/// `--radius-compact`, `surface-secondary`, no shadow), its placement, scrolling, entry motion and click containment. Its content is
+/// The panel owns the flat menu look (the `popover_surface` fill and edges,
+/// `--radius-compact`, no cast shadow), its placement, scrolling, entry motion and click containment. Its content is
 /// inset from the rounded border: GPUI clips to rectangles, and any inset of at least
 /// `r(1 - 1/√2)` keeps a row's rectangular highlight inside the panel's rounded corner, so rows
 /// never depend on their position in the panel.

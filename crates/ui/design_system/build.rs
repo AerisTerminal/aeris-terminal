@@ -3,8 +3,8 @@ mod token_compiler;
 
 use std::{env, fmt::Write as _, fs, path::PathBuf};
 use token_compiler::{
-    Declarations, cascade, parse_color, parse_preset_blocks, parse_theme_blocks, preset_ids,
-    resolve, source,
+    AERIS_ONLY_FALLBACKS, Declarations, cascade, parse_aeris_only_blocks, parse_color,
+    parse_preset_blocks, parse_theme_blocks, preset_ids, resolve, source,
 };
 
 #[macro_use]
@@ -58,8 +58,13 @@ fn compile_tokens() -> Result<(), String> {
     let css = fs::read_to_string("platform.css").map_err(|error| error.to_string())?;
     let (root, dark_overrides) = parse_theme_blocks(&css)?;
     let dark = cascade(&root, &dark_overrides);
-    require_registered_colors(&root)?;
-    require_registered_colors(&dark)?;
+    reject_aeris_only_tokens(&root, ":root")?;
+    reject_aeris_only_tokens(&dark_overrides, ".dark")?;
+    let (aeris_light_only, aeris_dark_only) = parse_aeris_only_blocks(&css)?;
+    let aeris_light = cascade(&root, &aeris_light_only);
+    let aeris_dark = cascade(&dark, &aeris_dark_only);
+    require_registered_colors(&aeris_light)?;
+    require_registered_colors(&aeris_dark)?;
     let presets = compile_presets(&css, &root, &dark)?;
     let mut output = String::new();
 
@@ -101,10 +106,10 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
         COLORS.len()
     )
     .expect("writing generated tokens to a String cannot fail");
-    emit_colors(&mut output, "LIGHT_COLORS", &root)?;
-    emit_colors(&mut output, "DARK_COLORS", &dark)?;
-    emit_sources(&mut output, "LIGHT_COLOR_SOURCES", &root)?;
-    emit_sources(&mut output, "DARK_COLOR_SOURCES", &dark)?;
+    emit_colors(&mut output, "LIGHT_COLORS", &aeris_light)?;
+    emit_colors(&mut output, "DARK_COLORS", &aeris_dark)?;
+    emit_sources(&mut output, "LIGHT_COLOR_SOURCES", &aeris_light)?;
+    emit_sources(&mut output, "DARK_COLOR_SOURCES", &aeris_dark)?;
     emit_presets(&mut output, &presets)?;
     emit_pixel_u16(
         &mut output,
@@ -154,7 +159,8 @@ struct Preset {
 
 /// Resolves each preset the way the CSS cascade does: the preset's light block overrides
 /// `:root` (and `.dark`, which has the same specificity but appears earlier), and its
-/// `.dark` block overrides that.
+/// `.dark` block overrides that. The Aeris-only `:not([data-theme])` blocks never match a
+/// preset, so each Aeris-only token takes the fallback components read it with.
 fn compile_presets(
     css: &str,
     root: &Declarations,
@@ -164,8 +170,13 @@ fn compile_presets(
         .into_iter()
         .map(|id| {
             let (light_overrides, dark_overrides) = parse_preset_blocks(css, &id)?;
-            let light = cascade(root, &light_overrides);
-            let dark = cascade(&cascade(dark, &light_overrides), &dark_overrides);
+            reject_aeris_only_tokens(&light_overrides, &id)?;
+            reject_aeris_only_tokens(&dark_overrides, &id)?;
+            let light = with_aeris_only_fallbacks(cascade(root, &light_overrides));
+            let dark = with_aeris_only_fallbacks(cascade(
+                &cascade(dark, &light_overrides),
+                &dark_overrides,
+            ));
             for declarations in [&light, &dark] {
                 require_registered_colors(declarations)?;
                 for token in PRESET_INVARIANT_TOKENS {
@@ -177,6 +188,26 @@ fn compile_presets(
             Ok(Preset { id, light, dark })
         })
         .collect()
+}
+
+/// Aeris-only tokens live solely in the `:not([data-theme])` blocks.
+fn reject_aeris_only_tokens(declarations: &Declarations, block: &str) -> Result<(), String> {
+    match AERIS_ONLY_FALLBACKS
+        .iter()
+        .find(|(name, _)| declarations.contains_key(*name))
+    {
+        Some((name, _)) => Err(format!(
+            "--{name} is Aeris-only and must not be declared in {block}"
+        )),
+        None => Ok(()),
+    }
+}
+
+fn with_aeris_only_fallbacks(mut declarations: Declarations) -> Declarations {
+    for (name, fallback) in AERIS_ONLY_FALLBACKS {
+        declarations.insert(name.to_owned(), fallback.to_owned());
+    }
+    declarations
 }
 
 /// Every color the stylesheet declares must be projected natively, and every

@@ -616,17 +616,27 @@ mod tests {
             ThemeColor::from_rgb8(250, 250, 250)
         );
         assert_eq!(light.border, ThemeColor::from_rgba8(10, 10, 10, 51));
-        assert_eq!(light.border_secondary, light.border);
+        assert_eq!(
+            light.border_secondary,
+            ThemeColor::from_rgba8(10, 10, 10, 26)
+        );
         assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(dark.surface, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(23, 23, 23));
-        assert_eq!(dark.border, ThemeColor::from_rgb8(44, 44, 44));
-        assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(64, 64, 64));
+        assert_eq!(dark.surface, ThemeColor::from_rgb8(23, 23, 23));
+        assert_eq!(
+            dark.surface_secondary,
+            ThemeColor::from_rgba8(250, 250, 250, 15)
+        );
+        assert_eq!(dark.border, ThemeColor::from_rgba8(250, 250, 250, 26));
+        assert_eq!(
+            dark.border_secondary,
+            ThemeColor::from_rgba8(250, 250, 250, 38)
+        );
         assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
-        assert_eq!(dark.text_default, ThemeColor::from_rgb8(237, 237, 237));
+        assert_eq!(dark.text_default, ThemeColor::from_rgb8(250, 250, 250));
+        assert_eq!(dark.text_muted, ThemeColor::from_rgba8(250, 250, 250, 64));
         assert_eq!(
             light.text_secondary,
             ThemeColor::from_rgba8(10, 10, 10, 148)
@@ -652,39 +662,13 @@ mod tests {
         assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.bullish, light.bullish);
         assert_eq!(dark.bearish, light.bearish);
-        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 20));
-        assert_eq!(light.active_bg, ThemeColor::from_rgba8(10, 10, 10, 31));
-        assert_eq!(dark.active_bg, ThemeColor::from_rgba8(250, 250, 250, 38));
-        // Pressed reads a step above hover in both modes.
-        for colors in [light, dark] {
-            assert!(colors.active_bg.alpha() > colors.hover_bg.alpha());
-        }
-        let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
-        assert!(hover_saturation.abs() < f32::EPSILON);
-
-        for composited in [
-            light.hover_bg.over(light.surface),
-            light.active_bg.over(light.surface),
-            dark.hover_bg.over(dark.surface),
-            dark.active_bg.over(dark.surface),
-            light.hover_bg.over(light.surface_secondary),
-            light.active_bg.over(light.surface_secondary),
-            dark.hover_bg.over(dark.surface_secondary),
-            dark.active_bg.over(dark.surface_secondary),
-        ] {
-            assert!((composited.alpha() - 1.0).abs() < f32::EPSILON);
-            assert!((composited.red() - composited.green()).abs() < f32::EPSILON);
-            assert!((composited.green() - composited.blue()).abs() < f32::EPSILON);
-        }
-        assert!((light.hover_bg.over(light.surface).red() - light.surface.red()).abs() > 0.01);
-        assert!((dark.hover_bg.over(dark.surface).red() - dark.surface.red()).abs() > 0.01);
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
         assert_eq!(token_source(&light_tokens, "border"), "#0a0a0a33");
-        assert_eq!(token_source(&dark_tokens, "surface"), "#000000");
-        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa1f");
+        assert_eq!(token_source(&dark_tokens, "surface"), "#171717");
+        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa13");
         assert_eq!(token_source(&light_tokens, "text-muted"), "#0a0a0a40");
         assert_eq!(token_source(&light_tokens, "text-secondary"), "#0a0a0a94");
         assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
@@ -709,16 +693,50 @@ mod tests {
     }
 
     #[test]
+    fn interaction_fills_composite_to_opaque_neutral_grays() {
+        let light = AerisTheme::light().colors;
+        let dark = AerisTheme::dark().colors;
+        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 13));
+        assert_eq!(light.active_bg, light.hover_bg);
+        assert_eq!(dark.hover_bg, ThemeColor::from_rgba8(250, 250, 250, 19));
+        assert_eq!(dark.active_bg, ThemeColor::from_rgba8(250, 250, 250, 38));
+        // Light mode selects with the hover fill; dark mode reads a step above hover.
+        assert!(dark.active_bg.alpha() > dark.hover_bg.alpha());
+        let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
+        assert!(hover_saturation.abs() < f32::EPSILON);
+
+        // Dark `surface-secondary` is a translucent tint, so resolve it over `surface` first.
+        let dark_secondary = dark.surface_secondary.over(dark.surface);
+        for composited in [
+            light.hover_bg.over(light.surface),
+            light.active_bg.over(light.surface),
+            dark.hover_bg.over(dark.surface),
+            dark.active_bg.over(dark.surface),
+            light.hover_bg.over(light.surface_secondary),
+            light.active_bg.over(light.surface_secondary),
+            dark.hover_bg.over(dark_secondary),
+            dark.active_bg.over(dark_secondary),
+        ] {
+            assert!((composited.alpha() - 1.0).abs() < f32::EPSILON);
+            assert!((composited.red() - composited.green()).abs() < f32::EPSILON);
+            assert!((composited.green() - composited.blue()).abs() < f32::EPSILON);
+        }
+        assert!((light.hover_bg.over(light.surface).red() - light.surface.red()).abs() > 0.01);
+        assert!((dark.hover_bg.over(dark.surface).red() - dark.surface.red()).abs() > 0.01);
+    }
+
+    #[test]
     fn compositing_over_a_translucent_tint_keeps_its_transparency() {
         let dark = AerisTheme::dark().colors;
         let tinted = dark.hover_bg.over(dark.disabled_bg);
         assert!(tinted.alpha() < 1.0);
         assert!(tinted.alpha() > dark.hover_bg.alpha());
 
-        let hover = dark.hover_bg.over(dark.surface_secondary);
+        let secondary = dark.surface_secondary.over(dark.surface);
+        let hover = dark.hover_bg.over(secondary);
         assert!((hover.alpha() - 1.0).abs() < f32::EPSILON);
         // A hover over the dark secondary surface stays a subtle lift, never a near-white fill.
-        assert!(hover.red() > dark.surface_secondary.red());
+        assert!(hover.red() > secondary.red());
         assert!(hover.red() < 0.3);
     }
 
@@ -749,32 +767,56 @@ mod tests {
 
     #[test]
     fn popover_layer_tokens_match_the_platform_contract() {
-        let light = AerisTheme::light().colors;
-        let dark = AerisTheme::dark().colors;
+        let light = AerisTheme::light();
+        let dark = AerisTheme::dark();
+        assert_eq!(
+            light.colors.surface_popover,
+            ThemeColor::from_rgb8(255, 255, 255)
+        );
+        assert_eq!(light.colors.border_popover, light.colors.border);
+        assert_eq!(
+            light.colors.border_popover_highlight,
+            ThemeColor::from_rgba8(255, 255, 255, 204)
+        );
+        assert_eq!(
+            dark.colors.surface_popover,
+            ThemeColor::from_rgb8(38, 38, 38)
+        );
+        assert_eq!(
+            dark.colors.border_popover,
+            ThemeColor::from_rgba8(0, 0, 0, 204)
+        );
+        assert_eq!(
+            dark.colors.border_popover_highlight,
+            ThemeColor::from_rgba8(255, 255, 255, 26)
+        );
+        assert_eq!(
+            token_source(&light.color_tokens(), "border-popover"),
+            "var(--border)"
+        );
+        assert_eq!(
+            token_source(&dark.color_tokens(), "surface-popover"),
+            "#262626"
+        );
 
-        // Floating layers paint `surface-secondary` over arbitrary content, so it must stay
-        // opaque in both modes.
-        for popover in [light.surface_secondary, dark.surface_secondary] {
-            assert!((popover.alpha() - 1.0).abs() < f32::EPSILON);
-        }
-        let dark_tokens = AerisTheme::dark().color_tokens();
-        assert_eq!(token_source(&dark_tokens, "surface-secondary"), "#171717");
-        assert_eq!(token_source(&dark_tokens, "border-secondary"), "#404040");
-        // Floating layers draw their edge with `border-secondary`; the retired popover tokens
-        // must not return.
-        for theme in [AerisTheme::light(), AerisTheme::dark()] {
-            for retired in [
-                "surface-popover",
-                "border-popover",
-                "border-popover-highlight",
-            ] {
-                assert!(
-                    theme
-                        .color_tokens()
-                        .iter()
-                        .all(|token| token.canonical_identifier != retired),
-                    "retired popover token --{retired} is back"
-                );
+        // Floating layers paint the popover fill over arbitrary content, so it stays opaque in
+        // every preset and mode. Presets declare no popover layer and fall back exactly as the
+        // stylesheet's `var(--surface-popover, var(--surface-secondary))` readers do.
+        for preset in ThemePreset::ALL {
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                let theme = AerisTheme::resolve(preset, mode);
+                let colors = theme.colors;
+                assert!((colors.surface_popover.alpha() - 1.0).abs() < f32::EPSILON);
+                if preset == ThemePreset::Aeris {
+                    continue;
+                }
+                assert_eq!(colors.surface_popover, colors.surface_secondary);
+                assert_eq!(colors.border_popover, colors.border_secondary);
+                assert!(colors.border_popover_highlight.alpha().abs() < f32::EPSILON);
+                let tokens = theme.color_tokens();
+                for (identifier, fallback) in crate::token_compiler::AERIS_ONLY_FALLBACKS {
+                    assert_eq!(token_source(&tokens, identifier), fallback);
+                }
             }
         }
     }
@@ -859,9 +901,9 @@ mod tests {
         assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(255, 172, 191));
         assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(191, 35, 71));
         assert_eq!(light.book_fill_text, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(0, 39, 77));
+        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(15, 53, 92));
         assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(51, 139, 228));
-        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(89, 16, 33));
+        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(104, 31, 48));
         assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 78, 118));
         assert_eq!(dark.book_fill_text, ThemeColor::from_rgb8(255, 255, 255));
 
@@ -1036,6 +1078,12 @@ mod tests {
             [ThemeMode::Light, ThemeMode::Dark].map(|mode| AerisTheme::resolve(preset, mode))
         }) {
             for token in theme.color_tokens() {
+                let aeris_only = crate::token_compiler::AERIS_ONLY_FALLBACKS
+                    .iter()
+                    .any(|(identifier, _)| *identifier == token.canonical_identifier);
+                if aeris_only && theme.preset != ThemePreset::Aeris {
+                    continue;
+                }
                 let declaration = format!(
                     "{}: {};",
                     token.css_custom_property(),

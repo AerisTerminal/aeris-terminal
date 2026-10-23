@@ -438,7 +438,7 @@ mod tests {
             "success page must reflect completion: {response}"
         );
         assert!(response.contains("--surface: #ffffff"));
-        assert!(response.contains("--surface: #000000"));
+        assert!(response.contains("--surface: #171717"));
         assert!(response.contains("var(--primary)"));
         assert!(!response.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));

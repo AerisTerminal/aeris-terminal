@@ -62,7 +62,7 @@
 
   /* Borders */
   --border: #0a0a0a33;
-  --border-secondary: #0a0a0a33;
+  --border-secondary: #0a0a0a1a;
   --border-subtle: #0a0a0a12;
   --border-width: 1px;
 
@@ -83,8 +83,8 @@
   --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #0a0a0a14;
-  --active-bg: #0a0a0a1f;
+  --hover-bg: #0a0a0a0d;
+  --active-bg: #0a0a0a0d;
   --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */
@@ -177,35 +177,35 @@
 
 .dark {
   /* Surfaces */
-  --surface: #000000;
-  --surface-secondary: #171717;
+  --surface: #171717;
+  --surface-secondary: #fafafa0f;
 
   /* Borders */
-  --border: #2c2c2c;
-  --border-secondary: #404040;
+  --border: #fafafa1a;
+  --border-secondary: #fafafa26;
   --border-subtle: #fafafa12;
   --border-width: 1px;
 
   /* Text */
-  --text-default: #ededed;
+  --text-default: #fafafa;
   --text-secondary: #fafafa8c;
-  --text-muted: #fafafa59;
+  --text-muted: #fafafa40;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
   --text-interactive: #fafafa8c;
-  --text-hover: #ededed;
-  --text-active: #ededed;
+  --text-hover: #fafafa;
+  --text-active: #fafafa;
 
   /* Interaction states */
-  --hover-bg: #fafafa1f;
+  --hover-bg: #fafafa13;
   --active-bg: #fafafa26;
   --disabled-bg: #fafafa0d;
 
   /* Icons */
   --icon: #fafafa8c;
-  --icon-active: #ededed;
+  --icon-active: #fafafa;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -282,6 +282,20 @@
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
   --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+}
+
+/* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
+   var(--surface-popover, var(--surface-secondary)) and var(--border-popover, var(--border-secondary)). */
+:root:not([data-theme]) {
+  --surface-popover: #ffffff;
+  --border-popover: var(--border);
+  --border-popover-highlight: #ffffffcc;
+}
+
+.dark:not([data-theme]) {
+  --surface-popover: #262626;
+  --border-popover: #000000cc;
+  --border-popover-highlight: #ffffff1a;
 }
 
 /* Theme presets — each preset overrides every color token for light and, with .dark, dark mode. */

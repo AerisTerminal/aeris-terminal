@@ -10,9 +10,9 @@ use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family, platform_typography,
 };
 use gpui::{
-    Anchor, AnimationExt, AnyElement, App, Bounds, Context, Div, ElementId, Hsla, IntoElement,
-    Pixels, Point, SharedString, Size, SpringAnimation, SpringConfig, Task, Window, anchored,
-    canvas, deferred, div, point, prelude::*, px,
+    Anchor, AnimationExt, AnyElement, App, Bounds, BoxShadow, Context, Div, ElementId, Hsla,
+    IntoElement, Pixels, Point, SharedString, Size, SpringAnimation, SpringConfig, Task, Window,
+    anchored, canvas, deferred, div, point, prelude::*, px,
 };
 
 /// Space between the trigger edge and the tooltip.
@@ -143,14 +143,20 @@ impl TooltipSpec {
         self.show_delay
     }
 
-    /// The Theme System popover look: `surface-secondary` edged with `border-secondary`.
+    /// The Theme System popover look: `surface-popover` with a `border-popover-highlight`
+    /// inner edge and a `border-popover` outer edge.
     /// Single-line labels are pills; rich content keeps a rounded rectangle so rows stay aligned.
     fn surface(&self, cx: &App) -> Div {
         let colors = self.theme.colors;
+        let edge = px(self.theme.dimensions.border_width);
         let base = div()
-            .border(px(self.theme.dimensions.border_width))
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface_secondary))
+            .border(edge)
+            .border_color(gpui_color(colors.border_popover_highlight))
+            .bg(gpui_color(colors.surface_popover))
+            .shadow(vec![
+                BoxShadow::new(px(0.0), px(0.0), gpui_color(colors.border_popover))
+                    .spread_radius(edge),
+            ])
             .font_family(platform_font_family())
             .font_weight(gpui::FontWeight(f32::from(
                 platform_typography().weight(TypographyRole::Normal),

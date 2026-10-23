@@ -12,6 +12,32 @@ pub(crate) fn parse_theme_blocks(css: &str) -> Result<(Declarations, Declaration
     Ok((root, dark))
 }
 
+/// Tokens only the default Aeris theme declares, in its `:root:not([data-theme])` and
+/// `.dark:not([data-theme])` blocks, with the CSS fallback a preset resolves to instead.
+pub(crate) const AERIS_ONLY_FALLBACKS: [(&str, &str); 3] = [
+    ("surface-popover", "var(--surface-secondary)"),
+    ("border-popover", "var(--border-secondary)"),
+    ("border-popover-highlight", "transparent"),
+];
+
+/// The light and dark blocks that apply only while no `data-theme` preset is set.
+pub(crate) fn parse_aeris_only_blocks(css: &str) -> Result<(Declarations, Declarations), String> {
+    let css = strip_comments(css)?;
+    let light = parse_blocks(&css, ":root:not([data-theme])")?;
+    let dark = parse_blocks(&css, ".dark:not([data-theme])")?;
+    for (selector, block) in [(":root", &light), (".dark", &dark)] {
+        let declared: Vec<&str> = block.keys().map(String::as_str).collect();
+        let mut expected: Vec<&str> = AERIS_ONLY_FALLBACKS.iter().map(|(name, _)| *name).collect();
+        expected.sort_unstable();
+        if declared != expected {
+            return Err(format!(
+                "{selector}:not([data-theme]) must declare exactly {expected:?}, found {declared:?}"
+            ));
+        }
+    }
+    Ok((light, dark))
+}
+
 /// The light `[data-theme="…"]` and dark `[data-theme="…"].dark` override blocks of one preset.
 pub(crate) fn parse_preset_blocks(
     css: &str,
@@ -197,6 +223,9 @@ pub(crate) fn parse_color(value: &str) -> Result<[u8; 4], String> {
     if value.starts_with('#') {
         return parse_hex(value);
     }
+    if value == "transparent" {
+        return Ok([0, 0, 0, 0]);
+    }
     let inner = value
         .strip_prefix("color-mix(in srgb,")
         .and_then(|value| value.strip_suffix(')'))
@@ -290,6 +319,26 @@ mod tests {
         assert!(parse_preset_blocks(css, "missing").is_err());
         assert_eq!(preset_ids(css).unwrap(), ["x"]);
         assert!(preset_ids("[data-theme=\"\"] {}").is_err());
+    }
+
+    #[test]
+    fn aeris_only_blocks_are_scoped_and_exact() {
+        let css = ":root { --a: #fff; } .dark { --a: #000; } \
+            :root:not([data-theme]) { --surface-popover: #fff; --border-popover: var(--a); \
+            --border-popover-highlight: transparent; } \
+            .dark:not([data-theme]) { --surface-popover: #111; --border-popover: #000; \
+            --border-popover-highlight: #fff1; }";
+        let (root, dark) = parse_theme_blocks(css).unwrap();
+        assert!(!root.contains_key("surface-popover"));
+        assert!(!dark.contains_key("surface-popover"));
+        let (light_only, dark_only) = parse_aeris_only_blocks(css).unwrap();
+        assert_eq!(source(&light_only, "border-popover").unwrap(), "var(--a)");
+        assert_eq!(source(&dark_only, "surface-popover").unwrap(), "#111");
+        assert_eq!(parse_color("transparent").unwrap(), [0, 0, 0, 0]);
+        assert!(
+            parse_aeris_only_blocks(":root:not([data-theme]) { --surface-popover: #fff; }")
+                .is_err()
+        );
     }
 
     #[test]

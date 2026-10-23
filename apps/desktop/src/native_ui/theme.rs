@@ -2,7 +2,7 @@ use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, ThemeMode, TypographyRole, platform_font_family,
     platform_mono_font_family, platform_typography,
 };
-use gpui::{FontWeight, Hsla, Pixels, Styled, px};
+use gpui::{BoxShadow, FontWeight, Hsla, Pixels, Styled, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
 
 /// Text-field tokens, exactly as the Theme System `Input` uses them: a `border` field on
@@ -59,14 +59,23 @@ pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
 }
 
 /// Floating-layer chrome (menus, dialogs, popovers, toasts, hints and the large workspace
-/// panels): the Theme System `.ui-popover` `surface-secondary` fill and `border-secondary`
-/// hairline.
+/// panels): the Theme System `.ui-popover` `surface-popover` fill with a 1px
+/// `border-popover-highlight` inner edge and a 1px `border-popover` outer edge. Presets
+/// resolve those tokens to `surface-secondary`, transparent and `border-secondary`.
 pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
+    let colors = &theme.colors;
     element
         .rounded(radius)
         .border(platform_border_width(theme))
-        .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
+        .border_color(gpui_color(colors.border_popover_highlight))
+        .bg(gpui_color(colors.surface_popover))
+        .shadow(vec![popover_outer_edge(theme)])
+}
+
+/// The CSS `0 0 0 1px var(--border-popover)` ring: a solid edge just outside the layer.
+pub(crate) fn popover_outer_edge(theme: &AerisTheme) -> BoxShadow {
+    BoxShadow::new(px(0.0), px(0.0), gpui_color(theme.colors.border_popover))
+        .spread_radius(platform_border_width(theme))
 }
 
 /// Projects `Aeris`'s semantic design contract into the unstyled Base
@@ -132,7 +141,18 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
 mod tests {
     use aeris_design_system::{AerisTheme, ThemeMode};
 
-    use super::{base_theme, gpui_color, input_appearance};
+    use super::{base_theme, gpui_color, input_appearance, popover_outer_edge};
+
+    #[test]
+    fn popover_outer_edge_is_a_solid_one_pixel_border_popover_ring() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let edge = popover_outer_edge(&theme);
+            assert_eq!(edge.color, gpui_color(theme.colors.border_popover));
+            assert_eq!(edge.blur_radius, gpui::px(0.0));
+            assert_eq!(edge.spread_radius, gpui::px(theme.dimensions.border_width));
+            assert!(!edge.inset);
+        }
+    }
 
     #[test]
     fn input_appearance_follows_platform_aliases_in_both_modes() {
