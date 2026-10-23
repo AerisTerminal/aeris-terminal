@@ -3828,7 +3828,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
     });
     let mut epochs = EpochSequence::<ConsumerTag>::default();
     let connection =
-        |provider: String, generation, state, epoch| MarketWorkerMessage::RuntimeProviderState {
+        |provider: String, generation, state, epoch| MarketWorkerMessage::RuntimeSelection {
             event: Fenced {
                 epoch,
                 value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
@@ -3852,6 +3852,25 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
             epochs.next(),
         ))
         .expect("wrong provider");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(pane.chart_failure, Some(ChartFailure::WorkerStopped));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::Runtime(Fenced {
+            epoch: epochs.next(),
+            value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
+                aeris_contracts::ProviderState {
+                    provider: provider.clone(),
+                    state: aeris_contracts::ProviderConnectionState::Failed,
+                    generation: 1,
+                    detail: None,
+                    transport_rtt_nanos: None,
+                },
+            ),
+        }))
+        .expect("missing selection metadata");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_ne!(pane.chart_failure, Some(ChartFailure::WorkerStopped));

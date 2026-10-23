@@ -580,7 +580,7 @@ pub(super) fn deliver_runtime_provider_state(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProviderState {
+        .send(MarketWorkerMessage::RuntimeSelection {
             event,
             generation: endpoint.active_generation,
         })
@@ -1516,7 +1516,7 @@ mod tests {
         )));
         assert!(messages.iter().any(|message| matches!(
             message,
-            MarketWorkerMessage::RuntimeProviderState {
+            MarketWorkerMessage::RuntimeSelection {
                 generation: 8,
                 event: Fenced {
                     value: MarketRuntimeEvent::ProviderState(super::super::ProviderState {

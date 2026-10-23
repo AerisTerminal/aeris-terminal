@@ -4045,7 +4045,10 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         match message {
-            MarketWorkerMessage::Runtime(event) => self.apply_fenced_runtime_event(event, cx),
+            MarketWorkerMessage::Runtime(event) => self.apply_fenced_runtime_event(event, None, cx),
+            MarketWorkerMessage::RuntimeSelection { event, generation } => {
+                self.apply_fenced_runtime_event(event, Some(generation), cx);
+            }
             MarketWorkerMessage::RuntimeSeriesPublication {
                 event,
                 received_unix_nanos,
@@ -4118,9 +4121,6 @@ impl WorkspaceSurface {
                     self.apply_fenced_market_session_status(generation, status, cx);
                 }
             },
-            MarketWorkerMessage::RuntimeProviderState { event, generation } => {
-                self.apply_runtime_provider_state(event, generation, cx);
-            }
             MarketWorkerMessage::StudyRegistrationOutcome {
                 request_sequence,
                 result,
@@ -4149,9 +4149,26 @@ impl WorkspaceSurface {
     fn apply_fenced_runtime_event(
         &mut self,
         event: aeris_market_runtime::MarketConsumerEvent,
+        selection_generation: Option<u64>,
         cx: &mut Context<Self>,
     ) {
+        if selection_generation.is_some()
+            && !matches!(
+                &event.value,
+                aeris_market_runtime::MarketRuntimeEvent::ProviderState(_)
+            )
+        {
+            diagnostic!("Aeris pane received unexpected selection-stamped runtime event");
+            return;
+        }
         match &event.value {
+            aeris_market_runtime::MarketRuntimeEvent::ProviderState(_) => {
+                if let Some(generation) = selection_generation {
+                    self.apply_runtime_provider_state(event, generation, cx);
+                } else {
+                    diagnostic!("Aeris pane received provider state without a selection fence");
+                }
+            }
             aeris_market_runtime::MarketRuntimeEvent::SeriesState(_)
             | aeris_market_runtime::MarketRuntimeEvent::DemandError(_) => {
                 self.apply_runtime_series_status(event, cx);

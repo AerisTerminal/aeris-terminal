@@ -2498,7 +2498,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProviderState {
+            [MarketWorkerMessage::RuntimeSelection {
                 generation: 7,
                 event: Fenced {
                     value: MarketRuntimeEvent::ProviderState(ProviderState {
@@ -2533,7 +2533,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProviderState {
+            [MarketWorkerMessage::RuntimeSelection {
                 generation: 7,
                 event: Fenced {
                     value: MarketRuntimeEvent::ProviderState(ProviderState {
@@ -2567,7 +2567,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProviderState {
+            [MarketWorkerMessage::RuntimeSelection {
                 event: Fenced {
                     value: MarketRuntimeEvent::ProviderState(ProviderState {
                         state: ProviderConnectionState::Online,
@@ -2664,7 +2664,7 @@ mod tests {
         .expect("calendar provider state is forwarded");
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeProviderState {
+            [MarketWorkerMessage::RuntimeSelection {
                 event: Fenced {
                     value: MarketRuntimeEvent::ProviderState(ProviderState {
                         state: ProviderConnectionState::Connecting,
@@ -3418,7 +3418,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProviderState {
+            [MarketWorkerMessage::RuntimeSelection {
                 event: Fenced {
                     epoch: actual,
                     value: MarketRuntimeEvent::ProviderState(ProviderState {

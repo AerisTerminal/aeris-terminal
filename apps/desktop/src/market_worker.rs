@@ -213,9 +213,10 @@ pub enum MarketWorkerMessage {
         received_unix_nanos: i64,
         recovery_request_id: Option<u64>,
     },
-    /// Coordinator provider state, retained with its consumer epoch and the
-    /// selection that was active when the endpoint accepted it.
-    RuntimeProviderState {
+    /// A selection-bound coordinator event whose runtime payload has no
+    /// selection generation. Capture the endpoint's generation at delivery,
+    /// never infer it from the pane when the event is projected.
+    RuntimeSelection {
         event: aeris_market_runtime::MarketConsumerEvent,
         generation: u64,
     },
@@ -1268,6 +1269,57 @@ mod tests {
                 selection,
             },
         ))
+    }
+
+    #[test]
+    fn fenced_provider_state_keeps_selection_stamp_fifo_and_control_reserve() {
+        use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
+        sender
+            .send(snapshot_message(&mut worker, 2))
+            .expect("publication fills the ordinary slot");
+        let mut epochs = EpochSequence::<ConsumerTag>::default();
+        let provider_state = |generation, epoch| MarketWorkerMessage::RuntimeSelection {
+            generation,
+            event: Fenced {
+                epoch,
+                value: MarketRuntimeEvent::ProviderState(aeris_contracts::ProviderState {
+                    provider: "fixture".into(),
+                    state: aeris_contracts::ProviderConnectionState::Online,
+                    generation: 4,
+                    detail: None,
+                    transport_rtt_nanos: Some(12_500_000),
+                }),
+            },
+        };
+        let first_epoch = epochs.next();
+        sender
+            .send(provider_state(7, first_epoch))
+            .expect("provider control uses the reserve");
+        let second_epoch = epochs.next();
+        sender
+            .send(provider_state(8, second_epoch))
+            .expect("next provider control stays in order");
+        let (first, _) = receiver.drain_up_to(1);
+        assert!(matches!(
+            first.as_slice(),
+            [MarketWorkerMessage::RuntimeSeriesPublication { .. }]
+        ));
+        let (remaining, _) = receiver.drain();
+        assert!(matches!(
+            remaining.as_slice(),
+            [
+                MarketWorkerMessage::RuntimeSelection {
+                    generation: 7,
+                    event: Fenced { epoch: actual_first, .. },
+                },
+                MarketWorkerMessage::RuntimeSelection {
+                    generation: 8,
+                    event: Fenced { epoch: actual_second, .. },
+                }
+            ] if *actual_first == first_epoch && *actual_second == second_epoch
+        ));
     }
 
     #[test]

@@ -1979,6 +1979,13 @@ Status: pending
     A mixed FIFO/selection-stamp queue regression and the existing pane and
     worker tests cover both outcomes. Provider-state metadata, other local
     outcomes and transitional names remain; M6.6 and VAL-DSK-021/022 stay open.
+  - Part 8b3c (2026-10-24): provider-state delivery uses the selection-bound
+    fenced runtime projection, rather than a provider-specific mailbox arm.
+    The worker captures its endpoint generation; the pane accepts only that
+    stamp and the current provider, and rejects an unstamped provider event.
+    Provider state remains control-reserved and FIFO with canonical bars.
+    Other local outcomes, transitional names, and the literal VAL-DSK-021/022
+    checks remain; M6.6 stays unchecked.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
@@ -2524,6 +2531,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 M6.6 Part 8b2d refactor(desktop): merged study reinitialization success/failure into one local result, preserving failure's unchanged persisted settings and a retry's successful replacement; GPUI checks both outcomes. Metadata-bearing fenced runtime entries, other local outcomes and message/type deletion remain; M6.6 and VAL-DSK-021/022 stay unchecked.
 - 2026-10-24 M6.6 Part 8b3b refactor(desktop): merged local connection and calendar statuses into one generation-stamped pane projection, removed the unused connection detail from the queue, and retained per-selection/RTT/backpressure behavior with a mixed FIFO regression. Provider-state metadata, other local outcomes and final message/channel deletion remain; M6.6 stays unchecked.
 - 2026-10-24 feat(accounts): no stabilization item. The Accounts panel Connections rows show each provider's feed level as a neutral pill, read from provider registration: Rithmic "L3 data" (it streams depth by order) and Hyperliquid "L2 data" (aggregated l2Book levels). `ProviderPresentationDescriptor::depth_available` is replaced by `feed_level: ProviderFeedLevel` (Bars, TopOfBook, PriceLevels, OrderLevels); registration validation now also requires the feed level to agree with the quote capability, which also removes one `struct_excessive_bools` flag. Regressions: `feed_levels_name_their_depth`, `registered_providers_declare_their_feed_level`. fmt, Clippy on the affected crates, naming_check and contracts, market_runtime and desktop tests run.
+- 2026-10-24 M6.6 Part 8b3c refactor(desktop): provider state now shares the selection-bound fenced runtime projection; the endpoint selection stamp, coordinator envelope, control reserve and FIFO are retained. Local outcomes and final transitional-type deletion still block M6.6 and VAL-DSK-021/022.
 
 ## 7. Known gaps / deferred
 
