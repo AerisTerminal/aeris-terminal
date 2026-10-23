@@ -1811,6 +1811,20 @@ Status: pending
     reserve's FIFO, mixed-publication ordering and explicit overflow tests
     using the actual app-scoped catalog failure route. Catalog/screener and
     alert-sync still need Part 7; Part 8 and VAL-DSK-021/022 remain open.
+  - Part 7f: local alert replacement acknowledgements now carry the sequence
+    allocated only after bounded command acceptance. The pane applies only
+    the latest accepted sequence, so delayed failures cannot post and delayed
+    successes cannot clear a newer failure notice. Adjacent command coalescing
+    retains the newest sequence and complete snapshot. The GPUI regression
+    covers both stale directions. Full fmt, check, strict Clippy, workspace
+    tests and naming gates pass. The first default-parallel workspace test
+    run transiently failed trading_runtime's
+    every_revision_changing_step_is_published at its 5-second placement
+    subscription wait; the same test alone and the repeated full parallel
+    workspace run passed without code changes. This intermittent,
+    unrelated timing dependency needs owner investigation; it is not
+    proof of deterministic test behavior. Catalog/screener and Part 8
+    remain open; M6.6 and VAL-DSK-021/022 are not closed.
   - Before Part 7b, parallel-suite timing follow-up: the study calculation
     worker now publishes its completion before replying, so an immediately
     following calculation cannot mistake an already-finished worker for a
@@ -2411,6 +2425,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M6.6 Part 7c fix(desktop): verified catalog terms now flow through the one session-status publisher after the catalog reply, retaining its clock, selection generation and backpressure retry instead of a second best-effort status send. The existing pane generation/instrument projection remains; Part 8 removes its message variant. Remaining Part 7 routes, VAL-DSK-021/022 and guarded GUI remain open.
 - 2026-10-23 M6.6 Part 7d refactor(desktop): covering recovery snapshots retain their coordinator consumer epoch to pane projection and exact chart request installation; removed the duplicate worker-built success bootstrap. Local failure and supersession controls retain generation/request fences. The worker and GPUI request/ordering/backpressure regressions pass; catalog, screener, diagnostics, alert-sync and Part 8 remain.
 - 2026-10-23 M6.6 Part 7e refactor(desktop): removed the unproduced diagnostic mailbox route and pane logger; real app-scoped catalog failure controls retain FIFO order with market publications and report bounded backpressure. Catalog/screener, alert-sync and Part 8 remain.
+- 2026-10-24 M6.6 Part 7f fix(desktop): correlate local alert-sync results with the latest accepted pane command sequence; reject stale success and failure before notice mutation. Catalog/screener and Part 8 remain.
 - 2026-10-23 UI feat(design-system): platform theme presets (Aeris, Tokyo Night, Catppuccin, GitHub, One, Dracula, Solarized, Gruvbox; light and dark) compile from platform.css into `ThemePreset`/`AerisTheme::resolve` and are picked in the profile menu; chart_integration pins theme-following chart colors to a non-Aeris preset's tokens so Aeris Charts never knows presets. Chart settings gain persisted axis border and axis text colors (appearance tags 28/29, empty follows the theme). Aeris Charts pinned to 2ed6e82 (wheel zoom/pan). Restriction: presets live only in platform.css and the design system; the engine keeps its own defaults. Time-axis labels still follow the chart text color, and the selected preset is not persisted (neither is the color mode).
 - 2026-10-23 UI fix(desktop): preset picker swatch dots sit inside their ring by an equal padding instead of flex-centering a fixed size, so they no longer drift off-center by half a pixel.
 - 2026-10-23 UI style(design-system): no stabilization item. The Aeris theme follows the updated `themes.md`: light `border-secondary` `#0a0a0a1a`, light hover/active `#0a0a0a0d`; dark `surface` `#171717`, translucent dark `surface-secondary` `#fafafa0f`, dark borders `#fafafa1a`/`#fafafa26`, text `#fafafa`, muted `#fafafa40`, hover `#fafafa13`. The Aeris-only popover layer returns: `popover_surface`, menu rows and tooltips use `surface-popover` with a `border-popover-highlight` inner edge and a 1px solid `border-popover` outer ring; presets resolve the tokens to `surface-secondary`, transparent and `border-secondary`. `CSS.md` and the website's `platform.css` carry the same Aeris tokens. Restriction recorded in section 5.

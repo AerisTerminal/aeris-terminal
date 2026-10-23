@@ -310,8 +310,8 @@ fn coalesces(previous: &MarketWorkerCommand, next: &MarketWorkerCommand) -> bool
         (MarketWorkerCommand::DepthVisible(_), MarketWorkerCommand::DepthVisible(_))
         | (MarketWorkerCommand::ResourceClass(_), MarketWorkerCommand::ResourceClass(_))
         | (
-            MarketWorkerCommand::ReplacePriceAlerts(_),
-            MarketWorkerCommand::ReplacePriceAlerts(_),
+            MarketWorkerCommand::ReplacePriceAlerts { .. },
+            MarketWorkerCommand::ReplacePriceAlerts { .. },
         ) => true,
         _ => false,
     }

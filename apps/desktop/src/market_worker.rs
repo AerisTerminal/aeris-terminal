@@ -316,8 +316,10 @@ pub enum MarketWorkerMessage {
     /// A consumer-scoped alert remains in the coordinator envelope until the pane
     /// matches its own registered alert identity.
     RuntimePriceAlert(aeris_market_runtime::MarketConsumerEvent),
-    PriceAlertSyncFailed,
-    PriceAlertSyncSucceeded,
+    PriceAlertSync {
+        sequence: u64,
+        succeeded: bool,
+    },
     StudyRegistered {
         request_sequence: u64,
         study_id: StudyInstanceId,
@@ -653,7 +655,10 @@ pub enum MarketWorkerCommand {
     ChartViewport(ChartViewportUpdate),
     DepthVisible(bool),
     ResourceClass(ConsumerResourceClass),
-    ReplacePriceAlerts(Vec<MarketPriceAlert>),
+    ReplacePriceAlerts {
+        sequence: u64,
+        alerts: Vec<MarketPriceAlert>,
+    },
     RegisterStudy(Box<StudyRegistrationRequest>),
     ReinitializeStudy(Box<StudyReinitializationRequest>),
     RemoveStudy(StudyInstanceId),
@@ -900,6 +905,7 @@ pub struct MarketDataWorker {
     ui_diagnostics: Option<UiDiagnosticsSender>,
     engine_selection_sequence: Option<Arc<AtomicU64>>,
     study_request_sequence: AtomicU64,
+    price_alert_sequence: AtomicU64,
 }
 
 impl MarketDataWorker {
@@ -922,6 +928,7 @@ impl MarketDataWorker {
             ui_diagnostics,
             engine_selection_sequence,
             study_request_sequence: AtomicU64::new(0),
+            price_alert_sequence: AtomicU64::new(0),
         }
     }
 
@@ -953,20 +960,35 @@ impl MarketDataWorker {
         let Some(commands) = self.commands.as_ref() else {
             return Err(TrySendError::Disconnected(alerts));
         };
+        let Some(sequence) = self
+            .price_alert_sequence
+            .load(Ordering::Acquire)
+            .checked_add(1)
+        else {
+            return Err(TrySendError::Full(alerts));
+        };
         commands
-            .try_send(MarketWorkerCommand::ReplacePriceAlerts(alerts))
+            .try_send(MarketWorkerCommand::ReplacePriceAlerts { sequence, alerts })
             .inspect(|()| commands.notify())
             .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::ReplacePriceAlerts(alerts)) => {
+                TrySendError::Full(MarketWorkerCommand::ReplacePriceAlerts { alerts, .. }) => {
                     TrySendError::Full(alerts)
                 }
-                TrySendError::Disconnected(MarketWorkerCommand::ReplacePriceAlerts(alerts)) => {
-                    TrySendError::Disconnected(alerts)
-                }
+                TrySendError::Disconnected(MarketWorkerCommand::ReplacePriceAlerts {
+                    alerts,
+                    ..
+                }) => TrySendError::Disconnected(alerts),
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                     unreachable!("alert send errors retain the alert snapshot")
                 }
-            })
+            })?;
+        self.price_alert_sequence.store(sequence, Ordering::Release);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn latest_price_alert_sequence(&self) -> u64 {
+        self.price_alert_sequence.load(Ordering::Acquire)
     }
 
     /// Queues one trusted native study registration without blocking GPUI.
@@ -1331,7 +1353,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_)
-                    | MarketWorkerCommand::ReplacePriceAlerts(_)
+                    | MarketWorkerCommand::ReplacePriceAlerts { .. }
                     | MarketWorkerCommand::RegisterStudy(_)
                     | MarketWorkerCommand::ReinitializeStudy(_)
                     | MarketWorkerCommand::RemoveStudy(_),
@@ -1346,7 +1368,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_)
-                    | MarketWorkerCommand::ReplacePriceAlerts(_)
+                    | MarketWorkerCommand::ReplacePriceAlerts { .. }
                     | MarketWorkerCommand::RegisterStudy(_)
                     | MarketWorkerCommand::ReinitializeStudy(_)
                     | MarketWorkerCommand::RemoveStudy(_),

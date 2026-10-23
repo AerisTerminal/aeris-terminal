@@ -254,8 +254,8 @@ pub(super) fn process_command(
         MarketWorkerCommand::ResourceClass(resource_class) => {
             set_resource_class(market, client_id, endpoint, resource_class)
         }
-        MarketWorkerCommand::ReplacePriceAlerts(alerts) => {
-            replace_price_alerts(market, client_id, endpoint, &alerts)
+        MarketWorkerCommand::ReplacePriceAlerts { sequence, alerts } => {
+            replace_price_alerts(market, client_id, endpoint, sequence, &alerts)
         }
         command @ (MarketWorkerCommand::RegisterStudy(_)
         | MarketWorkerCommand::ReinitializeStudy(_)
@@ -420,18 +420,19 @@ fn replace_price_alerts(
     market: &MarketService,
     client_id: u64,
     endpoint: &WorkerEndpoint,
+    sequence: u64,
     alerts: &[MarketPriceAlert],
 ) -> Result<(), String> {
-    match market.replace_price_alerts(client_id, endpoint.consumer_id, alerts) {
-        Ok(()) => endpoint
-            .messages
-            .send(MarketWorkerMessage::PriceAlertSyncSucceeded)
-            .map_err(|error| error.to_string()),
-        Err(_error) => endpoint
-            .messages
-            .send(MarketWorkerMessage::PriceAlertSyncFailed)
-            .map_err(|error| error.to_string()),
-    }
+    let succeeded = market
+        .replace_price_alerts(client_id, endpoint.consumer_id, alerts)
+        .is_ok();
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::PriceAlertSync {
+            sequence,
+            succeeded,
+        })
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn set_resource_class(

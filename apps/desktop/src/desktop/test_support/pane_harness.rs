@@ -3191,7 +3191,10 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::PriceAlertSyncFailed)
+            .send(MarketWorkerMessage::PriceAlertSync {
+                sequence: 0,
+                succeeded: false,
+            })
             .expect("fixture alert failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3226,7 +3229,10 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
 
     harness
         .publications
-        .send(MarketWorkerMessage::PriceAlertSyncSucceeded)
+        .send(MarketWorkerMessage::PriceAlertSync {
+            sequence: 0,
+            succeeded: true,
+        })
         .expect("fixture alert success enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3273,7 +3279,10 @@ fn pane_harness_alert_restore_failure_renders_and_processing_success_clears(
     );
     harness
         .publications
-        .send(MarketWorkerMessage::PriceAlertSyncSucceeded)
+        .send(MarketWorkerMessage::PriceAlertSync {
+            sequence: 0,
+            succeeded: true,
+        })
         .expect("fixture success enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3335,6 +3344,65 @@ fn pane_harness_alert_delete_queue_failure_renders_once_then_success_clears(
     });
     cx.run_until_parked();
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_price_alert_sync_ignores_retired_command_outcomes(cx: &mut TestAppContext) {
+    let (harness, cx) = PaneHarness::open(cx);
+    harness.pane.update(cx, |pane, _| {
+        pane.market_worker
+            .try_replace_price_alerts(Vec::new())
+            .expect("first replacement is queued");
+        pane.market_worker
+            .try_replace_price_alerts(Vec::new())
+            .expect("second replacement is queued");
+        assert_eq!(pane.market_worker.latest_price_alert_sequence(), 2);
+    });
+    for (sequence, succeeded, expected_notices) in [(1, false, 0), (2, false, 1), (1, true, 1)] {
+        harness
+            .publications
+            .send(MarketWorkerMessage::PriceAlertSync {
+                sequence,
+                succeeded,
+            })
+            .expect("fixture result enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let notices = harness.window.read(cx).toaster.notices();
+            assert_eq!(notices.len(), expected_notices);
+            if expected_notices == 1 {
+                assert_eq!(notices[0].title, "Price alerts unavailable");
+            }
+        });
+    }
+    harness.pane.update(cx, |pane, _| {
+        pane.market_worker
+            .try_replace_price_alerts(Vec::new())
+            .expect("third replacement is queued");
+        assert_eq!(pane.market_worker.latest_price_alert_sequence(), 3);
+    });
+    for sequence in [2, 3] {
+        harness
+            .publications
+            .send(MarketWorkerMessage::PriceAlertSync {
+                sequence,
+                succeeded: true,
+            })
+            .expect("fixture success enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                harness.window.read(cx).toaster.notices().len(),
+                usize::from(sequence == 2),
+            );
+        });
+    }
 }
 
 #[gpui::test]

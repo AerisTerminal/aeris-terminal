@@ -172,6 +172,17 @@ fn new_alert_id(alerts: &[WorkspacePriceAlertState]) -> Result<String, String> {
 }
 
 impl WorkspaceSurface {
+    pub(super) fn apply_current_price_alert_sync(
+        &self,
+        sequence: u64,
+        succeeded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if sequence == self.market_worker.latest_price_alert_sequence() {
+            Self::apply_price_alert_sync(succeeded, cx);
+        }
+    }
+
     pub(super) fn emit_initial_price_alert_restore_notice(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(
             &mut self.price_alert_restore_status,

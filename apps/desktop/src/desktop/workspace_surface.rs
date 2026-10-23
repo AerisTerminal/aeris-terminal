@@ -4137,8 +4137,10 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RuntimePriceAlert(event) => {
                 self.apply_runtime_price_alert(event, cx);
             }
-            MarketWorkerMessage::PriceAlertSyncFailed => Self::apply_price_alert_sync(false, cx),
-            MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),
+            MarketWorkerMessage::PriceAlertSync {
+                sequence,
+                succeeded,
+            } => self.apply_current_price_alert_sync(sequence, succeeded, cx),
         }
     }
 
