@@ -2316,6 +2316,14 @@ fn slow_native_calculation_cannot_commit_late_or_start_replacement_workers_and_r
         .get_mut(&fixture.producer)
         .unwrap()
         .program = Some(NativeStudyProgram::stateless(delayed));
+    fixture
+        .runtime
+        .executor
+        .get()
+        .expect("initial execution starts worker")
+        .as_ref()
+        .expect("study worker starts")
+        .enforce_deadline_in_test();
     assert!(
         matches!(fixture.runtime.execute_ready(&fixture.engine, fixture.producer),
             Err(StudyRuntimeError::ExecutionRejected { detail, .. }) if detail.contains("deadline"))
@@ -2326,7 +2334,9 @@ fn slow_native_calculation_cannot_commit_late_or_start_replacement_workers_and_r
             Err(StudyRuntimeError::ExecutionRejected { detail, .. }) if detail.contains("still finishing"))
     );
     assert!(fixture.runtime.execution_isolated());
-    std::thread::sleep(std::time::Duration::from_millis(160));
+    while fixture.runtime.execution_isolated() {
+        std::thread::yield_now();
+    }
     assert_eq!(fixture.runtime.output_series(output), Some(&committed));
 
     // Once the abandoned calculation finishes, the same worker accepts work again.

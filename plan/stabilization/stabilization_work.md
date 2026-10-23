@@ -1749,6 +1749,15 @@ Status: pending
     order_book_mailbox_preserves_newer_frames_after_earlier_frames and
     order_book_mailbox_does_not_reinterpret_session_generations. Tape and
     study publications remain for Part 6b; M6.6 and VAL-DSK-021/022 stay open.
+  - Before Part 6b, the two parallel-suite timing flakes from the M5 probe
+    follow-up were repaired at their test owners: ordinary study fixture
+    calculations await the isolated worker's reply without a wall-clock
+    deadline or shared turn budget; the dedicated deadline test explicitly
+    enables the unchanged production 50 ms deadline. A parallel gate also
+    exposed this scheduling race in the subtree checkpoint test, now covered
+    by the same fixture policy. The offline-lease
+    test installs the cached view before the startup fetch instead of racing
+    that fetch with an insufficient idle-poll clock rewind. M6.6 remains open.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
@@ -2309,6 +2318,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M5 route-bypass migration: 31 further service and feed tests (bracket/protection families, discipline, risk meters, retention, DAY working exposure, always-open far-future clocks, route-less Hyperliquid and chart modify) pass with and without the bypasses through the owner feed path; fixtures now keep quote interest across flat periods, restart risk-session tests on the deterministic clock, and place stops only where not already crossed. Only the 21 replay tests still depend on the bypasses.
 - 2026-10-23 M5 route-bypass migration: the replay harness registers the instrument through verified replay-feed Terms and re-primes session/Live after every restart; all 25 replay tests pass with and without the bypasses. `simulated_golden_v2.txt` changes only revisions (-1 from flatten on) and owner-book quote sequences (1/2/3 to 2/4/5); no order, event, fill or P&L value changed. No test depends on the bypasses now.
 - 2026-10-23 M5 route-bypass removal fix(trading): deleted the three test-only route bypasses; added route-less admission (QuoteUnavailable while RouteUnknown), never-fills and fills-after-verified-Terms regressions. Test builds now use production route gating.
+- 2026-10-23 M6.6 preflight test(desktop): stabilize study state-limit, subtree checkpoint and cached offline-lease fixtures - ordinary study unit tests wait for the worker while the explicit timeout test opts into the unchanged 50 ms production deadline; the cached account view is set before its startup request. The desktop poll policy is unchanged. M6.6 Part 6b follows.
 
 ## 7. Known gaps / deferred
 

@@ -86,6 +86,8 @@ pub(super) struct Executor {
     submitted: Cell<u64>,
     finished: Arc<AtomicU64>,
     turn_remaining: Cell<Option<Duration>>,
+    #[cfg(test)]
+    wait_for_test_calculation: Cell<bool>,
 }
 
 impl Executor {
@@ -129,11 +131,18 @@ impl Executor {
             submitted: Cell::new(0),
             finished,
             turn_remaining: Cell::new(None),
+            #[cfg(test)]
+            wait_for_test_calculation: Cell::new(true),
         })
     }
 
     pub(super) fn begin_turn(&self) {
         self.turn_remaining.set(Some(CALCULATION_DEADLINE));
+    }
+
+    #[cfg(test)]
+    pub(super) fn enforce_deadline_in_test(&self) {
+        self.wait_for_test_calculation.set(false);
     }
 
     /// Whether the worker is still running a calculation abandoned at its deadline.
@@ -175,12 +184,27 @@ impl Executor {
             .try_send(job)
             .map_err(|_| "study worker unavailable".to_string())?;
         self.submitted.set(self.submitted.get().wrapping_add(1));
-        let result = response.recv_timeout(remaining);
+        #[cfg(test)]
+        let result = if self.wait_for_test_calculation.get() {
+            response.recv().ok()
+        } else {
+            response.recv_timeout(remaining).ok()
+        };
+        #[cfg(not(test))]
+        let result = response.recv_timeout(remaining).ok();
         if self.turn_remaining.get().is_some() {
+            #[cfg(test)]
+            if self.wait_for_test_calculation.get() {
+                self.turn_remaining.set(None);
+            } else {
+                self.turn_remaining
+                    .set(Some(remaining.saturating_sub(started.elapsed())));
+            }
+            #[cfg(not(test))]
             self.turn_remaining
                 .set(Some(remaining.saturating_sub(started.elapsed())));
         }
-        result.unwrap_or_else(|_| {
+        result.unwrap_or_else(|| {
             Err("study calculation deadline exceeded; late result discarded".into())
         })
     }

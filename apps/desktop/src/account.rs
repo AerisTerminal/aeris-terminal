@@ -2165,12 +2165,21 @@ mod tests {
 
     #[test]
     fn verified_cached_offline_lease_keeps_the_platform_open() {
-        let (session, engine) = scripted_session();
         let mut offline = view(AccountSessionState::OfflineLease);
         offline.account_id = "acct_01".to_string();
         offline.plan_id = "pro".to_string();
-        engine.lock().expect("engine locks").view = offline;
-        rewind_status(&session);
+        // Install the cached view before the startup status request. Rewinding
+        // the clock after spawn races that request and the idle polling interval.
+        let engine = Arc::new(Mutex::new(FakeEngine {
+            view: offline,
+            signed_out: view(AccountSessionState::SignedOut),
+            ..FakeEngine::default()
+        }));
+        let worker = Arc::clone(&engine);
+        let session = DesktopAccount::spawn_with(move |request| {
+            worker.lock().expect("engine locks").handle(request)
+        })
+        .expect("isolated session spawns");
         wait_for(&session, "offline lease", || {
             session.presentation().state == account_state_label(AccountSessionState::OfflineLease)
         });
