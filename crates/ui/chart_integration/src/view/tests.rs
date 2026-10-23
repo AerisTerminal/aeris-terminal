@@ -6,6 +6,7 @@ use aeris_charts_engine::{
     AppearanceColor, AxisTextMidpoint, ChartCursor, ChartKey, DrawingKind, DrawingModifiers,
     InputModifiers, PointerInput, WheelSample,
 };
+use aeris_design_system::{ThemeMode, ThemePreset};
 use std::collections::HashSet;
 
 // Input helpers drive the Aeris Charts input controller exactly as the GPUI listeners do: the
@@ -1043,7 +1044,7 @@ fn big_trades_settings_restyle_the_drawn_indicator_in_place() {
     assert!(chart.set_order_flow_settings(invalid).is_err());
     assert_eq!(chart.order_flow_settings(), settings);
 
-    chart.set_theme(ChartTheme::Light);
+    chart.set_theme(AerisTheme::light());
     assert_eq!(chart.drawn_big_trades(), Some(id));
     assert_eq!(
         chart
@@ -1438,7 +1439,7 @@ fn hollow_candles_are_transparent_bodies_that_never_leak_into_the_user_appearanc
     let series = series_entry(&chart, 0);
     assert_eq!(series.kind, aeris_charts_engine::SeriesKind::Candlestick);
     assert_eq!(series.up_color.as_deref(), Some("transparent"));
-    let bullish = solid.effective_up_color(chart.theme);
+    let bullish = solid.effective_up_color(chart.engine_theme());
     assert_eq!(
         series.border_up_color.as_deref(),
         Some(bullish.as_str()),
@@ -1463,11 +1464,9 @@ fn hollow_candles_are_transparent_bodies_that_never_leak_into_the_user_appearanc
     );
 
     // A theme switch re-pins the frame to the new theme's candle colors.
-    let other = match chart.theme {
-        ChartTheme::Dark => ChartTheme::Light,
-        ChartTheme::Light => ChartTheme::Dark,
-    };
-    chart.set_theme(other);
+    let other_theme = chart.platform.toggled();
+    let other = chart_theme(other_theme.mode);
+    chart.set_theme(other_theme);
     assert_eq!(
         series_entry(&chart, 0).border_down_color.as_deref(),
         Some(solid.effective_down_color(other).as_str())
@@ -1985,11 +1984,12 @@ fn aeris_charts_theme_owns_chart_cosmetics_and_series_defaults() {
 
 #[test]
 fn chart_legend_text_colors_project_platform_chrome() {
-    for (theme, platform) in [
-        (ChartTheme::Light, AerisTheme::light()),
-        (ChartTheme::Dark, AerisTheme::dark()),
+    for platform in [
+        AerisTheme::light(),
+        AerisTheme::dark(),
+        AerisTheme::resolve(ThemePreset::Catppuccin, ThemeMode::Light),
     ] {
-        let palette = legend_palette(theme);
+        let palette = legend_palette(&platform);
         let colors = platform.colors;
         assert_eq!(palette.text, gpui_theme_color(colors.text_default));
         assert_eq!(palette.muted, gpui_theme_color(colors.text_secondary));
@@ -2485,9 +2485,9 @@ fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators
     let pane_count = chart.engine.panes.len();
     let series_count = chart.engine.series.len();
 
-    chart.set_theme(ChartTheme::Light);
+    chart.set_theme(AerisTheme::light());
     assert_aeris_charts_theme(&chart, ChartTheme::Light);
-    chart.set_theme(ChartTheme::Dark);
+    chart.set_theme(AerisTheme::dark());
     assert_aeris_charts_theme(&chart, ChartTheme::Dark);
     assert_eq!(
         chart
@@ -3130,7 +3130,7 @@ fn aeris_charts_default_grid_color_tracks_theme_but_custom_grid_color_does_not()
         aeris_charts_grid_color(ChartTheme::Dark)
     );
 
-    chart.set_theme(ChartTheme::Light);
+    chart.set_theme(AerisTheme::light());
     assert_eq!(
         chart.engine.options.get().grid.vert_lines.color,
         aeris_charts_grid_color(ChartTheme::Light)
@@ -3139,7 +3139,7 @@ fn aeris_charts_default_grid_color_tracks_theme_but_custom_grid_color_does_not()
     let mut custom = chart.appearance_settings();
     custom.grid_color = custom_color("#334155");
     assert!(chart.set_appearance_settings(&custom));
-    chart.set_theme(ChartTheme::Dark);
+    chart.set_theme(AerisTheme::dark());
     assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#334155");
 
     let mut persisted_light_default = chart.appearance_settings();
@@ -3153,7 +3153,7 @@ fn aeris_charts_default_grid_color_tracks_theme_but_custom_grid_color_does_not()
 
 #[test]
 fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() {
-    let light = AerisChartView::empty_with_theme(ChartTheme::Light);
+    let light = AerisChartView::empty_with_theme(AerisTheme::light());
     let persisted = light.appearance_settings();
     let light_defaults = FinancialThemeColors::for_theme(ChartTheme::Light);
     assert_eq!(persisted.up_color, AppearanceColor::Theme);
@@ -3163,7 +3163,7 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
         light_defaults.bullish
     );
 
-    let mut dark = AerisChartView::empty_with_theme(ChartTheme::Dark);
+    let mut dark = AerisChartView::empty_with_theme(AerisTheme::dark());
     let _ = dark.set_appearance_settings(&persisted);
 
     let series = series_entry(&dark, 0);
@@ -3186,18 +3186,18 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
     assert_eq!(effective.border_down_color, AppearanceColor::Theme);
 
     assert_eq!(
-        effective.effective_up_color(dark.theme),
+        effective.effective_up_color(dark.engine_theme()),
         dark_defaults.bullish
     );
     assert_eq!(
-        effective.effective_down_color(dark.theme),
+        effective.effective_down_color(dark.engine_theme()),
         dark_defaults.bearish
     );
 }
 
 #[test]
 fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
-    let mut chart = AerisChartView::empty_with_theme(ChartTheme::Dark);
+    let mut chart = AerisChartView::empty_with_theme(AerisTheme::dark());
     let aeris_defaults = chart.appearance_settings();
     let mut custom = aeris_defaults.clone();
     custom.up_color = custom_color("#112233");
@@ -3215,7 +3215,7 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     custom.line_style = 2;
 
     assert!(chart.set_appearance_settings(&custom));
-    chart.set_theme(ChartTheme::Light);
+    chart.set_theme(AerisTheme::light());
     assert_eq!(
         chart.engine.options.get().layout.background.color,
         "#0B1220"
@@ -3234,7 +3234,7 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
         "#ABCDEF"
     );
 
-    chart.set_theme(ChartTheme::Dark);
+    chart.set_theme(AerisTheme::dark());
     assert_eq!(chart.appearance_settings(), custom);
 
     let revision = chart.user_state_revision();
@@ -3274,14 +3274,14 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
 
 #[test]
 fn canonical_crosshair_color_tracks_aeris_theme() {
-    let mut chart = AerisChartView::empty_with_theme(ChartTheme::Light);
+    let mut chart = AerisChartView::empty_with_theme(AerisTheme::light());
     let light = FinancialThemeColors::for_theme(ChartTheme::Light);
     assert_eq!(
         chart.engine.options.get().crosshair.vert_line.color,
         light.crosshair
     );
 
-    chart.set_theme(ChartTheme::Dark);
+    chart.set_theme(AerisTheme::dark());
     let dark = FinancialThemeColors::for_theme(ChartTheme::Dark);
     assert_eq!(
         chart.engine.options.get().crosshair.vert_line.color,
@@ -5261,7 +5261,7 @@ fn platform_crosshair_time_label_omits_midnight_for_weekly_bars() {
         "weekly label shows time: {}",
         label.text
     );
-    chart.set_theme(ChartTheme::Light);
+    chart.set_theme(AerisTheme::light());
     assert!(!chart.engine.time_visible);
 }
 
@@ -5300,7 +5300,7 @@ fn second_bars_show_seconds_on_the_time_axis_across_theme_changes() {
     assert!(chart.engine.time_visible);
     assert!(chart.engine.seconds_visible);
 
-    chart.set_theme(ChartTheme::Light);
+    chart.set_theme(AerisTheme::light());
     assert!(chart.engine.seconds_visible);
 }
 
@@ -5786,4 +5786,118 @@ fn bars_report_their_span_in_the_largest_whole_drawing_interval_unit() {
         "an empty tick or month count falls back to the bar's seconds"
     );
     assert_eq!(interval(None, None, 0), None);
+}
+
+#[test]
+fn a_platform_preset_paints_its_palette_and_keeps_theme_provenance() {
+    let dracula = AerisTheme::resolve(ThemePreset::Dracula, ThemeMode::Dark);
+    let mut chart = AerisChartView::empty_with_theme(AerisTheme::dark());
+    let aeris = chart.appearance_settings();
+    let mut custom = aeris.clone();
+    custom.grid_color = custom_color("#334155");
+    assert!(chart.set_appearance_settings(&custom));
+
+    chart.set_theme(dracula);
+    let palette = PresetPalette::for_platform(&dracula).expect("Dracula is a preset");
+    let options = chart.engine.options.get();
+    assert_eq!(
+        options.layout.background.color,
+        palette.defaults().background
+    );
+    assert_eq!(options.layout.text_color, palette.defaults().text);
+    assert_eq!(options.grid.vert_lines.color, "#334155");
+    assert_eq!(
+        options.right_price_scale.border_color,
+        palette.defaults().axis_border
+    );
+    assert_eq!(
+        series_entry(&chart, 0).up_color.as_deref(),
+        Some(palette.defaults().bullish.as_str())
+    );
+    assert_eq!(chart.theme_defaults(), palette.defaults().clone());
+    assert_eq!(
+        chart.appearance_settings(),
+        custom,
+        "readback and persistence keep theme-following colors semantic"
+    );
+
+    // A series edit under the preset keeps the canvas intent and its provenance.
+    let mut thinner = custom.clone();
+    thinner.line_width = 1;
+    assert!(chart.set_series_appearance_settings(&thinner));
+    assert_eq!(chart.appearance_settings(), thinner);
+
+    chart.set_theme(AerisTheme::dark());
+    let engine_dark = FinancialThemeColors::for_theme(ChartTheme::Dark);
+    let options = chart.engine.options.get();
+    assert_eq!(options.layout.background.color, engine_dark.background);
+    assert_eq!(options.layout.text_color, engine_dark.text);
+    assert_eq!(options.grid.vert_lines.color, "#334155");
+    assert!(series_entry(&chart, 0).up_color.is_none());
+    assert_eq!(chart.engine.financial_appearance(0), Some(thinner.clone()));
+    assert_eq!(chart.appearance_settings(), thinner);
+    assert_eq!(
+        chart.theme_defaults().background,
+        FinancialThemeColors::for_theme(ChartTheme::Dark).background
+    );
+}
+
+#[test]
+fn axis_colors_survive_theme_switches_and_canvas_edits_until_reset() {
+    let mut chart = AerisChartView::empty_with_theme(AerisTheme::light());
+    let defaults = chart.theme_defaults();
+    assert_eq!(
+        chart.engine.options.get().time_scale.border_color,
+        defaults.axis_border
+    );
+    let axis = ChartAxisAppearance {
+        border_color: custom_color("#112233"),
+        text_color: custom_color("#445566"),
+    };
+    let revision = chart.user_state_revision();
+    assert!(chart.set_axis_appearance(&axis));
+    assert!(!chart.set_axis_appearance(&axis));
+    assert_eq!(chart.user_state_revision(), revision + 1);
+
+    let assert_axis_painted = |chart: &AerisChartView| {
+        let options = chart.engine.options.get();
+        assert_eq!(options.left_price_scale.border_color, "#112233");
+        assert_eq!(options.right_price_scale.border_color, "#112233");
+        assert_eq!(options.time_scale.border_color, "#112233");
+        assert_eq!(
+            chart.engine.panes[0]
+                .price_scale
+                .options()
+                .text_color
+                .as_deref(),
+            Some("#445566")
+        );
+    };
+    assert_axis_painted(&chart);
+    chart.set_theme(AerisTheme::dark());
+    assert_axis_painted(&chart);
+    let mut canvas = chart.appearance_settings();
+    canvas.text_color = custom_color("#ABCDEF");
+    assert!(chart.set_canvas_appearance_settings(&canvas));
+    assert_axis_painted(&chart);
+    chart.set_theme(AerisTheme::resolve(
+        ThemePreset::Solarized,
+        ThemeMode::Light,
+    ));
+    assert_axis_painted(&chart);
+    assert_eq!(chart.axis_appearance(), axis);
+
+    chart.reset_appearance_settings();
+    assert_eq!(chart.axis_appearance(), ChartAxisAppearance::default());
+    let defaults = chart.theme_defaults();
+    let options = chart.engine.options.get();
+    assert_eq!(options.time_scale.border_color, defaults.axis_border);
+    assert_eq!(
+        chart.engine.panes[0]
+            .price_scale
+            .options()
+            .text_color
+            .as_deref(),
+        Some(defaults.text.as_str())
+    );
 }

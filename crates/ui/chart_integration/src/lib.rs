@@ -56,18 +56,18 @@ pub use saved_drawings::saved_drawings_document;
 pub use trading_projection::chart_order_status;
 pub use view::{
     AerisChartView, BigTradesFilter, BigTradesIntensity, BigTradesSettings, BigTradesSize,
-    ChartAppearanceSettings, ChartColor, ChartContextKind, ChartContextRequest, ChartDepthLevel,
-    ChartDrawingAnchorError, ChartDrawingAnchorText, ChartDrawingKind, ChartDrawingSettings,
-    ChartDrawingStamp, ChartIndicator, ChartIndicatorError, ChartIndicatorState,
-    ChartLegendOptions, ChartSeriesColors, ChartSettingsRequest, ChartStudyInputRequirements,
-    ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget,
-    ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion,
-    ChartType, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
-    DeltaHistogramSettings, DrawingsLockSummary, FootprintDisplayMode, OrderBookDepthSettings,
-    OrderFlowAggregation, OrderFlowDefaultColors, OrderFlowSettings, OrderFlowSweep,
-    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind,
-    VolumeAverageSettings, VolumePlacement, VolumeSettings, chart_color_hex,
-    classify_order_flow_sweeps, drawing_color_hex,
+    ChartAppearanceSettings, ChartAxisAppearance, ChartColor, ChartContextKind,
+    ChartContextRequest, ChartDepthLevel, ChartDrawingAnchorError, ChartDrawingAnchorText,
+    ChartDrawingKind, ChartDrawingSettings, ChartDrawingStamp, ChartIndicator, ChartIndicatorError,
+    ChartIndicatorState, ChartLegendOptions, ChartSeriesColors, ChartSettingsRequest,
+    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
+    ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeDefaults, ChartType,
+    CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle, DeltaHistogramSettings,
+    DrawingsLockSummary, FootprintDisplayMode, OrderBookDepthSettings, OrderFlowAggregation,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction,
+    PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
+    chart_color_hex, classify_order_flow_sweeps, drawing_color_hex,
 };
 pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

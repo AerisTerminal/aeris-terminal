@@ -106,20 +106,20 @@ use aeris_chart_integration::{
     BigTradesSettings, BigTradesSize, ChartAggressorSide, ChartAlertCondition,
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
-    ChartAppearanceSettings, ChartBridgeMetrics, ChartColor, ChartContextKind, ChartContextRequest,
-    ChartDepthLevel, ChartDrawingId, ChartDrawingKind, ChartDrawingStamp, ChartExecutionId,
-    ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot,
-    ChartHostTimeWindow, ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata,
-    ChartLegendOptions, ChartOrderId, ChartOrderKind, ChartOrderRole, ChartOrderSide,
-    ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSeriesColors, ChartSettingsRequest,
-    ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartAppearanceSettings, ChartAxisAppearance, ChartBridgeMetrics, ChartColor, ChartContextKind,
+    ChartContextRequest, ChartDepthLevel, ChartDrawingId, ChartDrawingKind, ChartDrawingStamp,
+    ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker,
+    ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator, ChartIndicatorState,
+    ChartInstrumentMetadata, ChartLegendOptions, ChartOrderId, ChartOrderKind, ChartOrderRole,
+    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSeriesColors,
+    ChartSettingsRequest, ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
     ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
-    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
-    ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
-    ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
-    ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
-    ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
-    DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, FootprintDisplayMode,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartThemeDefaults,
+    ChartTradingAnnotation, ChartTradingAnnotationPlacement, ChartTradingAnnotationTone,
+    ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
+    ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
+    ChartWorkingOrder, ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings,
+    CumulativeDeltaStyle, DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, FootprintDisplayMode,
     MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowDefaultColors,
     OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
     VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings, chart_color_hex,
@@ -142,8 +142,7 @@ use aeris_contracts::{
     WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
-    TypographyRole,
+    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
 };
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
@@ -286,9 +285,9 @@ use terminal_chrome::{
     caption_keyboard_activates, caption_pointer_owner, connection_presentation,
 };
 use terminal_chrome::{
-    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme, chrome_tooltip,
-    exchange_mark, fullscreen_escape_command, header_icon, mark_tile, series_glyph,
-    terminal_header, watchlist_step, window_move_gesture_transition, workspace_title_bar,
+    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, chrome_tooltip, exchange_mark,
+    fullscreen_escape_command, header_icon, mark_tile, series_glyph, terminal_header,
+    watchlist_step, window_move_gesture_transition, workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, terminal_root,
@@ -5110,6 +5109,8 @@ enum ChartColorSetting {
     Text,
     Grid,
     Crosshair,
+    AxisBorder,
+    AxisText,
 }
 
 struct ChartColorPickerState {
@@ -5136,6 +5137,8 @@ impl ChartColorSetting {
             Self::Text => "Text",
             Self::Grid => "Grid",
             Self::Crosshair => "Crosshair",
+            Self::AxisBorder => "Axis border",
+            Self::AxisText => "Axis text",
         }
     }
 }
@@ -5188,6 +5191,9 @@ impl Default for ChartTradingVisibilitySettings {
 struct ChartSettingsSnapshot {
     chart_type: ChartType,
     appearance: ChartAppearanceSettings,
+    /// What theme-following appearance and axis colors paint under the chart's theme.
+    theme_defaults: ChartThemeDefaults,
+    axis: ChartAxisAppearance,
     series_colors: ChartSeriesColors,
     crosshair_mode: u8,
     order_flow: OrderFlowSettings,

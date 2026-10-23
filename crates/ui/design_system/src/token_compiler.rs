@@ -12,6 +12,46 @@ pub(crate) fn parse_theme_blocks(css: &str) -> Result<(Declarations, Declaration
     Ok((root, dark))
 }
 
+/// The light `[data-theme="…"]` and dark `[data-theme="…"].dark` override blocks of one preset.
+pub(crate) fn parse_preset_blocks(
+    css: &str,
+    data_theme: &str,
+) -> Result<(Declarations, Declarations), String> {
+    let css = strip_comments(css)?;
+    let selector = format!("[data-theme=\"{data_theme}\"]");
+    let light = parse_blocks(&css, &selector)?;
+    let dark = parse_blocks(&css, &format!("{selector}.dark"))?;
+    if light.is_empty() || dark.is_empty() {
+        return Err(format!(
+            "platform.css must contain {selector} and {selector}.dark token blocks"
+        ));
+    }
+    Ok((light, dark))
+}
+
+/// Every `[data-theme="…"]` preset id, in stylesheet order.
+pub(crate) fn preset_ids(css: &str) -> Result<Vec<String>, String> {
+    const MARKER: &str = "[data-theme=\"";
+    let css = strip_comments(css)?;
+    let mut ids: Vec<String> = Vec::new();
+    let mut rest = css.as_str();
+    while let Some(start) = rest.find(MARKER) {
+        let after = &rest[start + MARKER.len()..];
+        let end = after
+            .find('"')
+            .ok_or("unterminated [data-theme] selector")?;
+        let id = &after[..end];
+        if id.is_empty() {
+            return Err("empty [data-theme] preset id".into());
+        }
+        if !ids.iter().any(|known| known == id) {
+            ids.push(id.to_owned());
+        }
+        rest = &after[end + 1..];
+    }
+    Ok(ids)
+}
+
 fn strip_comments(css: &str) -> Result<String, String> {
     let mut output = String::with_capacity(css.len());
     let mut rest = css;
@@ -33,6 +73,16 @@ fn parse_blocks(css: &str, selector: &str) -> Result<Declarations, String> {
     while let Some(relative) = css[cursor..].find(selector) {
         let selector_start = cursor + relative;
         let after_selector = selector_start + selector.len();
+        // A selector only counts where it starts a rule, so `.dark` never matches the tail of
+        // a preset's `[data-theme="…"].dark`.
+        if css[..selector_start]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| !previous.is_whitespace() && previous != '}')
+        {
+            cursor = after_selector;
+            continue;
+        }
         let Some(open_relative) = css[after_selector..].find('{') else {
             return Err(format!("{selector} block is missing an opening brace"));
         };
@@ -225,6 +275,21 @@ mod tests {
         assert!(resolve(&root, "missing").is_err());
         assert!(parse_hex("red").is_err());
         assert!(parse_color("color-mix(in srgb, red 50%, transparent)").is_err());
+    }
+
+    #[test]
+    fn preset_blocks_parse_separately_from_the_default_dark_block() {
+        let css = ":root { --a: #fff; } .dark { --a: #000; } \
+            [data-theme=\"x\"] { --a: #111; } [data-theme=\"x\"].dark { --a: #222; }";
+        let (root, dark) = parse_theme_blocks(css).unwrap();
+        assert_eq!(source(&root, "a").unwrap(), "#fff");
+        assert_eq!(source(&dark, "a").unwrap(), "#000");
+        let (light, preset_dark) = parse_preset_blocks(css, "x").unwrap();
+        assert_eq!(source(&light, "a").unwrap(), "#111");
+        assert_eq!(source(&preset_dark, "a").unwrap(), "#222");
+        assert!(parse_preset_blocks(css, "missing").is_err());
+        assert_eq!(preset_ids(css).unwrap(), ["x"]);
+        assert!(preset_ids("[data-theme=\"\"] {}").is_err());
     }
 
     #[test]

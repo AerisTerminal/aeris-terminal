@@ -2,7 +2,10 @@
 mod token_compiler;
 
 use std::{env, fmt::Write as _, fs, path::PathBuf};
-use token_compiler::{cascade, parse_color, parse_theme_blocks, resolve, source};
+use token_compiler::{
+    Declarations, cascade, parse_color, parse_preset_blocks, parse_theme_blocks, preset_ids,
+    resolve, source,
+};
 
 #[macro_use]
 #[path = "src/color_registry.rs"]
@@ -15,6 +18,16 @@ macro_rules! color_identifiers {
 }
 
 platform_color_registry!(color_identifiers);
+
+/// Shape tokens a preset may restate but never change: presets only recolor the platform.
+const PRESET_INVARIANT_TOKENS: &[&str] = &[
+    "border-width",
+    "radius-small",
+    "radius-compact",
+    "radius-default",
+    "radius-medium",
+    "radius-large",
+];
 
 /// Non-color custom properties the token contract owns outside the color registry.
 fn is_non_color_token(name: &str) -> bool {
@@ -47,6 +60,7 @@ fn compile_tokens() -> Result<(), String> {
     let dark = cascade(&root, &dark_overrides);
     require_registered_colors(&root)?;
     require_registered_colors(&dark)?;
+    let presets = compile_presets(&css, &root, &dark)?;
     let mut output = String::new();
 
     let stack = resolve(&root, "font-sans")?;
@@ -91,6 +105,7 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
     emit_colors(&mut output, "DARK_COLORS", &dark)?;
     emit_sources(&mut output, "LIGHT_COLOR_SOURCES", &root)?;
     emit_sources(&mut output, "DARK_COLOR_SOURCES", &dark)?;
+    emit_presets(&mut output, &presets)?;
     emit_pixel_u16(
         &mut output,
         "RADIUS_SMALL",
@@ -130,9 +145,43 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
     fs::write(path, output).map_err(|error| error.to_string())
 }
 
+/// One `[data-theme]` preset resolved through the stylesheet cascade.
+struct Preset {
+    id: String,
+    light: Declarations,
+    dark: Declarations,
+}
+
+/// Resolves each preset the way the CSS cascade does: the preset's light block overrides
+/// `:root` (and `.dark`, which has the same specificity but appears earlier), and its
+/// `.dark` block overrides that.
+fn compile_presets(
+    css: &str,
+    root: &Declarations,
+    dark: &Declarations,
+) -> Result<Vec<Preset>, String> {
+    preset_ids(css)?
+        .into_iter()
+        .map(|id| {
+            let (light_overrides, dark_overrides) = parse_preset_blocks(css, &id)?;
+            let light = cascade(root, &light_overrides);
+            let dark = cascade(&cascade(dark, &light_overrides), &dark_overrides);
+            for declarations in [&light, &dark] {
+                require_registered_colors(declarations)?;
+                for token in PRESET_INVARIANT_TOKENS {
+                    if resolve(declarations, token)? != resolve(root, token)? {
+                        return Err(format!("preset {id} must not change --{token}"));
+                    }
+                }
+            }
+            Ok(Preset { id, light, dark })
+        })
+        .collect()
+}
+
 /// Every color the stylesheet declares must be projected natively, and every
 /// other custom property must belong to a known non-color token family.
-fn require_registered_colors(declarations: &token_compiler::Declarations) -> Result<(), String> {
+fn require_registered_colors(declarations: &Declarations) -> Result<(), String> {
     for name in declarations.keys() {
         if COLORS.contains(&name.as_str()) {
             continue;
@@ -170,37 +219,109 @@ fn emit_pixel_u16(output: &mut String, name: &str, value: &str) -> Result<(), St
     emit_u16(output, name, pixels)
 }
 
-fn emit_colors(
-    output: &mut String,
-    name: &str,
-    declarations: &token_compiler::Declarations,
-) -> Result<(), String> {
-    writeln!(
-        output,
-        "pub(crate) const {name}: [[u8; 4]; PLATFORM_COLOR_COUNT] = ["
-    )
-    .expect("writing generated tokens to a String cannot fail");
+const COLOR_ROW: &str = "[[u8; 4]; PLATFORM_COLOR_COUNT]";
+const SOURCE_ROW: &str = "[&str; PLATFORM_COLOR_COUNT]";
+
+/// The resolved colors of one palette as a registry-ordered array literal.
+fn color_rows(declarations: &Declarations) -> Result<String, String> {
+    let mut rows = String::from("[\n");
     for token in COLORS {
         let [r, g, b, a] = parse_color(&resolve(declarations, token)?)?;
-        writeln!(output, "    [{r}, {g}, {b}, {a}],")
+        writeln!(rows, "    [{r}, {g}, {b}, {a}],")
             .expect("writing generated tokens to a String cannot fail");
     }
-    output.push_str("];\n");
+    rows.push(']');
+    Ok(rows)
+}
+
+/// The source expressions of one palette as a registry-ordered array literal.
+fn source_rows(declarations: &Declarations) -> Result<String, String> {
+    let mut rows = String::from("[\n");
+    for token in COLORS {
+        writeln!(rows, "    {:?},", source(declarations, token)?)
+            .expect("writing generated tokens to a String cannot fail");
+    }
+    rows.push(']');
+    Ok(rows)
+}
+
+fn emit_colors(output: &mut String, name: &str, declarations: &Declarations) -> Result<(), String> {
+    writeln!(
+        output,
+        "pub(crate) const {name}: {COLOR_ROW} = {};",
+        color_rows(declarations)?
+    )
+    .expect("writing generated tokens to a String cannot fail");
     Ok(())
 }
 
 fn emit_sources(
     output: &mut String,
     name: &str,
-    declarations: &token_compiler::Declarations,
+    declarations: &Declarations,
 ) -> Result<(), String> {
     writeln!(
         output,
-        "pub(crate) const {name}: [&str; PLATFORM_COLOR_COUNT] = ["
+        "pub(crate) const {name}: {SOURCE_ROW} = {};",
+        source_rows(declarations)?
     )
     .expect("writing generated tokens to a String cannot fail");
-    for token in COLORS {
-        writeln!(output, "    {:?},", source(declarations, token)?)
+    Ok(())
+}
+
+fn emit_presets(output: &mut String, presets: &[Preset]) -> Result<(), String> {
+    writeln!(
+        output,
+        "pub(crate) const PRESET_COUNT: usize = {};
+pub(crate) const PRESET_IDS: [&str; PRESET_COUNT] = {:?};",
+        presets.len(),
+        presets
+            .iter()
+            .map(|preset| preset.id.as_str())
+            .collect::<Vec<_>>()
+    )
+    .expect("writing generated tokens to a String cannot fail");
+    emit_preset_rows(
+        output,
+        "PRESET_LIGHT_COLORS",
+        COLOR_ROW,
+        presets,
+        |preset| color_rows(&preset.light),
+    )?;
+    emit_preset_rows(output, "PRESET_DARK_COLORS", COLOR_ROW, presets, |preset| {
+        color_rows(&preset.dark)
+    })?;
+    emit_preset_rows(
+        output,
+        "PRESET_LIGHT_COLOR_SOURCES",
+        SOURCE_ROW,
+        presets,
+        |preset| source_rows(&preset.light),
+    )?;
+    emit_preset_rows(
+        output,
+        "PRESET_DARK_COLOR_SOURCES",
+        SOURCE_ROW,
+        presets,
+        |preset| source_rows(&preset.dark),
+    )
+}
+
+/// One row per preset, in `PRESET_IDS` order.
+fn emit_preset_rows(
+    output: &mut String,
+    name: &str,
+    row_type: &str,
+    presets: &[Preset],
+    rows: impl Fn(&Preset) -> Result<String, String>,
+) -> Result<(), String> {
+    writeln!(
+        output,
+        "pub(crate) const {name}: [{row_type}; PRESET_COUNT] = ["
+    )
+    .expect("writing generated tokens to a String cannot fail");
+    for preset in presets {
+        writeln!(output, "{},", rows(preset)?)
             .expect("writing generated tokens to a String cannot fail");
     }
     output.push_str("];\n");

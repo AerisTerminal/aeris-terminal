@@ -1,8 +1,9 @@
 use super::{
-    AerisChartView, BigTradesFilter, BigTradesSettings, ChartTheme, CumulativeDeltaReset,
+    AerisChartView, BigTradesFilter, BigTradesSettings, CumulativeDeltaReset,
     CumulativeDeltaSettings, FootprintDisplayMode, OrderFlowAggregation, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, chart_color_hex, platform_theme,
+    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, chart_color_hex,
 };
+use aeris_design_system::AerisTheme;
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
@@ -356,7 +357,7 @@ impl AerisChartView {
             big_trades: self
                 .order_flow_settings
                 .big_trades
-                .map(|settings| big_trades_options(settings, self.theme)),
+                .map(|settings| big_trades_options(settings, &self.platform)),
         }
     }
 
@@ -471,7 +472,7 @@ impl AerisChartView {
         else {
             return;
         };
-        let options = big_trades_options(settings, self.theme);
+        let options = big_trades_options(settings, &self.platform);
         if self.engine.big_trades_options(id) != Some(&options)
             && self.engine.set_big_trades_options(id, options).is_ok()
         {
@@ -511,8 +512,8 @@ const fn cumulative_delta_options(settings: CumulativeDeltaSettings) -> TradeStu
 
 /// Engine options for durable big-trades settings: translucent token fills outlined with the
 /// chart direction colors, labelled in the chart's own text color.
-fn big_trades_options(settings: BigTradesSettings, theme: ChartTheme) -> BigTradesOptions {
-    let colors = platform_theme(theme).colors;
+fn big_trades_options(settings: BigTradesSettings, theme: &AerisTheme) -> BigTradesOptions {
+    let colors = theme.colors;
     BigTradesOptions {
         filter: settings.filter,
         size: settings.size,

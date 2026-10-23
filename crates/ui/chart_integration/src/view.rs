@@ -68,13 +68,6 @@ const CHART_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
 const MAXIMUM_SESSION_PLAN_LEVELS: usize = 32;
 const SESSION_PLAN_LEVEL_COLOR: Color = Color::rgb(245, 166, 35);
 
-fn platform_theme(theme: ChartTheme) -> AerisTheme {
-    match theme {
-        ChartTheme::Light => AerisTheme::light(),
-        ChartTheme::Dark => AerisTheme::dark(),
-    }
-}
-
 #[cfg(test)]
 fn aeris_charts_grid_color(theme: ChartTheme) -> String {
     FinancialThemeColors::for_theme(theme).grid.to_string()
@@ -803,20 +796,23 @@ fn hollow_appearance(
     hollow
 }
 
-/// `appearance` with the candle colors the hollow transformation replaces taken from `base`.
-fn with_candle_colors(
+/// `appearance` with its chart-canvas fields taken from `canvas`; every series field is kept.
+fn with_canvas_of(
     mut appearance: ChartAppearanceSettings,
-    base: &ChartAppearanceSettings,
+    canvas: &ChartAppearanceSettings,
 ) -> ChartAppearanceSettings {
-    appearance.up_color.clone_from(&base.up_color);
-    appearance.down_color.clone_from(&base.down_color);
-    appearance.wick_up_color.clone_from(&base.wick_up_color);
-    appearance.wick_down_color.clone_from(&base.wick_down_color);
-    appearance.border_up_color.clone_from(&base.border_up_color);
     appearance
-        .border_down_color
-        .clone_from(&base.border_down_color);
-    appearance.border_visible = base.border_visible;
+        .background_color
+        .clone_from(&canvas.background_color);
+    appearance.text_color.clone_from(&canvas.text_color);
+    appearance.grid_visible = canvas.grid_visible;
+    appearance.grid_color.clone_from(&canvas.grid_color);
+    appearance.grid_style = canvas.grid_style;
+    appearance
+        .crosshair_color
+        .clone_from(&canvas.crosshair_color);
+    appearance.crosshair_width = canvas.crosshair_width;
+    appearance.crosshair_style = canvas.crosshair_style;
     appearance
 }
 
@@ -1160,7 +1156,10 @@ impl SeriesMutation {
 /// A GPUI entity hosting one authoritative Aeris Charts chart engine and renderer.
 pub struct AerisChartView {
     engine: ChartEngine,
-    theme: ChartTheme,
+    /// The platform theme the chart paints in; its mode selects the Aeris Charts theme.
+    platform: AerisTheme,
+    /// Chart colors of a non-default platform preset; `None` keeps Aeris Charts' own theme.
+    palette: Option<PresetPalette>,
     renderer: GpuiChartRenderer,
     data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
@@ -1205,10 +1204,13 @@ pub struct AerisChartView {
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
-    /// The user's own series appearance while a hollow chart type shows. Aeris Charts holds
-    /// the derived transparent bodies; this keeps the colors the user chose, so readback,
-    /// persistence and a return to solid candles never see the hollow transformation.
-    hollow_base: Option<ChartAppearanceSettings>,
+    /// The user's own appearance while Aeris Charts paints a derived one: a preset palette
+    /// pins theme-following colors and a hollow chart type makes bodies transparent. This keeps
+    /// what the user chose, with its theme provenance, so readback, persistence, a preset
+    /// switch and a return to solid candles never see the derivation.
+    appearance_intent: Option<ChartAppearanceSettings>,
+    /// Host-owned axis colors, painted after every engine theme or canvas change.
+    axis_appearance: ChartAxisAppearance,
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
     order_book_depth_state: Option<OrderBookDepthState>,
@@ -1260,7 +1262,7 @@ impl AerisChartView {
     /// Creates an empty Aeris Charts-owned surface without inventing market data.
     #[must_use]
     pub fn empty() -> Self {
-        Self::empty_with_theme(ChartTheme::Dark)
+        Self::empty_with_theme(AerisTheme::dark())
     }
 
     /// Creates an empty chart using Aeris Charts' canonical theme tokens.
@@ -1270,16 +1272,17 @@ impl AerisChartView {
     /// Panics when the platform font options derived from `platform.css` stop
     /// parsing.
     #[must_use]
-    pub fn empty_with_theme(theme: ChartTheme) -> Self {
+    pub fn empty_with_theme(theme: AerisTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
-        engine.set_theme(theme);
-        register_drawing_stamps(&mut engine, theme);
+        engine.set_theme(chart_theme(theme.mode));
+        register_drawing_stamps(&mut engine, &theme);
         apply_platform_chrome_contract(&mut engine, TimeAxisLabels::INTRADAY);
         apply_platform_interaction(&mut engine);
         let volume_series = install_volume_series(&mut engine);
-        Self {
+        let mut chart = Self {
             engine,
-            theme,
+            platform: theme,
+            palette: PresetPalette::for_platform(&theme),
             renderer: GpuiChartRenderer::new(),
             data_bridge: None,
             displayed_provenance: DisplayedProvenance::empty(),
@@ -1313,7 +1316,8 @@ impl AerisChartView {
             instrument_price_scale: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
-            hollow_base: None,
+            appearance_intent: None,
+            axis_appearance: ChartAxisAppearance::default(),
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             order_book_depth_state: None,
@@ -1333,7 +1337,9 @@ impl AerisChartView {
             live_evidence_rebuilds: 0,
             #[cfg(feature = "diagnostics")]
             live_evidence_mouse_downs: 0,
-        }
+        };
+        chart.sync_painted_appearance();
+        chart
     }
 
     /// Creates a chart from the bounded embedded replay using Aeris Charts' own styling.
@@ -1356,7 +1362,7 @@ impl AerisChartView {
     /// without a live bridge instead of panicking the UI thread.
     #[must_use]
     pub fn with_replay(replay: &ReplaySnapshot) -> Self {
-        Self::with_replay_and_theme(replay, ChartTheme::Dark)
+        Self::with_replay_and_theme(replay, AerisTheme::dark())
     }
 
     /// Creates a replay-backed chart using Aeris Charts' canonical theme tokens.
@@ -1366,10 +1372,10 @@ impl AerisChartView {
     /// Panics when the platform font options derived from `platform.css` stop
     /// parsing.
     #[must_use]
-    pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
+    pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: AerisTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
-        engine.set_theme(theme);
-        register_drawing_stamps(&mut engine, theme);
+        engine.set_theme(chart_theme(theme.mode));
+        register_drawing_stamps(&mut engine, &theme);
         apply_replay_contract(&mut engine, replay);
         apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
@@ -1386,7 +1392,8 @@ impl AerisChartView {
         debug_assert!(data_bridge.is_some());
         let mut chart = Self {
             engine,
-            theme,
+            platform: theme,
+            palette: PresetPalette::for_platform(&theme),
             renderer: GpuiChartRenderer::new(),
             data_bridge,
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
@@ -1420,7 +1427,8 @@ impl AerisChartView {
             instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
-            hollow_base: None,
+            appearance_intent: None,
+            axis_appearance: ChartAxisAppearance::default(),
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             order_book_depth_state: None,
@@ -1441,6 +1449,7 @@ impl AerisChartView {
             #[cfg(feature = "diagnostics")]
             live_evidence_mouse_downs: 0,
         };
+        chart.sync_painted_appearance();
         chart.apply_selected_price_format();
         chart
     }
@@ -1738,16 +1747,17 @@ impl AerisChartView {
     ///
     /// Panics when the platform font options derived from `platform.css` stop
     /// parsing.
-    pub fn set_theme(&mut self, theme: ChartTheme) {
+    pub fn set_theme(&mut self, theme: AerisTheme) {
         let time_labels = TimeAxisLabels::of(&self.engine);
-        if self.theme != theme {
+        if (self.platform.preset, self.platform.mode) != (theme.preset, theme.mode) {
             // Re-registering issues fresh raster keys, so it happens only on a real change.
-            register_drawing_stamps(&mut self.engine, theme);
+            register_drawing_stamps(&mut self.engine, &theme);
         }
-        self.theme = theme;
-        self.engine.set_theme(theme);
-        // A hollow frame is pinned to the theme's candle colors, so it follows a theme switch.
-        self.sync_hollow_candles();
+        self.platform = theme;
+        self.palette = PresetPalette::for_platform(&theme);
+        self.engine.set_theme(chart_theme(theme.mode));
+        // Preset colors and a hollow frame are pinned to the theme, so they follow a switch.
+        self.sync_painted_appearance();
         apply_platform_chrome_contract(&mut self.engine, time_labels);
         self.sync_big_trades_options();
         self.invalidate_series_layout();
@@ -2224,11 +2234,34 @@ impl AerisChartView {
     /// series/options internals to the desktop shell.
     #[must_use]
     pub fn appearance_settings(&self) -> ChartAppearanceSettings {
-        let appearance = self.engine.financial_appearance(0).unwrap_or_default();
-        match &self.hollow_base {
-            Some(base) => with_candle_colors(appearance, base),
-            None => appearance,
+        self.appearance_intent
+            .clone()
+            .unwrap_or_else(|| self.engine.financial_appearance(0).unwrap_or_default())
+    }
+
+    /// The colors theme-following appearance and axis fields paint under the chart's
+    /// platform theme.
+    #[must_use]
+    pub fn theme_defaults(&self) -> ChartThemeDefaults {
+        theme_defaults(self.palette.as_ref(), self.engine_theme())
+    }
+
+    /// The durable axis colors.
+    #[must_use]
+    pub fn axis_appearance(&self) -> ChartAxisAppearance {
+        self.axis_appearance.clone()
+    }
+
+    /// Applies durable axis colors without touching any other appearance.
+    pub fn set_axis_appearance(&mut self, axis: &ChartAxisAppearance) -> bool {
+        if self.axis_appearance == *axis {
+            return false;
         }
+        self.axis_appearance = axis.clone();
+        self.apply_platform_chart_colors();
+        self.invalidate_series_frame();
+        self.mark_user_state_changed();
+        true
     }
 
     /// The colors the primary series paints for its line, area and baseline controls, pinned
@@ -2282,7 +2315,18 @@ impl AerisChartView {
     }
 
     fn apply_canvas_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        let changed = self.engine.apply_financial_canvas_appearance(appearance);
+        let before = self.appearance_settings();
+        if let Some(intent) = self.appearance_intent.take() {
+            let intent = with_canvas_of(intent, appearance);
+            self.engine
+                .apply_financial_canvas_appearance(&self.painted_appearance(&intent));
+            self.appearance_intent = Some(intent);
+        } else {
+            self.engine.apply_financial_canvas_appearance(appearance);
+        }
+        // A canvas edit rewrites the price-axis text, so the axis colors follow it.
+        self.apply_platform_chart_colors();
+        let changed = before != self.appearance_settings();
         if changed {
             self.invalidate_series_frame();
         }
@@ -2290,42 +2334,82 @@ impl AerisChartView {
     }
 
     fn apply_series_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        let changed = match self.chart_type.hollow_sides() {
-            Some((bullish, bearish)) => {
-                let before = self.appearance_settings();
-                self.engine.apply_financial_series_appearance(
-                    0,
-                    &hollow_appearance(appearance, bullish, bearish, self.theme),
-                );
-                self.hollow_base = Some(appearance.clone());
-                before != self.appearance_settings()
-            }
-            None => self.engine.apply_financial_series_appearance(0, appearance),
-        };
+        let before = self.appearance_settings();
+        if let Some(intent) = self.appearance_intent.take() {
+            let intent = with_canvas_of(appearance.clone(), &intent);
+            self.engine
+                .apply_financial_series_appearance(0, &self.painted_appearance(&intent));
+            self.appearance_intent = Some(intent);
+        } else {
+            self.engine.apply_financial_series_appearance(0, appearance);
+        }
+        let changed = before != self.appearance_settings();
         if changed {
             self.invalidate_series_frame();
         }
         changed
     }
 
-    /// Shows or removes the hollow transformation for the current chart type and theme. The
-    /// engine's colors are replaced only while a hollow type shows or when leaving one.
-    fn sync_hollow_candles(&mut self) {
-        match (self.hollow_base.take(), self.chart_type.hollow_sides()) {
-            (None, None) => {}
-            (Some(base), None) => {
-                self.engine.apply_financial_series_appearance(0, &base);
+    const fn engine_theme(&self) -> ChartTheme {
+        chart_theme(self.platform.mode)
+    }
+
+    /// What Aeris Charts paints for the user's `intent`: theme-following colors pinned to
+    /// the preset palette, then transparent bodies for a hollow chart type.
+    fn painted_appearance(&self, intent: &ChartAppearanceSettings) -> ChartAppearanceSettings {
+        let pinned = self
+            .palette
+            .as_ref()
+            .map_or_else(|| intent.clone(), |palette| palette.pin(intent));
+        match self.chart_type.hollow_sides() {
+            Some((bullish, bearish)) => {
+                hollow_appearance(&pinned, bullish, bearish, self.engine_theme())
             }
-            (base, Some((bullish, bearish))) => {
-                let base = base
-                    .or_else(|| self.engine.financial_appearance(0))
-                    .unwrap_or_default();
-                self.engine.apply_financial_series_appearance(
-                    0,
-                    &hollow_appearance(&base, bullish, bearish, self.theme),
-                );
-                self.hollow_base = Some(base);
+            None => pinned,
+        }
+    }
+
+    /// Paints the derived appearance for the current palette and chart type, or restores the
+    /// user's own appearance once nothing is derived. The engine's colors are replaced only
+    /// while something is derived or when leaving that state.
+    fn sync_painted_appearance(&mut self) {
+        let derived = self.palette.is_some() || self.chart_type.hollow_sides().is_some();
+        match (self.appearance_intent.take(), derived) {
+            (None, false) => {}
+            (Some(intent), false) => {
+                self.engine.apply_financial_canvas_appearance(&intent);
+                self.engine.apply_financial_series_appearance(0, &intent);
             }
+            (intent, true) => {
+                let intent = intent.unwrap_or_else(|| self.appearance_settings());
+                let painted = self.painted_appearance(&intent);
+                self.engine.apply_financial_canvas_appearance(&painted);
+                self.engine.apply_financial_series_appearance(0, &painted);
+                self.appearance_intent = Some(intent);
+            }
+        }
+        self.apply_platform_chart_colors();
+    }
+
+    /// Paints the platform-owned chart colors the typed appearance does not carry: a preset's
+    /// layout colors and the axis colors. Aeris Charts resets them on every theme switch and
+    /// canvas edit, so each of those repaints them.
+    fn apply_platform_chart_colors(&mut self) {
+        let defaults = self.theme_defaults();
+        let text = effective_color(&self.appearance_settings().text_color, &defaults.text);
+        let border = effective_color(&self.axis_appearance.border_color, &defaults.axis_border);
+        let axis_text = effective_color(&self.axis_appearance.text_color, &text);
+        let price_scale = serde_json::json!({ "borderColor": border, "textColor": axis_text });
+        let mut patch = serde_json::json!({
+            "leftPriceScale": price_scale,
+            "rightPriceScale": price_scale,
+            "timeScale": { "borderColor": border },
+        });
+        if let Some(palette) = &self.palette {
+            patch["layout"] = palette.layout_patch();
+        }
+        if let Err(error) = self.engine.apply_options(&patch.to_string()) {
+            diagnostic!("Aeris Charts rejected the platform chart colors: {error}");
         }
     }
 
@@ -2335,8 +2419,9 @@ impl AerisChartView {
     pub fn reset_appearance_settings(&mut self) {
         let volume_visible = self.volume_visible();
         self.engine.reset_style_to_defaults();
-        self.hollow_base = None;
-        self.sync_hollow_candles();
+        self.appearance_intent = None;
+        self.axis_appearance = ChartAxisAppearance::default();
+        self.sync_painted_appearance();
         apply_product_series_markers(&mut self.engine, self.chart_type);
         self.reapply_study_styles();
         // Volume colors are indicator settings, not chart appearance.
@@ -2690,7 +2775,7 @@ impl AerisChartView {
     fn apply_price_series_kind(&mut self) {
         self.remove_session_plan_price_lines();
         install_product_price_series(&mut self.engine, self.chart_type, &self.product_bars);
-        self.sync_hollow_candles();
+        self.sync_painted_appearance();
         self.install_session_plan_price_lines();
         self.sync_brushable_interaction();
         self.invalidate_series_layout();
@@ -2968,8 +3053,8 @@ impl Default for AerisChartView {
     }
 }
 
-fn legend_palette(theme: ChartTheme) -> LegendPalette {
-    let colors = platform_theme(theme).colors;
+fn legend_palette(theme: &AerisTheme) -> LegendPalette {
+    let colors = theme.colors;
     LegendPalette {
         text: gpui_theme_color(colors.text_default),
         muted: gpui_theme_color(colors.text_secondary),
@@ -2982,7 +3067,7 @@ fn chart_legend_layers(
     chart: &Entity<AerisChartView>,
     rows: &[LegendRow],
     panes: &[LegendPaneLayout],
-    theme: ChartTheme,
+    theme: &AerisTheme,
     loading: bool,
     accessory: Option<&AnyView>,
 ) -> Vec<AnyElement> {
@@ -3313,7 +3398,7 @@ impl Render for AerisChartView {
             &entity,
             &self.legend_rows(),
             &self.legend_panes,
-            self.theme,
+            &self.platform,
             self.asset_loading.is_present(),
             self.legend_accessory.as_ref(),
         );
@@ -3393,5 +3478,8 @@ mod order_book_depth;
 use order_book_depth::OrderBookDepthState;
 mod order_flow;
 pub use order_flow::classify_order_flow_sweeps;
+mod palette;
+pub use palette::{ChartAxisAppearance, ChartThemeDefaults};
+use palette::{PresetPalette, chart_theme, effective_color, theme_defaults};
 mod studies;
 pub use studies::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};

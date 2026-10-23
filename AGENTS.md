@@ -354,6 +354,11 @@ When changing shared platform tokens such as colors, typography, radii, or inter
 3. run the website sync/tests so auth receives the same stylesheet;
 4. do not reintroduce one-off duplicate platform tokens in landing/auth/account CSS.
 
+Theme presets are the `[data-theme="<id>"]` blocks in `platform.css`, compiled into `ThemePreset` and
+`AerisTheme::resolve`; `themes.md` is their palette source and the preset blocks must match it. They are platform-only: `crates/ui/chart_integration` projects a non-default
+preset onto Aeris Charts through its existing appearance and options APIs, and Aeris Charts never
+receives a preset identity and keeps its own default theme.
+
 `CSS.md` holds the exact theme CSS from the Theme System and the rules for using it. Read it before
 any UI work and always follow it: every color, radius and border width comes from a token, never a
 hardcoded value or an ad-hoc alpha tint. Keep `CSS.md`, `platform.css` and the Theme System identical.

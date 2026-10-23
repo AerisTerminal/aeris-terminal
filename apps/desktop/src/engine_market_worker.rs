@@ -916,10 +916,11 @@ use publications::{cancel_pending_recovery, complete_pending_recovery, send_reco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_chart_integration::{AerisChartTheme, AerisChartView};
+    use aeris_chart_integration::AerisChartView;
     use aeris_contracts::{
         ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
+    use aeris_design_system::AerisTheme;
     use aeris_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
     use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
     use aeris_market_runtime::{
@@ -2407,7 +2408,7 @@ mod tests {
                         );
                         chart = Some(AerisChartView::with_replay_and_theme(
                             snapshot,
-                            AerisChartTheme::Dark,
+                            AerisTheme::dark(),
                         ));
                     }
                     update => {

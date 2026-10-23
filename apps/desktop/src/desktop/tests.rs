@@ -12,12 +12,11 @@ use super::{
     TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter, TimeSalesSideFilter,
     TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState,
     WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-    WorkspaceMaximizeTransition, active_workspace_after_close, aeris_chart_theme,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_position_id, chart_price_fixed_point,
-    chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
-    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
-    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    WorkspaceMaximizeTransition, active_workspace_after_close, bounded_status_detail,
+    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+    chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
+    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_menu_extent,
+    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, counted, current_instrument_menu_index,
     desktop_key_bindings, durable_workspace_viewport, first_selectable_instrument_index,
@@ -36,7 +35,7 @@ use super::{
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-use aeris_chart_integration::{AerisChartTheme, ChartSplitDirection, PriceAxisMenuState};
+use aeris_chart_integration::{ChartSplitDirection, PriceAxisMenuState};
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentKind,
     ProviderInstrumentSummary, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis,
@@ -52,7 +51,7 @@ pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
     })
     .expect("test trading service starts")
 }
-use aeris_design_system::{ThemeColor, ThemeMode};
+use aeris_design_system::ThemeColor;
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
@@ -2804,12 +2803,6 @@ fn watchlist_drag_reflows_continuously_at_row_midpoints() {
 }
 
 #[test]
-fn shell_theme_maps_only_to_aeris_charts_theme_selection() {
-    assert_eq!(aeris_chart_theme(ThemeMode::Light), AerisChartTheme::Light);
-    assert_eq!(aeris_chart_theme(ThemeMode::Dark), AerisChartTheme::Dark);
-}
-
-#[test]
 fn publication_is_ready_only_after_bridge_acceptance_without_recovery() {
     assert_eq!(publication_chart_state(true, false), ChartState::Ready);
     assert_eq!(publication_chart_state(false, true), ChartState::Recovering);
@@ -4272,9 +4265,12 @@ fn chart_detail_is_bounded_and_suppresses_generic_duplicates() {
 
 #[test]
 fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() {
-    use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
+    use super::workspace_surface::{
+        persisted_chart_appearance, restored_chart_appearance, restored_chart_axis,
+    };
     use aeris_chart_integration::{
-        AerisChartTheme, ChartAppearanceColor, ChartAppearanceSettings, ChartThemeColors,
+        AerisChartTheme, ChartAppearanceColor, ChartAppearanceSettings, ChartAxisAppearance,
+        ChartThemeColors,
     };
 
     let appearance = ChartAppearanceSettings {
@@ -4282,7 +4278,19 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
         background_color: ChartAppearanceColor::Custom("#0b1220".to_string()),
         ..ChartAppearanceSettings::default()
     };
-    let persisted = persisted_chart_appearance(&appearance);
+    let axis = ChartAxisAppearance {
+        border_color: ChartAppearanceColor::Custom("#475569".to_string()),
+        text_color: ChartAppearanceColor::Theme,
+    };
+    let persisted = persisted_chart_appearance(&appearance, &axis);
+    assert_eq!(
+        (
+            persisted.axis_border_color.as_str(),
+            persisted.axis_text_color.as_str()
+        ),
+        ("#475569", "theme")
+    );
+    assert_eq!(restored_chart_axis(&persisted), axis);
     assert_eq!(persisted.grid_color, "theme");
     assert_eq!(persisted.text_color, "theme");
     assert_eq!(persisted.up_color, "#abcdef");
@@ -4301,6 +4309,9 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
         .to_string();
     legacy.background_color.clear();
     legacy.text_color.clear();
+    legacy.axis_border_color.clear();
+    legacy.axis_text_color.clear();
+    assert_eq!(restored_chart_axis(&legacy), ChartAxisAppearance::default());
     let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
     assert_eq!(restored.down_color, ChartAppearanceColor::Theme);
     assert_eq!(restored.grid_color, ChartAppearanceColor::Theme);
@@ -4315,10 +4326,13 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
 #[test]
 fn saved_crosshair_style_follows_the_chart_default_unless_the_user_chose_one() {
     use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
-    use aeris_chart_integration::ChartAppearanceSettings;
+    use aeris_chart_integration::{ChartAppearanceSettings, ChartAxisAppearance};
 
     let default_style = ChartAppearanceSettings::default().crosshair_style;
-    let persisted = persisted_chart_appearance(&ChartAppearanceSettings::default());
+    let persisted = persisted_chart_appearance(
+        &ChartAppearanceSettings::default(),
+        &ChartAxisAppearance::default(),
+    );
     assert_eq!(persisted.crosshair_style_custom, Some(false));
 
     // A layout saved before style provenance stored the former dashed default.
@@ -4339,7 +4353,7 @@ fn saved_crosshair_style_follows_the_chart_default_unless_the_user_chose_one() {
         crosshair_style: picked_style,
         ..ChartAppearanceSettings::default()
     };
-    let persisted = persisted_chart_appearance(&picked);
+    let persisted = persisted_chart_appearance(&picked, &ChartAxisAppearance::default());
     assert_eq!(persisted.crosshair_style_custom, Some(true));
     assert_eq!(
         restored_chart_appearance(&persisted)
@@ -4422,9 +4436,14 @@ fn study_line_colors_persist_only_user_picks_by_output_index() {
 #[test]
 fn saved_area_fill_follows_the_translucent_default_instead_of_a_pinned_fallback() {
     use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
-    use aeris_chart_integration::{ChartAppearanceColor, ChartAppearanceSettings};
+    use aeris_chart_integration::{
+        ChartAppearanceColor, ChartAppearanceSettings, ChartAxisAppearance,
+    };
 
-    let persisted = persisted_chart_appearance(&ChartAppearanceSettings::default());
+    let persisted = persisted_chart_appearance(
+        &ChartAppearanceSettings::default(),
+        &ChartAxisAppearance::default(),
+    );
     for color in [
         &persisted.line_color,
         &persisted.area_top_color,

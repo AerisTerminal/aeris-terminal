@@ -513,6 +513,8 @@ fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
             appearance.background_color.as_str(),
             appearance.text_color.as_str(),
             appearance.area_bottom_color.as_str(),
+            appearance.axis_border_color.as_str(),
+            appearance.axis_text_color.as_str(),
         ]
         .into_iter()
         .all(|value| value.is_empty() || color_is_valid(value))
@@ -940,6 +942,8 @@ mod tests {
                 text_color: "#e2e8f0".to_string(),
                 area_bottom_color: "#2563eb00".to_string(),
                 crosshair_style_custom: Some(true),
+                axis_border_color: "#475569".to_string(),
+                axis_text_color: "theme".to_string(),
             }),
             order_flow: Some(round_trip_order_flow()),
             context_panel_visible: true,
@@ -1540,6 +1544,8 @@ mod tests {
             text_color: "theme".to_string(),
             area_bottom_color: "theme".to_string(),
             crosshair_style_custom: Some(true),
+            axis_border_color: String::new(),
+            axis_text_color: String::new(),
         });
 
         let sanitized = sanitize_workspace(workspace);

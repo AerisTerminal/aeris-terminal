@@ -1,9 +1,8 @@
 //! Built-in icon stamps for the Aeris Charts icon-stamp tool. Aeris Charts draws a chart-local
 //! raster per icon name; Terminal owns the glyph artwork and tints it with platform tokens.
 
-use super::platform_theme;
-use aeris_charts_engine::{ChartEngine, ChartTheme, MAX_DRAWING_ICON_SIZE};
-use aeris_design_system::{AerisTheme, ThemeColor};
+use aeris_charts_engine::{ChartEngine, MAX_DRAWING_ICON_SIZE};
+use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode, ThemePreset};
 use aeris_observability::diagnostic;
 use num_traits::ToPrimitive;
 use resvg::{tiny_skia, usvg};
@@ -117,8 +116,9 @@ struct StampRaster {
     pixels: Arc<[u8]>,
 }
 
-/// Registers every built-in stamp tinted for `theme`. Charts share one raster set per theme.
-pub(super) fn register_drawing_stamps(engine: &mut ChartEngine, theme: ChartTheme) {
+/// Registers every built-in stamp tinted for `theme`. Charts share one raster set per preset
+/// and mode.
+pub(super) fn register_drawing_stamps(engine: &mut ChartEngine, theme: &AerisTheme) {
     for raster in stamp_rasters(theme) {
         let registered = engine.set_drawing_icon(
             raster.name,
@@ -132,15 +132,22 @@ pub(super) fn register_drawing_stamps(engine: &mut ChartEngine, theme: ChartThem
     }
 }
 
-fn stamp_rasters(theme: ChartTheme) -> &'static [StampRaster] {
-    static LIGHT: OnceLock<Vec<StampRaster>> = OnceLock::new();
-    static DARK: OnceLock<Vec<StampRaster>> = OnceLock::new();
-    let rasters = match theme {
-        ChartTheme::Light => &LIGHT,
-        ChartTheme::Dark => &DARK,
+/// One raster set per preset and mode, built on first use: at most 16 sets of eight stamps.
+const STAMP_PALETTES: usize = ThemePreset::ALL.len() * 2;
+
+fn stamp_rasters(theme: &AerisTheme) -> &'static [StampRaster] {
+    static RASTERS: [OnceLock<Vec<StampRaster>>; STAMP_PALETTES] =
+        [const { OnceLock::new() }; STAMP_PALETTES];
+    let preset = ThemePreset::ALL
+        .iter()
+        .position(|preset| *preset == theme.preset)
+        .unwrap_or_default();
+    let mode = match theme.mode {
+        ThemeMode::Light => 0,
+        ThemeMode::Dark => 1,
     };
-    rasters.get_or_init(|| {
-        let platform = platform_theme(theme);
+    RASTERS[preset * 2 + mode].get_or_init(|| {
+        let platform = AerisTheme::resolve(theme.preset, theme.mode);
         ChartDrawingStamp::ALL
             .into_iter()
             .filter_map(
@@ -187,10 +194,13 @@ mod tests {
 
     #[test]
     fn every_stamp_rasterizes_tinted_artwork_within_engine_limits() {
-        for theme in [ChartTheme::Light, ChartTheme::Dark] {
-            let rasters = stamp_rasters(theme);
+        for platform in [
+            AerisTheme::light(),
+            AerisTheme::dark(),
+            AerisTheme::resolve(ThemePreset::Gruvbox, ThemeMode::Dark),
+        ] {
+            let rasters = stamp_rasters(&platform);
             assert_eq!(rasters.len(), ChartDrawingStamp::ALL.len());
-            let platform = platform_theme(theme);
             for (stamp, raster) in ChartDrawingStamp::ALL.into_iter().zip(rasters) {
                 assert_eq!(raster.name, stamp.icon_name());
                 assert!(raster.name.len() <= aeris_charts_engine::MAX_DRAWING_ICON_NAME_BYTES);

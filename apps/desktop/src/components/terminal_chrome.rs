@@ -1569,13 +1569,6 @@ fn format_transport_rtt(transport_rtt_nanos: Option<u64>) -> String {
     )
 }
 
-pub(super) const fn aeris_chart_theme(mode: ThemeMode) -> AerisChartTheme {
-    match mode {
-        ThemeMode::Light => AerisChartTheme::Light,
-        ThemeMode::Dark => AerisChartTheme::Dark,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

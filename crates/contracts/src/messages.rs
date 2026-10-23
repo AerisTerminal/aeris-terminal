@@ -570,6 +570,12 @@ pub struct WorkspaceChartAppearanceState {
     /// plain number.
     #[prost(bool, optional, tag = "27")]
     pub crosshair_style_custom: Option<bool>,
+    /// Empty in layouts saved before axis color control existed; restores as theme-following.
+    #[prost(string, tag = "28")]
+    pub axis_border_color: String,
+    /// Empty in layouts saved before axis color control existed; restores as theme-following.
+    #[prost(string, tag = "29")]
+    pub axis_text_color: String,
 }
 
 /// Durable host-owned state for one native Study Runtime instance.

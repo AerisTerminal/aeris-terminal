@@ -141,6 +141,16 @@ The whole row toggles, and focus uses the shared ring.
 dark), `hover-bg` on hover, the shared focus ring, and a `danger` border with a 3px `danger-ring` halo
 while invalid.
 
+## Theme presets
+
+The Theme CSS below is the default Aeris preset. `platform.css` also carries seven presets as
+`[data-theme="…"]` (light) and `[data-theme="…"].dark` (dark) blocks, copied value for value from
+`themes.md`: `tokyo-night`, `catppuccin`, `github`, `one`, `dracula`, `solarized` and `gruvbox`.
+Every preset block declares the same tokens as Aeris and only recolors the platform; radii and
+`--border-width` must match Aeris, and the build rejects a preset that misses a token or changes a shape
+token. Natively, `AerisTheme::resolve(ThemePreset, ThemeMode)` returns the cascaded palette, so UI code
+keeps reading `theme.colors.<token>` and never branches on the preset. The profile menu picks the preset.
+
 ## Theme CSS
 
 ```css
@@ -217,12 +227,12 @@ while invalid.
   --button-fill-subtle: #0a0a0a14;
 
   /* Trade — dedicated buy / sell buttons. Hover and press darken the fill; no shadows. */
-  --buy: #089981;
-  --buy-hover: #07876f;
-  --buy-active: #056f5c;
-  --buy-disabled: #b3e3da;
-  --buy-disabled-foreground: #5cbfae;
-  --buy-foreground: #ffffff;
+  --buy: var(--primary);
+  --buy-hover: var(--primary-hover);
+  --buy-active: var(--primary-active);
+  --buy-disabled: var(--primary-disabled);
+  --buy-disabled-foreground: var(--primary-disabled-foreground);
+  --buy-foreground: var(--primary-foreground);
   --sell: #f7525f;
   --sell-hover: #e5404d;
   --sell-active: #c9303c;
@@ -333,12 +343,12 @@ while invalid.
   --button-fill-subtle: #fafafa14;
 
   /* Trade — dedicated buy / sell buttons. Hover and press brighten the fill; no shadows. */
-  --buy: #089981;
-  --buy-hover: #0aad92;
-  --buy-active: #0bc0a2;
-  --buy-disabled: #0f4a41;
-  --buy-disabled-foreground: #3f9e8e;
-  --buy-foreground: #ffffff;
+  --buy: var(--primary);
+  --buy-hover: var(--primary-hover);
+  --buy-active: var(--primary-active);
+  --buy-disabled: var(--primary-disabled);
+  --buy-disabled-foreground: var(--primary-disabled-foreground);
+  --buy-foreground: var(--primary-foreground);
   --sell: #f7525f;
   --sell-hover: #f96a75;
   --sell-active: #fb838c;

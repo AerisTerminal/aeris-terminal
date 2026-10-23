@@ -163,6 +163,81 @@ impl ThemeMode {
     }
 }
 
+/// A named platform palette. Aeris is the `:root`/`.dark` default; every other preset is a
+/// `[data-theme="…"]` block in `platform.css` with light and dark modes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ThemePreset {
+    #[default]
+    Aeris,
+    TokyoNight,
+    Catppuccin,
+    Github,
+    One,
+    Dracula,
+    Solarized,
+    Gruvbox,
+}
+
+const _: () = assert!(ThemePreset::ALL.len() == PRESET_COUNT + 1);
+
+impl ThemePreset {
+    /// Every preset in picker order, Aeris first.
+    pub const ALL: [Self; 8] = [
+        Self::Aeris,
+        Self::TokyoNight,
+        Self::Catppuccin,
+        Self::Github,
+        Self::One,
+        Self::Dracula,
+        Self::Solarized,
+        Self::Gruvbox,
+    ];
+
+    /// The stable identifier: the `data-theme` attribute value, or `aeris` for the default.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self.generated_index() {
+            None => "aeris",
+            Some(index) => PRESET_IDS[index],
+        }
+    }
+
+    /// The display name used by the theme picker.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Aeris => "Aeris",
+            Self::TokyoNight => "Tokyo Night",
+            Self::Catppuccin => "Catppuccin",
+            Self::Github => "GitHub",
+            Self::One => "One",
+            Self::Dracula => "Dracula",
+            Self::Solarized => "Solarized",
+            Self::Gruvbox => "Gruvbox",
+        }
+    }
+
+    /// Looks a preset up by its stable identifier.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|preset| preset.id() == id)
+    }
+
+    /// Index into the generated `PRESET_*` tables; `None` for the `:root` default.
+    const fn generated_index(self) -> Option<usize> {
+        match self {
+            Self::Aeris => None,
+            Self::TokyoNight => Some(0),
+            Self::Catppuccin => Some(1),
+            Self::Github => Some(2),
+            Self::One => Some(3),
+            Self::Dracula => Some(4),
+            Self::Solarized => Some(5),
+            Self::Gruvbox => Some(6),
+        }
+    }
+}
+
 /// A resolved sRGB color with an independent alpha channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColor {
@@ -392,26 +467,37 @@ pub struct ThemeDimensions {
 /// A fully resolved `Aeris` theme suitable for a single paint revision.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AerisTheme {
+    pub preset: ThemePreset,
     pub mode: ThemeMode,
     pub colors: ThemeColors,
     pub dimensions: ThemeDimensions,
 }
 
 impl AerisTheme {
-    /// Resolves all foundational tokens for a mode.
+    /// Resolves all foundational tokens of one preset in one mode.
     #[must_use]
-    pub fn for_mode(mode: ThemeMode) -> Self {
+    pub fn resolve(preset: ThemePreset, mode: ThemeMode) -> Self {
+        let generated = match (preset.generated_index(), mode) {
+            (None, ThemeMode::Light) => LIGHT_COLORS,
+            (None, ThemeMode::Dark) => DARK_COLORS,
+            (Some(index), ThemeMode::Light) => PRESET_LIGHT_COLORS[index],
+            (Some(index), ThemeMode::Dark) => PRESET_DARK_COLORS[index],
+        };
         Self {
+            preset,
             mode,
-            colors: match mode {
-                ThemeMode::Light => light_colors(),
-                ThemeMode::Dark => dark_colors(),
-            },
+            colors: ThemeColors::from_generated(generated),
             dimensions: ThemeDimensions {
                 app_header_height: 44.0,
                 border_width: f32::from(BORDER_WIDTH),
             },
         }
+    }
+
+    /// Resolves all foundational tokens of the default Aeris preset for a mode.
+    #[must_use]
+    pub fn for_mode(mode: ThemeMode) -> Self {
+        Self::resolve(ThemePreset::Aeris, mode)
     }
 
     /// Resolves the dark theme used by the desktop terminal initially.
@@ -426,19 +512,21 @@ impl AerisTheme {
         Self::for_mode(ThemeMode::Light)
     }
 
-    /// Resolves the opposite mode as one complete theme value.
+    /// Resolves the opposite mode of the same preset as one complete theme value.
     #[must_use]
     pub fn toggled(self) -> Self {
-        Self::for_mode(self.mode.toggled())
+        Self::resolve(self.preset, self.mode.toggled())
     }
 
     /// Returns canonical source metadata for every color token resolved here.
     #[must_use]
     pub fn color_tokens(self) -> [ColorToken; PLATFORM_COLOR_COUNT] {
         let colors = self.colors.in_registry_order();
-        let sources = match self.mode {
-            ThemeMode::Light => LIGHT_COLOR_SOURCES,
-            ThemeMode::Dark => DARK_COLOR_SOURCES,
+        let sources = match (self.preset.generated_index(), self.mode) {
+            (None, ThemeMode::Light) => LIGHT_COLOR_SOURCES,
+            (None, ThemeMode::Dark) => DARK_COLOR_SOURCES,
+            (Some(index), ThemeMode::Light) => PRESET_LIGHT_COLOR_SOURCES[index],
+            (Some(index), ThemeMode::Dark) => PRESET_DARK_COLOR_SOURCES[index],
         };
         std::array::from_fn(|index| {
             ColorToken::new(COLOR_IDENTIFIERS[index], sources[index], colors[index])
@@ -450,14 +538,6 @@ impl Default for AerisTheme {
     fn default() -> Self {
         Self::dark()
     }
-}
-
-fn light_colors() -> ThemeColors {
-    ThemeColors::from_generated(LIGHT_COLORS)
-}
-
-fn dark_colors() -> ThemeColors {
-    ThemeColors::from_generated(DARK_COLORS)
 }
 
 /// The complete set of concrete radius tokens. No additional radius is valid.
@@ -506,9 +586,9 @@ impl RadiusToken {
 #[cfg(test)]
 mod tests {
     use super::{
-        AerisTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, brand_font_family,
-        platform_date_label, platform_font_family, platform_font_stack, platform_mono_font_family,
-        platform_typography,
+        AerisTheme, ColorToken, RadiusToken, ThemeColor, ThemeMode, ThemePreset, TypographyRole,
+        brand_font_family, platform_date_label, platform_font_family, platform_font_stack,
+        platform_mono_font_family, platform_typography,
     };
 
     #[test]
@@ -740,11 +820,18 @@ mod tests {
     fn trade_button_tokens_match_the_platform_contract() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.buy, ThemeColor::from_rgb8(8, 153, 129));
-        assert_eq!(light.buy_hover, ThemeColor::from_rgb8(7, 135, 111));
-        assert_eq!(light.buy_active, ThemeColor::from_rgb8(5, 111, 92));
-        assert_eq!(dark.buy_hover, ThemeColor::from_rgb8(10, 173, 146));
-        assert_eq!(dark.buy_active, ThemeColor::from_rgb8(11, 192, 162));
+        // Buy follows the primary action color in every preset and mode.
+        for preset in ThemePreset::ALL {
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                let colors = AerisTheme::resolve(preset, mode).colors;
+                assert_eq!(colors.buy, colors.primary);
+                assert_eq!(colors.buy_hover, colors.primary_hover);
+                assert_eq!(colors.buy_active, colors.primary_active);
+                assert_eq!(colors.buy_foreground, colors.primary_foreground);
+            }
+        }
+        assert_eq!(light.buy, ThemeColor::from_rgb8(0, 110, 221));
+        assert_eq!(light.buy_active, ThemeColor::from_rgb8(0, 80, 178));
         assert_eq!(light.sell, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(light.sell_hover, ThemeColor::from_rgb8(229, 64, 77));
         assert_eq!(light.sell_active, ThemeColor::from_rgb8(201, 48, 60));
@@ -753,9 +840,11 @@ mod tests {
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
-        assert_eq!(token_source(&light_tokens, "buy"), "#089981");
-        assert_eq!(token_source(&light_tokens, "buy-hover"), "#07876f");
-        assert_eq!(token_source(&dark_tokens, "buy-hover"), "#0aad92");
+        assert_eq!(token_source(&light_tokens, "buy"), "var(--primary)");
+        assert_eq!(
+            token_source(&dark_tokens, "buy-hover"),
+            "var(--primary-hover)"
+        );
         assert_eq!(token_source(&light_tokens, "sell"), "#f7525f");
         assert_eq!(token_source(&light_tokens, "sell-hover"), "#e5404d");
         assert_eq!(token_source(&dark_tokens, "sell-hover"), "#f96a75");
@@ -851,7 +940,51 @@ mod tests {
         let css = include_str!("../platform.css");
         assert!((AerisTheme::light().dimensions.border_width - 1.0).abs() < f32::EPSILON);
         assert!((AerisTheme::dark().dimensions.border_width - 1.0).abs() < f32::EPSILON);
-        assert_eq!(css.matches("--border-width: 1px;").count(), 2);
+        assert_eq!(
+            css.matches("--border-width:").count(),
+            css.matches("--border-width: 1px;").count()
+        );
+    }
+
+    #[test]
+    fn presets_follow_the_stylesheet_and_keep_their_mode() {
+        assert_eq!(
+            ThemePreset::ALL.map(ThemePreset::id),
+            [
+                "aeris",
+                "tokyo-night",
+                "catppuccin",
+                "github",
+                "one",
+                "dracula",
+                "solarized",
+                "gruvbox"
+            ]
+        );
+        for preset in ThemePreset::ALL {
+            assert_eq!(ThemePreset::from_id(preset.id()), Some(preset));
+            let light = AerisTheme::resolve(preset, ThemeMode::Light);
+            let dark = light.toggled();
+            assert_eq!((dark.preset, dark.mode), (preset, ThemeMode::Dark));
+            assert_ne!(light.colors.surface, dark.colors.surface);
+            assert_eq!(light.dimensions, AerisTheme::light().dimensions);
+            if preset != ThemePreset::Aeris {
+                assert_ne!(light.colors, AerisTheme::light().colors);
+                assert_ne!(dark.colors, AerisTheme::dark().colors);
+            }
+        }
+        assert_eq!(ThemePreset::from_id("missing"), None);
+        let tokyo = AerisTheme::resolve(ThemePreset::TokyoNight, ThemeMode::Dark);
+        assert_eq!(
+            tokyo.colors.surface,
+            ThemeColor::from_rgb8(0x1a, 0x1b, 0x26)
+        );
+        assert_eq!(token_source(&tokyo.color_tokens(), "surface"), "#1a1b26");
+        // Preset sources keep their own aliases rather than the default palette's literals.
+        assert_eq!(
+            token_source(&tokyo.color_tokens(), "book-ask-fill"),
+            "color-mix(in srgb, var(--sell) 35%, var(--surface))"
+        );
     }
 
     #[test]
@@ -899,7 +1032,9 @@ mod tests {
     fn css_manifest_contains_every_rust_color_token_and_mode_value() {
         let css = include_str!("../platform.css");
 
-        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+        for theme in ThemePreset::ALL.into_iter().flat_map(|preset| {
+            [ThemeMode::Light, ThemeMode::Dark].map(|mode| AerisTheme::resolve(preset, mode))
+        }) {
             for token in theme.color_tokens() {
                 let declaration = format!(
                     "{}: {};",

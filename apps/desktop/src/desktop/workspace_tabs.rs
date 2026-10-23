@@ -1019,6 +1019,8 @@ impl TerminalApp {
         Some(ChartSettingsSnapshot {
             chart_type: surface.chart_type(cx),
             appearance: surface.chart_appearance(cx)?,
+            theme_defaults: surface.chart_theme_defaults(cx)?,
+            axis: surface.chart_axis_appearance(cx)?,
             series_colors: surface.chart_series_colors(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
@@ -1133,9 +1135,42 @@ impl TerminalApp {
         let Some(surface) = self.chart_settings_surface(menu) else {
             return;
         };
-        let Some(mut appearance) = surface.read(cx).chart_appearance(cx) else {
-            return;
-        };
+        if matches!(
+            setting,
+            ChartColorSetting::AxisBorder | ChartColorSetting::AxisText
+        ) {
+            let Some(mut axis) = surface.read(cx).chart_axis_appearance(cx) else {
+                return;
+            };
+            if setting == ChartColorSetting::AxisBorder {
+                axis.border_color = ChartAppearanceColor::Custom(color);
+            } else {
+                axis.text_color = ChartAppearanceColor::Custom(color);
+            }
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_chart_axis_appearance(&axis, surface_cx);
+            });
+        } else {
+            let Some(appearance) = surface.read(cx).chart_appearance(cx) else {
+                return;
+            };
+            Self::apply_chart_appearance_color(&surface, appearance, setting, color, cx);
+        }
+        if let Some(picker) = &mut self.chart_settings_color_picker
+            && picker.setting == setting
+        {
+            picker.error = None;
+        }
+        cx.notify();
+    }
+
+    fn apply_chart_appearance_color(
+        surface: &Entity<WorkspaceSurface>,
+        mut appearance: ChartAppearanceSettings,
+        setting: ChartColorSetting,
+        color: String,
+        cx: &mut Context<Self>,
+    ) {
         match setting {
             ChartColorSetting::Up => {
                 appearance.up_color = ChartAppearanceColor::Custom(color.clone());
@@ -1182,6 +1217,7 @@ impl TerminalApp {
             ChartColorSetting::Crosshair => {
                 appearance.crosshair_color = ChartAppearanceColor::Custom(color);
             }
+            ChartColorSetting::AxisBorder | ChartColorSetting::AxisText => return,
         }
         surface.update(cx, |surface, surface_cx| match setting {
             ChartColorSetting::Background
@@ -1192,12 +1228,6 @@ impl TerminalApp {
             }
             _ => surface.set_chart_series_appearance(&appearance, surface_cx),
         });
-        if let Some(picker) = &mut self.chart_settings_color_picker
-            && picker.setting == setting
-        {
-            picker.error = None;
-        }
-        cx.notify();
     }
 
     /// Applies chart trading overlay actions through the surface that owns them.
@@ -1407,6 +1437,7 @@ impl TerminalApp {
             name,
             appearance: Some(workspace_surface::persisted_chart_appearance(
                 &snapshot.appearance,
+                &snapshot.axis,
             )),
             crosshair_mode: u32::from(snapshot.crosshair_mode),
             time_zone: snapshot.time_zone,
@@ -1428,11 +1459,12 @@ impl TerminalApp {
         let Some(surface) = self.chart_settings_surface(menu) else {
             return;
         };
-        let Some(appearance) = template
-            .appearance
-            .as_ref()
-            .and_then(workspace_surface::restored_chart_appearance)
-        else {
+        let Some((appearance, axis)) = template.appearance.as_ref().and_then(|appearance| {
+            Some((
+                workspace_surface::restored_chart_appearance(appearance)?,
+                workspace_surface::restored_chart_axis(appearance),
+            ))
+        }) else {
             return;
         };
         let crosshair_mode = u8::try_from(template.crosshair_mode).unwrap_or(0).min(3);
@@ -1449,6 +1481,7 @@ impl TerminalApp {
         let legend = workspace_surface::restored_chart_legend(template.legend);
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_appearance(&appearance, surface_cx);
+            surface.set_chart_axis_appearance(&axis, surface_cx);
             surface.set_chart_crosshair_mode(crosshair_mode, surface_cx);
             surface.set_chart_time_zone(time_zone, surface_cx);
             surface.set_chart_trading_visibility(trading_visibility, surface_cx);
@@ -3041,16 +3074,17 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn set_theme_mode(
+    /// Switches the application theme (palette preset and color mode) everywhere at once.
+    pub(super) fn set_theme(
         &mut self,
-        mode: aeris_design_system::ThemeMode,
+        theme: &AerisTheme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.theme.mode == mode {
+        if self.theme == *theme {
             return;
         }
-        self.theme = AerisTheme::for_mode(mode);
+        self.theme = *theme;
         cx.update_global::<gpui_base::Theme, _>(|base, _| *base = base_theme(&self.theme));
         window.refresh();
         for workspace in &self.workspaces {

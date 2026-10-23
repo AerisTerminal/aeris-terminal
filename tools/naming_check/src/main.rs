@@ -17,7 +17,7 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "third_party",
     "tmp",
 ];
-const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md"];
+const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md", "themes.md"];
 
 fn has_process_global_desktop_trading(source: &str) -> bool {
     let production = production_source_prefix(source);
@@ -1475,7 +1475,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "401c002c67924a799cb3346ad50de87b8b37d476";
+        let expected_revision = "2ed6e82ba9f218fccc86d42cefbb26d365ce0cd1";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",

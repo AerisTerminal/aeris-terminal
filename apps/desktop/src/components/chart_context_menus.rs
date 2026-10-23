@@ -1662,14 +1662,15 @@ struct SwitchWithOption {
 fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
     let title = snapshot.chart_type.label();
     let appearance = &snapshot.appearance;
+    let defaults = &snapshot.theme_defaults;
     let colors = &snapshot.series_colors;
     let groups = match snapshot.chart_type {
         ChartType::Candles
         | ChartType::HollowCandles
         | ChartType::HollowCandlesBullish
-        | ChartType::HollowCandlesBearish => vec![candle_group(ui, title, appearance)],
+        | ChartType::HollowCandlesBearish => vec![candle_group(ui, title, appearance, defaults)],
         ChartType::Footprint => vec![footprint_group(ui, title, snapshot.order_flow)],
-        ChartType::Bars => vec![bar_group(ui, title, appearance)],
+        ChartType::Bars => vec![bar_group(ui, title, appearance, defaults)],
         ChartType::Line | ChartType::LineWithMarkers | ChartType::BrushableArea => {
             vec![line_group(ui, title, appearance, colors)]
         }
@@ -1686,8 +1687,9 @@ fn candle_group(
     ui: SettingsUi<'_>,
     title: &'static str,
     appearance: &ChartAppearanceSettings,
+    defaults: &ChartThemeDefaults,
 ) -> AnyElement {
-    let candle = effective_candle_colors(appearance, ui.theme);
+    let candle = effective_candle_colors(appearance, defaults);
     let cell = |setting, value| ColorCell { setting, value };
     settings_group(
         title,
@@ -1743,11 +1745,10 @@ struct CandleColors {
 
 fn effective_candle_colors(
     appearance: &ChartAppearanceSettings,
-    theme: &AerisTheme,
+    defaults: &ChartThemeDefaults,
 ) -> CandleColors {
-    let chart_theme = aeris_chart_theme(theme.mode);
-    let up = appearance.effective_up_color(chart_theme);
-    let down = appearance.effective_down_color(chart_theme);
+    let up = effective_appearance_color(&appearance.up_color, &defaults.bullish);
+    let down = effective_appearance_color(&appearance.down_color, &defaults.bearish);
     let follow = |part: &ChartAppearanceColor, body: &str| match part {
         ChartAppearanceColor::Custom(color) => color.clone(),
         ChartAppearanceColor::Theme => body.to_string(),
@@ -1820,10 +1821,10 @@ fn bar_group(
     ui: SettingsUi<'_>,
     title: &'static str,
     appearance: &ChartAppearanceSettings,
+    defaults: &ChartThemeDefaults,
 ) -> AnyElement {
-    let up = effective_appearance_color(&appearance.up_color, |colors| colors.bullish, ui.theme);
-    let down =
-        effective_appearance_color(&appearance.down_color, |colors| colors.bearish, ui.theme);
+    let up = effective_appearance_color(&appearance.up_color, &defaults.bullish);
+    let down = effective_appearance_color(&appearance.down_color, &defaults.bearish);
     settings_group(
         title,
         [
@@ -1979,21 +1980,19 @@ fn line_style_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> A
 fn chart_canvas_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
     settings_groups(
         [
-            canvas_surface_group(ui, &snapshot.appearance),
-            canvas_grid_group(ui, &snapshot.appearance),
+            canvas_surface_group(ui, snapshot),
+            canvas_axis_group(ui, snapshot),
+            canvas_grid_group(ui, snapshot),
             canvas_crosshair_group(ui, snapshot),
         ],
         ui.theme,
     )
 }
 
-fn canvas_surface_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
-    let background = effective_appearance_color(
-        &appearance.background_color,
-        |colors| colors.background,
-        ui.theme,
-    );
-    let text = effective_appearance_color(&appearance.text_color, |colors| colors.text, ui.theme);
+fn canvas_surface_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let (appearance, defaults) = (&snapshot.appearance, &snapshot.theme_defaults);
+    let background = effective_appearance_color(&appearance.background_color, &defaults.background);
+    let text = effective_appearance_color(&appearance.text_color, &defaults.text);
     settings_group(
         "Chart",
         [
@@ -2020,9 +2019,42 @@ fn canvas_surface_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings
     )
 }
 
-fn canvas_grid_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
+/// Axis text follows the chart text color until it is pinned.
+fn canvas_axis_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let (axis, defaults) = (&snapshot.axis, &snapshot.theme_defaults);
+    let border = effective_appearance_color(&axis.border_color, &defaults.axis_border);
+    let chart_text = effective_appearance_color(&snapshot.appearance.text_color, &defaults.text);
+    let text = effective_appearance_color(&axis.text_color, &chart_text);
+    settings_group(
+        "Axes",
+        [
+            settings_color_row(
+                ui,
+                "Border",
+                ColorCell {
+                    setting: ChartColorSetting::AxisBorder,
+                    value: &border,
+                },
+                true,
+            ),
+            settings_color_row(
+                ui,
+                "Text",
+                ColorCell {
+                    setting: ChartColorSetting::AxisText,
+                    value: &text,
+                },
+                true,
+            ),
+        ],
+        ui.theme,
+    )
+}
+
+fn canvas_grid_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let appearance = &snapshot.appearance;
     let visible = appearance.grid_visible;
-    let color = effective_appearance_color(&appearance.grid_color, |colors| colors.grid, ui.theme);
+    let color = effective_appearance_color(&appearance.grid_color, &snapshot.theme_defaults.grid);
     let style = |label, style| {
         (
             label,
@@ -2073,8 +2105,7 @@ fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
     let visible = snapshot.crosshair_mode != CROSSHAIR_HIDDEN;
     let color = effective_appearance_color(
         &appearance.crosshair_color,
-        |colors| colors.crosshair,
-        ui.theme,
+        &snapshot.theme_defaults.crosshair,
     );
     let mode = |label, mode| {
         (
@@ -2317,16 +2348,10 @@ fn settings_switch_with_option(ui: SettingsUi<'_>, row: SwitchWithOption) -> Any
         .into_any_element()
 }
 
-/// Effective CSS color of a theme-following appearance field under the active theme.
-fn effective_appearance_color(
-    color: &ChartAppearanceColor,
-    role: fn(ChartThemeColors) -> &'static str,
-    theme: &AerisTheme,
-) -> String {
+/// Effective CSS color of an appearance field whose theme-following value paints `theme_color`.
+fn effective_appearance_color(color: &ChartAppearanceColor, theme_color: &str) -> String {
     match color {
-        ChartAppearanceColor::Theme => {
-            role(ChartThemeColors::for_theme(aeris_chart_theme(theme.mode))).to_string()
-        }
+        ChartAppearanceColor::Theme => theme_color.to_string(),
         ChartAppearanceColor::Custom(color) => color.clone(),
     }
 }
@@ -2765,23 +2790,34 @@ mod tests {
 
     #[test]
     fn candle_settings_show_the_colors_the_chart_paints() {
-        let theme = AerisTheme::dark();
+        let defaults = ChartThemeDefaults {
+            background: "#FFFFFF".into(),
+            text: "#000000".into(),
+            grid: "#CCCCCC".into(),
+            crosshair: "#999999".into(),
+            bullish: "#00AA00".into(),
+            bearish: "#AA0000".into(),
+            axis_border: "#CCCCCC".into(),
+        };
         let mut appearance = ChartAppearanceSettings {
             up_color: ChartAppearanceColor::Custom("#123456".into()),
             ..ChartAppearanceSettings::default()
         };
-        let colors = effective_candle_colors(&appearance, &theme);
+        let colors = effective_candle_colors(&appearance, &defaults);
         assert_eq!(colors.up, "#123456");
         assert_eq!(
             (colors.wick_up.as_str(), colors.border_up.as_str()),
             ("#123456", "#123456"),
             "an unpinned wick and border follow the custom body, as Aeris Charts paints them"
         );
-        let bearish = appearance.effective_down_color(aeris_chart_theme(theme.mode));
-        assert_eq!(colors.wick_down, bearish);
+        assert_eq!(
+            (colors.down.as_str(), colors.wick_down.as_str()),
+            ("#AA0000", "#AA0000"),
+            "a theme-following body paints the chart theme's bearish color"
+        );
         appearance.wick_up_color = ChartAppearanceColor::Custom("#ABCDEF".into());
         assert_eq!(
-            effective_candle_colors(&appearance, &theme).wick_up,
+            effective_candle_colors(&appearance, &defaults).wick_up,
             "#ABCDEF"
         );
     }

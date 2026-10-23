@@ -1,6 +1,6 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
 //! application-level section in a single panel: account (only while sign-in exists), Theme
-//! with a preview card per mode, Window with frameless mode and the drawing toolbar switch, the
+//! with a preview card per mode and a chip per palette preset, Window with frameless mode and the drawing toolbar switch, the
 //! keyboard shortcuts list, and
 //! About with version, system, build mode, Rithmic's notices while a Rithmic session is held, and
 //! updates.
@@ -9,7 +9,7 @@ use aeris_observability::diagnostic;
 use std::rc::Rc;
 
 use super::*;
-use aeris_design_system::ThemeMode;
+use aeris_design_system::{ThemeMode, ThemePreset};
 use gpui_base::Button as BaseButton;
 
 const PLATFORM_MENU_WIDTH: f32 = 320.0;
@@ -21,10 +21,23 @@ const SECTION_BOTTOM_PADDING: f32 = 12.0;
 const THEME_PREVIEW_HEIGHT: f32 = 72.0;
 const THEME_CARD_GAP: f32 = 6.0;
 const THEME_CARD_LABEL_HEIGHT: f32 = 16.0;
+const PRESET_GRID_TOP: f32 = 10.0;
+const PRESET_CHIP_HEIGHT: f32 = 28.0;
+const PRESET_CHIP_GAP: f32 = 4.0;
+const PRESET_SWATCH_SIZE: f32 = 14.0;
+/// Presets lay out two per row.
+const PRESET_ROWS: usize = ThemePreset::ALL.len().div_ceil(2);
+const _: () = assert!(
+    PRESET_ROWS == 4,
+    "PRESET_GRID_HEIGHT assumes four preset rows"
+);
+const PRESET_GRID_HEIGHT: f32 = 4.0 * PRESET_CHIP_HEIGHT + 3.0 * PRESET_CHIP_GAP;
 const THEME_SECTION_HEIGHT: f32 = SECTION_TITLE_HEIGHT
     + THEME_PREVIEW_HEIGHT
     + THEME_CARD_GAP
     + THEME_CARD_LABEL_HEIGHT
+    + PRESET_GRID_TOP
+    + PRESET_GRID_HEIGHT
     + SECTION_BOTTOM_PADDING;
 const WINDOW_SETTING_HEIGHT: f32 = 40.0;
 const WINDOW_SECTION_HEIGHT: f32 =
@@ -37,7 +50,7 @@ const ABOUT_UPDATE_HEIGHT: f32 = 44.0;
 const ABOUT_NOTICES_HEIGHT: f32 = 200.0;
 const THEME_MODES: [ThemeMode; 2] = [ThemeMode::Light, ThemeMode::Dark];
 
-type ThemeSelect = Rc<dyn Fn(ThemeMode, &mut Window, &mut App)>;
+type ThemeSelect = Rc<dyn Fn(AerisTheme, &mut Window, &mut App)>;
 type UpdateActivate = Rc<dyn Fn(UpdateAction, &mut Window, &mut App)>;
 type WindowToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
@@ -201,9 +214,9 @@ pub(super) fn platform_menu_layer(
     let animation_origin =
         PopupAnimationOrigin::from_trigger(anchor, Bounds::new(origin, panel_size));
     let theme_terminal = terminal.clone();
-    let select_theme: ThemeSelect = Rc::new(move |mode, window, cx| {
+    let select_theme: ThemeSelect = Rc::new(move |selected, window, cx| {
         theme_terminal.update(cx, |terminal, terminal_cx| {
-            terminal.set_theme_mode(mode, window, terminal_cx);
+            terminal.set_theme(&selected, window, terminal_cx);
         });
     });
     let (toggle_frameless, toggle_drawing_toolbar) = window_toggles(terminal);
@@ -570,9 +583,9 @@ const fn theme_card_id(mode: ThemeMode) -> &'static str {
     }
 }
 
-/// Theme section: one preview tile per mode, painted with that mode's own
-/// tokens. The menu stays open after a pick so the whole
-/// panel re-renders in the new mode.
+/// Theme section: one preview tile per mode in the selected preset's own tokens, then one
+/// chip per palette preset. The menu stays open after a pick so the whole panel re-renders in
+/// the new theme.
 fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
     section()
         .h(px(THEME_SECTION_HEIGHT))
@@ -584,11 +597,103 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
                 .gap_2()
                 .children(THEME_MODES.map(|mode| theme_card(mode, theme, on_select.clone()))),
         )
+        .child(
+            div()
+                .mt(px(PRESET_GRID_TOP))
+                .h(px(PRESET_GRID_HEIGHT))
+                .flex()
+                .flex_col()
+                .gap(px(PRESET_CHIP_GAP))
+                .children(ThemePreset::ALL.chunks(2).map(|row| {
+                    div().flex().gap(px(PRESET_CHIP_GAP)).children(
+                        row.iter()
+                            .map(|preset| preset_chip(*preset, theme, on_select.clone())),
+                    )
+                })),
+        )
+}
+
+const fn preset_chip_id(preset: ThemePreset) -> &'static str {
+    match preset {
+        ThemePreset::Aeris => "platform_menu_preset_aeris",
+        ThemePreset::TokyoNight => "platform_menu_preset_tokyo_night",
+        ThemePreset::Catppuccin => "platform_menu_preset_catppuccin",
+        ThemePreset::Github => "platform_menu_preset_github",
+        ThemePreset::One => "platform_menu_preset_one",
+        ThemePreset::Dracula => "platform_menu_preset_dracula",
+        ThemePreset::Solarized => "platform_menu_preset_solarized",
+        ThemePreset::Gruvbox => "platform_menu_preset_gruvbox",
+    }
+}
+
+/// One palette preset in the current mode: a swatch of that preset's surface and primary
+/// color beside its name, filled with `active-bg` while selected.
+fn preset_chip(preset: ThemePreset, theme: &AerisTheme, on_select: ThemeSelect) -> AnyElement {
+    let colors = theme.colors;
+    let selected = theme.preset == preset;
+    let preview = AerisTheme::resolve(preset, theme.mode);
+    let id = preset_chip_id(preset);
+    BaseButton::new(id)
+        .accessibility_label(format!("{} palette", preset.label()))
+        .group(id)
+        .flex_1()
+        .min_w_0()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            on_select(preview, window, cx);
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .h(px(PRESET_CHIP_HEIGHT))
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .when(selected, |chip| chip.bg(gpui_color(colors.active_bg)))
+                .when(!selected, |chip| {
+                    chip.group_hover(id, |style| style.bg(gpui_color(colors.hover_bg)))
+                })
+                .child(
+                    div()
+                        .size(px(PRESET_SWATCH_SIZE))
+                        .flex_none()
+                        .rounded_full()
+                        .border(platform_border_width(theme))
+                        .border_color(gpui_color(colors.border_secondary))
+                        .bg(gpui_color(preview.colors.surface))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(PRESET_SWATCH_SIZE / 2.0))
+                                .rounded_full()
+                                .bg(gpui_color(preview.colors.primary)),
+                        ),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(gpui_color(if selected {
+                            colors.text_default
+                        } else {
+                            colors.text_secondary
+                        }))
+                        .child(preset.label()),
+                ),
+        )
+        .into_any_element()
 }
 
 fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> AnyElement {
     let colors = theme.colors;
     let selected = theme.mode == mode;
+    let preview = AerisTheme::resolve(theme.preset, mode);
     BaseButton::new(theme_card_id(mode))
         .accessibility_label(format!("{} theme", theme_mode_name(mode)))
         .group(theme_card_id(mode))
@@ -599,11 +704,11 @@ fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> An
         .gap(px(THEME_CARD_GAP))
         .cursor_pointer()
         .on_click(move |_, window, cx| {
-            on_select(mode, window, cx);
+            on_select(preview, window, cx);
             cx.stop_propagation();
         })
         .child(theme_preview(
-            &AerisTheme::for_mode(mode),
+            &preview,
             theme,
             selected,
             theme_card_id(mode),

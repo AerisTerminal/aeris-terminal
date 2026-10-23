@@ -7,7 +7,7 @@
 
 use super::{
     AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendItem, LegendRow,
-    format_utc_offset, platform_date_label, platform_theme,
+    format_utc_offset, platform_date_label,
 };
 use aeris_charts_native::{
     ImageExportOptions, PreparedChartImage, measure_text, prepare_engine_image, register_font_data,
@@ -281,7 +281,7 @@ fn register_export_fonts() -> Result<(), String> {
         .clone()
 }
 
-fn chart_color(color: ThemeColor) -> Color {
+pub(super) fn chart_color(color: ThemeColor) -> Color {
     let channel = |value: f32| {
         (value * 255.0)
             .round()
@@ -355,7 +355,7 @@ impl AerisChartView {
                 trim_right_axis: true,
             },
         );
-        let colors = platform_theme(self.theme).colors;
+        let colors = self.platform.colors;
         let palette = ExportPalette {
             text: chart_color(colors.text_default),
             muted: chart_color(colors.text_secondary),

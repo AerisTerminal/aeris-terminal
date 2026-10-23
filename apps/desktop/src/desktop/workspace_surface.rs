@@ -439,6 +439,7 @@ pub(super) fn restored_chart_legend(
 
 pub(super) fn persisted_chart_appearance(
     appearance: &ChartAppearanceSettings,
+    axis: &ChartAxisAppearance,
 ) -> WorkspaceChartAppearanceState {
     WorkspaceChartAppearanceState {
         grid_visible: appearance.grid_visible,
@@ -469,6 +470,8 @@ pub(super) fn persisted_chart_appearance(
         crosshair_style_custom: Some(
             appearance.crosshair_style != ChartAppearanceSettings::default().crosshair_style,
         ),
+        axis_border_color: persisted_appearance_color(&axis.border_color),
+        axis_text_color: persisted_appearance_color(&axis.text_color),
     }
 }
 
@@ -539,6 +542,24 @@ pub(super) fn restored_chart_appearance(
         baseline_top_color: series_color(&appearance.baseline_top_color),
         baseline_bottom_color: series_color(&appearance.baseline_bottom_color),
     })
+}
+
+/// Axis colors were never flattened into theme defaults, so only an empty or theme marker
+/// follows the theme.
+pub(super) fn restored_chart_axis(
+    appearance: &WorkspaceChartAppearanceState,
+) -> ChartAxisAppearance {
+    let color = |color: &str| {
+        if color.is_empty() || color == THEME_APPEARANCE_COLOR {
+            ChartAppearanceColor::Theme
+        } else {
+            ChartAppearanceColor::Custom(color.to_string())
+        }
+    };
+    ChartAxisAppearance {
+        border_color: color(&appearance.axis_border_color),
+        text_color: color(&appearance.axis_text_color),
+    }
 }
 
 /// Durable marker for an appearance color that follows the active chart theme.
@@ -2012,10 +2033,12 @@ impl PanePresentation {
         let crosshair_mode = u8::try_from(state.crosshair_mode)
             .ok()
             .filter(|mode| *mode <= 3);
-        let appearance = state
-            .appearance
-            .as_ref()
-            .and_then(restored_chart_appearance);
+        let appearance = state.appearance.as_ref().and_then(|appearance| {
+            Some((
+                restored_chart_appearance(appearance)?,
+                restored_chart_axis(appearance),
+            ))
+        });
         let order_flow = state
             .order_flow
             .as_ref()
@@ -2036,8 +2059,9 @@ impl PanePresentation {
             if let Some(chart_type) = chart_type {
                 chart.set_chart_type(chart_type);
             }
-            if let Some(appearance) = &appearance {
+            if let Some((appearance, axis)) = &appearance {
                 chart.set_appearance_settings(appearance);
+                chart.set_axis_appearance(axis);
             }
             failed |= chart.restore_indicator_states(&indicators).is_err();
             if let Some(drawings) = drawings {
@@ -2111,7 +2135,10 @@ impl WorkspaceSurface {
             crosshair_mode: u32::from(chart.crosshair_mode()),
             price_alerts: self.price_alerts.clone(),
             studies,
-            appearance: Some(persisted_chart_appearance(&chart.appearance_settings())),
+            appearance: Some(persisted_chart_appearance(
+                &chart.appearance_settings(),
+                &chart.axis_appearance(),
+            )),
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
             legend: Some(persisted_chart_legend(chart.legend_options())),
             instrument_drawings,
@@ -3505,8 +3532,8 @@ impl WorkspaceSurface {
         snapshot: &aeris_application::ReplaySnapshot,
         cx: &mut Context<Self>,
     ) {
-        let chart_theme = aeris_chart_theme(self.theme.mode);
-        let chart = cx.new(move |_| AerisChartView::with_replay_and_theme(snapshot, chart_theme));
+        let theme = self.theme;
+        let chart = cx.new(move |_| AerisChartView::with_replay_and_theme(snapshot, theme));
         self.apply_chart_chrome_to_chart(&chart, cx);
         // An open settings session previews unconfirmed edits; restore the drawing before
         // its state is carried into the new chart.
@@ -5347,7 +5374,7 @@ impl WorkspaceSurface {
         });
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                chart.set_theme(aeris_chart_theme(theme.mode));
+                chart.set_theme(*theme);
                 chart_cx.notify();
             });
         }
@@ -5498,6 +5525,18 @@ impl WorkspaceSurface {
         self.chart
             .as_ref()
             .map(|chart| chart.read(cx).appearance_settings())
+    }
+
+    pub(super) fn chart_theme_defaults(&self, cx: &App) -> Option<ChartThemeDefaults> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).theme_defaults())
+    }
+
+    pub(super) fn chart_axis_appearance(&self, cx: &App) -> Option<ChartAxisAppearance> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).axis_appearance())
     }
 
     pub(super) fn chart_series_colors(&self, cx: &App) -> Option<ChartSeriesColors> {
@@ -5765,6 +5804,26 @@ impl WorkspaceSurface {
             changed
         }) {
             self.retained_chart_presentation.rejected_saved.appearance = false;
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_chart_axis_appearance(
+        &mut self,
+        axis: &ChartAxisAppearance,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_axis_appearance(axis);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        }) {
             self.chart_persistence_dirty = true;
             cx.notify();
         }
