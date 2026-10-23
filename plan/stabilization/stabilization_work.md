@@ -1784,6 +1784,17 @@ Status: pending
     provider mismatch, retired generation, RTT and pending adoption. Session,
     recovery, catalog, screener, diagnostics and alert-sync remain for Part 7;
     Part 8 and VAL-DSK-021/022 remain open.
+  - Part 7c: catalog-installed verified terms no longer send an immediate
+    session status ahead of their catalog reply. They invalidate the prior
+    acknowledgement and use the existing clock-driven session-status publisher,
+    which retains the exact selection generation and retries after bounded
+    mailbox backpressure. The regression fills the reserve, verifies catalog
+    ordering, checks a failed send does not acknowledge the status, then
+    drains and receives exactly the new terms' status. The existing pane
+    projection checks the exact committed generation and instrument identity;
+    its legacy message variant is removed with the other local projections
+    in Part 8. Recovery, catalog/screener, diagnostics and alert-sync routes
+    remain in Part 7; M6.6 is unchecked.
   - Before Part 7b, parallel-suite timing follow-up: the study calculation
     worker now publishes its completion before replying, so an immediately
     following calculation cannot mistake an already-finished worker for a
@@ -2379,6 +2390,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 M6.6 Part 7a refactor(desktop): price-alert triggers retain their coordinator consumer envelope until the pane matches its alert identity; the old trigger message is removed. A wrong-consumer fixture does not notify or enqueue, while a matching fixture preserves the exact fence. Other Part 7 routes, Part 8 and milestone GUI evidence remain open.
 
 - 2026-10-23 M6.6 Part 7b refactor(desktop): provider state retains its coordinator envelope across pending selection and queue delivery; pane projection checks provider and committed generation, with bridge and GPUI regressions. Deleted the duplicate pushed-event connection conversion; local startup controls remain explicit. M6.6 and VAL-DSK-021/022 remain open.
+- 2026-10-23 M6.6 Part 7c fix(desktop): verified catalog terms now flow through the one session-status publisher after the catalog reply, retaining its clock, selection generation and backpressure retry instead of a second best-effort status send. The existing pane generation/instrument projection remains; Part 8 removes its message variant. Remaining Part 7 routes, VAL-DSK-021/022 and guarded GUI remain open.
 
 ## 7. Known gaps / deferred
 

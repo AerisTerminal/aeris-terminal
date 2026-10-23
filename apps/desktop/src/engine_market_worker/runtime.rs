@@ -427,9 +427,7 @@ fn apply_received_event(
         .then_some(record.endpoint.active_generation);
     let (catalog, event) = classify_provider_catalog_event(event);
     if let Some(catalog) = catalog {
-        return Ok(deliver_provider_catalog_event(
-            market, record, catalog, clock,
-        ));
+        return Ok(deliver_provider_catalog_event(record, catalog));
     }
     let Some(event) = event else { return Ok(false) };
     let endpoint = &mut record.endpoint;
@@ -488,10 +486,8 @@ fn apply_received_event(
 /// Delivers one provider catalog result to its pane and reports whether the
 /// worker's selected product changed.
 fn deliver_provider_catalog_event(
-    market: &MarketService,
     record: &mut EndpointRecord,
     event: ProviderCatalogEvent,
-    clock: &dyn Clock,
 ) -> bool {
     let mut changed = false;
     if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
@@ -501,27 +497,13 @@ fn deliver_provider_catalog_event(
         // Verified Terms supersede the provisional selected descriptor, not
         // a different pane selection. Ticket demand uses the same identity.
         record.product = instrument.clone();
+        // The verified terms may change the calendar without changing the
+        // instrument ID. Retry through the single session-status publisher
+        // after this catalog reply, including when its mailbox was full.
+        record.session_status_sent = None;
         changed = true;
     }
     let endpoint = &record.endpoint;
-    if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
-        && record.role != EndpointRole::MarketScreen
-    {
-        let status = market.market_session_status(instrument, clock.wall_unix_nanos());
-        if let Err(MarketWorkerSendError::Full) =
-            endpoint
-                .messages
-                .send(MarketWorkerMessage::MarketSessionStatus {
-                    generation: endpoint.active_generation,
-                    status,
-                })
-        {
-            // A chart's status is resent by the session-status pass once its
-            // mailbox drains; one pane's backlog must not stop the workspace
-            // market worker.
-            diagnostic!("Aeris market session status could not enter the pane mailbox");
-        }
-    }
     match endpoint
         .messages
         .send(MarketWorkerMessage::ProviderCatalog(event))
@@ -1308,6 +1290,67 @@ mod tests {
             receiver.drain().0.is_empty(),
             "do not repeat an acknowledged status"
         );
+    }
+
+    #[test]
+    fn catalog_terms_status_uses_the_retrying_session_route_after_the_catalog_reply() {
+        let market = MarketService::start().expect("market runtime");
+        let clock = ManualClock::new(1_781_568_000_000_000_000);
+        let (_pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            super::super::default_product("ES"),
+            3,
+            super::super::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        record.endpoint.messages = messages;
+        let mut records = vec![record];
+        publish_session_statuses(&market, &mut records, false, &clock);
+        assert_eq!(receiver.drain().0.len(), 1);
+        for _ in 0..8 {
+            records[0]
+                .endpoint
+                .messages
+                .send(MarketWorkerMessage::EndpointFailure {
+                    generation: 1,
+                    message: String::new(),
+                })
+                .expect("fill bounded control reserve");
+        }
+        let mut terms = super::super::default_product("ES");
+        terms.session_generation = 2;
+        assert!(deliver_provider_catalog_event(
+            &mut records[0],
+            ProviderCatalogEvent::SelectionInstalled {
+                command_generation: 2,
+                instrument: terms.clone(),
+            },
+        ));
+        assert_eq!(records[0].session_status_sent, None);
+        publish_session_statuses(&market, &mut records, false, &clock);
+        assert_eq!(
+            records[0].session_status_sent, None,
+            "backpressure must not acknowledge the new terms"
+        );
+        let (queued, _) = receiver.drain();
+        assert_eq!(queued.len(), 9);
+        assert!(matches!(
+            queued.last(),
+            Some(MarketWorkerMessage::ProviderCatalog(
+                ProviderCatalogEvent::SelectionInstalled { .. }
+            ))
+        ));
+        publish_session_statuses(&market, &mut records, false, &clock);
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::MarketSessionStatus { generation: 1, status }]
+                if status.instrument_id == terms.instrument_id
+        ));
+        assert_eq!(records[0].session_status_sent, Some(terms.instrument_id));
     }
 
     #[test]
