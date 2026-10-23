@@ -65,6 +65,15 @@ impl TradingCore {
             // Direct-observation fixtures have no provider feed; real Terms always carry a route.
             return Ok(());
         }
+        if matches!(
+            self.quote_book
+                .feed_state(&instrument.instrument_id, &self.state.market_routes),
+            aeris_trading::market::FeedState::Unavailable {
+                reason: aeris_trading::market::FeedReason::RouteUnknown
+            }
+        ) {
+            return Err(aeris_trading::RejectReason::QuoteUnavailable);
+        }
         self.quote_book
             .check_session(&instrument.instrument_id, self.command_now)
     }

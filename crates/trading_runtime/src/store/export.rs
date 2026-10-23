@@ -97,3 +97,71 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     aeris_platform_sys::fs::write_file_durably(path, bytes)
         .map_err(|error| format!("trading export could not be committed: {error}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn crash_during_export_replacement_keeps_previous_complete_export() {
+        const CHILD_ROOT: &str = "AERIS_EXPORT_CRASH_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let mut staged =
+                aeris_platform_sys::fs::StagedFile::create(&root.join("executions.json"))
+                    .expect("stage export");
+            staged
+                .write_all(br#"[{"id":"replacement"}]"#)
+                .expect("write replacement");
+            std::fs::write(root.join("staged"), b"ready").expect("signal parent");
+            thread::sleep(Duration::from_secs(30));
+            panic!("parent did not terminate export writer");
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "aeris-export-crash-{}-{:?}",
+            std::process::id(),
+            thread::current().id()
+        ));
+        std::fs::create_dir(&root).expect("create isolated export root");
+        let destination = root.join("executions.json");
+        let previous = [json!({"id": "previous"})];
+        write_json(&destination, &previous).expect("previous export");
+        let mut child = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "store::export::tests::crash_during_export_replacement_keeps_previous_complete_export",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, &root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start export writer");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("staged").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let staged = root.join("staged").exists();
+        child.kill().expect("terminate export writer before commit");
+        child.wait().expect("reap export writer");
+        assert!(staged, "writer did not reach the replacement boundary");
+        let bytes = std::fs::read(&destination).expect("read previous export");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).expect("complete JSON"),
+            json!(previous)
+        );
+        assert_eq!(
+            aeris_platform_sys::fs::remove_stale_temporaries(&root, "executions.json")
+                .expect("remove abandoned stage"),
+            1
+        );
+        std::fs::remove_dir_all(root).expect("remove isolated export root");
+    }
+}

@@ -1538,6 +1538,68 @@ fn retention_never_prunes_fills_pinned_by_a_live_group() {
     );
 }
 
+#[test]
+fn retention_keeps_fills_and_events_referenced_by_an_open_order() {
+    // Simulated fills are all-or-nothing. Model a partially-filled broker-era
+    // order in SQLite to exercise the open-order retention predicate.
+    let directory = TestDirectory::new("retention-open-order-pin");
+    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    configuration.retention.maximum_fills = 1;
+    configuration.retention.maximum_order_events = 1;
+    let service = start_service_with_config(configuration);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let order = service
+        .place_order(market_order(
+            "partially-filled-pin",
+            OrderSide::Buy,
+            1,
+            1_000,
+        ))
+        .expect("order");
+    service
+        .observe_market(observation(10_000, 10_025, 2, 2_000))
+        .expect("fill");
+    service
+        .place_order(market_order("later-fill", OrderSide::Sell, 3, 3_000))
+        .expect("later order");
+    service
+        .observe_market(observation(10_010, 10_025, 4, 4_000))
+        .expect("later fill");
+    let path = config(&directory).database_path;
+    let connection = rusqlite::Connection::open(&path).expect("fixture database");
+    connection
+        .execute(
+            "UPDATE orders SET status = 'partially_filled' WHERE id = ?1",
+            [order.id.as_str()],
+        )
+        .expect("model partially filled order");
+    clock.advance(Duration::from_secs(3_700));
+    service.status().expect("retention tick");
+    service.status().expect("retention barrier");
+    for (table, condition) in [
+        ("fills", "order_id"),
+        ("order_events", "order_id"),
+        ("orders", "id"),
+    ] {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE {condition} = ?1"),
+                [order.id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("pinned rows");
+        assert!(
+            count > 0,
+            "{table} rows referenced by the open order survive"
+        );
+    }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
 fn equity_watch_profile() -> RiskProfile {
     RiskProfile {
         account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
@@ -2870,6 +2932,75 @@ fn active_bracket_cancellation_cascades_only_from_the_stop() {
         );
         service.shutdown(Duration::from_secs(2)).expect("shutdown");
     }
+}
+
+#[test]
+fn last_target_fill_cancels_the_resized_stop_with_typed_cascade() {
+    let directory = TestDirectory::new("last-target-cascade");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut entry = market_order("last-target-entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = quantity(2);
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("bracket");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry");
+    let armed = service.snapshot().expect("armed");
+    let stop_id = armed
+        .orders
+        .iter()
+        .find(|order| order.order_type == OrderType::Stop && order.status.is_open())
+        .expect("stop")
+        .id
+        .clone();
+    service
+        .observe_market(observation(10_200, 10_225, 3, 3_000))
+        .expect("first target");
+    let halfway = service.snapshot().expect("halfway");
+    let stop = halfway
+        .orders
+        .iter()
+        .find(|order| order.id == stop_id)
+        .expect("stop");
+    assert_eq!(stop.quantity, quantity(1));
+    assert_leg_event(
+        &halfway,
+        &stop_id,
+        OrderEventKind::Resized,
+        aeris_trading::OrderEventReason::CoverageShrink,
+    );
+    service
+        .observe_market(observation(10_400, 10_425, 4, 4_000))
+        .expect("last target");
+    let complete = service.snapshot().expect("complete");
+    assert_eq!(complete.positions[0].net_quantity.units(), 0);
+    assert_eq!(
+        complete.managed_brackets[0].status,
+        BracketViewStatus::Completed
+    );
+    assert_eq!(
+        complete
+            .orders
+            .iter()
+            .find(|order| order.id == stop_id)
+            .expect("stop")
+            .status,
+        OrderStatus::Cancelled
+    );
+    assert_leg_event(
+        &complete,
+        &stop_id,
+        OrderEventKind::Cancelled,
+        aeris_trading::OrderEventReason::Cascade,
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
 
 #[test]

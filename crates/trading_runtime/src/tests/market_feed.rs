@@ -1998,7 +1998,21 @@ impl QuoteInterestSink for RecordedInterest {
 fn quote_book_validates_and_fences_generation_and_source_sequence() {
     let mut book = crate::core::market::feed::QuoteBook::default();
     let routes = [(route().instrument_id.clone(), route())].into();
+    assert_eq!(
+        book.feed_state(&route().instrument_id, &BTreeMap::new()),
+        FeedState::Unavailable {
+            reason: FeedReason::RouteUnknown
+        },
+        "a migrated instrument without verified Terms has no executable feed"
+    );
     book.set_generation_floor(&route().instrument_id, 2);
+    assert_eq!(
+        book.feed_state(&route().instrument_id, &routes),
+        FeedState::Unavailable {
+            reason: FeedReason::QuoteMissing
+        },
+        "verified Terms resolve the route before a live feed arrives"
+    );
     assert!(
         !book
             .accept(

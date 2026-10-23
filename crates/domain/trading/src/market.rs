@@ -114,6 +114,7 @@ impl TradingQuote {
 /// Provider-neutral reason for withholding execution against a market feed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FeedReason {
+    RouteUnknown,
     Disconnected,
     Recovering,
     QuoteExpired,

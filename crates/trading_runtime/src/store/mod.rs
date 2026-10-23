@@ -1178,7 +1178,10 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        let instrument = crate::tests::instrument();
+        let instrument = TradingInstrument {
+            instrument_id: InstrumentId::try_new("hyperliquid:perp:BTC").expect("BTC id"),
+            ..crate::tests::instrument()
+        };
         store.put_instrument(&instrument).expect("v19 instrument");
         store.migrate(false).expect("V20 migration");
         assert_eq!(
@@ -1188,7 +1191,15 @@ mod tests {
                 .get(&instrument.instrument_id),
             Some(&instrument)
         );
-        assert!(store.load_market_routes().expect("routes").is_empty());
+        let routes = store.load_market_routes().expect("routes");
+        assert!(routes.is_empty());
+        let book = crate::core::market::feed::QuoteBook::default();
+        assert_eq!(
+            book.feed_state(&instrument.instrument_id, &routes),
+            aeris_trading::market::FeedState::Unavailable {
+                reason: aeris_trading::market::FeedReason::RouteUnknown
+            }
+        );
         let route: Option<String> = store
             .connection
             .query_row(
@@ -1198,6 +1209,29 @@ mod tests {
             )
             .expect("legacy route column");
         assert_eq!(route, None);
+        let verified = MarketRoute {
+            instrument_id: instrument.instrument_id.clone(),
+            provider_id: "hyperliquid".into(),
+            provider_symbol: "BTC".into(),
+            display_symbol: "BTC-USDC".into(),
+            venue_id: "HYPERLIQUID".into(),
+            entitlement_id: None,
+            price_scale: instrument.price_scale,
+            quantity_scale: instrument.quantity_scale,
+        };
+        store
+            .put_verified_instrument(&instrument, &verified)
+            .expect("verified catalog Terms");
+        let resolved = store.load_market_routes().expect("resolved routes");
+        assert_eq!(resolved.get(&instrument.instrument_id), Some(&verified));
+        assert_eq!(resolved[&instrument.instrument_id].provider_symbol, "BTC");
+        assert_eq!(
+            book.feed_state(&instrument.instrument_id, &resolved),
+            aeris_trading::market::FeedState::Unavailable {
+                reason: aeris_trading::market::FeedReason::QuoteMissing
+            },
+            "route resolution precedes an actual Live quote"
+        );
     }
 
     #[test]

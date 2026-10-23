@@ -3,8 +3,8 @@ use crate::{SimulatedMarketObservation, service::Command};
 use aeris_instruments::InstrumentId;
 use aeris_trading::RejectReason;
 use aeris_trading::market::{
-    FeedState, InstrumentSession, MAXIMUM_QUOTE_INTEREST, MarketFeedError, MarketFeedEvent,
-    MarketRoute, TradingQuote,
+    FeedReason, FeedState, InstrumentSession, MAXIMUM_QUOTE_INTEREST, MarketFeedError,
+    MarketFeedEvent, MarketRoute, TradingQuote,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -40,6 +40,24 @@ struct QuoteEntry {
 }
 
 impl QuoteBook {
+    pub(crate) fn feed_state(
+        &self,
+        id: &InstrumentId,
+        routes: &BTreeMap<InstrumentId, MarketRoute>,
+    ) -> FeedState {
+        if !routes.contains_key(id) {
+            return FeedState::Unavailable {
+                reason: FeedReason::RouteUnknown,
+            };
+        }
+        self.entries
+            .get(id)
+            .and_then(|entry| entry.feed)
+            .unwrap_or(FeedState::Unavailable {
+                reason: FeedReason::QuoteMissing,
+            })
+    }
+
     pub(crate) fn day_deadline(&self, id: &InstrumentId, now: i64) -> Result<i64, RejectReason> {
         let session = self
             .entries

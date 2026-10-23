@@ -499,13 +499,17 @@ impl TradingStore {
             .execute(
                 &format!(
                     "DELETE FROM order_events WHERE id IN (
-                        SELECT id FROM order_events WHERE id IN (
+                        SELECT id FROM order_events WHERE (id IN (
                             SELECT id FROM order_events ORDER BY sequence DESC LIMIT -1 OFFSET ?1
                         ) OR order_id IN (
                             SELECT id FROM orders WHERE status NOT IN
                                 ('pending', 'working', 'pending_modify', 'partially_filled',
                                  'pending_cancel')
                             ORDER BY submitted_unix_nanos DESC LIMIT -1 OFFSET ?2
+                        )) AND order_id NOT IN (
+                            SELECT id FROM orders WHERE status IN
+                                ('pending', 'working', 'pending_modify', 'partially_filled',
+                                 'pending_cancel', 'inactive')
                         ) {group_pin_events} ORDER BY sequence LIMIT 5000
                      )"
                 ),
