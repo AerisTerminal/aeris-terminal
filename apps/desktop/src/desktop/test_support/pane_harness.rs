@@ -497,7 +497,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
 fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
     cx: &mut TestAppContext,
 ) {
-    use aeris_market_data::{OrderBookFrame, OrderBookState};
+    use aeris_market_data::{OrderBookPublication, OrderBookState};
 
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
@@ -509,29 +509,32 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
             .clone()
             .expect("fixture product")
     });
-    let frame = |generation, revision| OrderBookFrame {
-        provider_id: product.provider.clone(),
-        instrument_id: product.instrument_id.clone(),
-        entitlement_id: product.entitlement_id.clone(),
-        session_generation: 1,
-        selection_generation: generation,
-        revision,
-        source_watermark: revision,
-        bbo_source_watermark: revision,
-        state: OrderBookState::Ready,
-        price_scale: 2,
-        quantity_scale: 0,
-        price_increment: Some(1),
-        best_bid: None,
-        best_ask: None,
-        traded_volumes: std::collections::BTreeMap::default(),
-        trade_source_watermark: revision,
-        top_of_book_only: false,
-        rows: Vec::new(),
+    let events = FixtureMarketEvents::default();
+    let frame = |generation, revision| {
+        MarketWorkerMessage::RuntimeOrderBook(events.order_book(
+            generation,
+            OrderBookPublication {
+                provider_id: product.provider.clone(),
+                instrument_id: product.instrument_id.clone(),
+                entitlement_id: product.entitlement_id.clone(),
+                session_generation: product.session_generation,
+                revision,
+                source_watermark: revision,
+                bbo_source_watermark: revision,
+                state: OrderBookState::Ready,
+                bids: vec![],
+                asks: vec![],
+                best_bid: None,
+                best_ask: None,
+                traded_volumes: std::collections::BTreeMap::default(),
+                trade_source_watermark: revision,
+                top_of_book_only: false,
+            },
+        ))
     };
     harness
         .publications
-        .send(MarketWorkerMessage::OrderBook(frame(1, 1)))
+        .send(frame(1, 1))
         .expect("initial order book");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -553,7 +556,7 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
         .expect("selection");
     harness
         .publications
-        .send(MarketWorkerMessage::OrderBook(frame(sequence, 90)))
+        .send(frame(sequence, 90))
         .expect("early replacement frame");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -568,11 +571,11 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
         .expect("selection marker");
     harness
         .publications
-        .send(MarketWorkerMessage::OrderBook(frame(1, 99)))
+        .send(frame(1, 99))
         .expect("retired higher revision");
     harness
         .publications
-        .send(MarketWorkerMessage::OrderBook(frame(sequence, 2)))
+        .send(frame(sequence, 2))
         .expect("current frame");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 3);

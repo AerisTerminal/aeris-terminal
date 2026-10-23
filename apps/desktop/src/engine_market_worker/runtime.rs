@@ -451,18 +451,11 @@ fn apply_received_event(
     if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
         return Ok(false);
     }
-    if is_series_status(&event) {
-        deliver_runtime_series_event(
-            endpoint,
-            aeris_market_runtime::MarketConsumerEvent {
-                epoch: consumer_epoch,
-                value: event,
-            },
-        )?;
-        return Ok(false);
-    }
-    if is_bar_publication(&event) {
-        deliver_runtime_series_publication(
+    if is_series_status(&event)
+        || is_bar_publication(&event)
+        || matches!(event, MarketRuntimeEvent::OrderBookSnapshot(_))
+    {
+        deliver_fenced_pane_event(
             endpoint,
             aeris_market_runtime::MarketConsumerEvent {
                 epoch: consumer_epoch,
@@ -531,6 +524,23 @@ fn deliver_provider_catalog_event(
     }
 }
 
+fn deliver_fenced_pane_event(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+    received_unix_nanos: i64,
+) -> Result<(), String> {
+    match &event.value {
+        MarketRuntimeEvent::SeriesState(_) | MarketRuntimeEvent::DemandError(_) => {
+            deliver_runtime_series_event(endpoint, event)
+        }
+        MarketRuntimeEvent::SeriesSnapshot(_) | MarketRuntimeEvent::SeriesUpdate(_) => {
+            deliver_runtime_series_publication(endpoint, event, received_unix_nanos)
+        }
+        MarketRuntimeEvent::OrderBookSnapshot(_) => deliver_runtime_order_book(endpoint, event),
+        _ => Err("unexpected fenced pane event".into()),
+    }
+}
+
 fn is_series_status(event: &MarketRuntimeEvent) -> bool {
     matches!(
         event,
@@ -570,6 +580,28 @@ pub(super) fn deliver_runtime_series_publication(
             event,
             received_unix_nanos,
         })
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn deliver_runtime_order_book(
+    endpoint: &WorkerEndpoint,
+    event: aeris_market_runtime::MarketConsumerEvent,
+) -> Result<(), String> {
+    let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = &event.value else {
+        return Err("unexpected runtime order-book event".into());
+    };
+    if snapshot.consumer_id.0.get() != endpoint.consumer_id {
+        return Err("engine order-book consumer mismatched".into());
+    }
+    if snapshot.generation.0.get() < endpoint.active_generation {
+        return Ok(());
+    }
+    if snapshot.generation.0.get() > endpoint.active_generation {
+        return Err("engine order-book generation advanced unexpectedly".into());
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeOrderBook(event))
         .map_err(|error| error.to_string())
 }
 

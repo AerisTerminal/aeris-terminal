@@ -2,41 +2,12 @@
 
 use super::{
     ChartInterval, FeedConnectionState, InstallProviderInstrument, MarketDemandErrorScope,
-    MarketOrderBookSnapshot, MarketPublicationGeneration, MarketRecoveryFailure,
-    MarketRuntimeEvent, MarketService, MarketWorkerBootstrap, MarketWorkerMessage,
-    MarketWorkerSender, ProviderConnectionState, ProviderState, PushedEventContext,
-    ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams, demand_error,
-    provider_display_name, replay_runtime_snapshot, runtime_order_book_frame, series_key,
-    worker_identity,
+    MarketPublicationGeneration, MarketRecoveryFailure, MarketRuntimeEvent, MarketService,
+    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerSender, ProviderConnectionState,
+    ProviderState, PushedEventContext, ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams,
+    demand_error, provider_display_name, replay_runtime_snapshot, series_key, worker_identity,
 };
 use aeris_observability::diagnostic;
-
-fn apply_order_book_snapshot(
-    snapshot: &MarketOrderBookSnapshot,
-    context: &PushedEventContext<'_>,
-    messages: &MarketWorkerSender,
-) -> Result<(), String> {
-    let &PushedEventContext {
-        consumer_id,
-        active_generation,
-        instrument,
-        ..
-    } = context;
-    if snapshot.consumer_id.0.get() != consumer_id {
-        return Err("engine order-book consumer mismatched".to_string());
-    }
-    let Some(frame) = runtime_order_book_frame(snapshot, instrument, active_generation) else {
-        // Depth is an ancillary stream. A stale or malformed book
-        // image must never transition the price chart into a fatal
-        // state; retain the last valid Order Book frame and wait for the next
-        // canonical snapshot.
-        return Ok(());
-    };
-    messages
-        .send(MarketWorkerMessage::OrderBook(frame))
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
 
 pub(super) fn apply_pushed_event(
     event: MarketRuntimeEvent,
@@ -59,9 +30,6 @@ pub(super) fn apply_pushed_event(
                 messages,
             )?;
             Ok(())
-        }
-        MarketRuntimeEvent::OrderBookSnapshot(snapshot) => {
-            apply_order_book_snapshot(&snapshot, context, messages)
         }
         MarketRuntimeEvent::TradeTapeSnapshot(snapshot) => {
             if snapshot.consumer_id.0.get() != consumer_id {

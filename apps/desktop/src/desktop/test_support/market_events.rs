@@ -3,11 +3,12 @@
 use std::{num::NonZeroU64, sync::Arc};
 
 use aeris_contracts::{EngineFaultCode, FailureStage, SeriesLoadState};
-use aeris_market_data::{BarSeriesKey, MarketBar};
+use aeris_market_data::{BarSeriesKey, MarketBar, OrderBookPublication};
 use aeris_market_runtime::{
     CanonicalMarketSeriesSnapshot, MarketConsumerEvent, MarketConsumerId, MarketDemandError,
-    MarketDemandErrorScope, MarketGenerationId, MarketProviderGeneration, MarketRuntimeEvent,
-    MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, SeriesTailOperation,
+    MarketDemandErrorScope, MarketGenerationId, MarketOrderBookSnapshot, MarketProviderGeneration,
+    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate,
+    SeriesTailOperation,
     fence::{ConsumerTag, EpochSequence, Fenced},
 };
 
@@ -32,6 +33,22 @@ impl Default for FixtureMarketEvents {
 }
 
 impl FixtureMarketEvents {
+    #[must_use]
+    pub fn order_book(
+        &self,
+        selection: u64,
+        publication: OrderBookPublication,
+    ) -> MarketConsumerEvent {
+        Fenced {
+            epoch: self.envelope.epoch,
+            value: MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
+                consumer_id: self.consumer_id,
+                generation: Self::generation(selection),
+                publication,
+                display_depth: None,
+            }),
+        }
+    }
     #[must_use]
     pub fn new(consumer_id: MarketConsumerId) -> Self {
         Self {

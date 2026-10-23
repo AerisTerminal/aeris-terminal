@@ -4027,7 +4027,9 @@ impl WorkspaceSurface {
                     self.apply_market_session_status(status, cx);
                 }
             }
-            MarketWorkerMessage::OrderBook(frame) => self.apply_order_book_frame(frame, cx),
+            MarketWorkerMessage::RuntimeOrderBook(event) => {
+                self.apply_runtime_order_book(event, cx);
+            }
             MarketWorkerMessage::TradeTape(snapshot) => self.apply_trade_tape(snapshot, cx),
             MarketWorkerMessage::StudyOutput(snapshot) => {
                 self.apply_study_output_message(&snapshot, cx);
@@ -4151,6 +4153,36 @@ impl WorkspaceSurface {
             self.apply_trade_tape_to_chart(&snapshot, cx);
             self.trade_tape = Some(snapshot);
             cx.notify();
+        }
+    }
+
+    fn apply_runtime_order_book(
+        &mut self,
+        event: aeris_market_runtime::MarketConsumerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let aeris_market_runtime::MarketRuntimeEvent::OrderBookSnapshot(snapshot) = event.value
+        else {
+            diagnostic!("Aeris pane received an unexpected runtime order book event");
+            return;
+        };
+        if !self
+            .chart_pane_controller
+            .accept_publication(snapshot.generation.0.get())
+        {
+            return;
+        }
+        let Some(product) = &self.product else {
+            return;
+        };
+        // An ancillary malformed or stale image leaves the last valid depth
+        // visible; it must never put the price chart into an error state.
+        if let Some(frame) = engine_market_worker::runtime_order_book_frame(
+            &snapshot,
+            product,
+            snapshot.generation.0.get(),
+        ) {
+            self.apply_order_book_frame(frame, cx);
         }
     }
 

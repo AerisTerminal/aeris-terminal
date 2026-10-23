@@ -2935,69 +2935,86 @@ mod tests {
         );
     }
 
+    /// A real MNQ top-of-book fixture with accurate Rithmic integer-contract volumes.
+    fn mnq_top_of_book_snapshot(product: &InstallProviderInstrument) -> MarketOrderBookSnapshot {
+        MarketOrderBookSnapshot {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::MIN),
+            publication: OrderBookPublication {
+                provider_id: "rithmic".to_string(),
+                instrument_id: product.instrument_id.clone(),
+                entitlement_id: product.entitlement_id.clone(),
+                session_generation: 1,
+                revision: 1,
+                source_watermark: 1,
+                state: OrderBookState::Ready,
+                bids: vec![DepthLevel {
+                    price: 7_798_670,
+                    quantity: 653_408,
+                    order_count: None,
+                }],
+                asks: vec![DepthLevel {
+                    price: 7_798_671,
+                    quantity: 22_517_771,
+                    order_count: None,
+                }],
+                best_bid: Some(aeris_market_data::QuoteLevel {
+                    price: 7_798_670,
+                    quantity: Some(653_408),
+                    order_count: Some(3),
+                }),
+                best_ask: Some(aeris_market_data::QuoteLevel {
+                    price: 7_798_671,
+                    quantity: Some(22_517_771),
+                    order_count: Some(4),
+                }),
+                bbo_source_watermark: 2,
+                traded_volumes: BTreeMap::new(),
+                trade_source_watermark: 0,
+                top_of_book_only: false,
+            },
+            display_depth: None,
+        }
+    }
+
     /// The Rithmic Order Book panel stayed empty because the engine's order-book
     /// snapshot had no arm here: `OrderBook` was declared, coalesced, and
-    /// rendered, but never constructed. Levels are a real MNQ top-of-book fixture
-    /// with accurate Rithmic integer-contract volumes.
+    /// rendered, but never constructed.
     #[test]
     fn rithmic_order_book_snapshot_uses_the_consumers_selection_identity() {
         let mut product = default_product("MNQ");
         product.selection_generation = 9;
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let outcome = apply_pushed_event(
-            MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
-                consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                generation: MarketGenerationId(NonZeroU64::MIN),
-                publication: OrderBookPublication {
-                    provider_id: "rithmic".to_string(),
-                    instrument_id: product.instrument_id.clone(),
-                    entitlement_id: product.entitlement_id.clone(),
-                    session_generation: 1,
-                    revision: 1,
-                    source_watermark: 1,
-                    state: OrderBookState::Ready,
-                    bids: vec![DepthLevel {
-                        price: 7_798_670,
-                        quantity: 653_408,
-                        order_count: None,
-                    }],
-                    asks: vec![DepthLevel {
-                        price: 7_798_671,
-                        quantity: 22_517_771,
-                        order_count: None,
-                    }],
-                    best_bid: Some(aeris_market_data::QuoteLevel {
-                        price: 7_798_670,
-                        quantity: Some(653_408),
-                        order_count: Some(3),
-                    }),
-                    best_ask: Some(aeris_market_data::QuoteLevel {
-                        price: 7_798_671,
-                        quantity: Some(22_517_771),
-                        order_count: Some(4),
-                    }),
-                    bbo_source_watermark: 2,
-                    traded_volumes: BTreeMap::new(),
-                    trade_source_watermark: 0,
-                    top_of_book_only: false,
-                },
-                display_depth: None,
-            }),
-            &PushedEventContext {
-                consumer_id: 1,
-                active_generation: 1,
-                realtime: true,
-                instrument: &product,
-            },
-            &sender,
+        let endpoint = series_endpoint(sender, 1, 1);
+        let snapshot = mnq_top_of_book_snapshot(&product);
+        let deliver = |snapshot| {
+            runtime::deliver_runtime_order_book(
+                &endpoint,
+                fenced_event(MarketRuntimeEvent::OrderBookSnapshot(snapshot)),
+            )
+        };
+        let mut future = snapshot.clone();
+        future.generation = MarketGenerationId(NonZeroU64::new(2).expect("generation"));
+        assert_eq!(
+            deliver(future),
+            Err("engine order-book generation advanced unexpectedly".into())
         );
-        assert_eq!(outcome, Ok(()));
+        let mut wrong_consumer = snapshot.clone();
+        wrong_consumer.consumer_id = MarketConsumerId(NonZeroU64::new(2).expect("consumer"));
+        assert_eq!(
+            deliver(wrong_consumer),
+            Err("engine order-book consumer mismatched".into())
+        );
+        assert_eq!(deliver(snapshot), Ok(()));
         let (messages, _) = receiver.drain();
         let frame = messages
             .into_iter()
             .find_map(|message| match message {
-                MarketWorkerMessage::OrderBook(frame) => Some(frame),
+                MarketWorkerMessage::RuntimeOrderBook(Fenced {
+                    value: MarketRuntimeEvent::OrderBookSnapshot(snapshot),
+                    ..
+                }) => runtime_order_book_frame(&snapshot, &product, 1),
                 _ => None,
             })
             .expect("Rithmic depth must reach the Order Book panel");

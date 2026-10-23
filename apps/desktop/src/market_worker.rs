@@ -10,7 +10,6 @@ use aeris_contracts::{
     SelectProviderInstrument,
 };
 use aeris_market_data::ChartInterval;
-use aeris_market_data::OrderBookFrame;
 use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
@@ -274,6 +273,8 @@ pub enum MarketWorkerMessage {
         event: aeris_market_runtime::MarketConsumerEvent,
         received_unix_nanos: i64,
     },
+    /// Canonical depth stays in its coordinator envelope until pane projection.
+    RuntimeOrderBook(aeris_market_runtime::MarketConsumerEvent),
     StudyOutput(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),
@@ -303,7 +304,6 @@ pub enum MarketWorkerMessage {
         generation: u64,
         status: aeris_contracts::MarketSessionStatus,
     },
-    OrderBook(OrderBookFrame),
     TradeTape(MarketTradeTapeSnapshot),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     PriceAlertSyncFailed,
@@ -469,8 +469,8 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
         MarketWorkerMessage::RuntimeSeriesPublication { .. }
+            | MarketWorkerMessage::RuntimeOrderBook(_)
             | MarketWorkerMessage::StudyOutput(_)
-            | MarketWorkerMessage::OrderBook(_)
             | MarketWorkerMessage::TradeTape(_)
     )
 }
@@ -1506,10 +1506,10 @@ mod tests {
         InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
         SearchProviderInstruments, SelectProviderInstrument,
     };
-    use aeris_market_data::OrderBookFrame;
     use aeris_market_data::{
         BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
     };
+    use aeris_market_data::{OrderBookFrame, OrderBookPublication};
     use aeris_market_runtime::study::StudyInstanceId;
     use aeris_market_runtime::{
         MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeSnapshot,
@@ -1541,6 +1541,42 @@ mod tests {
             } => Some(update.operation),
             _ => None,
         }
+    }
+
+    fn book_message(frame: OrderBookFrame) -> MarketWorkerMessage {
+        let event = FixtureMarketEvents::default().order_book(
+            frame.selection_generation,
+            OrderBookPublication {
+                provider_id: frame.provider_id,
+                instrument_id: frame.instrument_id,
+                entitlement_id: frame.entitlement_id,
+                session_generation: frame.session_generation,
+                revision: frame.revision,
+                source_watermark: frame.source_watermark,
+                state: frame.state,
+                bids: vec![],
+                asks: vec![],
+                best_bid: None,
+                best_ask: None,
+                bbo_source_watermark: frame.bbo_source_watermark,
+                traded_volumes: frame.traded_volumes,
+                trade_source_watermark: frame.trade_source_watermark,
+                top_of_book_only: frame.top_of_book_only,
+            },
+        );
+        MarketWorkerMessage::RuntimeOrderBook(event)
+    }
+
+    fn book_snapshot(
+        message: &MarketWorkerMessage,
+    ) -> Option<&aeris_market_runtime::MarketOrderBookSnapshot> {
+        let MarketWorkerMessage::RuntimeOrderBook(event) = message else {
+            return None;
+        };
+        let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = &event.value else {
+            return None;
+        };
+        Some(snapshot)
     }
 
     fn study_series() -> BarSeriesKey {
@@ -2936,15 +2972,12 @@ mod tests {
         };
         assert!(
             sender
-                .send(MarketWorkerMessage::OrderBook(frame(
-                    3,
-                    OrderBookState::Ready,
-                )))
+                .send(book_message(frame(3, OrderBookState::Ready,)))
                 .is_ok()
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::OrderBook(frame(
+                .send(book_message(frame(
                     2,
                     OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap),
                 )))
@@ -2954,12 +2987,12 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::OrderBook(first),
-                MarketWorkerMessage::OrderBook(second),
-            ] if first.revision == 3
-                && first.state == OrderBookState::Ready
-                && second.revision == 2
-                && second.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
+                first,
+                second,
+            ] if book_snapshot(first).is_some_and(|item| item.publication.revision == 3
+                && item.publication.state == OrderBookState::Ready)
+                && book_snapshot(second).is_some_and(|item| item.publication.revision == 2
+                && item.publication.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap))
         ));
     }
 
@@ -2988,17 +3021,18 @@ mod tests {
             rows: Vec::new(),
         };
         sender
-            .send(MarketWorkerMessage::OrderBook(frame(2)))
+            .send(book_message(frame(2)))
             .expect("first frame queues");
         sender
-            .send(MarketWorkerMessage::OrderBook(frame(3)))
+            .send(book_message(frame(3)))
             .expect("newer frame queues behind it");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::OrderBook(first), MarketWorkerMessage::OrderBook(second)]
-                if first.revision == 2 && second.revision == 3
+            [first, second]
+                if book_snapshot(first).is_some_and(|item| item.publication.revision == 2)
+                    && book_snapshot(second).is_some_and(|item| item.publication.revision == 3)
         ));
     }
 
@@ -3060,28 +3094,28 @@ mod tests {
             rows: Vec::new(),
         };
         sender
-            .send(MarketWorkerMessage::OrderBook(frame(7, 99, 40)))
+            .send(book_message(frame(7, 99, 40)))
             .expect("old session frame queues");
         sender
-            .send(MarketWorkerMessage::OrderBook(frame(8, 1, 1)))
+            .send(book_message(frame(8, 1, 1)))
             .expect("new session frame queues");
         sender
-            .send(MarketWorkerMessage::OrderBook(frame(7, 100, 99)))
+            .send(book_message(frame(7, 100, 99)))
             .expect("late old session frame is safely ignored");
 
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::OrderBook(first),
-                MarketWorkerMessage::OrderBook(second),
-                MarketWorkerMessage::OrderBook(third),
-            ] if first.session_generation == 7
-                && first.revision == 40
-                && second.session_generation == 8
-                && second.revision == 1
-                && third.session_generation == 7
-                && third.revision == 99
+                first,
+                second,
+                third,
+            ] if book_snapshot(first).is_some_and(|item| item.publication.session_generation == 7
+                && item.publication.revision == 40)
+                && book_snapshot(second).is_some_and(|item| item.publication.session_generation == 8
+                    && item.publication.revision == 1)
+                && book_snapshot(third).is_some_and(|item| item.publication.session_generation == 7
+                    && item.publication.revision == 99)
         ));
     }
 
