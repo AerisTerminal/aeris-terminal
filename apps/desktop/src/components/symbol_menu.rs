@@ -146,8 +146,8 @@ pub(super) fn instrument_dialog_content(
                             .label(format!("Connect {provider_name} in Accounts"))
                             .on_click(move |_, window, cx| {
                                 accounts.update(cx, |surface, surface_cx| {
-                                    surface.open_chrome_overlay(
-                                        ChromeOverlay::Accounts,
+                                    surface.open_accounts_panel(
+                                        accounts_panel::AccountsTab::Connections,
                                         window,
                                         surface_cx,
                                     );

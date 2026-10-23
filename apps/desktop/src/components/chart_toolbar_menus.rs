@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    connection: &DataConnections,
+    connections: accounts_panel::ConnectionsView<'_>,
     theme: &AerisTheme,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
@@ -16,7 +16,6 @@ pub(super) fn chrome_overlay_layer(
             | ChromeOverlay::QuickTimeframe
             | ChromeOverlay::ChartType
             | ChromeOverlay::TimeZone
-            | ChromeOverlay::Accounts
     );
     let anchored_menu = matches!(
         overlay,
@@ -40,7 +39,7 @@ pub(super) fn chrome_overlay_layer(
         app_state,
         app,
         overlay,
-        connection,
+        connections,
         chrome_menu_extent(viewport, chrome_height),
         theme,
         cx,
@@ -82,9 +81,11 @@ pub(super) fn chrome_overlay_layer(
                     frameless: menu_overlay,
                     radius: if matches!(
                         overlay,
-                        ChromeOverlay::Instrument | ChromeOverlay::Indicator
+                        ChromeOverlay::Instrument
+                            | ChromeOverlay::Indicator
+                            | ChromeOverlay::Accounts
                     ) {
-                        RadiusToken::Medium
+                        RadiusToken::Compact
                     } else {
                         RadiusToken::Default
                     },
@@ -212,7 +213,7 @@ pub(super) fn chrome_overlay_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     overlay: ChromeOverlay,
-    connection: &DataConnections,
+    connections: accounts_panel::ConnectionsView<'_>,
     extent: super::chrome_menu::ChromeMenuExtent,
     theme: &AerisTheme,
     cx: &App,
@@ -241,7 +242,7 @@ pub(super) fn chrome_overlay_content(
                 },
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
-                connection_missing: connection.disconnected(app_state.symbol_provider),
+                connection_missing: connections.data.disconnected(app_state.symbol_provider),
                 provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
                 markets_flyout_open: app_state
                     .menu_state
@@ -299,10 +300,14 @@ pub(super) fn chrome_overlay_content(
         ChromeOverlay::TimeZone => {
             time_zone_overlay_content(app_state, app, theme, cx).into_any_element()
         }
-        ChromeOverlay::Accounts => {
-            accounts_panel::accounts_panel_content(app_state, app, connection, theme)
-                .into_any_element()
-        }
+        ChromeOverlay::Accounts => accounts_panel::accounts_panel_content(
+            app_state,
+            app,
+            connections,
+            accounts_panel::accounts_panel_size(extent),
+            theme,
+        )
+        .into_any_element(),
     }
 }
 

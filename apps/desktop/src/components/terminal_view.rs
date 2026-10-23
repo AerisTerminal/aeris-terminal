@@ -474,6 +474,7 @@ impl TerminalApp {
 
     fn rendered_chrome_overlay(
         &self,
+        terminal: &Entity<Self>,
         active: &Entity<WorkspaceSurface>,
         title_bar_row_height: f32,
         window: &Window,
@@ -482,7 +483,11 @@ impl TerminalApp {
         chrome_overlay_layer(
             active.read(cx),
             active,
-            &self.data_connections,
+            accounts_panel::ConnectionsView {
+                terminal,
+                data: &self.data_connections,
+                rithmic_login: &self.rithmic_login,
+            },
             &self.theme,
             chart_chrome::CHART_CHROME_HEIGHT + title_bar_row_height,
             window.viewport_size(),
@@ -581,6 +586,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::trading_kill_switch))
             .on_action(cx.listener(Self::open_command_palette))
             .on_action(cx.listener(Self::connect_rithmic))
+            .on_action(cx.listener(Self::cancel_rithmic_login))
             .on_action(cx.listener(Self::disconnect_rithmic))
             .on_action(cx.listener(Self::refresh_broker_connections))
     }
@@ -641,14 +647,8 @@ impl TerminalApp {
         // slides; its animation redraws this view every frame, so the anchor follows it.
         let title_bar_row_height =
             placement.row_height(self.frameless_title_bar.visibility_at(now));
-        let overlay = self.rendered_chrome_overlay(&active, title_bar_row_height, window, cx);
-        let account_dialog = accounts_panel::account_dialog_layer(workspace, &active, &self.theme);
-        let rithmic_login_dialog = rithmic_login::rithmic_login_dialog_layer(
-            &terminal,
-            &self.rithmic_login,
-            &self.data_connections.rithmic,
-            &self.theme,
-        );
+        let overlay =
+            self.rendered_chrome_overlay(&terminal, &active, title_bar_row_height, window, cx);
         let (context_menu, settings_menu) = self.chart_surface_menus(
             &terminal,
             pane_count,
@@ -717,8 +717,6 @@ impl TerminalApp {
             .children(fullscreen_hint)
             .children(overlay)
             .children(frameless_reveal_zone)
-            .children(account_dialog)
-            .children(rithmic_login_dialog)
             .children(context_menu)
             .children(settings_menu)
             .children(drawing_tool_menu)

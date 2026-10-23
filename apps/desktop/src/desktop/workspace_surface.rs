@@ -3117,6 +3117,7 @@ impl WorkspaceSurface {
                 // An unfinished form or confirmation never outlives the panel that owns it.
                 self.trading_pnl.account_creator = None;
                 self.trading_pnl.account_delete_confirmation = None;
+                window.dispatch_action(Box::new(CancelRithmicLogin), cx);
             }
             Some(
                 ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType,

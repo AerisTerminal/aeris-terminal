@@ -985,7 +985,7 @@ fn chart_settings_panel(
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
-    let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
+    let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
     popover_surface(div().id("chart_settings_menu"), theme, radius)
         .absolute()
         .left(bounds.origin.x)

@@ -506,8 +506,8 @@ const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIME_ZONE_MENU_WIDTH: f32 = 320.0;
 const TIME_ZONE_MENU_MAX_HEIGHT: f32 = 520.0;
-const ACCOUNTS_PANEL_WIDTH: f32 = 380.0;
-const ACCOUNTS_PANEL_MAX_HEIGHT: f32 = 560.0;
+const ACCOUNTS_PANEL_WIDTH: f32 = 680.0;
+const ACCOUNTS_PANEL_HEIGHT: f32 = 520.0;
 const TIMEFRAME_FLYOUT_WIDTH: f32 = 136.0;
 const TIMEFRAME_FLYOUT_GAP: f32 = 5.0;
 const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
@@ -576,6 +576,7 @@ actions!(
         TradingKillSwitch,
         OpenCommandPalette,
         ConnectRithmic,
+        CancelRithmicLogin,
         DisconnectRithmic,
         RefreshBrokerConnections,
     ]
@@ -922,7 +923,7 @@ struct TradingPnlState {
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     market_error: Option<String>,
     order_entry: TradingOrderEntryState,
-    account_creator: Option<PracticeAccountDialogState>,
+    account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
     refresh_pending: bool,
     next_refresh: Instant,
@@ -1112,7 +1113,8 @@ impl Default for TradingOrderEntryState {
     }
 }
 
-struct PracticeAccountDialogState {
+/// The inline new-practice-account form in the Accounts panel's Trading accounts tab.
+struct PracticeAccountFormState {
     name: Entity<InputState>,
     equity: Entity<InputState>,
 }
@@ -1487,6 +1489,8 @@ struct WorkspaceMenuState {
     chrome_list_keyboard: bool,
     /// Header Accounts trigger, measured each frame so its panel opens beneath it.
     accounts_trigger_bounds: Option<Bounds<Pixels>>,
+    /// The Accounts panel section shown when it opens; kept across openings.
+    accounts_tab: accounts_panel::AccountsTab,
     /// Why the last quick-timeframe submission was rejected; cleared by an edit or close.
     quick_timeframe_error: Option<QuickTimeframeError>,
     /// The symbol menu's provider and category dropdown, opened from the search-field logo.

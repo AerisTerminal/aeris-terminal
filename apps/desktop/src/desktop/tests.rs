@@ -1072,6 +1072,73 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn accounts_panel_opens_on_a_tab_and_drops_forms_when_leaving_it(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, surface_cx| {
+                surface.open_accounts_panel(
+                    accounts_panel::AccountsTab::TradingAccounts,
+                    window,
+                    surface_cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let name = cx.new(|input_cx| InputState::new(window, input_cx));
+            let equity = cx.new(|input_cx| InputState::new(window, input_cx));
+            surface.update(cx, |surface, surface_cx| {
+                assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::Accounts));
+                assert_eq!(
+                    surface.menu_state.accounts_tab,
+                    accounts_panel::AccountsTab::TradingAccounts
+                );
+                surface.trading_pnl.account_creator =
+                    Some(PracticeAccountFormState { name, equity });
+                surface.open_accounts_panel(
+                    accounts_panel::AccountsTab::Connections,
+                    window,
+                    surface_cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(
+                surface.chrome_overlay,
+                Some(ChromeOverlay::Accounts),
+                "switching tabs keeps the panel open"
+            );
+            assert_eq!(
+                surface.menu_state.accounts_tab,
+                accounts_panel::AccountsTab::Connections
+            );
+            assert!(
+                surface.trading_pnl.account_creator.is_none(),
+                "an unfinished form never follows the panel to another tab"
+            );
+        });
+    }
+
+    #[test]
+    fn accounts_panel_shrinks_to_the_room_under_the_header() {
+        let roomy = accounts_panel::accounts_panel_size(chrome_menu_extent(
+            size(px(1600.0), px(1000.0)),
+            80.0,
+        ));
+        assert_eq!(
+            roomy,
+            size(px(ACCOUNTS_PANEL_WIDTH), px(ACCOUNTS_PANEL_HEIGHT))
+        );
+        let small = accounts_panel::accounts_panel_size(chrome_menu_extent(
+            size(px(500.0), px(400.0)),
+            80.0,
+        ));
+        assert!(small.width < px(500.0) && small.height < px(400.0 - 80.0));
+    }
+
+    #[gpui::test]
     fn practice_account_name_input_does_not_open_symbol_typeahead(cx: &mut TestAppContext) {
         let (surface, _requests, _publications, cx) = harness(cx);
         cx.update(|window, cx| {
@@ -1080,7 +1147,7 @@ mod timeframe_input {
             name.update(cx, |input, input_cx| input.focus(window, input_cx));
             surface.update(cx, |surface, surface_cx| {
                 surface.trading_pnl.account_creator =
-                    Some(PracticeAccountDialogState { name, equity });
+                    Some(PracticeAccountFormState { name, equity });
                 surface_cx.notify();
             });
         });
@@ -1095,7 +1162,7 @@ mod timeframe_input {
                 .trading_pnl
                 .account_creator
                 .as_ref()
-                .expect("practice dialog remains open");
+                .expect("practice account form remains open");
             assert_eq!(creator.name.read(cx).value().as_ref(), "a");
         });
     }

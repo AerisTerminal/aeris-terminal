@@ -15,6 +15,13 @@ pub(super) struct ChromeMenuExtent {
     pub(super) list_height: f32,
 }
 
+impl ChromeMenuExtent {
+    /// Outer height: the search header above the list.
+    pub(super) fn height(self) -> f32 {
+        CHROME_MENU_SEARCH_HEIGHT + self.list_height
+    }
+}
+
 /// Size the symbol and indicator menus to the surface they open over rather than to a fixed
 /// design width. Both keep the 960x564 design ceiling on a roomy window and shrink from there,
 /// so a narrow or short viewport gets a smaller menu instead of a clipped one.
@@ -44,10 +51,10 @@ pub(super) fn chrome_menu_surface(
         .flex()
         .flex_col()
         .w(px(extent.width))
-        .h(px(CHROME_MENU_SEARCH_HEIGHT + extent.list_height))
+        .h(px(extent.height()))
         .max_h(px(CHROME_MENU_MAX_HEIGHT))
         .max_h_full()
-        .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
+        .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
         .overflow_hidden()
         .font_family(aeris_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
@@ -174,8 +181,8 @@ pub(super) fn scrollable_menu_body(
         .w_full()
         .h(px(extent.list_height))
         .max_h(px(extent.list_height))
-        .rounded_bl(px(f32::from(RadiusToken::Medium.logical_pixels())))
-        .rounded_br(px(f32::from(RadiusToken::Medium.logical_pixels())))
+        .rounded_bl(px(f32::from(RadiusToken::Compact.logical_pixels())))
+        .rounded_br(px(f32::from(RadiusToken::Compact.logical_pixels())))
         .overflow_hidden()
         .child(
             tracked_overflow_y_scrollbar(body, scroll)

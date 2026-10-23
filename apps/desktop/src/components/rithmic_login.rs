@@ -1,8 +1,8 @@
-//! Rithmic login: the Accounts-panel state for the saved login, and the dialog that picks a
-//! Rithmic server and system and takes the user ID and password.
+//! Rithmic login: the Accounts-panel state for the saved login, and the inline form in its
+//! Connections tab that picks a Rithmic server and system and takes the user ID and password.
 //!
 //! Presentation only. The market runtime owns the server catalog, system discovery, the
-//! sign-in check and the saved login. The password goes from the dialog straight to the
+//! sign-in check and the saved login. The password goes from the form straight to the
 //! runtime, which keeps it only in the native credential vault; nothing here can read it back.
 
 use super::*;
@@ -82,16 +82,16 @@ pub(super) enum RithmicLoginOperation {
     Forgetting,
 }
 
-/// The open login dialog and the background work it started. One login change and one system
+/// The open login form and the background work it started. One login change and one system
 /// discovery run at a time.
 #[derive(Default)]
 pub(super) struct RithmicLoginFlow {
-    dialog: Option<RithmicLoginDialog>,
+    form: Option<RithmicLoginForm>,
     operation: Option<gpui::Task<()>>,
     discovery: Option<gpui::Task<()>>,
 }
 
-struct RithmicLoginDialog {
+struct RithmicLoginForm {
     server: RithmicServer,
     systems: RithmicSystems,
     system: Option<String>,
@@ -131,7 +131,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.rithmic_login.dialog.is_some() {
+        if self.rithmic_login.form.is_some() {
             return;
         }
         let saved = self.data_connections.rithmic.saved_login().cloned();
@@ -142,7 +142,7 @@ impl TerminalApp {
                 .masked(true)
         });
         user.update(cx, |input, input_cx| input.focus(window, input_cx));
-        self.rithmic_login.dialog = Some(RithmicLoginDialog {
+        self.rithmic_login.form = Some(RithmicLoginForm {
             server: saved
                 .as_ref()
                 .map_or(RithmicServer::CORE, |login| login.server),
@@ -171,8 +171,19 @@ impl TerminalApp {
         self.run_rithmic_login_operation(RithmicLoginOperation::Checking, None, window, cx);
     }
 
-    fn close_rithmic_login_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.rithmic_login.dialog.take().is_some() {
+    /// Drops an unfinished login form when the Accounts panel closes or leaves Connections.
+    /// A sign-in already sent keeps running; its outcome lands on the connection card.
+    pub(super) fn cancel_rithmic_login(
+        &mut self,
+        _: &CancelRithmicLogin,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_rithmic_login_form(cx);
+    }
+
+    fn close_rithmic_login_form(&mut self, cx: &mut Context<Self>) {
+        if self.rithmic_login.form.take().is_some() {
             cx.notify();
         }
     }
@@ -182,55 +193,55 @@ impl TerminalApp {
         dropdown: RithmicLoginDropdown,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.rithmic_login.dialog {
-            dialog.open_dropdown = (dialog.open_dropdown != Some(dropdown)).then_some(dropdown);
+        if let Some(form) = &mut self.rithmic_login.form {
+            form.open_dropdown = (form.open_dropdown != Some(dropdown)).then_some(dropdown);
             cx.notify();
         }
     }
 
     fn close_rithmic_login_dropdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.rithmic_login.dialog
-            && dialog.open_dropdown.take().is_some()
+        if let Some(form) = &mut self.rithmic_login.form
+            && form.open_dropdown.take().is_some()
         {
             cx.notify();
         }
     }
 
     fn select_rithmic_server(&mut self, server: RithmicServer, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.rithmic_login.dialog else {
+        let Some(form) = &mut self.rithmic_login.form else {
             return;
         };
-        dialog.open_dropdown = None;
-        if dialog.server != server {
-            dialog.server = server;
-            dialog.system = None;
-            dialog.message = None;
+        form.open_dropdown = None;
+        if form.server != server {
+            form.server = server;
+            form.system = None;
+            form.message = None;
             self.discover_rithmic_systems(cx);
         }
         cx.notify();
     }
 
     fn select_rithmic_system(&mut self, system: String, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.rithmic_login.dialog {
-            dialog.open_dropdown = None;
-            dialog.system = Some(system);
-            dialog.message = None;
+        if let Some(form) = &mut self.rithmic_login.form {
+            form.open_dropdown = None;
+            form.system = Some(system);
+            form.message = None;
             cx.notify();
         }
     }
 
-    /// Asks the runtime which systems the dialog's server offers. A discovery already running
-    /// is never doubled; when it finishes for a server the dialog has since left, it starts
+    /// Asks the runtime which systems the form's server offers. A discovery already running
+    /// is never doubled; when it finishes for a server the form has since left, it starts
     /// again for the current one.
     fn discover_rithmic_systems(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.rithmic_login.dialog else {
+        let Some(form) = &mut self.rithmic_login.form else {
             return;
         };
-        dialog.systems = RithmicSystems::Discovering;
+        form.systems = RithmicSystems::Discovering;
         if self.rithmic_login.discovery.is_some() {
             return;
         }
-        let server = dialog.server;
+        let server = form.server;
         let market = self.lifecycle.market().clone();
         let work = cx
             .background_executor()
@@ -253,19 +264,19 @@ impl TerminalApp {
         result: Result<Vec<String>, String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(dialog) = &mut self.rithmic_login.dialog else {
+        let Some(form) = &mut self.rithmic_login.form else {
             return;
         };
-        if dialog.server != server {
+        if form.server != server {
             self.discover_rithmic_systems(cx);
             return;
         }
-        dialog.systems = match result {
+        form.systems = match result {
             Ok(systems) if systems.is_empty() => {
                 RithmicSystems::Failed("This server offers no Rithmic systems".to_string())
             }
             Ok(systems) => {
-                dialog.system = retained_system(dialog.system.take(), &systems);
+                form.system = retained_system(form.system.take(), &systems);
                 RithmicSystems::Listed(systems)
             }
             Err(error) => RithmicSystems::Failed(error),
@@ -277,20 +288,20 @@ impl TerminalApp {
         if self.rithmic_login.operation.is_some() {
             return;
         }
-        let Some(dialog) = &mut self.rithmic_login.dialog else {
+        let Some(form) = &mut self.rithmic_login.form else {
             return;
         };
-        let Some(system_name) = dialog.system.clone() else {
-            dialog.message = Some("Choose a Rithmic system".to_string());
+        let Some(system_name) = form.system.clone() else {
+            form.message = Some("Choose a Rithmic system".to_string());
             cx.notify();
             return;
         };
-        dialog.message = None;
+        form.message = None;
         let login = RithmicLoginInput {
-            server: dialog.server,
+            server: form.server,
             system_name,
-            user: Zeroizing::new(dialog.user.read(cx).value().to_string()),
-            password: Zeroizing::new(dialog.password.read(cx).value().to_string()),
+            user: Zeroizing::new(form.user.read(cx).value().to_string()),
+            password: Zeroizing::new(form.password.read(cx).value().to_string()),
         };
         self.run_rithmic_login_operation(RithmicLoginOperation::SigningIn, Some(login), window, cx);
     }
@@ -388,9 +399,9 @@ impl TerminalApp {
                 }
                 view.saved = saved.map_or(SavedRithmicLogin::Missing, SavedRithmicLogin::Saved);
                 // A new login goes straight to choosing one of its markets, unless the
-                // dialog was cancelled while signing in.
+                // form was cancelled while signing in.
                 if operation == RithmicLoginOperation::SigningIn
-                    && self.rithmic_login.dialog.take().is_some()
+                    && self.rithmic_login.form.take().is_some()
                 {
                     self.active_surface().update(cx, |surface, surface_cx| {
                         surface.choose_symbol_provider(
@@ -403,8 +414,8 @@ impl TerminalApp {
                 }
             }
             (RithmicLoginOperation::SigningIn, Err(error)) => {
-                if let Some(dialog) = &mut self.rithmic_login.dialog {
-                    dialog.message = Some(error);
+                if let Some(form) = &mut self.rithmic_login.form {
+                    form.message = Some(error);
                 } else {
                     view.message = Some(error);
                     view.failed = true;
@@ -425,11 +436,11 @@ impl TerminalApp {
     }
 }
 
-fn signing_in_status(dialog: &RithmicLoginDialog) -> String {
+fn signing_in_status(form: &RithmicLoginForm) -> String {
     format!(
         "Signing in to {} on {}…",
-        dialog.system.as_deref().unwrap_or("Rithmic"),
-        dialog.server.label()
+        form.system.as_deref().unwrap_or("Rithmic"),
+        form.server.label()
     )
 }
 
@@ -469,58 +480,73 @@ pub(super) fn rithmic_marks(theme: &AerisTheme) -> impl IntoElement + use<> {
         .child(mark(assets::AttributionMark::PoweredByOmne))
 }
 
-/// The login dialog, centered over the whole window above the Accounts panel that opened it.
-pub(super) fn rithmic_login_dialog_layer(
+/// Whether the inline login form is open in the Connections tab.
+pub(super) const fn rithmic_login_form_open(flow: &RithmicLoginFlow) -> bool {
+    flow.form.is_some()
+}
+
+/// The inline login form inside the Rithmic connection card. Escape inside it cancels the
+/// form without closing the Accounts panel around it.
+pub(super) fn rithmic_login_form(
     terminal: &Entity<TerminalApp>,
     flow: &RithmicLoginFlow,
     view: &RithmicLoginView,
     theme: &AerisTheme,
 ) -> Option<AnyElement> {
-    let dialog = flow.dialog.as_ref()?;
-    let dismiss = terminal.clone();
+    let form = flow.form.as_ref()?;
+    let escape = terminal.clone();
     let cancel = terminal.clone();
     let save = terminal.clone();
     let signing_in = view.operation == Some(RithmicLoginOperation::SigningIn);
     Some(
-        Dialog::new(
-            "rithmic_login_dialog",
-            DialogSize::Md,
-            theme,
-            move |_, cx| {
-                dismiss.update(cx, TerminalApp::close_rithmic_login_dialog);
-            },
-        )
-        .title("Connect Rithmic")
-        .subtitle(
-            div()
-                .text_sm()
-                .text_color(gpui_color(theme.colors.text_secondary))
-                .child("Use the Rithmic login from your broker or prop firm."),
-        )
-        .child(rithmic_login_dialog_body(
-            terminal, dialog, signing_in, theme,
-        ))
-        .action(
-            Button::new("rithmic_login_cancel", theme)
-                .variant(ButtonVariant::Outline)
-                .label("Cancel")
-                .on_click(move |_, _, cx| {
-                    cancel.update(cx, TerminalApp::close_rithmic_login_dialog);
-                }),
-        )
-        .action(
-            Button::new("rithmic_login_save", theme)
-                .variant(ButtonVariant::Primary)
-                .label(if signing_in { "Signing in" } else { "Connect" })
-                .loading(signing_in)
-                .disabled(signing_in || dialog.system.is_none())
-                .on_click(move |_, window, cx| {
-                    save.update(cx, |terminal, terminal_cx| {
-                        terminal.sign_in_rithmic(window, terminal_cx);
-                    });
-                }),
-        )
-        .into_any_element(),
+        div()
+            .id("rithmic_login_form")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .pt_2()
+            .border_t(px(theme.dimensions.border_width))
+            .border_color(gpui_color(theme.colors.border_secondary))
+            .on_key_down(move |event, _, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    escape.update(cx, TerminalApp::close_rithmic_login_form);
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(gpui_color(theme.colors.text_secondary))
+                    .child("Use the Rithmic login from your broker or prop firm."),
+            )
+            .child(rithmic_login_form_body(terminal, form, signing_in, theme))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("rithmic_login_cancel", theme)
+                            .variant(ButtonVariant::Outline)
+                            .label("Cancel")
+                            .on_click(move |_, _, cx| {
+                                cancel.update(cx, TerminalApp::close_rithmic_login_form);
+                            }),
+                    )
+                    .child(
+                        Button::new("rithmic_login_save", theme)
+                            .variant(ButtonVariant::Primary)
+                            .label(if signing_in { "Signing in" } else { "Connect" })
+                            .loading(signing_in)
+                            .disabled(signing_in || form.system.is_none())
+                            .on_click(move |_, window, cx| {
+                                save.update(cx, |terminal, terminal_cx| {
+                                    terminal.sign_in_rithmic(window, terminal_cx);
+                                });
+                            }),
+                    ),
+            )
+            .into_any_element(),
     )
 }
 
@@ -531,9 +557,9 @@ fn field_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
         .child(label)
 }
 
-fn rithmic_login_dialog_body(
+fn rithmic_login_form_body(
     terminal: &Entity<TerminalApp>,
-    dialog: &RithmicLoginDialog,
+    form: &RithmicLoginForm,
     signing_in: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
@@ -543,10 +569,10 @@ fn rithmic_login_dialog_body(
         .flex_col()
         .gap_2()
         .child(field_label("Server", theme))
-        .child(server_dropdown(terminal, dialog, theme))
+        .child(server_dropdown(terminal, form, theme))
         .child(field_label("System", theme))
-        .child(system_dropdown(terminal, dialog, theme))
-        .children(match &dialog.systems {
+        .child(system_dropdown(terminal, form, theme))
+        .children(match &form.systems {
             RithmicSystems::Failed(error) => {
                 let retry = terminal.clone();
                 Some(
@@ -578,9 +604,9 @@ fn rithmic_login_dialog_body(
             RithmicSystems::Discovering | RithmicSystems::Listed(_) => None,
         })
         .child(field_label("User ID", theme))
-        .child(Input::new(&dialog.user).platform(theme))
+        .child(Input::new(&form.user).platform(theme))
         .child(field_label("Password", theme))
-        .child(Input::new(&dialog.password).platform(theme))
+        .child(Input::new(&form.password).platform(theme))
         .child(
             div()
                 .mt_1()
@@ -600,15 +626,14 @@ fn rithmic_login_dialog_body(
             div()
                 .text_sm()
                 .text_color(gpui_color(colors.text_secondary))
-                .child(signing_in_status(dialog))
+                .child(signing_in_status(form))
         }))
-        .children(dialog.message.as_ref().map(|message| {
+        .children(form.message.as_ref().map(|message| {
             div()
                 .text_sm()
                 .text_color(gpui_color(colors.danger))
                 .child(message.clone())
         }))
-        .child(div().mt_1().child(rithmic_marks(theme)))
 }
 
 fn dropdown_trigger(
@@ -667,10 +692,10 @@ fn select_menu(id: &'static str, theme: &AerisTheme) -> MenuPanel {
 
 fn server_dropdown(
     terminal: &Entity<TerminalApp>,
-    dialog: &RithmicLoginDialog,
+    form: &RithmicLoginForm,
     theme: &AerisTheme,
 ) -> MenuAnchor {
-    let open = dialog.open_dropdown == Some(RithmicLoginDropdown::Server);
+    let open = form.open_dropdown == Some(RithmicLoginDropdown::Server);
     let menu = open.then(|| {
         select_menu("rithmic_login_server_menu", theme).children(
             RithmicServer::all().enumerate().map(|(index, server)| {
@@ -680,7 +705,7 @@ fn server_dropdown(
                     server.label(),
                     theme,
                 )
-                .checked(dialog.server == server)
+                .checked(form.server == server)
                 .on_click(move |_, _, cx| {
                     choose.update(cx, |terminal, terminal_cx| {
                         terminal.select_rithmic_server(server, terminal_cx);
@@ -696,7 +721,7 @@ fn server_dropdown(
             terminal,
             RithmicLoginDropdown::Server,
             "rithmic_login_server_select",
-            dialog.server.label().to_string(),
+            form.server.label().to_string(),
             open,
             theme,
         ),
@@ -706,14 +731,14 @@ fn server_dropdown(
 
 fn system_dropdown(
     terminal: &Entity<TerminalApp>,
-    dialog: &RithmicLoginDialog,
+    form: &RithmicLoginForm,
     theme: &AerisTheme,
 ) -> MenuAnchor {
-    let systems = match &dialog.systems {
+    let systems = match &form.systems {
         RithmicSystems::Listed(systems) => systems.as_slice(),
         RithmicSystems::Discovering | RithmicSystems::Failed(_) => &[],
     };
-    let open = dialog.open_dropdown == Some(RithmicLoginDropdown::System) && !systems.is_empty();
+    let open = form.open_dropdown == Some(RithmicLoginDropdown::System) && !systems.is_empty();
     let menu = open.then(|| {
         select_menu("rithmic_login_system_menu", theme).children(systems.iter().enumerate().map(
             |(index, system)| {
@@ -724,7 +749,7 @@ fn system_dropdown(
                     system.clone(),
                     theme,
                 )
-                .checked(dialog.system.as_ref() == Some(system))
+                .checked(form.system.as_ref() == Some(system))
                 .on_click(move |_, _, cx| {
                     let chosen = chosen.clone();
                     choose.update(cx, |terminal, terminal_cx| {
@@ -734,7 +759,7 @@ fn system_dropdown(
             },
         ))
     });
-    let label = match (&dialog.systems, &dialog.system) {
+    let label = match (&form.systems, &form.system) {
         (RithmicSystems::Discovering, _) => "Finding systems on this server…".to_string(),
         (_, Some(system)) => system.clone(),
         (RithmicSystems::Listed(_), None) => "Choose a system".to_string(),
@@ -748,7 +773,7 @@ fn system_dropdown(
         open,
         theme,
     )
-    .loading(matches!(dialog.systems, RithmicSystems::Discovering))
+    .loading(matches!(form.systems, RithmicSystems::Discovering))
     .disabled(systems.is_empty());
     select_field(terminal, "rithmic_login_system_field", trigger, menu)
 }
