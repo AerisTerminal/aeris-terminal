@@ -1757,7 +1757,14 @@ Status: pending
     exposed this scheduling race in the subtree checkpoint test, now covered
     by the same fixture policy. The offline-lease
     test installs the cached view before the startup fetch instead of racing
-    that fetch with an insufficient idle-poll clock rewind. M6.6 remains open.
+    that fetch with an insufficient idle-poll clock rewind. Evidence: both
+    focused tests passed six successive runs each, the default-parallel
+    market-runtime library suite passed three successive runs (374 passed,
+    four ignored each), and the default-parallel full workspace suite passed
+    twice after the fix; fmt, workspace check, strict Clippy and naming check
+    also passed. The first pre-fix gate on this session exposed the same race
+    in `subtree_checkpoint_restores_state_outputs_without_rewinding_generation`,
+    which the shared test fixture policy resolved. M6.6 remains open.
   - Part 1: the bounded presentation mailbox no longer scans and replaces
     already-queued study, order-book or trade-tape publications. Those
     generation-bearing events remain in emission order across control messages;
