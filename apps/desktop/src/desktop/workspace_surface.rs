@@ -3002,6 +3002,10 @@ impl WorkspaceSurface {
         if overlay == ChromeOverlay::Instrument {
             self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }
+        if overlay == ChromeOverlay::Accounts {
+            self.menu_state.accounts_placement =
+                chart_context_menus::FloatingPanelPlacement::default();
+        }
         if matches!(overlay, ChromeOverlay::Instrument | ChromeOverlay::Accounts) {
             // Both surfaces present the broker connections; the runtime check reads the
             // local credential vault in the background and never blocks this frame.

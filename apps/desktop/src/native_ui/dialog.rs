@@ -358,7 +358,7 @@ impl RenderOnce for Dialog {
             })
             .children(self.children);
         let movable = self.movable;
-        let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
+        let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
         let panel = popover_surface(div().id("dialog_panel"), &theme, radius)
             .w(self.size.width())
             .map(|panel| match (self.max_height, movable.is_some()) {

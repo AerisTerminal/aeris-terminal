@@ -216,7 +216,7 @@ impl TerminalApp {
             chart_context_menu: None,
             chart_context_copy_feedback_generation: 0,
             chart_settings_menu: None,
-            chart_settings_placement: chart_context_menus::ChartSettingsPlacement::default(),
+            chart_settings_placement: chart_context_menus::FloatingPanelPlacement::default(),
             chart_settings_section: ChartSettingsSection::Symbol,
             chart_settings_color_picker: None,
             chart_settings_select: None,
@@ -2140,7 +2140,7 @@ impl TerminalApp {
                 self.chart_settings_template_name = None;
                 self.chart_settings_template_error = None;
                 self.chart_settings_placement =
-                    chart_context_menus::ChartSettingsPlacement::default();
+                    chart_context_menus::FloatingPanelPlacement::default();
                 self.chart_settings_menu = Some(menu);
             }
         }

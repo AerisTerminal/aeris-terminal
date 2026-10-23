@@ -19,10 +19,7 @@ pub(super) fn chrome_overlay_layer(
     );
     let anchored_menu = matches!(
         overlay,
-        ChromeOverlay::Timeframe
-            | ChromeOverlay::ChartType
-            | ChromeOverlay::TimeZone
-            | ChromeOverlay::Accounts
+        ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::TimeZone
     );
     let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
     // Menu overlays draw their own `MenuPanel` surfaces; the frame only places and animates them.
@@ -30,26 +27,48 @@ pub(super) fn chrome_overlay_layer(
         overlay,
         ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::TimeZone
     );
+    let extent = chrome_menu_extent(viewport, chrome_height);
+    // The Accounts panel floats over the whole window, centered until it is dragged.
+    let floating = (overlay == ChromeOverlay::Accounts)
+        .then(|| accounts_panel::accounts_panel_bounds(app_state, extent, viewport));
     let menu_left = compact_menu_left(overlay, app_state, viewport);
-    let animation_origin = chrome_overlay_animation_origin(overlay, app_state, menu_left, viewport);
+    let animation_origin =
+        chrome_overlay_animation_origin(overlay, app_state, menu_left, viewport, floating);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
-    let panel = chrome_overlay_content(
-        app_state,
-        app,
-        overlay,
-        connections,
-        chrome_menu_extent(viewport, chrome_height),
-        theme,
-        cx,
-    );
+    let panel = chrome_overlay_content(app_state, app, overlay, connections, extent, theme, cx);
     let close_app = app.clone();
+    let move_app = app.clone();
+    let panel = chrome_overlay_panel(
+        panel,
+        theme,
+        ChromeOverlayPanelStyle {
+            interval_popup: compact_panel,
+            frameless: menu_overlay,
+        },
+        closing,
+        generation,
+        phase,
+        animation_origin,
+    );
+    let panel = match floating {
+        Some(bounds) => div()
+            .absolute()
+            .left(bounds.origin.x)
+            .top(bounds.origin.y)
+            .child(panel)
+            .into_any_element(),
+        None => panel.into_any_element(),
+    };
     Some(
         div()
             .id("chrome_overlay_scrim")
             .absolute()
-            .top(px(chrome_height))
+            .map(|scrim| match floating {
+                Some(_) => scrim.top_0(),
+                None => scrim.top(px(chrome_height)),
+            })
             .left_0()
             .right_0()
             .bottom_0()
@@ -64,37 +83,22 @@ pub(super) fn chrome_overlay_layer(
                     .justify_center()
                     .pt(px(QUICK_TIMEFRAME_POPUP_TOP))
             })
-            .when(!anchored_menu && !quick_timeframe, |scrim| {
-                scrim.items_center().justify_center()
-            })
+            .when(
+                !anchored_menu && !quick_timeframe && floating.is_none(),
+                |scrim| scrim.items_center().justify_center(),
+            )
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
                     app.close_chrome_overlay(window, app_cx);
                 });
                 cx.stop_propagation();
             })
-            .child(chrome_overlay_panel(
-                panel,
-                theme,
-                ChromeOverlayPanelStyle {
-                    interval_popup: compact_panel,
-                    frameless: menu_overlay,
-                    radius: if matches!(
-                        overlay,
-                        ChromeOverlay::Instrument
-                            | ChromeOverlay::Indicator
-                            | ChromeOverlay::Accounts
-                    ) {
-                        RadiusToken::Compact
-                    } else {
-                        RadiusToken::Default
-                    },
-                },
-                closing,
-                generation,
-                phase,
-                animation_origin,
-            ))
+            .on_drag_move::<accounts_panel::AccountsPanelMoveDrag>(move |event, _, cx| {
+                move_app.update(cx, |app, app_cx| {
+                    app.move_accounts_panel(event.event.position, app_cx);
+                });
+            })
+            .child(panel)
             .into_any_element(),
     )
 }
@@ -104,6 +108,7 @@ fn chrome_overlay_animation_origin(
     app_state: &WorkspaceSurface,
     menu_left: Pixels,
     viewport: gpui::Size<Pixels>,
+    floating: Option<Bounds<Pixels>>,
 ) -> PopupAnimationOrigin {
     let trigger = app_state
         .chrome_overlay_trigger_position
@@ -141,7 +146,11 @@ fn chrome_overlay_animation_origin(
         }
         ChromeOverlay::ChartType => (menu_left, TIMEFRAME_MENU_WIDTH),
         ChromeOverlay::TimeZone => (menu_left, TIME_ZONE_MENU_WIDTH),
-        ChromeOverlay::Accounts => (menu_left, ACCOUNTS_PANEL_WIDTH),
+        ChromeOverlay::Accounts => {
+            return floating.map_or(PopupAnimationOrigin::new(0.5, 0.0), |bounds| {
+                PopupAnimationOrigin::from_trigger(trigger, bounds)
+            });
+        }
         ChromeOverlay::QuickTimeframe => (
             ((viewport.width - px(QUICK_TIMEFRAME_POPUP_WIDTH)) / 2.0).max(px(0.0)),
             QUICK_TIMEFRAME_POPUP_WIDTH,
@@ -172,10 +181,6 @@ pub(super) fn compact_menu_left(
     let (trigger, width) = match overlay {
         ChromeOverlay::ChartType => (app_state.chart_type_trigger_bounds, TIMEFRAME_MENU_WIDTH),
         ChromeOverlay::TimeZone => (app_state.time_zone_trigger_bounds, TIME_ZONE_MENU_WIDTH),
-        ChromeOverlay::Accounts => (
-            app_state.menu_state.accounts_trigger_bounds,
-            ACCOUNTS_PANEL_WIDTH,
-        ),
         ChromeOverlay::Timeframe => {
             let intervals = app_state.available_intervals();
             let groups = timeframe_menu_groups(intervals);
@@ -192,7 +197,9 @@ pub(super) fn compact_menu_left(
             app_state.timeframe_trigger_bounds,
             QUICK_TIMEFRAME_POPUP_WIDTH,
         ),
-        ChromeOverlay::Instrument | ChromeOverlay::Indicator => return px(0.0),
+        ChromeOverlay::Instrument | ChromeOverlay::Indicator | ChromeOverlay::Accounts => {
+            return px(0.0);
+        }
     };
     clamp_anchored_menu_left(timeframe_overlay_left(trigger), viewport, width)
 }
@@ -318,7 +325,6 @@ pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     /// The content is one or more `MenuPanel`s that draw their own surface.
     frameless: bool,
-    radius: RadiusToken,
 }
 
 pub(super) fn chrome_overlay_panel(
@@ -331,7 +337,7 @@ pub(super) fn chrome_overlay_panel(
     animation_origin: PopupAnimationOrigin,
 ) -> impl IntoElement {
     let enter_offset = animation_origin.enter_offset();
-    let radius = px(f32::from(style.radius.logical_pixels()));
+    let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
     div()
         .id("chrome_overlay_panel")
         .relative()

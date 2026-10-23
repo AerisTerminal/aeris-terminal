@@ -191,7 +191,7 @@ impl RenderOnce for ColorPicker {
             handler: self.on_select,
         };
 
-        let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+        let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
         let panel = popover_surface(div().id(self.id), &theme, radius)
             .absolute()
             .top_full()

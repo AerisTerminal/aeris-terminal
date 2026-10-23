@@ -852,13 +852,28 @@ pub(super) fn price_axis_menu_item(
     item
 }
 
-/// Where the viewer dragged the chart settings panel. `None` keeps it centered; every fresh
-/// open starts centered again.
+/// Where the viewer dragged a floating panel (chart settings, Accounts). `None` keeps it
+/// centered; every fresh open starts centered again.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct ChartSettingsPlacement {
+pub(super) struct FloatingPanelPlacement {
     pub(super) origin: Option<gpui::Point<Pixels>>,
     /// Pointer offset from the panel origin captured when a title-bar drag begins.
     grab: gpui::Point<Pixels>,
+}
+
+impl FloatingPanelPlacement {
+    /// Records where the title bar was grabbed, measured from the panel origin.
+    pub(super) fn grab(&mut self, offset: gpui::Point<Pixels>) {
+        self.grab = offset;
+    }
+
+    /// Moves the panel under the pointer; returns whether it moved.
+    pub(super) fn follow(&mut self, pointer: gpui::Point<Pixels>) -> bool {
+        let origin = Some(pointer - self.grab);
+        let moved = self.origin != origin;
+        self.origin = origin;
+        moved
+    }
 }
 
 /// Drag payload for moving the chart settings panel by its title bar.
@@ -877,13 +892,11 @@ impl TerminalApp {
         pointer: gpui::Point<Pixels>,
         origin: gpui::Point<Pixels>,
     ) {
-        self.chart_settings_placement.grab = pointer - origin;
+        self.chart_settings_placement.grab(pointer - origin);
     }
 
     fn move_chart_settings(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        let origin = pointer - self.chart_settings_placement.grab;
-        if self.chart_settings_placement.origin != Some(origin) {
-            self.chart_settings_placement.origin = Some(origin);
+        if self.chart_settings_placement.follow(pointer) {
             cx.notify();
         }
     }
@@ -900,7 +913,7 @@ pub(super) fn chart_settings_menu_layer(
     let scale = chart_settings_scale(viewport);
     let panel_size = chart_settings_panel_size(viewport);
     let origin = clamp_floating_panel_origin(
-        placement.unwrap_or_else(|| chart_settings_centered_origin(viewport, panel_size)),
+        placement.unwrap_or_else(|| centered_floating_panel_origin(viewport, panel_size)),
         viewport,
         panel_size,
     );
@@ -1053,7 +1066,7 @@ fn chart_settings_title_bar(
                 .text_color(gpui_color(colors.text_default))
                 .child("Chart settings"),
         )
-        .child(chart_settings_drag_grip(theme))
+        .child(floating_panel_drag_grip(theme))
         .child(close_button("chart_settings_close", theme, move |_, cx| {
             close_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.close_chart_settings_menu(terminal_cx);
@@ -1061,7 +1074,8 @@ fn chart_settings_title_bar(
         }))
 }
 
-fn chart_settings_drag_grip(theme: &AerisTheme) -> Div {
+/// The three-dot grip centered in a floating panel's title bar, the sign that it moves.
+pub(super) fn floating_panel_drag_grip(theme: &AerisTheme) -> Div {
     let mut grip = div()
         .absolute()
         .left(relative(0.5))
@@ -1136,7 +1150,7 @@ fn chart_settings_panel_body(
         })
 }
 
-fn chart_settings_centered_origin(
+pub(super) fn centered_floating_panel_origin(
     viewport: gpui::Size<Pixels>,
     panel_size: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
@@ -2645,7 +2659,7 @@ mod tests {
             )
         );
         assert_eq!(
-            chart_settings_centered_origin(viewport, panel_size),
+            centered_floating_panel_origin(viewport, panel_size),
             point(px(280.0), px(200.0))
         );
     }
@@ -2689,7 +2703,7 @@ mod tests {
                 px(CHART_SETTINGS_PANEL_HEIGHT * factor)
             )
         );
-        let origin = chart_settings_centered_origin(viewport, panel_size);
+        let origin = centered_floating_panel_origin(viewport, panel_size);
         assert!(origin.x >= px(OVERLAY_EDGE_MARGIN) && origin.y >= px(OVERLAY_EDGE_MARGIN));
     }
 
@@ -2699,7 +2713,7 @@ mod tests {
         let panel_size = chart_settings_panel_size(viewport);
         assert_eq!(panel_size, size(px(464.0), px(304.0)));
         assert_eq!(
-            chart_settings_centered_origin(viewport, panel_size),
+            centered_floating_panel_origin(viewport, panel_size),
             point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
         );
     }

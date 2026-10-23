@@ -25,7 +25,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars and the large
   workspace panels) use `popover_surface` from `native_ui/theme.rs`, the Theme System
   `.ui-popover`: an opaque `surface-secondary` fill and a 1px `border-secondary` edge, with no
-  inner highlight. No floating layer casts a shadow.
+  inner highlight. No floating layer casts a shadow. Menus, dropdowns, select menus, dialogs,
+  the color picker and the large workspace panels use `--radius-compact` (`RadiusToken::Compact`).
 - Tooltips (`terminal_ui::tooltip`) use the same popover look: `surface-secondary`, a 1px
   `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
@@ -33,7 +34,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
   and slides in from the trigger side and fades out when the pointer leaves, presses or scrolls.
 - Large workspace panels (the symbol, indicator, chart settings and accounts panels, the indicator
-  settings dialogs and the header account menu) are popover layers too. Their settings sit in
+  settings dialogs and the header account menu) are popover layers too. The chart settings and
+  Accounts panels open centered in the window and move by their title bar. Their settings sit in
   titled groups with no card fill, no outlined blocks and no hairlines between rows; consecutive
   groups are split by a 1px `border` divider (`settings_groups`), as the Theme System splits
   grouped popup content. Size and style settings are dropdowns, not tab groups. A setting row

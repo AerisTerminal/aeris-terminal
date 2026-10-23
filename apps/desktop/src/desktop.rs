@@ -506,8 +506,8 @@ const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIME_ZONE_MENU_WIDTH: f32 = 320.0;
 const TIME_ZONE_MENU_MAX_HEIGHT: f32 = 520.0;
-const ACCOUNTS_PANEL_WIDTH: f32 = 680.0;
-const ACCOUNTS_PANEL_HEIGHT: f32 = 520.0;
+const ACCOUNTS_PANEL_WIDTH: f32 = 760.0;
+const ACCOUNTS_PANEL_HEIGHT: f32 = 560.0;
 const TIMEFRAME_FLYOUT_WIDTH: f32 = 136.0;
 const TIMEFRAME_FLYOUT_GAP: f32 = 5.0;
 const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
@@ -1487,10 +1487,12 @@ struct WorkspaceMenuState {
     order_book_column_open: bool,
     timeframe_flyout_keyboard: bool,
     chrome_list_keyboard: bool,
-    /// Header Accounts trigger, measured each frame so its panel opens beneath it.
+    /// Header Accounts trigger, measured each frame so its panel opens out of it.
     accounts_trigger_bounds: Option<Bounds<Pixels>>,
     /// The Accounts panel section shown when it opens; kept across openings.
     accounts_tab: accounts_panel::AccountsTab,
+    /// Where the Accounts panel was dragged; every fresh open starts centered.
+    accounts_placement: chart_context_menus::FloatingPanelPlacement,
     /// Why the last quick-timeframe submission was rejected; cleared by an edit or close.
     quick_timeframe_error: Option<QuickTimeframeError>,
     /// The symbol menu's provider and category dropdown, opened from the search-field logo.
@@ -5239,7 +5241,7 @@ struct TerminalApp {
     chart_context_menu: Option<ChartContextMenu>,
     chart_context_copy_feedback_generation: u64,
     chart_settings_menu: Option<ChartContextMenu>,
-    chart_settings_placement: chart_context_menus::ChartSettingsPlacement,
+    chart_settings_placement: chart_context_menus::FloatingPanelPlacement,
     chart_settings_section: ChartSettingsSection,
     chart_settings_color_picker: Option<ChartColorPickerState>,
     /// The settings dropdown that is open, by its row id.

@@ -1121,6 +1121,79 @@ mod timeframe_input {
         });
     }
 
+    #[gpui::test]
+    fn accounts_panel_opens_centered_follows_a_drag_and_recenters_on_reopen(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let viewport = size(px(1600.0), px(1000.0));
+        let extent = chrome_menu_extent(viewport, 80.0);
+        let open = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                surface.update(cx, |surface, surface_cx| {
+                    surface.open_accounts_panel(
+                        accounts_panel::AccountsTab::Connections,
+                        window,
+                        surface_cx,
+                    );
+                });
+            });
+            cx.run_until_parked();
+        };
+        open(cx);
+        let centered =
+            cx.read(|cx| accounts_panel::accounts_panel_bounds(surface.read(cx), extent, viewport));
+        assert_eq!(
+            centered.origin,
+            point(
+                (viewport.width - centered.size.width) / 2.0,
+                (viewport.height - centered.size.height) / 2.0
+            ),
+            "a fresh panel opens centered in the window"
+        );
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, surface_cx| {
+                surface
+                    .menu_state
+                    .accounts_placement
+                    .grab(point(px(40.0), px(10.0)));
+                surface.move_accounts_panel(point(px(240.0), px(110.0)), surface_cx);
+            });
+        });
+        let moved =
+            cx.read(|cx| accounts_panel::accounts_panel_bounds(surface.read(cx), extent, viewport));
+        assert_eq!(
+            moved.origin,
+            point(px(200.0), px(100.0)),
+            "the panel follows the grab"
+        );
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, surface_cx| {
+                surface.move_accounts_panel(point(px(-900.0), px(-900.0)), surface_cx);
+            });
+        });
+        let clamped =
+            cx.read(|cx| accounts_panel::accounts_panel_bounds(surface.read(cx), extent, viewport));
+        assert_eq!(
+            clamped.origin,
+            point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN)),
+            "a drag past the edge keeps the panel inside the window"
+        );
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, surface_cx| {
+                surface.close_chrome_overlay(window, surface_cx);
+            });
+        });
+        cx.run_until_parked();
+        open(cx);
+        let reopened =
+            cx.read(|cx| accounts_panel::accounts_panel_bounds(surface.read(cx), extent, viewport));
+        assert_eq!(
+            reopened.origin, centered.origin,
+            "every fresh open starts centered"
+        );
+    }
+
     #[test]
     fn accounts_panel_shrinks_to_the_room_under_the_header() {
         let roomy = accounts_panel::accounts_panel_size(chrome_menu_extent(

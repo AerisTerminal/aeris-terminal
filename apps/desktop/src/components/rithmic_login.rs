@@ -1,10 +1,11 @@
 //! Rithmic login: the Accounts-panel state for the saved login, and the inline form in its
-//! Connections tab that picks a Rithmic server and system and takes the user ID and password.
+//! Connections section that picks a Rithmic server and system and takes the user ID and password.
 //!
 //! Presentation only. The market runtime owns the server catalog, system discovery, the
 //! sign-in check and the saved login. The password goes from the form straight to the
 //! runtime, which keeps it only in the native credential vault; nothing here can read it back.
 
+use super::big_trades_dialog::described_setting_row;
 use super::*;
 use aeris_market_runtime::{RithmicLoginSummary, RithmicServer};
 use zeroize::Zeroizing;
@@ -485,8 +486,9 @@ pub(super) const fn rithmic_login_form_open(flow: &RithmicLoginFlow) -> bool {
     flow.form.is_some()
 }
 
-/// The inline login form inside the Rithmic connection card. Escape inside it cancels the
-/// form without closing the Accounts panel around it.
+/// The inline login form under the Rithmic connection row: one row per field, label on the
+/// left and the field on the right. Escape inside it cancels the form without closing the
+/// Accounts panel around it.
 pub(super) fn rithmic_login_form(
     terminal: &Entity<TerminalApp>,
     flow: &RithmicLoginFlow,
@@ -494,146 +496,157 @@ pub(super) fn rithmic_login_form(
     theme: &AerisTheme,
 ) -> Option<AnyElement> {
     let form = flow.form.as_ref()?;
+    let colors = theme.colors;
     let escape = terminal.clone();
-    let cancel = terminal.clone();
-    let save = terminal.clone();
     let signing_in = view.operation == Some(RithmicLoginOperation::SigningIn);
+    let field = |control: AnyElement| {
+        div()
+            .w(px(accounts_panel::ACCOUNTS_FIELD_WIDTH))
+            .child(control)
+            .into_any_element()
+    };
     Some(
         div()
             .id("rithmic_login_form")
             .flex()
             .flex_col()
-            .gap_3()
-            .pt_2()
-            .border_t(px(theme.dimensions.border_width))
-            .border_color(gpui_color(theme.colors.border_secondary))
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key.eq_ignore_ascii_case("escape") {
                     escape.update(cx, TerminalApp::close_rithmic_login_form);
                     cx.stop_propagation();
                 }
             })
+            .child(described_setting_row(
+                "Server",
+                [SharedString::from(
+                    "Where your broker's Rithmic system runs",
+                )],
+                field(server_dropdown(terminal, form, theme).into_any_element()),
+                theme,
+            ))
+            .child(described_setting_row(
+                "System",
+                [SharedString::from(
+                    "The system your broker or prop firm gave you",
+                )],
+                field(system_dropdown(terminal, form, theme).into_any_element()),
+                theme,
+            ))
+            .children(discovery_failure(terminal, form, theme))
+            .child(described_setting_row(
+                "User ID",
+                [SharedString::from("The Rithmic user ID from your broker")],
+                accounts_panel::accounts_field(&form.user, theme),
+                theme,
+            ))
+            .child(described_setting_row(
+                "Password",
+                [SharedString::from(
+                    "Kept only in this computer's protected credential storage",
+                )],
+                accounts_panel::accounts_field(&form.password, theme),
+                theme,
+            ))
             .child(
                 div()
+                    .py_2()
                     .text_xs()
-                    .text_color(gpui_color(theme.colors.text_secondary))
-                    .child("Use the Rithmic login from your broker or prop firm."),
-            )
-            .child(rithmic_login_form_body(terminal, form, signing_in, theme))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
+                    .text_color(gpui_color(colors.text_muted))
                     .child(
-                        Button::new("rithmic_login_cancel", theme)
-                            .variant(ButtonVariant::Outline)
-                            .label("Cancel")
-                            .on_click(move |_, _, cx| {
-                                cancel.update(cx, TerminalApp::close_rithmic_login_form);
-                            }),
-                    )
-                    .child(
-                        Button::new("rithmic_login_save", theme)
-                            .variant(ButtonVariant::Primary)
-                            .label(if signing_in { "Signing in" } else { "Connect" })
-                            .loading(signing_in)
-                            .disabled(signing_in || form.system.is_none())
-                            .on_click(move |_, window, cx| {
-                                save.update(cx, |terminal, terminal_cx| {
-                                    terminal.sign_in_rithmic(window, terminal_cx);
-                                });
-                            }),
+                        "Rithmic market data needs a paid market-data subscription on the \
+                         account and Aeris enabled by your broker or prop firm.",
                     ),
             )
+            .children(signing_in.then(|| {
+                div()
+                    .pb_2()
+                    .text_sm()
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(signing_in_status(form))
+            }))
+            .children(form.message.as_ref().map(|message| {
+                div()
+                    .pb_2()
+                    .text_sm()
+                    .text_color(gpui_color(colors.danger))
+                    .child(message.clone())
+            }))
+            .child(form_actions(terminal, form, signing_in, theme))
             .into_any_element(),
     )
 }
 
-fn field_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
-    div()
-        .text_xs()
-        .text_color(gpui_color(theme.colors.text_muted))
-        .child(label)
+/// Why the server's systems could not be listed, with a retry.
+fn discovery_failure(
+    terminal: &Entity<TerminalApp>,
+    form: &RithmicLoginForm,
+    theme: &AerisTheme,
+) -> Option<impl IntoElement> {
+    let RithmicSystems::Failed(error) = &form.systems else {
+        return None;
+    };
+    let retry = terminal.clone();
+    Some(
+        div()
+            .pb_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(gpui_color(theme.colors.danger))
+                    .child(error.clone()),
+            )
+            .child(
+                Button::new("rithmic_login_retry_discovery", theme)
+                    .variant(ButtonVariant::Secondary)
+                    .label("Retry")
+                    .on_click(move |_, _, cx| {
+                        retry.update(cx, |terminal, terminal_cx| {
+                            terminal.discover_rithmic_systems(terminal_cx);
+                            terminal_cx.notify();
+                        });
+                    }),
+            ),
+    )
 }
 
-fn rithmic_login_form_body(
+fn form_actions(
     terminal: &Entity<TerminalApp>,
     form: &RithmicLoginForm,
     signing_in: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
+    let cancel = terminal.clone();
+    let save = terminal.clone();
     div()
+        .pb_2()
         .flex()
-        .flex_col()
+        .justify_end()
         .gap_2()
-        .child(field_label("Server", theme))
-        .child(server_dropdown(terminal, form, theme))
-        .child(field_label("System", theme))
-        .child(system_dropdown(terminal, form, theme))
-        .children(match &form.systems {
-            RithmicSystems::Failed(error) => {
-                let retry = terminal.clone();
-                Some(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_xs()
-                                .text_color(gpui_color(colors.danger))
-                                .child(error.clone()),
-                        )
-                        .child(
-                            Button::new("rithmic_login_retry_discovery", theme)
-                                .variant(ButtonVariant::Outline)
-                                .label("Retry")
-                                .on_click(move |_, _, cx| {
-                                    retry.update(cx, |terminal, terminal_cx| {
-                                        terminal.discover_rithmic_systems(terminal_cx);
-                                        terminal_cx.notify();
-                                    });
-                                }),
-                        ),
-                )
-            }
-            RithmicSystems::Discovering | RithmicSystems::Listed(_) => None,
-        })
-        .child(field_label("User ID", theme))
-        .child(Input::new(&form.user).platform(theme))
-        .child(field_label("Password", theme))
-        .child(Input::new(&form.password).platform(theme))
         .child(
-            div()
-                .mt_1()
-                .px_3()
-                .py_2()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .bg(gpui_color(colors.surface))
-                .text_xs()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(
-                    "Aeris keeps this login only in this computer's protected credential \
-                     storage. Rithmic market data needs a paid market-data subscription on the \
-                     account and Aeris enabled by its broker or prop firm.",
-                ),
+            Button::new("rithmic_login_cancel", theme)
+                .variant(ButtonVariant::Secondary)
+                .label("Cancel")
+                .on_click(move |_, _, cx| {
+                    cancel.update(cx, TerminalApp::close_rithmic_login_form);
+                }),
         )
-        .children(signing_in.then(|| {
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(signing_in_status(form))
-        }))
-        .children(form.message.as_ref().map(|message| {
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.danger))
-                .child(message.clone())
-        }))
+        .child(
+            Button::new("rithmic_login_save", theme)
+                .variant(ButtonVariant::Primary)
+                .label(if signing_in { "Signing in" } else { "Connect" })
+                .loading(signing_in)
+                .disabled(signing_in || form.system.is_none())
+                .on_click(move |_, window, cx| {
+                    save.update(cx, |terminal, terminal_cx| {
+                        terminal.sign_in_rithmic(window, terminal_cx);
+                    });
+                }),
+        )
 }
 
 fn dropdown_trigger(
@@ -646,8 +659,7 @@ fn dropdown_trigger(
 ) -> Button {
     let toggle = terminal.clone();
     Button::new(id, theme)
-        .variant(ButtonVariant::Outline)
-        .button_size(ButtonSize::Lg)
+        .variant(ButtonVariant::Secondary)
         .trigger()
         .full_width()
         .open(open)

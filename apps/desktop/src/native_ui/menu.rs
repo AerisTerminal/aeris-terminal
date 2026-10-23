@@ -596,7 +596,7 @@ pub(crate) const ANCHOR_GAP: Pixels = px(4.0);
 /// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
 ///
 /// The panel owns the flat menu look (the `border-secondary` popover hairline,
-/// `--radius-default` unless [`MenuPanel::radius`] tightens it, `surface-secondary`, no shadow), its placement, scrolling, entry motion and click containment. Its content is
+/// `--radius-compact`, `surface-secondary`, no shadow), its placement, scrolling, entry motion and click containment. Its content is
 /// inset from the rounded border: GPUI clips to rectangles, and any inset of at least
 /// `r(1 - 1/√2)` keeps a row's rectangular highlight inside the panel's rounded corner, so rows
 /// never depend on their position in the panel.
@@ -613,7 +613,6 @@ pub(crate) struct MenuPanel {
     animation: Option<PopupAnimationOrigin>,
     /// Set by [`MenuAnchor`]: closes an anchored menu on a press outside it and its trigger.
     on_dismiss: Option<Dismiss>,
-    radius: RadiusToken,
     children: Vec<AnyElement>,
 }
 
@@ -634,16 +633,8 @@ impl MenuPanel {
             scroll: None,
             animation: None,
             on_dismiss: None,
-            radius: RadiusToken::Default,
             children: Vec::new(),
         }
-    }
-
-    /// A large workspace panel may take the tighter `--radius-compact` corner; the inset still
-    /// keeps every row inside it.
-    pub(crate) fn radius(mut self, radius: RadiusToken) -> Self {
-        self.radius = radius;
-        self
     }
 
     /// Grows the inset with a screen-aware menu whose rows use the same scale.
@@ -738,7 +729,7 @@ impl RenderOnce for MenuPanel {
                 body.flex_1().min_h_0().overflow_y_scroll()
             })
             .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
-        let radius = px(f32::from(self.radius.logical_pixels()));
+        let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
         let frame = div().id(self.id.clone()).occlude().flex().flex_col();
         let panel = popover_surface(frame, &self.theme, radius)
             .font_family(platform_font_family())
@@ -955,16 +946,14 @@ mod tests {
     fn panel_inset_keeps_square_row_corners_inside_the_rounded_border() {
         // A row corner at (inset, inset) from the panel's inner edge must lie inside the corner
         // circle of the inner radius, whatever row is highlighted or scrolled to the edge.
-        for radius in [RadiusToken::Default, RadiusToken::Compact] {
-            let inner_radius =
-                f32::from(radius.logical_pixels()) - AerisTheme::light().dimensions.border_width;
-            let inset = PANEL_INSET.0 * ROOT_REM_PX;
-            let offset = inner_radius - inset;
-            assert!(
-                (offset * offset * 2.0).sqrt() <= inner_radius,
-                "a {inset}px inset leaves row corners outside the {inner_radius}px corner"
-            );
-        }
+        let inner_radius = f32::from(RadiusToken::Compact.logical_pixels())
+            - AerisTheme::light().dimensions.border_width;
+        let inset = PANEL_INSET.0 * ROOT_REM_PX;
+        let offset = inner_radius - inset;
+        assert!(
+            (offset * offset * 2.0).sqrt() <= inner_radius,
+            "a {inset}px inset leaves row corners outside the {inner_radius}px corner"
+        );
     }
 
     #[test]

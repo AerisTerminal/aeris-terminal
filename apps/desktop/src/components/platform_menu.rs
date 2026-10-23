@@ -215,7 +215,6 @@ pub(super) fn platform_menu_layer(
         });
     });
     let panel = MenuPanel::new("platform_menu", MenuPlacement::At(origin), theme)
-        .radius(RadiusToken::Compact)
         .width(px(PLATFORM_MENU_WIDTH))
         .animate_from(animation_origin)
         .children(header)

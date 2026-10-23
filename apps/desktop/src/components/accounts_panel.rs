@@ -1,16 +1,21 @@
-//! Accounts panel: a sidebar panel with the market-data connections and the trading accounts.
-//! Connecting a provider, creating a practice account and confirming a deletion all happen
-//! inline in the panel; nothing opens a second dialog over it.
+//! Accounts panel: a floating sidebar panel with the market-data connections and the trading
+//! accounts. It opens centered in the window and moves by its title bar, like the chart
+//! settings panel. Connecting a provider, creating a practice account and confirming a deletion
+//! all happen inline in the panel; nothing opens a second dialog over it.
 //!
-//! Presentation only. The market runtime owns the saved Rithmic login and its credentials; `trading_runtime` owns practice accounts. This panel dispatches their
-//! commands and shows the last observed state.
+//! Presentation only. The market runtime owns the saved Rithmic login and its credentials;
+//! `trading_runtime` owns practice accounts. This panel dispatches their commands and shows the
+//! last observed state.
 
+use super::big_trades_dialog::{
+    control_strip, described_setting_row, settings_group, settings_groups,
+};
 use super::*;
-use gpui::Stateful;
 
-const ROW_HEIGHT: f32 = 44.0;
 const HEADER_HEIGHT: f32 = 44.0;
-const SIDEBAR_WIDTH: f32 = 168.0;
+const SIDEBAR_WIDTH: f32 = 184.0;
+/// Login and account fields hold system names and user IDs, wider than a setting value.
+pub(super) const ACCOUNTS_FIELD_WIDTH: f32 = 240.0;
 
 /// The Accounts panel sections.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -45,6 +50,16 @@ pub(super) struct ConnectionsView<'a> {
     pub(super) terminal: &'a Entity<TerminalApp>,
     pub(super) data: &'a DataConnections,
     pub(super) rithmic_login: &'a rithmic_login::RithmicLoginFlow,
+}
+
+/// Drag payload for moving the Accounts panel by its title bar.
+#[derive(Clone)]
+pub(super) struct AccountsPanelMoveDrag;
+
+impl Render for AccountsPanelMoveDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
 }
 
 impl WorkspaceSurface {
@@ -83,9 +98,20 @@ impl WorkspaceSurface {
         self.chrome_focus.focus(window, cx);
         cx.notify();
     }
+
+    /// Follows a title-bar drag; the layer clamps the stored origin inside the window.
+    pub(super) fn move_accounts_panel(
+        &mut self,
+        pointer: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.menu_state.accounts_placement.follow(pointer) {
+            cx.notify();
+        }
+    }
 }
 
-/// The panel's size: the design size, shrunk to the room under the header.
+/// The panel's size: the design size, shrunk to the room the window leaves.
 pub(super) fn accounts_panel_size(
     extent: super::chrome_menu::ChromeMenuExtent,
 ) -> gpui::Size<Pixels> {
@@ -93,6 +119,27 @@ pub(super) fn accounts_panel_size(
         px(ACCOUNTS_PANEL_WIDTH.min(extent.width)),
         px(ACCOUNTS_PANEL_HEIGHT.min(extent.height())),
     )
+}
+
+/// Where the panel sits: centered until the viewer drags it, and always inside the window.
+pub(super) fn accounts_panel_bounds(
+    app_state: &WorkspaceSurface,
+    extent: super::chrome_menu::ChromeMenuExtent,
+    viewport: gpui::Size<Pixels>,
+) -> Bounds<Pixels> {
+    let panel_size = accounts_panel_size(extent);
+    let origin = chart_context_menus::clamp_floating_panel_origin(
+        app_state
+            .menu_state
+            .accounts_placement
+            .origin
+            .unwrap_or_else(|| {
+                chart_context_menus::centered_floating_panel_origin(viewport, panel_size)
+            }),
+        viewport,
+        panel_size,
+    );
+    Bounds::new(origin, panel_size)
 }
 
 pub(super) fn accounts_panel_content(
@@ -103,20 +150,9 @@ pub(super) fn accounts_panel_content(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let tab = app_state.menu_state.accounts_tab;
-    let content = div()
-        .id("accounts_panel_content")
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .overflow_y_scroll()
-        .px_5()
-        .py_4()
-        .flex()
-        .flex_col()
-        .gap_3();
-    let content = match tab {
-        AccountsTab::Connections => connections_tab(content, connections, theme),
-        AccountsTab::TradingAccounts => trading_accounts_tab(content, app_state, app, theme),
+    let groups = match tab {
+        AccountsTab::Connections => connections_groups(connections, theme),
+        AccountsTab::TradingAccounts => trading_account_groups(app_state, app, theme),
     };
     div()
         .id("accounts_panel")
@@ -124,19 +160,34 @@ pub(super) fn accounts_panel_content(
         .h(panel_size.height)
         .flex()
         .flex_col()
-        .child(panel_header(app, theme))
+        .child(panel_title_bar(app, theme))
         .child(
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .child(panel_sidebar(app, tab, theme))
-                .child(content),
+                .child(panel_sidebar(app_state, app, tab, theme))
+                .child(
+                    div()
+                        .id("accounts_panel_content")
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_6()
+                        .py_4()
+                        .child(settings_groups(groups, theme)),
+                ),
         )
 }
 
-fn panel_header(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl IntoElement {
+/// Title bar of the panel. Dragging it moves the panel anywhere in the window.
+fn panel_title_bar(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl IntoElement {
+    let colors = theme.colors;
+    let grab = app.clone();
     div()
+        .id("accounts_panel_title_bar")
+        .relative()
         .h(px(HEADER_HEIGHT))
         .flex_none()
         .flex()
@@ -144,25 +195,49 @@ fn panel_header(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl Into
         .justify_between()
         .pl_4()
         .pr_2()
-        .border_b(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border_secondary))
+        .border_b(platform_border_width(theme))
+        .border_color(gpui_color(colors.border_secondary))
+        .cursor(FLOATING_PANEL_MOVE_CURSOR)
+        .on_drag(AccountsPanelMoveDrag, move |drag, offset, _, cx| {
+            grab.update(cx, |surface, _| {
+                surface.menu_state.accounts_placement.grab(offset);
+            });
+            cx.new(|_| drag.clone())
+        })
         .child(
             div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(theme.colors.text_default))
-                .child("Accounts and connections"),
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    header_icon(HugeIcon::User)
+                        .with_size(px(16.0))
+                        .color(gpui_color(colors.icon)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .text_color(gpui_color(colors.text_default))
+                        .child("Accounts and connections"),
+                ),
         )
+        .child(chart_context_menus::floating_panel_drag_grip(theme))
         .child(super::chrome_menu::chrome_menu_close_button(app, theme))
 }
 
+/// Section tabs, with the account this workspace trades on pinned under them.
 fn panel_sidebar(
+    app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     selected: AccountsTab,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let tabs = TabList::sidebar("accounts_panel_tabs", "Accounts sections").children(
-        AccountsTab::ALL.into_iter().map(|tab| {
+    let colors = theme.colors;
+    let tabs = TabList::sidebar("accounts_panel_tabs", "Accounts sections")
+        .flex_1()
+        .min_h_0()
+        .children(AccountsTab::ALL.into_iter().map(|tab| {
             let select = app.clone();
             Tab::new(("accounts_panel_tab", tab as usize), theme)
                 .sidebar()
@@ -176,84 +251,181 @@ fn panel_sidebar(
                 })
                 .child(header_icon(tab.icon()).with_size(px(16.0)))
                 .child(tab.label())
-        }),
-    );
+        }));
+    let trading = &app_state.trading_pnl;
+    let active = trading
+        .order_entry
+        .selected_account_id
+        .as_ref()
+        .and_then(|id| trading.accounts.iter().find(|account| &account.id == id));
     div()
         .w(px(SIDEBAR_WIDTH))
         .h_full()
         .flex_none()
+        .flex()
+        .flex_col()
         .p_2()
-        .border_r(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border_secondary))
+        .border_r(platform_border_width(theme))
+        .border_color(gpui_color(colors.border_secondary))
         .child(tabs)
-}
-
-fn connections_tab(
-    content: Stateful<Div>,
-    connections: ConnectionsView<'_>,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    content
-        .child(section_heading(
-            "Market data connections",
-            "Sign in once; Aeris keeps the login on this computer and reconnects on its own.",
-            theme,
-        ))
-        .child(rithmic_card(connections, theme))
-        .child(rithmic_login::rithmic_marks(theme))
-}
-
-fn trading_accounts_tab(
-    content: Stateful<Div>,
-    app_state: &WorkspaceSurface,
-    app: &Entity<WorkspaceSurface>,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    content
-        .child(section_heading(
-            "Practice accounts",
-            "Choose the account this workspace trades on.",
-            theme,
-        ))
-        .child(practice_accounts(app_state, app, theme))
-        .children(broker_accounts(app_state, app, theme))
         .child(
             div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_2()
+                .pt_3()
+                .pb_1()
+                .border_t(platform_border_width(theme))
+                .border_color(gpui_color(colors.border))
                 .child(
-                    "Practice accounts trade simulated funds; broker demo accounts trade on the \
-                     broker's demo server.",
-                ),
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child("Trading on"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .truncate()
+                        .text_color(gpui_color(if active.is_some() {
+                            colors.text_default
+                        } else {
+                            colors.text_muted
+                        }))
+                        .child(active.map_or_else(
+                            || "No account chosen".to_string(),
+                            |account| account.display_name.clone(),
+                        )),
+                )
+                .children(active.map(|account| environment_badge(account.environment, theme))),
         )
 }
 
-/// Every trading account carries its environment, so simulated, demo and live accounts
-/// are never confused where an order is placed.
-pub(super) fn environment_badge(
-    environment: aeris_trading::AccountEnvironment,
-    theme: &AerisTheme,
-) -> AnyElement {
+fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> Vec<AnyElement> {
+    vec![
+        rithmic_group(connections, theme),
+        settings_group(
+            "Hyperliquid",
+            [described_setting_row(
+                "Hyperliquid",
+                [SharedString::from(
+                    "Crypto markets from Hyperliquid's public feed",
+                )],
+                pill(
+                    "No login needed",
+                    theme.colors.surface_secondary,
+                    theme.colors.text_secondary,
+                    Some(theme.colors.border_subtle),
+                    theme,
+                ),
+                theme,
+            )],
+            theme,
+        ),
+    ]
+}
+
+/// The Rithmic connection. Connect opens the login form in place; the connection row keeps
+/// its status while the form is open.
+fn rithmic_group(connections: ConnectionsView<'_>, theme: &AerisTheme) -> AnyElement {
     let colors = theme.colors;
-    // The neutral badge is the Theme System's `surface-secondary` pill with a `border-subtle`
-    // edge, so it stays visible on the `surface-secondary` panels it sits in.
-    let (label, background, text, edge) = match environment {
-        aeris_trading::AccountEnvironment::Simulated => (
-            "Simulated",
+    let view = &connections.data.rithmic;
+    let connected = view.connected();
+    let busy = view.busy();
+    let form_open = rithmic_login::rithmic_login_form_open(connections.rithmic_login);
+    // A different login is a disconnect followed by a new connection, so a connected row
+    // offers only Disconnect.
+    let action = (!form_open).then(|| {
+        if connected {
+            Button::new("accounts_rithmic_disconnect", theme)
+                .variant(ButtonVariant::Secondary)
+                .label("Disconnect")
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(DisconnectRithmic), cx);
+                })
+        } else {
+            Button::new("accounts_rithmic_connect", theme)
+                .variant(ButtonVariant::Default)
+                .label("Connect")
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ConnectRithmic), cx);
+                })
+        }
+        .loading(busy)
+        .disabled(busy)
+        .into_any_element()
+    });
+    let status = if connected {
+        pill(
+            "Connected",
+            colors.positive_subtle,
+            colors.text_positive,
+            None,
+            theme,
+        )
+    } else {
+        pill(
+            "Not connected",
             colors.surface_secondary,
             colors.text_secondary,
             Some(colors.border_subtle),
-        ),
-        aeris_trading::AccountEnvironment::Demo => {
-            ("Demo", colors.indigo_subtle, colors.indigo, None)
-        }
-        aeris_trading::AccountEnvironment::Live => (
-            "Live · data only",
-            colors.warning_subtle,
-            colors.text_warning,
-            None,
-        ),
+            theme,
+        )
     };
+    let mut rows = vec![described_setting_row(
+        "Rithmic",
+        [SharedString::from(view.detail())],
+        control_strip(std::iter::once(status).chain(action)),
+        theme,
+    )];
+    rows.extend(view.message.as_ref().map(|message| {
+        div()
+            .pb_2()
+            .text_xs()
+            .text_color(gpui_color(if view.failed {
+                colors.danger
+            } else {
+                colors.text_secondary
+            }))
+            .child(message.clone())
+            .into_any_element()
+    }));
+    rows.extend(rithmic_login::rithmic_login_form(
+        connections.terminal,
+        connections.rithmic_login,
+        view,
+        theme,
+    ));
+    rows.push(
+        div()
+            .pt_2()
+            .child(rithmic_login::rithmic_marks(theme))
+            .into_any_element(),
+    );
+    settings_group("Rithmic · CME Group futures", rows, theme)
+}
+
+fn trading_account_groups(
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+) -> Vec<AnyElement> {
+    let mut groups = vec![practice_accounts(app_state, app, theme)];
+    groups.extend(broker_accounts(app_state, app, theme));
+    groups
+}
+
+/// A `radius-large` pill: a neutral badge passes its `border-subtle` edge, a tinted badge
+/// pairs a `-subtle` fill with its text color and has none.
+fn pill(
+    label: &'static str,
+    background: ThemeColor,
+    text: ThemeColor,
+    edge: Option<ThemeColor>,
+    theme: &AerisTheme,
+) -> AnyElement {
     div()
         .flex_none()
         .when_some(edge, |badge, edge| {
@@ -273,236 +445,73 @@ pub(super) fn environment_badge(
         .into_any_element()
 }
 
-/// Broker accounts registered by the trading owner. They are never deleted here, and a
-/// live account cannot be chosen for orders. Accounts recorded by a venue this build no
-/// longer routes stay in the store for history but are not offered here.
-fn broker_accounts(
-    app_state: &WorkspaceSurface,
-    app: &Entity<WorkspaceSurface>,
+/// Every trading account carries its environment, so simulated, demo and live accounts
+/// are never confused where an order is placed.
+pub(super) fn environment_badge(
+    environment: aeris_trading::AccountEnvironment,
     theme: &AerisTheme,
-) -> Option<impl IntoElement> {
-    let trading = &app_state.trading_pnl;
-    let selected = trading.order_entry.selected_account_id.as_ref();
-    let mut rows = trading
-        .accounts
-        .iter()
-        .enumerate()
-        .filter(|(_, account)| {
-            account.environment != aeris_trading::AccountEnvironment::Simulated
-                && account.venue_id == aeris_trading::venue::BROKER_VENUE_ID
-        })
-        .peekable();
-    rows.peek()?;
-    let mut list = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .mt_2()
-        .child(section_heading(
-            "Broker accounts",
-            "Accounts your broker reports for the connected login.",
+) -> AnyElement {
+    let colors = theme.colors;
+    match environment {
+        aeris_trading::AccountEnvironment::Simulated => pill(
+            "Simulated",
+            colors.surface_secondary,
+            colors.text_secondary,
+            Some(colors.border_subtle),
             theme,
-        ));
-    for (index, account) in rows {
-        let detail = match account.environment {
-            aeris_trading::AccountEnvironment::Live => {
-                "Broker live · trading is disabled".to_string()
-            }
-            _ if trading.connected_broker_accounts.contains(&account.id) => {
-                format!("Broker demo · {}", account.currency)
-            }
-            _ => "Broker demo · not connected".to_string(),
-        };
-        let selectable = account.environment == aeris_trading::AccountEnvironment::Demo;
-        list = list.child(account_row(
-            app,
-            AccountRow {
-                index,
-                account,
-                detail,
-                selected: selected == Some(&account.id),
-                selectable,
-            },
-            theme,
-        ));
-    }
-    Some(list)
-}
-
-fn section_heading(
-    title: &'static str,
-    detail: &'static str,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(theme.colors.text_default))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child(detail),
-        )
-}
-
-fn field_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
-    div()
-        .text_xs()
-        .text_color(gpui_color(theme.colors.text_muted))
-        .child(label)
-}
-
-/// A connection block on the panel, inset to line up with the account rows below it.
-fn card(id: &'static str) -> Stateful<Div> {
-    div().id(id).flex().flex_col().gap_2().px_2()
-}
-
-fn status_dot(active: bool, theme: &AerisTheme) -> impl IntoElement {
-    div()
-        .flex_none()
-        .size(px(8.0))
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .bg(gpui_color(if active {
-            theme.colors.text_positive
-        } else {
-            theme.colors.text_muted
-        }))
-}
-
-fn provider_heading(
-    name: &'static str,
-    detail: String,
-    active: bool,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    div()
-        .min_w_0()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(status_dot(active, theme))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(theme.colors.text_default))
-                        .child(name),
-                ),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_secondary))
-                .truncate()
-                .child(detail),
-        )
-}
-
-/// The Rithmic connection card. Connect opens the login form inside the card.
-fn rithmic_card(connections: ConnectionsView<'_>, theme: &AerisTheme) -> impl IntoElement {
-    let view = &connections.data.rithmic;
-    let connected = view.connected();
-    let busy = view.busy();
-    // A different login is a disconnect followed by a new connection, so a connected card
-    // offers only Disconnect. The action steps aside while the login form is open.
-    let action = (!rithmic_login::rithmic_login_form_open(connections.rithmic_login)).then(|| {
-        if connected {
-            Button::new("accounts_rithmic_disconnect", theme)
-                .variant(ButtonVariant::Outline)
-                .label("Disconnect")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(DisconnectRithmic), cx);
-                })
-        } else {
-            Button::new("accounts_rithmic_connect", theme)
-                .variant(ButtonVariant::Default)
-                .label("Connect")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(ConnectRithmic), cx);
-                })
+        ),
+        aeris_trading::AccountEnvironment::Demo => {
+            pill("Demo", colors.indigo_subtle, colors.indigo, None, theme)
         }
-        .button_size(ButtonSize::Lg)
-        .loading(busy)
-        .disabled(busy)
-    });
-    card("accounts_rithmic")
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(provider_heading("Rithmic", view.detail(), connected, theme))
-                .children(action.map(|action| div().flex_none().child(action))),
-        )
-        .children(view.message.as_ref().map(|message| {
-            div()
-                .text_xs()
-                .text_color(gpui_color(if view.failed {
-                    theme.colors.danger
-                } else {
-                    theme.colors.text_muted
-                }))
-                .child(message.clone())
-        }))
-        .children(rithmic_login::rithmic_login_form(
-            connections.terminal,
-            connections.rithmic_login,
-            view,
+        aeris_trading::AccountEnvironment::Live => pill(
+            "Live · data only",
+            colors.warning_subtle,
+            colors.text_warning,
+            None,
             theme,
-        ))
+        ),
+    }
 }
 
 fn practice_accounts(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     theme: &AerisTheme,
-) -> impl IntoElement {
+) -> AnyElement {
     let trading = &app_state.trading_pnl;
     let selected = trading.order_entry.selected_account_id.as_ref();
-    let mut list = div().flex().flex_col().gap_1();
     let practice = trading
         .accounts
         .iter()
         .enumerate()
         .filter(|(_, account)| account.environment == aeris_trading::AccountEnvironment::Simulated)
         .collect::<Vec<_>>();
+    let mut rows = Vec::new();
     if practice.is_empty() && trading.account_creator.is_none() {
-        list = list.child(
+        rows.push(
             div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child("No practice accounts yet. Create one to trade with simulated funds."),
+                .py_2()
+                .text_sm()
+                .text_color(gpui_color(theme.colors.text_secondary))
+                .child("No practice accounts yet.")
+                .into_any_element(),
         );
     }
     for (index, account) in practice {
         if trading.account_delete_confirmation.as_ref() == Some(&account.id) {
-            list = list.child(delete_confirmation(app, account, theme));
+            rows.push(delete_confirmation(app, account, theme));
             continue;
         }
         let detail = account.starting_equity.map_or_else(
-            || "Practice account".to_string(),
+            || "Simulated funds".to_string(),
             |equity| {
                 format!(
-                    "Practice · started with {}",
+                    "Started with {}",
                     super::order_ticket::format_money(&account.currency, equity)
                 )
             },
         );
-        list = list.child(account_row(
+        rows.push(account_row(
             app,
             AccountRow {
                 index,
@@ -515,23 +524,72 @@ fn practice_accounts(
         ));
     }
     if let Some(creator) = trading.account_creator.as_ref() {
-        return list.child(practice_account_form(app, creator, theme).mt_1());
-    }
-    let open = app.clone();
-    list.child(
-        div().mt_1().child(
+        rows.extend(practice_account_form(app, creator, theme));
+    } else {
+        let open = app.clone();
+        rows.push(described_setting_row(
+            "New practice account",
+            [SharedString::from(
+                "Trade simulated funds on live prices, starting from any balance",
+            )],
             Button::new("accounts_new_practice_account", theme)
                 .variant(ButtonVariant::Default)
                 .icon(header_icon(HugeIcon::Add))
-                .label("New practice account")
-                .button_size(ButtonSize::Lg)
+                .label("New account")
                 .on_click(move |_, window, cx| {
                     open.update(cx, |surface, surface_cx| {
                         open_practice_account_form(surface, window, surface_cx);
                     });
-                }),
-        ),
-    )
+                })
+                .into_any_element(),
+            theme,
+        ));
+    }
+    settings_group("Practice accounts", rows, theme)
+}
+
+/// Broker accounts registered by the trading owner. They are never deleted here, and a
+/// live account cannot be chosen for orders. Accounts recorded by a venue this build no
+/// longer routes stay in the store for history but are not offered here.
+fn broker_accounts(
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    let trading = &app_state.trading_pnl;
+    let selected = trading.order_entry.selected_account_id.as_ref();
+    let rows = trading
+        .accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| {
+            account.environment != aeris_trading::AccountEnvironment::Simulated
+                && account.venue_id == aeris_trading::venue::BROKER_VENUE_ID
+        })
+        .map(|(index, account)| {
+            let detail = match account.environment {
+                aeris_trading::AccountEnvironment::Live => {
+                    "Live account · trading is disabled".to_string()
+                }
+                _ if trading.connected_broker_accounts.contains(&account.id) => {
+                    format!("Broker demo server · {}", account.currency)
+                }
+                _ => "Broker demo server · not connected".to_string(),
+            };
+            account_row(
+                app,
+                AccountRow {
+                    index,
+                    account,
+                    detail,
+                    selected: selected == Some(&account.id),
+                    selectable: account.environment == aeris_trading::AccountEnvironment::Demo,
+                },
+                theme,
+            )
+        })
+        .collect::<Vec<_>>();
+    (!rows.is_empty()).then(|| settings_group("Broker accounts", rows, theme))
 }
 
 struct AccountRow<'a> {
@@ -543,11 +601,13 @@ struct AccountRow<'a> {
     selectable: bool,
 }
 
+/// One account: its name and detail on the left; its environment, the Use control and, for
+/// a practice account, Delete on the right.
 fn account_row(
     app: &Entity<WorkspaceSurface>,
     row: AccountRow<'_>,
     theme: &AerisTheme,
-) -> impl IntoElement {
+) -> AnyElement {
     let AccountRow {
         index,
         account,
@@ -555,77 +615,39 @@ fn account_row(
         selected,
         selectable,
     } = row;
-    let colors = theme.colors;
+    let simulated = account.environment == aeris_trading::AccountEnvironment::Simulated;
     let select = app.clone();
     let account_id = account.id.clone();
-    let simulated = account.environment == aeris_trading::AccountEnvironment::Simulated;
-    div()
-        .id(("accounts_trading_row", index))
-        .h(px(ROW_HEIGHT))
-        .px_2()
-        .flex()
-        .items_center()
-        .gap_2()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .bg(gpui_color(if selected {
-            colors.active_bg.over(colors.surface_secondary)
-        } else {
-            colors.surface_secondary
-        }))
-        .when(selectable, |row| {
-            row.cursor_pointer()
-                .role(Role::Button)
-                .aria_label(format!("Trade on {}", account.display_name))
-                .hover(move |row| {
-                    row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                })
-                .on_click(move |_, _, cx| {
-                    select.update(cx, |surface, surface_cx| {
-                        surface.select_trading_account(account_id.clone(), surface_cx);
-                    });
-                })
-        })
-        .child(
-            div()
-                .flex_none()
-                .size(px(16.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(selected, |slot| {
-                    slot.child(
-                        header_icon(HugeIcon::CheckIcon)
-                            .with_size(px(16.0))
-                            .color(gpui_color(colors.icon_active)),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(gpui_color(colors.text_default))
-                        .truncate()
-                        .child(account.display_name.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_secondary))
-                        .truncate()
-                        .child(detail),
-                ),
-        )
-        .child(environment_badge(account.environment, theme))
-        // Only practice accounts can be deleted; broker accounts belong to the broker.
-        .when(simulated, |row| {
-            row.child(delete_account_button(app, index, account, theme))
-        })
+    let use_button = selectable.then(|| {
+        Button::new(("accounts_trading_use", index), theme)
+            .variant(ButtonVariant::Secondary)
+            .selected(selected)
+            .icon(header_icon(if selected {
+                HugeIcon::CheckIcon
+            } else {
+                HugeIcon::User
+            }))
+            .label(if selected { "Trading" } else { "Use" })
+            .aria_label(format!("Trade on {}", account.display_name))
+            .on_click(move |_, _, cx| {
+                select.update(cx, |surface, surface_cx| {
+                    surface.select_trading_account(account_id.clone(), surface_cx);
+                });
+            })
+            .into_any_element()
+    });
+    // Only practice accounts can be deleted; broker accounts belong to the broker.
+    let delete = simulated.then(|| delete_account_button(app, index, account, theme));
+    described_setting_row(
+        account.display_name.clone(),
+        [SharedString::from(detail)],
+        control_strip(
+            std::iter::once(environment_badge(account.environment, theme))
+                .chain(use_button)
+                .chain(delete),
+        ),
+        theme,
+    )
 }
 
 fn delete_account_button(
@@ -633,7 +655,7 @@ fn delete_account_button(
     index: usize,
     account: &aeris_trading::TradingAccount,
     theme: &AerisTheme,
-) -> impl IntoElement {
+) -> AnyElement {
     let delete = app.clone();
     let account_id = account.id.clone();
     Button::new(("accounts_practice_delete", index), theme)
@@ -649,6 +671,7 @@ fn delete_account_button(
             });
             cx.stop_propagation();
         })
+        .into_any_element()
 }
 
 /// The account row turned into its delete confirmation, in place.
@@ -656,64 +679,48 @@ fn delete_confirmation(
     app: &Entity<WorkspaceSurface>,
     account: &aeris_trading::TradingAccount,
     theme: &AerisTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
+) -> AnyElement {
     let cancel = app.clone();
     let confirm = app.clone();
     let account_key = account.id.as_str().to_string();
-    card("accounts_delete_confirmation")
-        .child(
-            div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_danger))
-                .child(format!("Delete {}?", account.display_name)),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(
-                    "This permanently removes its open positions, working orders, fills, P/L \
-                     history, risk state, and local copier references. It cannot be undone.",
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("accounts_delete_cancel", theme)
-                        .variant(ButtonVariant::Outline)
-                        .label("Cancel")
-                        .on_click(move |_, _, cx| {
-                            cancel.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_delete_confirmation = None;
-                                surface_cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("accounts_delete_confirm", theme)
-                        .variant(ButtonVariant::Destructive)
-                        .label("Delete account")
-                        .on_click(move |_, _, cx| {
-                            let service = confirm.read(cx).lifecycle.trading().clone();
-                            let feedback = confirm.read(cx).lifecycle.trading_feedback().clone();
-                            confirm.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_delete_confirmation = None;
-                                surface_cx.notify();
-                            });
-                            aeris_desktop::trading::delete_practice_account(
-                                &service,
-                                &feedback,
-                                account_key.clone(),
-                                cx,
-                            );
-                        }),
-                ),
-        )
+    described_setting_row(
+        format!("Delete {}?", account.display_name),
+        [SharedString::from(
+            "Permanently removes its positions, working orders, fills, P/L history, risk state \
+             and copier references. This cannot be undone.",
+        )],
+        control_strip([
+            Button::new("accounts_delete_cancel", theme)
+                .variant(ButtonVariant::Secondary)
+                .label("Cancel")
+                .on_click(move |_, _, cx| {
+                    cancel.update(cx, |surface, surface_cx| {
+                        surface.trading_pnl.account_delete_confirmation = None;
+                        surface_cx.notify();
+                    });
+                })
+                .into_any_element(),
+            Button::new("accounts_delete_confirm", theme)
+                .variant(ButtonVariant::Destructive)
+                .label("Delete")
+                .on_click(move |_, _, cx| {
+                    let service = confirm.read(cx).lifecycle.trading().clone();
+                    let feedback = confirm.read(cx).lifecycle.trading_feedback().clone();
+                    confirm.update(cx, |surface, surface_cx| {
+                        surface.trading_pnl.account_delete_confirmation = None;
+                        surface_cx.notify();
+                    });
+                    aeris_desktop::trading::delete_practice_account(
+                        &service,
+                        &feedback,
+                        account_key.clone(),
+                        cx,
+                    );
+                })
+                .into_any_element(),
+        ]),
+        theme,
+    )
 }
 
 fn open_practice_account_form(
@@ -738,62 +745,75 @@ fn open_practice_account_form(
     cx.notify();
 }
 
+/// A text field in an Accounts row's control slot.
+pub(super) fn accounts_field(input: &Entity<InputState>, theme: &AerisTheme) -> AnyElement {
+    div()
+        .w(px(ACCOUNTS_FIELD_WIDTH))
+        .h(px(32.0))
+        .flex()
+        .child(Input::new(input).platform(theme).flex_1())
+        .into_any_element()
+}
+
 fn practice_account_form(
     app: &Entity<WorkspaceSurface>,
     creator: &PracticeAccountFormState,
     theme: &AerisTheme,
-) -> Stateful<Div> {
+) -> [AnyElement; 3] {
     let cancel = app.clone();
     let create = app.clone();
     let name = creator.name.clone();
     let equity = creator.equity.clone();
-    card("accounts_practice_form")
-        .gap_2()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(theme.colors.text_default))
-                .child("New practice account"),
-        )
-        .child(field_label("Account name", theme))
-        .child(Input::new(&creator.name).platform(theme))
-        .child(field_label("Starting equity in USD", theme))
-        .child(Input::new(&creator.equity).platform(theme))
-        .child(
-            div()
-                .mt_1()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("accounts_create_cancel", theme)
-                        .variant(ButtonVariant::Outline)
-                        .label("Cancel")
-                        .on_click(move |_, _, cx| {
-                            cancel.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_creator = None;
-                                surface_cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("accounts_create_confirm", theme)
-                        .variant(ButtonVariant::Primary)
-                        .label("Create account")
-                        .on_click(move |_, _, cx| {
-                            let name = name.read(cx).value().to_string();
-                            let equity = equity.read(cx).value().to_string();
-                            let service = create.read(cx).lifecycle.trading().clone();
-                            let feedback = create.read(cx).lifecycle.trading_feedback().clone();
-                            create.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_creator = None;
-                                surface_cx.notify();
-                            });
-                            aeris_desktop::trading::create_practice_account(
-                                &service, &feedback, name, &equity, cx,
-                            );
-                        }),
-                ),
-        )
+    [
+        described_setting_row(
+            "Account name",
+            [SharedString::from(
+                "Shown in the header and the order ticket",
+            )],
+            accounts_field(&creator.name, theme),
+            theme,
+        ),
+        described_setting_row(
+            "Starting balance",
+            [SharedString::from("Simulated US dollars")],
+            accounts_field(&creator.equity, theme),
+            theme,
+        ),
+        div()
+            .pt_1()
+            .pb_2()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("accounts_create_cancel", theme)
+                    .variant(ButtonVariant::Secondary)
+                    .label("Cancel")
+                    .on_click(move |_, _, cx| {
+                        cancel.update(cx, |surface, surface_cx| {
+                            surface.trading_pnl.account_creator = None;
+                            surface_cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                Button::new("accounts_create_confirm", theme)
+                    .variant(ButtonVariant::Primary)
+                    .label("Create account")
+                    .on_click(move |_, _, cx| {
+                        let name = name.read(cx).value().to_string();
+                        let equity = equity.read(cx).value().to_string();
+                        let service = create.read(cx).lifecycle.trading().clone();
+                        let feedback = create.read(cx).lifecycle.trading_feedback().clone();
+                        create.update(cx, |surface, surface_cx| {
+                            surface.trading_pnl.account_creator = None;
+                            surface_cx.notify();
+                        });
+                        aeris_desktop::trading::create_practice_account(
+                            &service, &feedback, name, &equity, cx,
+                        );
+                    }),
+            )
+            .into_any_element(),
+    ]
 }
