@@ -261,11 +261,10 @@ pub enum MarketWorkerMessage {
         study_id: StudyInstanceId,
         message: String,
     },
-    EngineSelectionCommitted {
+    /// A local select-and-demand acknowledgement, fenced by the exact pending sequence.
+    EngineSelectionOutcome {
         sequence: u64,
-    },
-    EngineSelectionFailed {
-        sequence: u64,
+        succeeded: bool,
     },
     SelectedInstrument {
         generation: u64,
@@ -1984,7 +1983,10 @@ mod tests {
         }));
         for sequence in 1..=3 {
             sender
-                .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+                .send(MarketWorkerMessage::EngineSelectionOutcome {
+                    sequence,
+                    succeeded: true,
+                })
                 .expect("switch marker sends");
         }
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2409,7 +2411,10 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         sender
-            .send(MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 })
+            .send(MarketWorkerMessage::EngineSelectionOutcome {
+                sequence: 7,
+                succeeded: true,
+            })
             .expect("switch marker sends");
         assert_eq!(
             sender.send(snapshot_message(&mut worker, 2)),
@@ -2427,7 +2432,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::EngineSelectionCommitted { sequence: 7 },
+                MarketWorkerMessage::EngineSelectionOutcome { sequence: 7, succeeded: true },
                 MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })

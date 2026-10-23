@@ -1932,6 +1932,15 @@ Status: pending
     additional presentation metadata; local outcomes and transitional
     `MarketWorkerMessage` names remain for the next Part 8b step.
     M6.6 and VAL-DSK-021/022 remain open.
+  - Part 8b2a (2026-10-24): local select-and-demand success and failure
+    acknowledgements share one sequence-fenced outcome instead of two
+    independently routed message variants. The pane commits or rejects only
+    the matching pending sequence; existing duplicate-reply, stale-reply,
+    failed-switch, queue-order and rapid-switch regressions exercise both
+    branches. This is a partial local-outcome collapse, not the final bridge
+    migration: metadata-bearing fenced runtime entries, other local outcomes,
+    `MarketWorkerMessage`, transitional channel aliases and `fn enqueue`
+    remain. M6.6 and VAL-DSK-021/022 stay open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

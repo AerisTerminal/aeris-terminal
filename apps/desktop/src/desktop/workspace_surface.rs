@@ -4070,11 +4070,15 @@ impl WorkspaceSurface {
                 generation,
                 message,
             } => self.apply_series_state_message(generation, ChartState::Error, message, cx),
-            MarketWorkerMessage::EngineSelectionCommitted { sequence } => {
-                self.commit_pending_selection(sequence, cx);
-            }
-            MarketWorkerMessage::EngineSelectionFailed { sequence } => {
-                self.reject_pending_engine_selection(sequence, cx);
+            MarketWorkerMessage::EngineSelectionOutcome {
+                sequence,
+                succeeded,
+            } => {
+                if succeeded {
+                    self.commit_pending_selection(sequence, cx);
+                } else {
+                    self.reject_pending_engine_selection(sequence, cx);
+                }
             }
             MarketWorkerMessage::SelectedInstrument {
                 generation,

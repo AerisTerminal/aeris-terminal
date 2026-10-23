@@ -383,7 +383,10 @@ fn pane_harness_one_user_selection_command_and_one_applied_reply(cx: &mut TestAp
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+            .send(MarketWorkerMessage::EngineSelectionOutcome {
+                sequence,
+                succeeded: true,
+            })
             .expect("fixture reply enters mailbox");
     }
     harness.pane.update(cx, |pane, cx| {
@@ -463,7 +466,10 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker");
     harness
         .publications
@@ -563,7 +569,10 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("selection marker");
     harness
         .publications
@@ -624,7 +633,10 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             .expect("selection request");
         harness
             .publications
-            .send(MarketWorkerMessage::EngineSelectionFailed { sequence })
+            .send(MarketWorkerMessage::EngineSelectionOutcome {
+                sequence,
+                succeeded: false,
+            })
             .expect("selection failure enters mailbox");
         harness
             .publications
@@ -694,7 +706,10 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("replacement marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -814,7 +829,10 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
         .expect("selection request");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -893,7 +911,10 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
             .expect("selection request");
         harness
             .publications
-            .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+            .send(MarketWorkerMessage::EngineSelectionOutcome {
+                sequence,
+                succeeded: true,
+            })
             .expect("marker enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -963,7 +984,10 @@ fn pane_harness_interval_switch_covers_chart_until_replacement(cx: &mut TestAppC
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1020,7 +1044,10 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker");
     harness
         .publications
@@ -1111,7 +1138,10 @@ fn check_snapshot_switch_order(order: [u8; 3], cx: &mut TestAppContext) {
     let mut replacement_installed = false;
     for event in order {
         let message = match event {
-            0 => MarketWorkerMessage::EngineSelectionCommitted { sequence },
+            0 => MarketWorkerMessage::EngineSelectionOutcome {
+                sequence,
+                succeeded: true,
+            },
             1 | 2 => {
                 let interval = if event == 1 {
                     ChartInterval::Minute1
@@ -1202,7 +1232,10 @@ fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppCo
         .expect("initial interval request");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence: initial })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence: initial,
+            succeeded: true,
+        })
         .expect("initial selection");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1268,8 +1301,9 @@ fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppCo
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted {
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
             sequence: final_generation,
+            succeeded: true,
         })
         .expect("final reply");
     harness
@@ -1295,8 +1329,9 @@ fn deliver_retired_interval_outcomes(
     for &generation in sequences[..sequences.len() - 1].iter().rev() {
         harness
             .publications
-            .send(MarketWorkerMessage::EngineSelectionCommitted {
+            .send(MarketWorkerMessage::EngineSelectionOutcome {
                 sequence: generation,
+                succeeded: true,
             })
             .expect("retired reply");
         harness
@@ -1450,7 +1485,10 @@ fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("commit");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1519,7 +1557,10 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("commit");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1605,7 +1646,10 @@ fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("commit");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1694,7 +1738,10 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1822,7 +1869,10 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("replacement marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1886,7 +1936,10 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
     }
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1989,7 +2042,10 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
         .expect("selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2070,7 +2126,10 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2128,7 +2187,10 @@ fn check_switch_cover_through_ready(
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("selection commit");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2241,7 +2303,10 @@ fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestA
         .expect("instrument selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("selection commit");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2312,7 +2377,10 @@ fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
         if marker_first {
             harness
                 .publications
-                .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+                .send(MarketWorkerMessage::EngineSelectionOutcome {
+                    sequence,
+                    succeeded: true,
+                })
                 .expect("marker enters mailbox");
         }
         harness
@@ -2363,7 +2431,10 @@ fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut Tes
     assert_ne!(first, second);
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionFailed { sequence: first })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence: first,
+            succeeded: false,
+        })
         .expect("retired failure enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2400,7 +2471,10 @@ fn pane_harness_selection_outcome_uses_exact_pending_controller_generation(
         .expect("pending selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("selection outcome enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2440,7 +2514,10 @@ fn pane_harness_failed_pending_instrument_keeps_previous_identity(cx: &mut TestA
         .expect("instrument selection");
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionFailed { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: false,
+        })
         .expect("failure enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3764,7 +3841,10 @@ fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EngineSelectionCommitted { sequence })
+        .send(MarketWorkerMessage::EngineSelectionOutcome {
+            sequence,
+            succeeded: true,
+        })
         .expect("marker");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
