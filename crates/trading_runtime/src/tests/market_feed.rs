@@ -134,6 +134,19 @@ pub(crate) fn live_session(id: InstrumentId, generation: u64) -> MarketFeedEvent
     })
 }
 
+/// A session that never closes, for fixtures whose clock sits far beyond the fixed-epoch
+/// end of [`live_session`].
+pub(crate) fn always_open_session(id: InstrumentId, generation: u64) -> MarketFeedEvent {
+    MarketFeedEvent::Session(aeris_trading::market::InstrumentSession {
+        instrument_id: id,
+        provider_generation: generation,
+        phase: SessionPhase::AlwaysOpen,
+        source: CalendarSourceKind::ProviderCalendar,
+        session_end_unix_nanos: None,
+        next_open_unix_nanos: None,
+    })
+}
+
 #[test]
 fn day_acceptance_fixes_session_deadline_and_restores_it() {
     let directory = TestDirectory::new("day-acceptance-deadline");
@@ -1506,16 +1519,33 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
 #[test]
 fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
     let directory = TestDirectory::new("chart-stale-revision");
-    let (service, _clock) = feed_service(&directory);
+    let (service, clock) = feed_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument");
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    service.status().expect("drain feed");
     let mut request = market_order("chart-stale", OrderSide::Buy, 1, 1_000);
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
     let accepted = service.place_order(request).expect("accepted");
     let before = service.snapshot().expect("before");
+    // A restart without a feed leaves the owner without any quote; the stale revision is
+    // still rejected before the market is read.
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let service = start_service_with_config(configuration);
     let command = RevisionedModifyOrder {
         order: ModifyOrder {
             client_order_id: accepted.client_order_id.clone(),
@@ -2400,10 +2430,19 @@ fn verified_terms_persist_routes_and_recovered_orders_republish_interest() {
 fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve_it() {
     let directory = TestDirectory::new("migrated-hyperliquid-route");
     let instrument = high_precision_crypto_instrument();
-    let (service, clock, _) = live_feed_service(&directory);
+    let (service, clock, feed) = live_feed_service(&directory);
     service
         .register_instrument(instrument.clone())
         .expect("legacy instrument");
+    bootstrap_live_feed(&feed, &instrument, migrated_btc_route(&instrument));
+    service.status().expect("verified terms drain");
+    feed.push(hyperliquid_quote(
+        instrument.instrument_id.clone(),
+        1,
+        9_950_000_000,
+        9_975_000_000,
+    ))
+    .expect("resting quote");
     let mut request = market_order("legacy-btc-limit", OrderSide::Buy, 1, 1_000);
     request.instrument_id = instrument.instrument_id.clone();
     request.quantity = FixedPoint::try_new(100_000_000, 8).unwrap();
@@ -2412,6 +2451,9 @@ fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve
     request.limit_price = Some(FixedPoint::try_new(9_900_000_000, 8).unwrap());
     let order = service.place_order(request).expect("legacy resting order");
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    // Model the V20-migrated legacy store: the persisted verified route is absent, so the
+    // resting order stays route-less until new Terms resolve it.
+    null_persisted_route(&directory, &instrument);
 
     let mut configuration = config(&directory);
     configuration.clock = clock;
@@ -2467,19 +2509,12 @@ fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve
         serde_json::from_str::<serde_json::Value>(&persisted).unwrap()["provider_symbol"],
         "BTC"
     );
-    feed.push(MarketFeedEvent::Quote(TradingQuote {
-        instrument_id: instrument.instrument_id,
-        bid: FixedPoint::try_new(9_800_000_000, 8).unwrap(),
-        ask: FixedPoint::try_new(9_900_000_000, 8).unwrap(),
-        bid_size: None,
-        ask_size: None,
-        last: None,
-        provider_id: "hyperliquid".into(),
-        provider_generation: 1,
-        source_sequence: Some(1),
-        exchange_unix_nanos: None,
-        received_unix_nanos: 1_000_000_000_001,
-    }))
+    feed.push(hyperliquid_quote(
+        instrument.instrument_id,
+        1,
+        9_800_000_000,
+        9_900_000_000,
+    ))
     .expect("quote");
     restarted.status().expect("execution");
     assert_eq!(
@@ -2496,6 +2531,40 @@ fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("shutdown");
+}
+
+/// One Hyperliquid Live quote for the migrated crypto fixture at the deterministic clock.
+fn hyperliquid_quote(
+    instrument_id: InstrumentId,
+    source_sequence: u64,
+    bid: i64,
+    ask: i64,
+) -> MarketFeedEvent {
+    MarketFeedEvent::Quote(TradingQuote {
+        instrument_id,
+        bid: FixedPoint::try_new(bid, 8).unwrap(),
+        ask: FixedPoint::try_new(ask, 8).unwrap(),
+        bid_size: None,
+        ask_size: None,
+        last: None,
+        provider_id: "hyperliquid".into(),
+        provider_generation: 1,
+        source_sequence: Some(source_sequence),
+        exchange_unix_nanos: None,
+        received_unix_nanos: 1_000_000_000_001,
+    })
+}
+
+/// Removes the persisted verified route, modeling a V20-migrated legacy instrument that has
+/// not yet received its Terms.
+fn null_persisted_route(directory: &TestDirectory, instrument: &TradingInstrument) {
+    rusqlite::Connection::open(config(directory).database_path)
+        .unwrap()
+        .execute(
+            "UPDATE instruments SET market_route_json = NULL WHERE id = ?1",
+            [instrument.instrument_id.as_str()],
+        )
+        .unwrap();
 }
 
 fn migrated_btc_route(instrument: &TradingInstrument) -> MarketRoute {
