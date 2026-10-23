@@ -210,6 +210,26 @@ pub enum LocalFailureScope {
     Selection(u64),
 }
 
+/// Results of local pane commands, fenced by the request sequence or study identity
+/// at the GPUI owner rather than projected as coordinator publications.
+pub enum LocalCommandOutcome {
+    PriceAlertSync {
+        sequence: u64,
+        succeeded: bool,
+    },
+    StudyRegistration {
+        request_sequence: u64,
+        result: Result<StudyInstanceId, String>,
+    },
+    StudyReinitialization {
+        study_id: StudyInstanceId,
+        result: Result<(), String>,
+    },
+    StudyRemovalFailed {
+        study_id: StudyInstanceId,
+    },
+}
+
 pub enum MarketWorkerMessage {
     /// Coordinator events retain their consumer fence through the bounded
     /// queue; the pane projects each event at its owning presentation boundary.
@@ -242,24 +262,7 @@ pub enum MarketWorkerMessage {
         generation: u64,
         status: LocalSessionStatus,
     },
-    PriceAlertSync {
-        sequence: u64,
-        succeeded: bool,
-    },
-    /// Local study registration acknowledgement, fenced by its pending request sequence.
-    StudyRegistrationOutcome {
-        request_sequence: u64,
-        result: Result<StudyInstanceId, String>,
-    },
-    /// Local reinitialization result for the active study.
-    StudyReinitializationOutcome {
-        study_id: StudyInstanceId,
-        result: Result<(), String>,
-    },
-    StudyRemovalFailed {
-        study_id: StudyInstanceId,
-        message: String,
-    },
+    LocalCommandOutcome(LocalCommandOutcome),
     /// A local select-and-demand acknowledgement, fenced by the exact pending sequence.
     EngineSelectionOutcome {
         sequence: u64,
@@ -1223,8 +1226,8 @@ impl MarketWorkerRetirement {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartViewportUpdate, ConsumerResourceClass, LocalSessionStatus, MarketDataWorker,
-        MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
+        ChartViewportUpdate, ConsumerResourceClass, LocalCommandOutcome, LocalSessionStatus,
+        MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
         MarketWorkerMessage, PendingUiDiagnostics, UiDiagnosticsFeedback, market_worker_channel,
         ui_diagnostics_channel,
     };
@@ -2032,6 +2035,70 @@ mod tests {
                 (super::LocalFailureScope::Selection(6), "retired".into()),
             ]
         );
+    }
+
+    #[test]
+    fn local_command_outcomes_keep_request_fences_and_fifo() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::PriceAlertSync {
+                    sequence: 5,
+                    succeeded: false,
+                },
+            ))
+            .expect("alert result enters control reserve");
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::StudyRegistration {
+                    request_sequence: 7,
+                    result: Err("fixture".into()),
+                },
+            ))
+            .expect("study result enters control reserve");
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::StudyReinitialization {
+                    study_id,
+                    result: Ok(()),
+                },
+            ))
+            .expect("reinitialization enters control reserve");
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::StudyRemovalFailed { study_id },
+            ))
+            .expect("removal failure enters control reserve");
+        let (first, _) = receiver.drain_up_to(2);
+        assert!(matches!(
+            first.as_slice(),
+            [
+                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::PriceAlertSync {
+                    sequence: 5,
+                    succeeded: false,
+                }),
+                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::StudyRegistration {
+                    request_sequence: 7,
+                    result: Err(_),
+                }),
+            ]
+        ));
+        let (later, _) = receiver.drain();
+        assert!(matches!(
+            later.as_slice(),
+            [
+                MarketWorkerMessage::LocalCommandOutcome(
+                    LocalCommandOutcome::StudyReinitialization {
+                        study_id: reinitialized,
+                        result: Ok(()),
+                    }
+                ),
+                MarketWorkerMessage::LocalCommandOutcome(
+                    LocalCommandOutcome::StudyRemovalFailed { study_id: removed }
+                ),
+            ] if *reinitialized == study_id && *removed == study_id
+        ));
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 use super::*;
 use aeris_desktop::market_worker::{
-    EngineWorkerStartup, LocalSessionStatus, MarketWorkerCommand, MarketWorkerSender,
-    market_worker_channel,
+    EngineWorkerStartup, LocalCommandOutcome, LocalSessionStatus, MarketWorkerCommand,
+    MarketWorkerSender, market_worker_channel,
 };
 use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
 use gpui::{TestAppContext, VisualTestContext};
@@ -2051,10 +2051,12 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::StudyReinitializationOutcome {
-            study_id,
-            result: Err("private-provider-rejection".into()),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::StudyReinitialization {
+                study_id,
+                result: Err("private-provider-rejection".into()),
+            },
+        ))
         .expect("reinitialization failure");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2076,16 +2078,41 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::StudyReinitializationOutcome {
-            study_id,
-            result: Ok(()),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::StudyReinitialization {
+                study_id,
+                result: Ok(()),
+            },
+        ))
         .expect("reinitialization success");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.studies.active[0].persisted, replacement);
         assert!(!pane.studies.reinitializing.contains_key(&study_id));
         assert!(pane.chart_persistence_dirty);
+    });
+}
+
+#[gpui::test]
+fn pane_harness_local_study_removal_failure_renders_one_notice(cx: &mut TestAppContext) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
+    for _ in 0..2 {
+        harness
+            .publications
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::StudyRemovalFailed { study_id },
+            ))
+            .expect("study removal failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Study unavailable");
     });
 }
 
@@ -3337,10 +3364,12 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::PriceAlertSync {
-                sequence: 0,
-                succeeded: false,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::PriceAlertSync {
+                    sequence: 0,
+                    succeeded: false,
+                },
+            ))
             .expect("fixture alert failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3375,10 +3404,12 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
 
     harness
         .publications
-        .send(MarketWorkerMessage::PriceAlertSync {
-            sequence: 0,
-            succeeded: true,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::PriceAlertSync {
+                sequence: 0,
+                succeeded: true,
+            },
+        ))
         .expect("fixture alert success enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3425,10 +3456,12 @@ fn pane_harness_alert_restore_failure_renders_and_processing_success_clears(
     );
     harness
         .publications
-        .send(MarketWorkerMessage::PriceAlertSync {
-            sequence: 0,
-            succeeded: true,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::PriceAlertSync {
+                sequence: 0,
+                succeeded: true,
+            },
+        ))
         .expect("fixture success enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3507,10 +3540,12 @@ fn pane_harness_price_alert_sync_ignores_retired_command_outcomes(cx: &mut TestA
     for (sequence, succeeded, expected_notices) in [(1, false, 0), (2, false, 1), (1, true, 1)] {
         harness
             .publications
-            .send(MarketWorkerMessage::PriceAlertSync {
-                sequence,
-                succeeded,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::PriceAlertSync {
+                    sequence,
+                    succeeded,
+                },
+            ))
             .expect("fixture result enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3533,10 +3568,12 @@ fn pane_harness_price_alert_sync_ignores_retired_command_outcomes(cx: &mut TestA
     for sequence in [2, 3] {
         harness
             .publications
-            .send(MarketWorkerMessage::PriceAlertSync {
-                sequence,
-                succeeded: true,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::PriceAlertSync {
+                    sequence,
+                    succeeded: true,
+                },
+            ))
             .expect("fixture success enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3604,10 +3641,12 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
         });
         harness
             .publications
-            .send(MarketWorkerMessage::StudyRegistrationOutcome {
-                request_sequence: sequence,
-                result: Err("private-credential-sentinel".into()),
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::StudyRegistration {
+                    request_sequence: sequence,
+                    result: Err("private-credential-sentinel".into()),
+                },
+            ))
             .expect("fixture study failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3648,10 +3687,12 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     ] {
         harness
             .publications
-            .send(MarketWorkerMessage::StudyRegistrationOutcome {
-                request_sequence: 1,
-                result,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::StudyRegistration {
+                    request_sequence: 1,
+                    result,
+                },
+            ))
             .expect("retired study outcome enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3661,10 +3702,12 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     }
     harness
         .publications
-        .send(MarketWorkerMessage::StudyRegistrationOutcome {
-            request_sequence: 3,
-            result: Ok(StudyInstanceId::try_from_u64(3).expect("fixture identity")),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            LocalCommandOutcome::StudyRegistration {
+                request_sequence: 3,
+                result: Ok(StudyInstanceId::try_from_u64(3).expect("fixture identity")),
+            },
+        ))
         .expect("fixture registration enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);

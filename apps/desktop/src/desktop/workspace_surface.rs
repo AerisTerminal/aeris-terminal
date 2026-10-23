@@ -4114,28 +4114,40 @@ impl WorkspaceSurface {
                     self.apply_fenced_market_session_status(generation, status, cx);
                 }
             },
-            MarketWorkerMessage::StudyRegistrationOutcome {
+            MarketWorkerMessage::LocalCommandOutcome(outcome) => {
+                self.apply_local_command_outcome(outcome, cx);
+            }
+        }
+    }
+
+    fn apply_local_command_outcome(
+        &mut self,
+        outcome: aeris_desktop::market_worker::LocalCommandOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        use aeris_desktop::market_worker::LocalCommandOutcome;
+        match outcome {
+            LocalCommandOutcome::PriceAlertSync {
+                sequence,
+                succeeded,
+            } => self.apply_current_price_alert_sync(sequence, succeeded, cx),
+            LocalCommandOutcome::StudyRegistration {
                 request_sequence,
                 result,
             } => match result {
                 Ok(study_id) => self.apply_study_registered(request_sequence, study_id, cx),
                 Err(message) => self.apply_study_registration_failed(request_sequence, message, cx),
             },
-            MarketWorkerMessage::StudyReinitializationOutcome { study_id, result } => {
+            LocalCommandOutcome::StudyReinitialization { study_id, result } => {
                 if result.is_ok() {
                     self.apply_study_reinitialized(study_id, cx);
                 } else {
                     self.apply_study_reinitialization_failure(study_id, cx);
                 }
             }
-            MarketWorkerMessage::StudyRemovalFailed {
-                study_id,
-                message: _,
-            } => self.apply_study_removal_failure(study_id, cx),
-            MarketWorkerMessage::PriceAlertSync {
-                sequence,
-                succeeded,
-            } => self.apply_current_price_alert_sync(sequence, succeeded, cx),
+            LocalCommandOutcome::StudyRemovalFailed { study_id } => {
+                self.apply_study_removal_failure(study_id, cx);
+            }
         }
     }
 

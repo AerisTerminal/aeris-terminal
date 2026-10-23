@@ -366,10 +366,12 @@ fn reinitialize_study(
         .map(|_| ());
     endpoint
         .messages
-        .send(MarketWorkerMessage::StudyReinitializationOutcome {
-            study_id: request.study_id,
-            result,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            aeris_desktop::market_worker::LocalCommandOutcome::StudyReinitialization {
+                study_id: request.study_id,
+                result,
+            },
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -382,10 +384,12 @@ fn register_study(
     let result = market.register_study(client_id, endpoint.consumer_id, request.registration);
     endpoint
         .messages
-        .send(MarketWorkerMessage::StudyRegistrationOutcome {
-            request_sequence: request.sequence,
-            result,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            aeris_desktop::market_worker::LocalCommandOutcome::StudyRegistration {
+                request_sequence: request.sequence,
+                result,
+            },
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -397,9 +401,11 @@ fn remove_study(
 ) -> Result<(), String> {
     match market.remove_study(client_id, study_id) {
         Ok(_) => Ok(()),
-        Err(message) => endpoint
+        Err(_) => endpoint
             .messages
-            .send(MarketWorkerMessage::StudyRemovalFailed { study_id, message })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::StudyRemovalFailed { study_id },
+            ))
             .map_err(|error| error.to_string()),
     }
 }
@@ -416,10 +422,12 @@ fn replace_price_alerts(
         .is_ok();
     endpoint
         .messages
-        .send(MarketWorkerMessage::PriceAlertSync {
-            sequence,
-            succeeded,
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(
+            aeris_desktop::market_worker::LocalCommandOutcome::PriceAlertSync {
+                sequence,
+                succeeded,
+            },
+        ))
         .map_err(|error| error.to_string())
 }
 
