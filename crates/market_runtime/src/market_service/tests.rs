@@ -188,7 +188,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             selection_entitlement_id: "fourth-provider",
             catalog_refresh_on_startup: false,
             ready_label_suffix: "",
-            depth_available: false,
+            feed_level: aeris_contracts::ProviderFeedLevel::Bars,
             search_categories_available: false,
             market_screen_available: false,
             trades_available: false,
@@ -239,6 +239,18 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
 }
 
 #[test]
+fn registered_providers_declare_their_feed_level() {
+    assert_eq!(
+        RITHMIC_PRESENTATION.feed_level,
+        aeris_contracts::ProviderFeedLevel::OrderLevels
+    );
+    assert_eq!(
+        HYPERLIQUID_PRESENTATION.feed_level,
+        aeris_contracts::ProviderFeedLevel::PriceLevels
+    );
+}
+
+#[test]
 fn registered_provider_capabilities_match_presentations_and_streams() {
     let descriptors = BUILT_IN_PROVIDER_DESCRIPTORS;
     assert_eq!(descriptors.len(), 2);
@@ -246,8 +258,12 @@ fn registered_provider_capabilities_match_presentations_and_streams() {
         let capabilities = descriptor.capabilities;
         assert_eq!(descriptor.presentation.id, descriptor.id);
         assert_eq!(
-            descriptor.presentation.depth_available,
+            descriptor.presentation.feed_level.depth_available(),
             capabilities.depth.is_some()
+        );
+        assert_eq!(
+            descriptor.presentation.feed_level.quotes_available(),
+            capabilities.quotes.is_some()
         );
         assert_eq!(
             descriptor.presentation.trades_available,

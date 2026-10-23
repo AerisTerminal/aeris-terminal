@@ -917,7 +917,8 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     selection_entitlement_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
     catalog_refresh_on_startup: false,
     ready_label_suffix: "",
-    depth_available: true,
+    // Rithmic streams depth by order, not only aggregated price levels.
+    feed_level: aeris_contracts::ProviderFeedLevel::OrderLevels,
     search_categories_available: false,
     market_screen_available: false,
     trades_available: true,
@@ -978,7 +979,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     selection_entitlement_id: "hyperliquid-public",
     catalog_refresh_on_startup: true,
     ready_label_suffix: "",
-    depth_available: true,
+    feed_level: aeris_contracts::ProviderFeedLevel::PriceLevels,
     search_categories_available: false,
     market_screen_available: true,
     trades_available: true,
@@ -1552,7 +1553,9 @@ fn configured_engine_from_descriptors(
     for descriptor in descriptors {
         let capabilities = &descriptor.capabilities;
         if descriptor.presentation.id != descriptor.id
-            || descriptor.presentation.depth_available != capabilities.depth.is_some()
+            || descriptor.presentation.feed_level.depth_available() != capabilities.depth.is_some()
+            || descriptor.presentation.feed_level.quotes_available()
+                != capabilities.quotes.is_some()
             || descriptor.presentation.trades_available
                 != capabilities.engine.streams.contains(MarketStream::Trades)
             || capabilities.concurrency.maximum_sessions == 0

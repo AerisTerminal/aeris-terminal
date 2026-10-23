@@ -25,8 +25,45 @@ pub enum ProviderDailyBarCadence {
     TradingSession,
 }
 
-/// Stable provider metadata for catalog and chart presentation.
-// Each flag is an independent, static provider capability, not encoded state.
+/// How deep a provider's live market feed goes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderFeedLevel {
+    /// Bars only, without a live quote.
+    Bars,
+    /// Level 1: the best bid and offer.
+    TopOfBook,
+    /// Level 2: aggregated size at each price level.
+    PriceLevels,
+    /// Level 3: every resting order at each price level.
+    OrderLevels,
+}
+
+impl ProviderFeedLevel {
+    /// Whether the feed carries a book beyond the best bid and offer.
+    #[must_use]
+    pub const fn depth_available(self) -> bool {
+        matches!(self, Self::PriceLevels | Self::OrderLevels)
+    }
+
+    /// Whether the feed carries a live best bid and offer.
+    #[must_use]
+    pub const fn quotes_available(self) -> bool {
+        !matches!(self, Self::Bars)
+    }
+
+    /// The conventional feed-level name, or `None` for a bars-only feed.
+    #[must_use]
+    pub const fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Bars => None,
+            Self::TopOfBook => Some("L1 data"),
+            Self::PriceLevels => Some("L2 data"),
+            Self::OrderLevels => Some("L3 data"),
+        }
+    }
+}
+
+/// Stable provider metadata for catalog and chart presentation.// Each flag is an independent, static provider capability, not encoded state.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderPresentationDescriptor {
@@ -40,7 +77,7 @@ pub struct ProviderPresentationDescriptor {
     pub selection_entitlement_id: &'static str,
     pub catalog_refresh_on_startup: bool,
     pub ready_label_suffix: &'static str,
-    pub depth_available: bool,
+    pub feed_level: ProviderFeedLevel,
     /// Whether search honours `InstrumentSearchCategories` (it serves more than one category).
     pub search_categories_available: bool,
     /// Whether the provider answers `ScreenProviderMarkets` with listed-market statistics.
@@ -48,4 +85,22 @@ pub struct ProviderPresentationDescriptor {
     /// Whether the provider streams individual trade prints (time and sales).
     pub trades_available: bool,
     pub connection_kind: ProviderConnectionKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderFeedLevel;
+
+    #[test]
+    fn feed_levels_name_their_depth() {
+        assert_eq!(ProviderFeedLevel::Bars.label(), None);
+        assert_eq!(ProviderFeedLevel::TopOfBook.label(), Some("L1 data"));
+        assert_eq!(ProviderFeedLevel::PriceLevels.label(), Some("L2 data"));
+        assert_eq!(ProviderFeedLevel::OrderLevels.label(), Some("L3 data"));
+        assert!(!ProviderFeedLevel::TopOfBook.depth_available());
+        assert!(ProviderFeedLevel::PriceLevels.depth_available());
+        assert!(ProviderFeedLevel::OrderLevels.depth_available());
+        assert!(!ProviderFeedLevel::Bars.quotes_available());
+        assert!(ProviderFeedLevel::TopOfBook.quotes_available());
+    }
 }

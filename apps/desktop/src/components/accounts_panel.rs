@@ -312,18 +312,34 @@ fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> V
                 [SharedString::from(
                     "Crypto markets from Hyperliquid's public feed",
                 )],
-                pill(
-                    "No login needed",
-                    theme.colors.surface_secondary,
-                    theme.colors.text_secondary,
-                    Some(theme.colors.border_subtle),
-                    theme,
+                control_strip(
+                    feed_level_pill(TerminalProvider::Hyperliquid, theme)
+                        .into_iter()
+                        .chain(std::iter::once(pill(
+                            "No login needed",
+                            theme.colors.surface_secondary,
+                            theme.colors.text_secondary,
+                            Some(theme.colors.border_subtle),
+                            theme,
+                        ))),
                 ),
                 theme,
             )],
             theme,
         ),
     ]
+}
+
+/// The depth the provider's registration declares for its live feed.
+fn feed_level_pill(provider: TerminalProvider, theme: &AerisTheme) -> Option<AnyElement> {
+    let label = provider_presentation(provider)?.feed_level.label()?;
+    Some(pill(
+        label,
+        theme.colors.surface_secondary,
+        theme.colors.text_secondary,
+        Some(theme.colors.border_subtle),
+        theme,
+    ))
 }
 
 /// The Rithmic connection. Connect opens the login form in place; the connection row keeps
@@ -376,7 +392,12 @@ fn rithmic_group(connections: ConnectionsView<'_>, theme: &AerisTheme) -> AnyEle
     let mut rows = vec![described_setting_row(
         "Rithmic",
         [SharedString::from(view.detail())],
-        control_strip(std::iter::once(status).chain(action)),
+        control_strip(
+            feed_level_pill(TerminalProvider::Rithmic, theme)
+                .into_iter()
+                .chain(std::iter::once(status))
+                .chain(action),
+        ),
         theme,
     )];
     rows.extend(view.message.as_ref().map(|message| {
