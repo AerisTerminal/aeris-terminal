@@ -1910,6 +1910,16 @@ Status: pending
     `ChartState` (now in `chart_pane_controller`). Remaining: the order book,
     tape, study, connection and session routes still use the parallel desktop
     model, and `MarketWorkerMessage` is not deleted.
+  - Part 8a (2026-10-24): the worker's bespoke FIFO/wake implementation moves
+    to one typed, bounded per-pane projection queue. Runtime envelopes and
+    local presentation outcomes still share FIFO order, a bounded control
+    reserve, explicit `Full` backpressure, suppression policy and frame-budget
+    wake continuation. The compatibility `MarketWorkerMessage` payload and
+    `MarketWorkerSender`/`Receiver` names remain for the next Part 8 step;
+    this is not a rename-based claim of VAL-DSK-021. The new queue has its own
+    10,000-event budget/order/overflow regression; existing bridge and pane
+    coverage still runs. M6.6 and VAL-DSK-021/022 remain open until the
+    parallel message model is removed and the literal checks pass.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
@@ -2450,6 +2460,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 UI feat(design-system): platform theme presets (Aeris, Tokyo Night, Catppuccin, GitHub, One, Dracula, Solarized, Gruvbox; light and dark) compile from platform.css into `ThemePreset`/`AerisTheme::resolve` and are picked in the profile menu; chart_integration pins theme-following chart colors to a non-Aeris preset's tokens so Aeris Charts never knows presets. Chart settings gain persisted axis border and axis text colors (appearance tags 28/29, empty follows the theme). Aeris Charts pinned to 2ed6e82 (wheel zoom/pan). Restriction: presets live only in platform.css and the design system; the engine keeps its own defaults. Time-axis labels still follow the chart text color, and the selected preset is not persisted (neither is the color mode).
 - 2026-10-23 UI fix(desktop): preset picker swatch dots sit inside their ring by an equal padding instead of flex-centering a fixed size, so they no longer drift off-center by half a pixel.
 - 2026-10-23 UI style(design-system): no stabilization item. The Aeris theme follows the updated `themes.md`: light `border-secondary` `#0a0a0a1a`, light hover/active `#0a0a0a0d`; dark `surface` `#171717`, translucent dark `surface-secondary` `#fafafa0f`, dark borders `#fafafa1a`/`#fafafa26`, text `#fafafa`, muted `#fafafa40`, hover `#fafafa13`. The Aeris-only popover layer returns: `popover_surface`, menu rows and tooltips use `surface-popover` with a `border-popover-highlight` inner edge and a 1px solid `border-popover` outer ring; presets resolve the tokens to `surface-secondary`, transparent and `border-secondary`. `CSS.md` and the website's `platform.css` carry the same Aeris tokens. Restriction recorded in section 5.
+- 2026-10-24 M6.6 Part 8a refactor(desktop): extracted the one bounded pane projection queue from market_worker, removed its bespoke enqueue, and preserved runtime-event FIFO, the control reserve, wake continuation and overflow in a 10,000-event regression. The old message type remains to collapse in Part 8b; M6.6 and VAL-DSK-021/022 remain unchecked.
 
 ## 7. Known gaps / deferred
 

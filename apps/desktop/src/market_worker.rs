@@ -19,10 +19,15 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError},
     },
     time::{Duration, Instant},
+};
+
+mod pane_projection_queue;
+use pane_projection_queue::{
+    PaneProjectionReceiver, PaneProjectionSender, pane_projection_channel,
 };
 
 /// A bounded coordinator mailbox whose receiving endpoint has been dropped.
@@ -68,7 +73,6 @@ impl std::fmt::Display for ProviderCommandUnavailable {
 
 impl std::error::Error for ProviderCommandUnavailable {}
 
-const CONTROL_RESERVE: usize = 8;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -291,120 +295,8 @@ pub enum MarketWorkerMessage {
     },
 }
 
-struct MarketWorkerMailbox {
-    queue: Mutex<VecDeque<MarketWorkerMessage>>,
-    capacity: usize,
-    sender_count: AtomicUsize,
-    receiver_alive: AtomicBool,
-    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    wake_pending: AtomicBool,
-    market_publications_enabled: AtomicBool,
-}
-
-fn fire_mailbox_wake(mailbox: &MarketWorkerMailbox) {
-    if !mailbox.receiver_alive.load(Ordering::Acquire) {
-        return;
-    }
-    if mailbox.wake_pending.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let wake = mailbox
-        .wake
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    match wake {
-        Some(wake) => wake(),
-        None => mailbox.wake_pending.store(false, Ordering::Release),
-    }
-}
-
-pub struct MarketWorkerSender {
-    mailbox: Arc<MarketWorkerMailbox>,
-}
-
-pub struct MarketWorkerReceiver {
-    mailbox: Arc<MarketWorkerMailbox>,
-}
-
-impl Clone for MarketWorkerSender {
-    fn clone(&self) -> Self {
-        self.mailbox.sender_count.fetch_add(1, Ordering::Relaxed);
-        Self {
-            mailbox: Arc::clone(&self.mailbox),
-        }
-    }
-}
-
-impl Drop for MarketWorkerSender {
-    fn drop(&mut self) {
-        if self.mailbox.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            fire_mailbox_wake(&self.mailbox);
-        }
-    }
-}
-
-impl MarketWorkerSender {
-    /// Enqueues one presentation message and wakes the consumer.
-    ///
-    /// # Errors
-    ///
-    /// Returns explicit backpressure when the bounded GPUI mailbox is full, or
-    /// a disconnect after the receiving endpoint is dropped. Market runtime
-    /// callers reserve capacity before polling canonical events, so `Full` is an
-    /// invariant violation rather than a signal to discard or reconstruct bars.
-    pub fn send(&self, message: MarketWorkerMessage) -> Result<(), MarketWorkerSendError> {
-        self.enqueue(message)?;
-        fire_mailbox_wake(&self.mailbox);
-        Ok(())
-    }
-
-    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), MarketWorkerSendError> {
-        if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(MarketWorkerSendError::Disconnected);
-        }
-        if !self.accepts_message(&message) {
-            return Ok(());
-        }
-        let mut queue = self
-            .mailbox
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(MarketWorkerSendError::Disconnected);
-        }
-        // App-scoped controls use the bounded reserve and share FIFO ordering;
-        // a saturated mailbox reports backpressure instead of evicting events.
-        let limit = if is_market_publication(&message) {
-            self.mailbox.capacity
-        } else {
-            self.mailbox.capacity.saturating_add(CONTROL_RESERVE)
-        };
-        if queue.len() >= limit {
-            return Err(MarketWorkerSendError::Full);
-        }
-        queue.push_back(message);
-        Ok(())
-    }
-
-    fn accepts_message(&self, message: &MarketWorkerMessage) -> bool {
-        self.mailbox
-            .market_publications_enabled
-            .load(Ordering::Acquire)
-            || !is_market_publication(message)
-    }
-
-    pub fn occupancy(&self) -> (usize, usize) {
-        let current = self
-            .mailbox
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len();
-        (current, self.mailbox.capacity)
-    }
-}
+pub type MarketWorkerSender = PaneProjectionSender<MarketWorkerMessage>;
+pub type MarketWorkerReceiver = PaneProjectionReceiver<MarketWorkerMessage>;
 
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
@@ -456,119 +348,9 @@ impl GenerationCoalescingQueue {
     }
 }
 
-impl MarketWorkerReceiver {
-    fn set_market_publications_enabled(&self, enabled: bool) {
-        let mut queue = self
-            .mailbox
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self
-            .mailbox
-            .market_publications_enabled
-            .load(Ordering::Acquire)
-            == enabled
-        {
-            return;
-        }
-        queue.retain(|message| !is_market_publication(message));
-        self.mailbox
-            .market_publications_enabled
-            .store(enabled, Ordering::Release);
-    }
-
-    pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
-        *self
-            .mailbox
-            .wake
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
-        let pending = !self
-            .mailbox
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty();
-        if pending {
-            fire_mailbox_wake(&self.mailbox);
-        }
-    }
-
-    #[must_use]
-    pub fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
-        self.drain_up_to(usize::MAX)
-    }
-
-    /// Drains at most `limit` messages while preserving the mailbox wake edge.
-    ///
-    /// The desktop consumes this bounded form from its frame callback so a burst
-    /// of provider updates cannot monopolize GPUI's event loop. Any remaining
-    /// messages stay queued and trigger another wake/frame.
-    pub fn drain_up_to(&self, limit: usize) -> (Vec<MarketWorkerMessage>, bool) {
-        let mut queue = self
-            .mailbox
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let messages = if limit == usize::MAX {
-            queue.drain(..).collect::<Vec<_>>()
-        } else {
-            let end = limit.min(queue.len());
-            queue.drain(..end).collect::<Vec<_>>()
-        };
-        drop(queue);
-        self.mailbox.wake_pending.store(false, Ordering::Release);
-        let (queued, disconnected) = {
-            let queue = self
-                .mailbox
-                .queue
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                !queue.is_empty(),
-                self.mailbox.sender_count.load(Ordering::Acquire) == 0,
-            )
-        };
-        if queued {
-            fire_mailbox_wake(&self.mailbox);
-        }
-        (messages, disconnected)
-    }
-}
-
-impl Drop for MarketWorkerReceiver {
-    fn drop(&mut self) {
-        self.mailbox.receiver_alive.store(false, Ordering::Release);
-        *self
-            .mailbox
-            .wake
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        self.mailbox
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-    }
-}
-
 #[must_use]
 pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, MarketWorkerReceiver) {
-    let mailbox = Arc::new(MarketWorkerMailbox {
-        queue: Mutex::new(VecDeque::with_capacity(capacity.get().saturating_add(1))),
-        capacity: capacity.get(),
-        sender_count: AtomicUsize::new(1),
-        receiver_alive: AtomicBool::new(true),
-        wake: Mutex::new(None),
-        wake_pending: AtomicBool::new(false),
-        market_publications_enabled: AtomicBool::new(true),
-    });
-    (
-        MarketWorkerSender {
-            mailbox: Arc::clone(&mailbox),
-        },
-        MarketWorkerReceiver { mailbox },
-    )
+    pane_projection_channel(capacity, is_market_publication)
 }
 
 pub enum MarketWorkerCommand {
