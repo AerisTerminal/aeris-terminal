@@ -1297,7 +1297,10 @@ mod tests {
                             }),
                         ..
                     }) => panic!("Hyperliquid market runtime startup failed: {detail:?}"),
-                    MarketWorkerMessage::EndpointFailure { message, .. } => {
+                    MarketWorkerMessage::LocalFailure {
+                        scope: aeris_desktop::market_worker::LocalFailureScope::Selection(_),
+                        message,
+                    } => {
                         panic!("Hyperliquid market endpoint failed: {message}")
                     }
                     _ => {}
@@ -1993,7 +1996,8 @@ mod tests {
         let sender = record.endpoint.messages.clone();
         let mut count = 0;
         loop {
-            match sender.send(MarketWorkerMessage::CatalogFailure {
+            match sender.send(MarketWorkerMessage::LocalFailure {
+                scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                 message: "fixture".to_string(),
             }) {
                 Ok(()) => count += 1,
@@ -2020,7 +2024,8 @@ mod tests {
         record.endpoint.pending_recovery = Some(pending);
         for _ in 0..count {
             sender
-                .send(MarketWorkerMessage::CatalogFailure {
+                .send(MarketWorkerMessage::LocalFailure {
+                    scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                     message: "fixture".to_string(),
                 })
                 .expect("control reserve fills");

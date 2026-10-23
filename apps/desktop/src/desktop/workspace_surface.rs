@@ -4065,16 +4065,9 @@ impl WorkspaceSurface {
                 request_id,
                 failure,
             } => self.apply_recovery_message(generation, request_id, failure, cx),
-            MarketWorkerMessage::CatalogFailure { message: _ } => {
-                Self::post_symbol_search_notice(
-                    "The market catalog is unavailable. Try again later.",
-                    cx,
-                );
+            MarketWorkerMessage::LocalFailure { scope, message } => {
+                self.apply_local_failure(scope, message, cx);
             }
-            MarketWorkerMessage::EndpointFailure {
-                generation,
-                message,
-            } => self.apply_series_state_message(generation, ChartState::Error, message, cx),
             MarketWorkerMessage::EngineSelectionOutcome {
                 sequence,
                 succeeded,
@@ -4143,6 +4136,25 @@ impl WorkspaceSurface {
                 sequence,
                 succeeded,
             } => self.apply_current_price_alert_sync(sequence, succeeded, cx),
+        }
+    }
+
+    fn apply_local_failure(
+        &mut self,
+        scope: aeris_desktop::market_worker::LocalFailureScope,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        match scope {
+            aeris_desktop::market_worker::LocalFailureScope::Catalog => {
+                Self::post_symbol_search_notice(
+                    "The market catalog is unavailable. Try again later.",
+                    cx,
+                );
+            }
+            aeris_desktop::market_worker::LocalFailureScope::Selection(generation) => {
+                self.apply_series_state_message(generation, ChartState::Error, message, cx);
+            }
         }
     }
 

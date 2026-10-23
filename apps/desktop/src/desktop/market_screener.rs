@@ -708,7 +708,10 @@ impl MarketScreener {
                         outcome.changed |= self.apply_catalog_event(event, &mut outcome.opened);
                     }
                 }
-                MarketWorkerMessage::CatalogFailure { message } => {
+                MarketWorkerMessage::LocalFailure {
+                    scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
+                    message,
+                } => {
                     self.pending_screen = None;
                     self.pending_selection = None;
                     self.message = Some(message);

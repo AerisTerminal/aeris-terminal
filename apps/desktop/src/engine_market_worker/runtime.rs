@@ -356,11 +356,14 @@ pub(super) fn report_failure(
     message: String,
 ) {
     let publication = match generation {
-        Some(generation) => MarketWorkerMessage::EndpointFailure {
-            generation,
+        Some(generation) => MarketWorkerMessage::LocalFailure {
+            scope: aeris_desktop::market_worker::LocalFailureScope::Selection(generation),
             message,
         },
-        None => MarketWorkerMessage::CatalogFailure { message },
+        None => MarketWorkerMessage::LocalFailure {
+            scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
+            message,
+        },
     };
     match messages.send(publication) {
         Ok(()) | Err(MarketWorkerSendError::Disconnected) => {
@@ -1195,8 +1198,8 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::EndpointFailure {
-                generation: 7,
+            [MarketWorkerMessage::LocalFailure {
+                scope: aeris_desktop::market_worker::LocalFailureScope::Selection(7),
                 message,
             }] if message == "market unavailable"
         ));
@@ -1217,7 +1220,10 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::CatalogFailure { message }]
+            [MarketWorkerMessage::LocalFailure {
+                scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
+                message,
+            }]
                 if message == "catalog unavailable"
         ));
     }
@@ -1293,8 +1299,8 @@ mod tests {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::EndpointFailure {
-                    generation: 1,
+                .send(MarketWorkerMessage::LocalFailure {
+                    scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                     message: String::new(),
                 })
                 .expect("fill bounded control reserve");
@@ -1341,8 +1347,8 @@ mod tests {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::EndpointFailure {
-                    generation: 1,
+                .send(MarketWorkerMessage::LocalFailure {
+                    scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                     message: String::new(),
                 })
                 .expect("fill bounded control reserve");
@@ -1411,8 +1417,8 @@ mod tests {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::EndpointFailure {
-                    generation: 1,
+                .send(MarketWorkerMessage::LocalFailure {
+                    scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                     message: String::new(),
                 })
                 .expect("fill bounded control reserve");
@@ -1557,7 +1563,10 @@ mod tests {
         assert!(first.worker.drain_messages().0.is_empty());
         assert!(matches!(
             second.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::EndpointFailure { generation: 1, message }]
+            [MarketWorkerMessage::LocalFailure {
+                scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
+                message,
+            }]
                 if message == "rejected"
         ));
     }

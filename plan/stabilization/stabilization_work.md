@@ -1986,6 +1986,14 @@ Status: pending
     Provider state remains control-reserved and FIFO with canonical bars.
     Other local outcomes, transitional names, and the literal VAL-DSK-021/022
     checks remain; M6.6 stays unchecked.
+  - Part 8b3d (2026-10-24): locally detected catalog and endpoint failures
+    share one typed failure projection. App-scoped catalog failures remain
+    independent of chart selection, while endpoint failures retain the exact
+    selection generation and cannot fail a retired or pending chart. The
+    bounded queue preserves both scopes in FIFO order, and pane tests retain
+    sanitized catalog notices and selection fencing. Recovery, alert and
+    study-removal outcomes, transitional names, and literal VAL-DSK-021/022
+    checks remain; M6.6 stays unchecked.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
@@ -2533,6 +2541,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 feat(accounts): no stabilization item. The Accounts panel Connections rows show each provider's feed level as a neutral pill, read from provider registration: Rithmic "L3 data" (it streams depth by order) and Hyperliquid "L2 data" (aggregated l2Book levels). `ProviderPresentationDescriptor::depth_available` is replaced by `feed_level: ProviderFeedLevel` (Bars, TopOfBook, PriceLevels, OrderLevels); registration validation now also requires the feed level to agree with the quote capability, which also removes one `struct_excessive_bools` flag. Regressions: `feed_levels_name_their_depth`, `registered_providers_declare_their_feed_level`. fmt, Clippy on the affected crates, naming_check and contracts, market_runtime and desktop tests run.
 - 2026-10-24 M6.6 Part 8b3c refactor(desktop): provider state now shares the selection-bound fenced runtime projection; the endpoint selection stamp, coordinator envelope, control reserve and FIFO are retained. Local outcomes and final transitional-type deletion still block M6.6 and VAL-DSK-021/022.
 - 2026-10-24 fix(trading): no stabilization item. A practice order was refused with "tilt size reduction limits the next entry to 100000000 units at scale 8": an always-on discipline rule capped every new entry at the losing round trip's peak size after any loss, and two losses inside five minutes locked the account for fifteen minutes. Both ran ahead of the risk profile on every account, with no setting. The maintainer removed both: `DisciplineState` keeps only the last stop fill for the fast stop re-entry warning, its rapid-loss and post-loss cap columns are written empty and never read (so a stored cooldown or cap from an older build stops blocking at once), and the synthetic cooldown lock no longer appears in risk locks or meters. Orders accepted with risk warnings now raise a warning toast ("Risk warning on Buy 1 ESZ5" over the warnings and the account) on every venue. Not removed: the trade cycle's now-unread peak quantity column. Regressions: `losing_trades_never_cap_size_or_lock_the_account`, `a_risk_warned_acceptance_is_announced_with_its_warnings`. fmt, strict Clippy on trading_runtime and desktop, naming_check, and trading_runtime and desktop tests green.
+- 2026-10-24 M6.6 Part 8b3d refactor(desktop): local catalog and endpoint failures now use one explicitly scoped projection; app failures remain app-scoped and selection failures keep the exact generation fence. A mixed-scope FIFO regression and existing pane redaction/fencing tests cover the change. Recovery, alert and study-removal outcomes and final bridge deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 
 ## 7. Known gaps / deferred
 

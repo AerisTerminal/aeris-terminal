@@ -4131,7 +4131,8 @@ fn pane_harness_catalog_failure_before_selection_does_not_fail_chart(cx: &mut Te
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::CatalogFailure {
+            .send(MarketWorkerMessage::LocalFailure {
+                scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                 message: "private-catalog-detail".into(),
             })
             .expect("catalog failure enters mailbox");
@@ -4158,7 +4159,8 @@ fn pane_harness_late_catalog_failure_cannot_fail_selected_chart(cx: &mut TestApp
     let chart = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("ready chart"));
     harness
         .publications
-        .send(MarketWorkerMessage::CatalogFailure {
+        .send(MarketWorkerMessage::LocalFailure {
+            scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
             message: "retired catalog failure".into(),
         })
         .expect("catalog failure enters mailbox");
@@ -4184,8 +4186,8 @@ fn pane_harness_endpoint_failure_is_selection_fenced(cx: &mut TestAppContext) {
     harness.publish_snapshot(12, cx);
     harness
         .publications
-        .send(MarketWorkerMessage::EndpointFailure {
-            generation: 2,
+        .send(MarketWorkerMessage::LocalFailure {
+            scope: aeris_desktop::market_worker::LocalFailureScope::Selection(2),
             message: "retired endpoint failed".into(),
         })
         .expect("retired failure");
@@ -4196,8 +4198,8 @@ fn pane_harness_endpoint_failure_is_selection_fenced(cx: &mut TestAppContext) {
     });
     harness
         .publications
-        .send(MarketWorkerMessage::EndpointFailure {
-            generation: 1,
+        .send(MarketWorkerMessage::LocalFailure {
+            scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
             message: "current endpoint failed".into(),
         })
         .expect("current failure");

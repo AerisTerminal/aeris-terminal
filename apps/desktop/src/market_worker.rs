@@ -202,6 +202,14 @@ pub enum LocalSessionStatus {
     MarketSession(aeris_contracts::MarketSessionStatus),
 }
 
+/// Scope of a locally detected failure, rather than a coordinator event.
+/// Only selection failures may change the chart; catalog failures remain app-scoped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalFailureScope {
+    Catalog,
+    Selection(u64),
+}
+
 pub enum MarketWorkerMessage {
     /// Coordinator events retain their consumer fence through the bounded
     /// queue; the pane projects each event at its owning presentation boundary.
@@ -225,13 +233,9 @@ pub enum MarketWorkerMessage {
         request_id: u64,
         failure: MarketRecoveryFailure,
     },
-    /// A catalog or screen endpoint has no chart selection generation.
-    CatalogFailure {
-        message: String,
-    },
-    /// Local endpoint or command failure, not a coordinator series transition.
-    EndpointFailure {
-        generation: u64,
+    /// Local failures share one projection; the scope determines the receiving owner.
+    LocalFailure {
+        scope: LocalFailureScope,
         message: String,
     },
     SessionStatus {
@@ -1942,7 +1946,8 @@ mod tests {
     fn app_scoped_failures_preserve_fifo_order_and_report_backpressure() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        let failure = |generation: u64| MarketWorkerMessage::CatalogFailure {
+        let failure = |generation: u64| MarketWorkerMessage::LocalFailure {
+            scope: super::LocalFailureScope::Catalog,
             message: generation.to_string(),
         };
         assert!(sender.send(failure(1)).is_ok());
@@ -1950,7 +1955,11 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert_eq!(messages.len(), 2);
         for (index, message) in messages.iter().enumerate() {
-            let MarketWorkerMessage::CatalogFailure { message } = message else {
+            let MarketWorkerMessage::LocalFailure {
+                scope: super::LocalFailureScope::Catalog,
+                message,
+            } = message
+            else {
                 panic!("app-scoped failures must remain ordered");
             };
             assert_eq!(message, &(index + 1).to_string());
@@ -1977,13 +1986,52 @@ mod tests {
             .into_iter()
             .chain(later)
             .map(|message| {
-                let MarketWorkerMessage::CatalogFailure { message } = message else {
+                let MarketWorkerMessage::LocalFailure {
+                    scope: super::LocalFailureScope::Catalog,
+                    message,
+                } = message
+                else {
                     panic!("app-scoped failures must remain ordered");
                 };
                 message.parse::<u64>().expect("fixture sequence")
             })
             .collect::<Vec<_>>();
         assert_eq!(observed, (1..=10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn local_failures_keep_scope_and_fifo_across_app_and_selection() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        for (scope, message) in [
+            (super::LocalFailureScope::Catalog, "catalog"),
+            (super::LocalFailureScope::Selection(7), "current"),
+            (super::LocalFailureScope::Selection(6), "retired"),
+        ] {
+            sender
+                .send(MarketWorkerMessage::LocalFailure {
+                    scope,
+                    message: message.into(),
+                })
+                .expect("control reserve accepts local failure");
+        }
+        let (first, _) = receiver.drain_up_to(1);
+        let (rest, _) = receiver.drain();
+        let observed = first
+            .into_iter()
+            .chain(rest)
+            .map(|entry| match entry {
+                MarketWorkerMessage::LocalFailure { scope, message } => (scope, message),
+                _ => panic!("only local failures were sent"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            [
+                (super::LocalFailureScope::Catalog, "catalog".into()),
+                (super::LocalFailureScope::Selection(7), "current".into()),
+                (super::LocalFailureScope::Selection(6), "retired".into()),
+            ]
+        );
     }
 
     #[test]
@@ -2364,7 +2412,8 @@ mod tests {
         assert!(sender.send(snapshot).is_ok());
         assert!(
             sender
-                .send(MarketWorkerMessage::CatalogFailure {
+                .send(MarketWorkerMessage::LocalFailure {
+                    scope: super::LocalFailureScope::Catalog,
                     message: "fixture".into(),
                 })
                 .is_ok()
@@ -2391,7 +2440,10 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::CatalogFailure { .. },
+                MarketWorkerMessage::LocalFailure {
+                    scope: super::LocalFailureScope::Catalog,
+                    ..
+                },
                 MarketWorkerMessage::RuntimeSeriesPublication { .. }
             ]
         ));

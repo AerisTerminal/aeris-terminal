@@ -3536,7 +3536,10 @@ impl MarketSummaryEntry {
                     received_unix_nanos,
                     recovery_request_id: None,
                 } => self.apply_runtime_publication(event, received_unix_nanos),
-                MarketWorkerMessage::CatalogFailure { message } => self.message = Some(message),
+                MarketWorkerMessage::LocalFailure {
+                    scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
+                    message,
+                } => self.message = Some(message),
                 _ => {}
             }
         }
