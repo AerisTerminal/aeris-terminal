@@ -27,7 +27,7 @@ the binding architecture (section 7, milestone M1 row) and the validation contra
 design report copies under `plan/stabilization/reports/` with the architecture at
 `plan/stabilization/architecture.md`. The latter is what is implemented here. Evidence files committed
 by later features also live in `reports/`; name them `<item-id>_<probe-or-benchmark>.<ext>` so the
-twelve source copies stay distinguishable.
+eleven source copies stay distinguishable.
 
 To resume in a fresh mission:
 
@@ -66,7 +66,7 @@ documents wherever they disagree.
 | D11 | Fake CLI modes | `--rithmic` and `--multi-chart` fake-instrument startup modes are removed. |
 | D12 | provider_history | Unused parts trimmed (see `architecture.md` for the exact keep/delete list). |
 | D13 | Aeris Charts | Cross-repo changes allowed: edit/test/push aeris-charts per its AGENTS.md, then bump only the `aeris_charts_*` revisions here. |
-| D14 | CI | GitHub-hosted `windows-latest` (fmt, clippy, test, naming_check) + `ubuntu-latest` (fmt, naming) on push and pull_request to main. Hosted runners lack the Rithmic kit; kit-dependent code skipped there. |
+| D14 | CI | GitHub-hosted `windows-latest` (fmt, clippy, test, naming_check) + `ubuntu-latest` (fmt, naming) on push and pull_request to main. Hosted runners lack the Rithmic kit; kit-dependent code skipped there. Later amended: the `workflow_dispatch`-only `macos.yml` and `macos_preview.yml` workflows exist, and `macos_preview.yml` is the one hosted lane that may receive the Rithmic kit (repo `AGENTS.md`). |
 | D15 | plan/ | `plan/` stays in the repo. Tracking doc at `plan/stabilization/stabilization_work.md`, audit/design reports beside it. Repo AGENTS.md updated to allow `plan/stabilization/` and to record each new restriction as it lands. |
 | D16 | Git | Workers commit on `main`; orchestrator pushes each validated milestone to `origin/main` (fetch first, never force). |
 | D17 | Validation | Validators may launch the real desktop in an isolated data folder while the user keeps their own desktop closed; Hyperliquid public data may be used live; Rithmic live excluded. |
@@ -78,10 +78,13 @@ Reconciled decisions recorded in `architecture.md` (binding there; noted here so
 - **Per-pane account selection is kept.** Workspace-level trading account selection is out of scope
   (architecture.md section 3.7.3).
 - **Risk session rollover default boundary: 00:00 UTC.** (architecture.md risk table, "keep today /
-  00:00 UTC / per pane" row.)
-- **V24 (dropping the superseded trading tables) is DEFERRED out of this mission.** The tables remain
-  in place and unread until V22/V23 are verified in a released build (architecture.md sections 3.4
-  and 5).
+  00:00 UTC / per pane" row.) The runtime also offers `RiskSessionBoundary::ChicagoClose`
+  (17:00 America/Chicago) for futures; no desktop code selects it yet (section 7).
+- **V24 was first deferred; superseded.** V24 drops `managed_brackets` and `protective_orders` and is
+  applied by the gated `finalize_group_migration` step (after the group backfill and the runtime
+  conversion of awaiting brackets), never by the migration chain. Only the removal of the old P&L
+  tables (`trade_pnl_cycles`, `risk_trade_cycles`) and the per-fill P&L columns stays deferred; they
+  remain unread (architecture.md sections 3.4 and 5).
 
 Design defaults (no explicit user decision; change only with orchestrator approval):
 
@@ -106,17 +109,17 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | closed in 30a2d5d1 |
 | MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | closed in 8c61798d |
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in 1303adbd |
-| MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | M3.5 capability/presentation split and literal ban closed in 2f3fd729; provider-session registry remains M3.6 |
+| MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | closed: M3.5 capability/presentation split and literal ban in 2f3fd729; M3.6 provider-session registry in 3d474290 |
 | MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in 0eae9355 |
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
-| MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
+| MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | closed: trading feed in db7a572c; waitable outbox and single command queue in 866032c4 and 9f568443; desktop quote relay removed in cd54c087 |
 | MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in a00725b0 |
-| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup and study wrappers closed in e52e72f8; order-book demand M3.8 open |
+| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | closed: command fences/consumer cleanup and study wrappers in e52e72f8; order-book demand with M3.8 in db7a572c |
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in 8c61798d; the bounded Indexed correction overlay still recomputes its retained bars |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
 | MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments, M3.2 trade retention/demand-dirty/provider wording, and M3.5 Rithmic presentation and capability documentation closed; other items open |
 | MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | closed in 0e77fa3c |
-| TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
+| TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | closed in cd54c087; GUI pane-free bracket fill recorded in 6ed03a11 |
 | TR-02 | High | Closed-market and stale-quote protection exists only for one broker provider | M4.8 (groundwork M3.7) | provider-neutral session, feed-generation and per-class age gates in trading owner; GUI resting-order check outstanding |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | closed: one atomic step locks, cancels non-protective orders with the kill-switch cause and flattens priced positions; unpriced positions keep protection and are reported |
 | TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | closed: FlattenScope covers every account/instrument from owner quotes; event flatten needs no observation; broker closes cover every instrument |
@@ -128,7 +131,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-10 | Medium | Desktop keeps per-pane copies of trading state and resolves intents against them | M6.10 (part), M6.11 | open |
 | TR-11 | Medium | Duplicate PnL trackers and no cash ledger | M4.9 (single PnL path), M5.7 | closed: exact cost basis plus one durable cash ledger with fees |
 | TR-12 | Low | Smaller defects and debt | M4.1, M4.2, M4.5, M4.6, M5.9, M8.10 | open; reverse is one atomic admitted operation since M5.9, and broker and practice positions share one netted ledger since the 2026-10-22 futures venue contract (V28); the order plant is no longer unused since the Rithmic venue relay, and the rest stays with M8.10 |
-| UI-01 | High | Practice venue market data is relayed through the chart UI | M3.8 (market side), M4.7 | open |
+| UI-01 | High | Practice venue market data is relayed through the chart UI | M3.8 (market side), M4.7 | closed in cd54c087 |
 | UI-02 | High | Symbol/interval switching is a UI-owned state machine without generations | M6.3, M6.4 | open |
 | UI-03 | High | Provider-specific identity, entitlement and wording in the desktop | M6.7, M6.8, M6.9 | open |
 | UI-04 | Medium | Symbol selection takes two round trips and startup catalog resolution lives in the desktop | M3.10 (runtime part), M6.5 | M3.10 closes the two-step chart pick and desktop startup catalog ownership; M6.5 retains the broader picker cleanup |
@@ -1113,7 +1116,7 @@ Status: pending
     `ConnectProvider`, M6.10 wires stable-ID `Trading` feedback, and M7.8
     wires trusted-location `OpenFolder`. M6.12 enforces remaining desktop-wide
     discards. No placeholder action or parallel owner is introduced.
-- [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
+- [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place (code complete in `ChartPaneController`, which took the planned `ChartBinding` role; Part 28b guarded VAL-DSK-013/014/015 GUI storm not yet validated)
   - Part 1: fixed a replacement tape rewrite invalidating the still-displayed
     chart's order-flow resume cursor before its covering snapshot. The tape
     remains retained for projection into the replacement chart. The existing
@@ -1745,12 +1748,45 @@ Status: pending
     regression verifies the retry and prevents a duplicate after delivery.
     Parallel market messages, ChartState/MarketGeneration and other bridge
     discards remain; VAL-DSK-021/022 remain open.
+  - Status (2026-10-23 audit): series bars and status reach panes as fenced
+    `MarketConsumerEvent`s; `MarketWorkerMessage` now carries
+    `RuntimeSeriesStatus`, `RuntimeSeriesPublication` and `EndpointFailure`
+    where the Part 5 route map names `Update` and `SeriesState`. Done: the
+    enqueue scan (MD-16), the `publications.rs` expect and the duplicate
+    `ChartState` (now in `chart_pane_controller`). Remaining: the order book,
+    tape, study, connection and session routes still use the parallel desktop
+    model, and `MarketWorkerMessage` is not deleted.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
+  - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
+    `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
+    `tools/test_window_controls.ps1`), `replay_conversion`, `worker_identity` and
+    `default_product`; the `desktop_source_is_provider_neutral` rule does not exist yet.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
+  - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
+    `CatalogReady`), the display-text risk check (the desktop reads the typed
+    `OrderEventReason::RiskWarning`) and the default workspace (`InstrumentRequest::Default`).
+    `TradingEvent` is now a struct carrying the working set, so a risk warning stays an order
+    event reason rather than a `TradingEvent` variant; it renders only a chart annotation, not
+    a Warning notice. Remaining: `TerminalProvider`/`FALLBACK_TERMINAL_PROVIDER`, the
+    provider-mapping naming_check rule and `desktop_control_flow_does_not_match_display_text`.
 - [ ] M6.9 descriptor-login-and-symbol-browser - Descriptor-driven provider connect, login form and symbol browser
+  - Status (2026-10-23 audit): `ConnectRithmic` is still the connect action; the login form is
+    `components/rithmic_login.rs` and the browser lives in `rithmic_shell.rs`.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-23 audit): `latest_feedback` is replaced by the `DesktopServices` feedback
+    handle and `announce_fills` by snapshot diffing in `components/toaster.rs`
+    (`announce_trading`). Remaining: `TradingPnlState`, `keep_trading_pnl_fresh` and
+    `schedule_trading_refresh` (250 ms) and `service.snapshot()`; the desktop does not call
+    `TradingService::subscribe` yet.
 - [ ] M6.11 trading-intents-and-snapshot-removal - Revisioned chart intents and scoped emergency buttons; remove `TradingSnapshot`
+  - Status (2026-10-23 audit): chart intents already carry `expected_revision`. Remaining: the
+    desktop does not handle `StaleRevision`, flatten still needs a current bid and ask from the
+    pane, and `TradingSnapshot`, `place_order_from_market`/`place_bracket_from_market` and
+    `MAXIMUM_SNAPSHOT_ITEMS` remain.
 - [ ] M6.12 discard-policy-enforcement - Zero unhandled discards in desktop production code
+  - Status (2026-10-23 audit): every remaining `let _ =` in `apps/desktop/src` is test code or a
+    test-fixture `Drop`, and `update.rs` has none. Remaining: the `let_underscore_must_use`
+    and `let_underscore_future` deny lints.
 
 ### M7 desktop structure
 
@@ -1760,6 +1796,7 @@ Status: pending
 - [ ] M7.2 account-gate-isolation - Dormant account integration isolated behind `AccountGate`
 - [ ] M7.3 chart-host-events - `AerisChartView` emits host events; split its host state
 - [ ] M7.4 pane-controllers-split - `WorkspaceSurface` becomes composition and render over pane controllers
+  - Status (2026-10-23 audit): `PanePersistence` and `PanePresentation` already exist (M6.4).
 - [ ] M7.5 app-controllers-split - `TerminalApp` split into app controllers
 - [ ] M7.6 frame-scheduler - Dirty-source `FrameScheduler`; delete the 100 ms timer
 - [ ] M7.7 workspace-durable-container - Versioned, checksummed workspace container on top of `platform_sys`
@@ -1778,11 +1815,15 @@ Status: pending
 - [ ] M8.3 ffi-consolidation - Remaining FFI moves to `platform_sys`; `platform_runtime` forbids unsafe
 - [ ] M8.4 account-runtime-safety - Account runtime vault, lock and issuer fixes
 - [ ] M8.5 readiness-contract - Shared readiness report; readiness never touches the real database
+  - Status (2026-10-23 audit): the trading store already takes a preflight copy at open
+    (`store/schema.rs`), but readiness still opens the real store through `start_trading_service()`.
 - [ ] M8.6 release-wire-protocol-and-residue - Release wire protocol v1, uninstall safety and Axiusflow residue removal
 - [ ] M8.7 release-packager-e2e - Release producer tool and end-to-end lifecycle harness (no publishing)
 - [ ] M8.8 rollback-safety - Schema-gated rollback, startup-complete probation, deterministic recovery
 - [ ] M8.9 dependency-direction-and-contracts - Fix dependency direction and reduce `contracts` to the persisted schema
 - [ ] M8.10 dependency-hygiene - Remove reqwest stack, unused crates and duplicate pins; small context_runtime fixes
+  - The spec's "keep the unused Rithmic `order_plant` out of the default build" part no longer
+    applies: the order plant carries broker orders through `market_runtime::rithmic_venue`.
 - [ ] M8.11 vendor-and-tooling-trim - Trim `gpui_base`, stale tooling and test-only exports
 - [ ] M8.12 naming-check-structural-and-docs - Structural naming_check and final README/AGENTS update
 
@@ -1803,14 +1844,21 @@ the repo root `AGENTS.md`.
   `windows-latest` runs the full local gate and `ubuntu-latest` runs fmt plus naming_check, with
   read-only `permissions`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1`.
   `pull_request_target`, `secrets.` references and self-hosted runners are forbidden on the
-  pull-request path; `tools/naming_check` enforces the shape (M1.2, 63a71463).
+  pull-request path; `tools/naming_check` enforces the shape (M1.2, 63a71463). A workflow that uses a
+  self-hosted runner stays `workflow_dispatch`-only in every trigger form, and live, credentialed and
+  performance lanes stay `workflow_dispatch`-only. The manual `macos_preview.yml` tester build is the one
+  hosted lane that may receive the Rithmic kit, from its only secret, and only when its `rithmic_kit`
+  input is set.
 - Desktop production code stores `ChartInterval` and never constructs `SeriesCadence`; the sole mapping belongs
   to `market_runtime::cadence` and is enforced by `desktop_never_constructs_series_cadence` (M1.3, ab5ff341).
-- `platform_sys` is the only new unsafe boundary. Only its platform-specific source files may add unsafe code;
-  the remaining pre-existing `platform_runtime` FFI files stay on an exact interim allowlist until M8.3
-  (M1.5, 3c42981b).
-- Durable file publication goes through `platform_sys::fs`; production raw `fs::write` and `fs::rename` calls are
-  rejected outside the exact lifecycle/build allowlist (M1.6, 3c42981b).
+- `platform_sys` is the only new unsafe boundary. Only its platform-specific source files
+  (`src/windows/`, `src/macos/`) may add unsafe code, each block with a single-operation safety
+  justification; the remaining pre-existing `platform_runtime` FFI files stay on an exact interim
+  allowlist until M8.3 (M1.5, 3c42981b). `platform_sys` is a leaf crate: only `platform_runtime`,
+  `trading_runtime` and `observability` may depend on it.
+- Durable file publication goes through `platform_sys::fs` (a unique temporary in the destination directory,
+  content sync before replacement, parent-directory sync on Unix); production raw `fs::write` and `fs::rename`
+  calls are rejected outside the exact lifecycle/build allowlist (M1.6, 3c42981b).
 - Secret-bearing types use reviewed redacting wrappers and cannot derive or use debug formatting in production
   (M1.7, 3c42981b).
 - Each data root has one process owner. Validation roots and vault namespaces are isolated
@@ -1834,18 +1882,61 @@ the repo root `AGENTS.md`.
 - Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, 13837b86).
 - The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, 0e77fa3c).
 - Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, 6d559cd7).
-- Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, 6b248b2f).
+- Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`, with wall time clamped monotonically per process; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, 6b248b2f).
 - One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, 98262ee5).
 - `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, f34adbc0).
 - Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, 836c9573).
 - V20 persists only verified trading market routes; migrated legacy instruments remain route-less until the market owner publishes verified Terms. The owner bounds ticket interest at 64 and combined quote interest at 256 (M4.7 part 2/3, 5c38b21e).
 - V21 reads and writes only `fill_accounting` and `trade_cycles` for P&L; legacy cycle tables and fill columns are preserved, unread, for deferred removal (M4.9).
+- The trading schema runs V1–V28 (full text in the repo `AGENTS.md`): V22 lifecycle columns; V23 `order_groups` and `order_group_legs`; V24 drops `managed_brackets` and `protective_orders` only through the gated `finalize_group_migration` step, so a failed conversion keeps its rows and retries; V25 cash ledger, fee schedules, exact cost basis and instrument class/grid columns, backfilled once by `complete_post_group_migrations` (a simulated balance is the exact sum of its ledger entries); V26 position and ledger checkpoints and `equity_samples` (one sample per simulated fill, timer samples only on change and at each risk boundary, a 1,440-entry ring per account, minute samples older than seven days folded to hourly and hourly rows older than a year dropped, both windows trailing the newest sample); V27 `risk_sessions` and `risk_locks.kind` (the owner timer rolls each session at its boundary in one transaction, releasing only daily-meter locks); V28 netted broker accounts (broker fills share the `positions` ledger, `broker_positions` and `broker_deals.broker_position_id` dropped, `broker_bracket_levels` added, no cash-ledger entries for broker accounts, a venue declares `VenueCapabilities` when attached).
 - Desktop source may not reference `SimulatedMarketObservation`; quote execution and current quote provenance are owned by the trading QuoteBook fed from the market runtime (M4.7 part 3/3, cd54c087).
 - Simulated order admission and fills require the trading owner's verified session, Live current-generation quote and class-specific freshness; a restart-time owner-local `eligible_after` fences restored orders without comparing provider generations across processes (M4.8).
 - Broker order commands reserve bounded venue request capacity before their SQLite commit; the request becomes visible to the relay only after commit, and queue rejection causes no durable change or compensating undo (M4.10 part 2/4, ce69e2bb).
-- Simulated mark-only quotes update unrealized P&L only in memory without cloning full trading state or writing SQLite; retention runs only hourly from the owner timer, with a 5,000-row-per-table cap per run (M4.10 part 4/4, 658a73bd).
+- Simulated mark-only quotes update unrealized P&L only in memory without cloning full trading state or writing SQLite; retention runs only from the owner timer at startup and hourly, writes position and ledger checkpoints in the same transaction before pruning, never deletes rows referenced by an open order or a live order group, and deletes at most 5,000 rows per table per run (M4.10 part 4/4, 658a73bd; checkpoints M5.8).
 - Simulated fill quantity and price policies live only in `trading_runtime::execution`; the approved `TouchLiquidity` and `TouchPrice` traits/implementations retain full order quantity and exact touch (M5.3 part 11, a0ade75f).
 - Broker orders reach Rithmic only through `market_runtime::rithmic_venue`, attached once by `MarketService::attach_broker_venue`; it routes only Rithmic Test and Rithmic Paper Trading logins, refuses a live login before any order-plant login, and attaches a new venue session generation with Rithmic's capabilities per connection (2026-10-22 Rithmic venue relay).
+
+Rules in force in the repo `AGENTS.md` that earlier entries above do not state (recorded during the
+2026-10-23 audit; `AGENTS.md` is authoritative):
+
+- Quote and series interests share `MarketEngine`'s one bounded `DataLeaseRegistry`;
+  `aeris_trading::market` depends only on `aeris_instruments`, and `market_engine` never depends on
+  `aeris_trading` or a provider adapter (M3.7).
+- `trading_runtime` is the single owner of broker accounts, orders, fills, positions, P&L, simulated
+  execution and the user-record store; the desktop holds command/view handles only.
+- Recurring contract-hour projection lives in `aeris_instruments::calendar::weekly_hours`; a historical
+  DAY deadline comes only from a verified route and the acceptance-time open session, and unresolved
+  legacy rows stay non-executable.
+- Desktop trading handles, trading feedback, instruction and alert clocks, the account owner, the
+  market owner, and workspace and chart-chrome persistence paths and save receipts all come from the
+  instance's `DesktopServices`; none of their process-global lookups may return (M6.1).
+- `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`, compiled only for
+  tests or the `diagnostics` feature; the diagnostic conformance command is gated likewise (M6.1).
+- Trading consumers subscribe through `TradingService::subscribe`: a typed `TradingEvent` with the
+  bounded `WorkingSet` after every revision-changing step, quote-only marks coalesced to one
+  publication per 100 ms with a trailing flush, at most eight subscriptions with a 1,024-event slot that
+  overflows into a `lagged` resync, and paged history on the `aeris-trading-history` thread with
+  500-row keyset pages (M5.11).
+- `tools/naming_check` strips only balanced `#[cfg(test)]` module bodies, and every allowlist entry
+  needs a written reason; stale entries fail.
+- The trading owner's quote-interest revision is durable store metadata, and a provider reconnect
+  republishes trading sessions before its `Feed::Live` (M5.12).
+- `paper_trading_probe` runs the practice trading lifecycle on the public Hyperliquid feed from
+  `tools/aeris_probes` (M5.12).
+- Every Hyperliquid info request spends from the adapter's one process-wide weight budget
+  (`hyperliquid_market/src/budget.rs`, 1,000 of 1,200 per minute) (2026-10-22 Hyperliquid 429 fix).
+- Provider-specific capabilities and presentation metadata are declared with provider registration,
+  and provider wire aggregation belongs to its adapter (M3.5).
+- Every runtime-to-consumer event leaves the coordinator in a `Fenced<ConsumerTag, MarketRuntimeEvent>`
+  envelope, and selection-bound events are rejected against the exact current demand (M3.9, 8bbfac6a).
+- Every catalog search and selection carries a 45-second response deadline, and a catalog rejection
+  names its search or selection lane explicitly.
+- Chart selections, including startup and restored ones, resolve through the coordinator's
+  `select_and_demand`; the desktop never owns startup catalog resolution (M3.10).
+- When a trade-built series' covering history exhausts its retries, the runtime opens a live-only
+  series with the `HistoryUnavailable` presentation and keeps one slow probe
+  (`HISTORY_UNAVAILABLE_RETRY_DELAY`); an exhausted backfill lane keeps its cooldown until fresh demand
+  (2026-10-22 live-only history fix).
 
 ## 6. Progress log
 
@@ -2172,33 +2263,37 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-23 style(design-system): no stabilization item. The platform theme follows the Theme System's retheme: dark `surface-secondary` is the opaque `#171717`, dark `border` `#2c2c2c`, dark `border-secondary` `#404040` and dark `hover-bg` `#fafafa1f`, and `--surface-popover` is gone. Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars) and tooltips now use the `.ui-popover` look: a `surface-secondary` fill with a 1px `border-secondary` edge; menu rows rest on `surface-secondary`. Text fields and order-ticket fields take `border-secondary` in dark mode through the new `field_border`, matching the Theme System inputs and `.ticket-field`. `CSS.md` drops the translucent dark `surface-secondary` rule. Regressions: the palette test pins the new dark values, `popover_layer_tokens_match_the_platform_contract` requires an opaque `surface-secondary` and keeps `surface-popover` retired, and the hover compositing test covers the opaque dark secondary surface.
 - 2026-10-23 style(design-system): no stabilization item. Light `border-secondary` is now `#0a0a0a33` (the same as light `border`), light `hover-bg` `#0a0a0a14` and light `active-bg` `#0a0a0a1f`; dark is unchanged. Large panels (the chart settings panel and the indicator, Volume, Big Trades and Order Flow settings dialogs) now use the same popover surface as every floating layer: `surface_panel`, `popover_edge`, `MenuPanel::on_surface`, `Dialog::panel_surface` and the chrome overlay's `on_surface` style are removed. Settings groups no longer sit on filled cards; each group keeps its title and the groups are split by a 1px `border` divider through the shared `settings_groups` helper (the chart context menu's duplicate group helpers are gone). The accounts panel's connection and account cards lose their fill and are split by a `border` divider, and the Simulated badge is a neutral `surface-secondary` badge with a `border-subtle` edge. `CSS.md` rules updated. Regressions: the palette test pins the new light values and asserts `active-bg` stays stronger than `hover-bg`.
 - 2026-10-23 style(ui): no stabilization item. Aeris Charts is pinned to 401c002c (0.13.4 and the light secondary border and interaction fills), and the `aeris_naming_check` pin assertion moves with it. The indicator settings dialogs (study, Volume, Big Trades, Order Flow) use the chart settings panel's row layout: label and description on the left, a compact control on the right; dropdowns, number fields and hex swatches are `SETTINGS_CONTROL_WIDTH` wide instead of stretching across the dialog (shared `described_setting_row`, `setting_block`, `control_strip`, `setting_input`). Paired colors (Up/Down, Bid/Ask, positive/negative, CVD candles) sit side by side as named swatches (`named_color_button`). A study's Style group is one Lines row: the thickness dropdown with a swatch per line beside it, bare swatches named by their tooltips when the study draws several lines (`color_dot_button`), replacing the separate thickness and stacked color rows. The symbol and indicator menus no longer paint `surface` over the overlay's popover surface. Dialogs drop their shadow, and the color picker handles use a `border-secondary` edge instead of a shadow. The color picker's hex row is sized in design rems like its Set button, so the preview, the field and Set stay the same height in rem-scaled panels. The Rithmic card no longer offers Change (a different login is Disconnect then Connect), and New practice account uses the `Default` button. `CSS.md` rules updated (no floating-layer shadows, compact setting rows, side-by-side colors, Default for a panel's add or connect action).
+- 2026-10-23 docs(stabilization): no stabilization item. Audit of this tracker and `architecture.md` against the code. Corrected: V24 is applied by the gated finalize step (only the old P&L tables stay deferred); MD-08, MD-11, MD-13, TR-01 and UI-01 are closed by their checked items; the M2.4 reconnect-log gap was resolved by M3.12; the macOS workflows exist; CI is still `disabled_manually` (rechecked). Unchecked M6.3, M6.6–M6.12, M7.4, M8.5 and M8.10 gained status notes for work already done or no longer applicable, without checking any item. Section 5 now records the `AGENTS.md` rules it lacked (`DesktopServices`, trading subscription, V22–V28, `Fenced` envelope, `select_and_demand`, `HistoryUnavailable`, the Hyperliquid budget and others) and the corrected retention rule. `architecture.md` drops the never-built `aeris_clock` crate and the removed broker providers, and describes the as-built module trees, schema sequence, subscription API and Rithmic venue relay. No code changed.
 ## 7. Known gaps / deferred
 
 From `reports/work_items.md` ("Deferred / out of scope") plus mission-accepted limitations:
 
 - Depth-aware partial fills, the slippage model, margin and buying power, currency conversion, and the
   Funding/MarginReserve ledger kinds. Only hooks are left (D3 "solid core").
-- V24: dropping the legacy trading tables is deferred out of this mission; it needs V22/V23 verified
-  in a released build first (09 section 5.2). The superseded tables stay, unread.
+- Removing the old P&L tables (`trade_pnl_cycles`, `risk_trade_cycles`) and the per-fill P&L columns;
+  they stay, unread. V24 itself (dropping `managed_brackets` and `protective_orders`) is applied by the
+  gated `finalize_group_migration` step (section 2).
 - Removing the legacy data-root migration and the vault legacy-name probes (F19, LC-17) waits until
   the maintainer confirms their machine is migrated.
-- Risk profile registration UI (TR-09 desktop part); only runtime rollover is in scope.
+- Risk profile registration UI (TR-09 desktop part); only runtime rollover is in scope. Nothing in the
+  desktop selects the futures `ChicagoClose` boundary either.
 - Automatic route resolution for migrated instruments without a stored route (09 Q10); these show
   "feed unavailable" until the instrument is selected again.
 - Holiday data for exchange-rule calendars (10 Q3). Exchange rules report Open on holidays; trading is
   still protected by the staleness rule.
 - Focusing the existing window on a second launch; it needs IPC.
 - An Aeris Charts append operation for order flow (only if measured as the bottleneck in M7.11).
-- An Aeris Charts in-place data reset, if the M6.4 check shows the engine lacks it.
+- An Aeris Charts in-place cross-instrument data reset; M6.4 confirmed it remains an Aeris Charts
+  operation, to be added with M7.9.
 - Workspace-level trading account selection; the per-pane selection is kept (architecture.md 3.7.3).
 - Rithmic live qualification, production release publication,
-  code-signing certificate and key custody, the AWS release endpoint, and the macOS workflows.
+  code-signing certificate and key custody, the AWS release endpoint, and macOS signing and
+  notarization (the manual `macos.yml` and `macos_preview.yml` workflows exist).
 - Manual checks only the maintainer can run: logoff flush (M8.3), VM install and uninstall (M8.6),
   Rithmic login through the native vault (M6.9).
-- As checked with `gh workflow list --all` on 2026-10-13, the GitHub `CI` workflow is
-  `disabled_manually`; consequently there was no post-push run for M1 head `f2170311`.
+- As checked with `gh workflow list --all` on 2026-10-13 and again on 2026-10-23, the GitHub `CI`
+  workflow (and `Live market gates`) is `disabled_manually`, so pushes get no CI run.
   Re-enabling it requires the maintainer; no Actions setting was changed.
-- The M2.4 blocked-network reconnect interval log was not collected: routing an isolated
-  validation process through an unreachable HTTP proxy also blocks the required startup catalog,
-  so no WebSocket session begins. Deterministic backoff tests pass; a controlled WebSocket-only
-  failure injection or maintainer-approved per-process network restriction is needed for the live log.
+- Resolved: the M2.4 blocked-network reconnect interval log could not be collected through an HTTP
+  proxy (it also blocked the startup catalog); M3.12 (6d559cd7) added the probe-feature
+  WebSocket-only fault control and recorded the live retry delays.
