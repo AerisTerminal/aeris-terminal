@@ -153,12 +153,11 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
 #[test]
 fn live_account_rejects_every_trading_command_without_mutation() {
     let directory = TestDirectory::new("live-reject");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = live_feed_service(&directory);
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("owner drains verified terms");
     let mut request = market_order("live-order", OrderSide::Buy, 1, 1_000);
     let simulated = request.account_id.clone();
-    service
-        .register_instrument(instrument())
-        .expect("instrument");
     service.place_order(request.clone()).expect("sim order");
     let mut broker = broker_account(AccountEnvironment::Live);
     broker.id = simulated;
@@ -248,10 +247,13 @@ fn live_account_rejects_every_trading_command_without_mutation() {
 #[test]
 fn owner_replaces_desktop_venue_identity_on_simulated_place_and_modify() {
     let directory = TestDirectory::new("owner-provenance");
-    let service = start_service(&directory);
-    service
-        .register_instrument(instrument())
-        .expect("instrument");
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
     let mut request = market_order("route-identity", OrderSide::Buy, 1, 1_000);
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
@@ -309,10 +311,9 @@ fn flatten_outcome_preserves_simulated_fills_with_no_pending_closes() {
 #[test]
 fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
     let directory = TestDirectory::new("managed-broker");
-    let service = start_service(&directory);
-    service
-        .register_instrument(instrument())
-        .expect("instrument");
+    let (service, _clock, feed) = live_feed_service(&directory);
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("owner drains verified terms");
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("broker");
     let (_generation, _requests) = service
