@@ -1044,7 +1044,7 @@ fn chart_settings_title_bar(
         .h(design_rems(CHART_SETTINGS_TITLE_BAR_HEIGHT))
         .flex_none()
         .pl_4()
-        .pr_3()
+        .pr_2()
         .flex()
         .items_center()
         .justify_between()
@@ -1061,10 +1061,21 @@ fn chart_settings_title_bar(
         })
         .child(
             div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_default))
-                .child("Chart settings"),
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    header_icon(HugeIcon::Settings)
+                        .with_size(px(16.0))
+                        .color(gpui_color(colors.icon)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .text_color(gpui_color(colors.text_default))
+                        .child("Chart settings"),
+                ),
         )
         .child(floating_panel_drag_grip(theme))
         .child(close_button("chart_settings_close", theme, move |_, cx| {
@@ -1129,6 +1140,10 @@ fn chart_settings_panel_body(
                 .overflow_y_scroll()
                 .px_6()
                 .py_4()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(chart_settings_section_header(view.section, theme))
                 .child(content),
         )
         .children(match view.templates.overlay {
@@ -1148,6 +1163,27 @@ fn chart_settings_panel_body(
             | ChartSettingsTemplateOverlay::Menu
             | ChartSettingsTemplateOverlay::TemplatesFlyout => None,
         })
+}
+
+fn chart_settings_section_header(section: ChartSettingsSection, theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .child(
+            div()
+                .text_base()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_default))
+                .child(section.label()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child(section.description()),
+        )
 }
 
 pub(super) fn centered_floating_panel_origin(
@@ -1222,12 +1258,14 @@ fn chart_settings_sidebar(
             Tab::new(("chart_settings_section", section as usize), theme)
                 .sidebar()
                 .selected(selected == section)
+                .gap_2()
                 .on_click(move |_, _, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         terminal.set_chart_settings_section(section, terminal_cx);
                     });
                     cx.stop_propagation();
                 })
+                .child(header_icon(section.icon()).with_size(px(16.0)))
                 .child(section.label())
         }));
     div()
@@ -1237,12 +1275,20 @@ fn chart_settings_sidebar(
         .flex_none()
         .flex()
         .flex_col()
-        .gap_3()
         .p_2()
+        .border_r(px(theme.dimensions.border_width))
+        .border_color(gpui_color(theme.colors.border_secondary))
         .child(sections)
-        .child(chart_settings_template_control(
-            terminal, menu, templates, theme,
-        ))
+        .child(
+            div()
+                .flex_none()
+                .pt_2()
+                .border_t(px(theme.dimensions.border_width))
+                .border_color(gpui_color(theme.colors.border))
+                .child(chart_settings_template_control(
+                    terminal, menu, templates, theme,
+                )),
+        )
 }
 
 fn chart_settings_template_control(
@@ -1255,7 +1301,6 @@ fn chart_settings_template_control(
     let open = state.overlay.menu_open();
     let button = Button::new("chart_settings_templates", theme)
         .variant(ButtonVariant::Secondary)
-        .button_size(ButtonSize::Lg)
         .trigger()
         .full_width()
         .open(open)

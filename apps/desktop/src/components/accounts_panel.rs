@@ -298,8 +298,7 @@ fn panel_sidebar(
                             || "No account chosen".to_string(),
                             |account| account.display_name.clone(),
                         )),
-                )
-                .children(active.map(|account| environment_badge(account.environment, theme))),
+                ),
         )
 }
 

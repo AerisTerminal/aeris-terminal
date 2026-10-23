@@ -122,6 +122,14 @@ list and its tabs in dense panel headers (bottom panel, side panels);
 `TabList::sidebar` + `Tab::sidebar` for vertical section navigation.
 
 **`Switch`** / **`SwitchRow`** (`switch.rs`): every on/off setting, never an "On" / "Off" button.
+One size everywhere (the order ticket's): a 28x16 `--radius-full` track with 2px padding and a 12px
+round `primary-foreground` thumb; the track is `primary` when on, `border-secondary` when off and
+`disabled-bg` when disabled. There is no size variant.
+
+Sidebar panels (chart settings, Accounts) share one frame: a 44px draggable title bar with an icon,
+the title and the drag grip, split from the body by a `border-secondary` line; a compact sidebar of
+`Tab::sidebar` tabs with 16px icons, split from the content by a `border-secondary` line, with any
+footer (template control, the account traded on) under a `border` line. The sidebar carries no badges.
 
 **`CheckboxRow`** (`checkbox.rs`): an option that refines the setting above it (a legend's values
 under its switch), never a setting of its own. A 16px `--radius-small` box: `surface` with a

@@ -1084,7 +1084,6 @@ fn bracket_header(state: &TradingOrderControlsState<'_>) -> Div {
                 state.trading.order_entry.ticket.bracket_enabled,
                 state.theme,
             )
-            .small()
             .on_change(move |on, _, _, cx| {
                 toggle.update(cx, |surface, surface_cx| {
                     surface.update_ticket(|ticket| ticket.bracket_enabled = on, surface_cx);

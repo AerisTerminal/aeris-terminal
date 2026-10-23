@@ -519,8 +519,8 @@ const CHART_SETTINGS_PANEL_HEIGHT: f32 = 600.0;
 /// compact on large screens like the chart context menus.
 const CHART_SETTINGS_GROWTH_SHARE: f32 = 0.5;
 /// Design height of the settings title bar that doubles as the panel's drag handle.
-const CHART_SETTINGS_TITLE_BAR_HEIGHT: f32 = 36.0;
-const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 140.0;
+const CHART_SETTINGS_TITLE_BAR_HEIGHT: f32 = 44.0;
+const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 168.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
@@ -5071,6 +5071,24 @@ impl ChartSettingsSection {
             Self::Canvas => "Canvas",
             Self::Legend => "Legend",
             Self::Trading => "Trading",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Symbol => "Colors and style of the price series",
+            Self::Canvas => "Background, grid and crosshair",
+            Self::Legend => "What the legends show over the chart",
+            Self::Trading => "Orders, positions and fills on the chart",
+        }
+    }
+
+    const fn icon(self) -> HugeIcon {
+        match self {
+            Self::Symbol => HugeIcon::Chart,
+            Self::Canvas => HugeIcon::View,
+            Self::Legend => HugeIcon::DataPanel,
+            Self::Trading => HugeIcon::OrderEntry,
         }
     }
 }

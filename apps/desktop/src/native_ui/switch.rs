@@ -15,14 +15,18 @@ use super::{rem_scale::design_rems, theme::gpui_color};
 
 type ChangeHandler = Rc<dyn Fn(bool, &ClickEvent, &mut Window, &mut App)>;
 
-/// The desktop switch appearance, backed by the shared switch interaction model.
+const TRACK_WIDTH: f32 = 28.0;
+const TRACK_HEIGHT: f32 = 16.0;
+const THUMB_SIZE: f32 = 12.0;
+
+/// The desktop switch appearance, backed by the shared switch interaction model. Every switch
+/// has the same dense track and round thumb, from the order ticket to the settings dialogs.
 #[derive(IntoElement)]
 pub(crate) struct Switch {
     id: ElementId,
     label: SharedString,
     checked: bool,
     disabled: bool,
-    small: bool,
     theme: AerisTheme,
     on_change: Option<ChangeHandler>,
 }
@@ -39,16 +43,9 @@ impl Switch {
             label: label.into(),
             checked,
             disabled: false,
-            small: false,
             theme: *theme,
             on_change: None,
         }
-    }
-
-    /// The dense size for compact forms such as the order ticket.
-    pub(crate) fn small(mut self) -> Self {
-        self.small = true;
-        self
     }
 
     /// A switch that shows its value but cannot be changed.
@@ -71,11 +68,6 @@ impl RenderOnce for Switch {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
         let disabled = self.disabled;
-        let (track_width, track_height, thumb_width, thumb_height) = if self.small {
-            (28.0, 16.0, 12.0, 12.0)
-        } else {
-            (44.0, 19.0, 23.0, 15.0)
-        };
         let track = if disabled {
             colors.disabled_bg
         } else if self.checked {
@@ -87,8 +79,8 @@ impl RenderOnce for Switch {
             .checked(self.checked)
             .disabled(disabled)
             .accessibility_label(self.label)
-            .w(design_rems(track_width))
-            .h(design_rems(track_height))
+            .w(design_rems(TRACK_WIDTH))
+            .h(design_rems(TRACK_HEIGHT))
             .map(|switch| {
                 if disabled {
                     switch.cursor_not_allowed()
@@ -120,8 +112,7 @@ impl RenderOnce for Switch {
                     .rounded_full()
                     .child(
                         SwitchThumb::new(self.checked)
-                            .w(design_rems(thumb_width))
-                            .h(design_rems(thumb_height))
+                            .size(design_rems(THUMB_SIZE))
                             .rounded_full()
                             .bg(gpui_color(colors.primary_foreground)),
                     ),
