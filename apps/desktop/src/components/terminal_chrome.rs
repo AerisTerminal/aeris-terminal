@@ -153,9 +153,10 @@ pub(super) const fn window_move_gesture_transition(
 pub(super) fn terminal_header(
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
+    layout_menu: AnyElement,
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
-    let controls = header_controls(app, state);
+    let controls = header_controls(app, state, layout_menu);
     div()
         .w_full()
         .h(px(theme.dimensions.app_header_height))
@@ -192,6 +193,10 @@ fn header_brand(theme: &AerisTheme) -> Stateful<Div> {
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) workspaces: &'a [WorkspaceTab],
+    /// Whether each workspace's layout has unsaved changes, in workspace order.
+    pub(super) unsaved: &'a [bool],
+    /// The "New tab" placeholder when there is one: whether its start page is shown.
+    pub(super) start_page: Option<bool>,
     pub(super) market_summaries: &'a BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     pub(super) active: usize,
     pub(super) enabled: bool,
@@ -482,6 +487,7 @@ fn header_connection_presentation(state: &HeaderState) -> ConnectionPresentation
 pub(super) fn header_controls(
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
+    layout_menu: AnyElement,
 ) -> impl IntoElement {
     // Give the global controls an explicit, non-shrinking track. GPUI cannot
     // infer a stable intrinsic width for this mixed Button/avatar group, which
@@ -571,6 +577,7 @@ pub(super) fn header_controls(
         .flex()
         .items_center()
         .child(market_controls)
+        .child(layout_menu)
         .child(accounts)
         .child(time_zone)
 }

@@ -253,6 +253,31 @@ impl WorkspaceMarketFactory {
     }
 }
 
+/// Endpoints a test factory queued, kept alive without a market group to start them.
+#[cfg(test)]
+pub(super) struct UnstartedWorkspaceAdditions {
+    _queued: mpsc::Receiver<EndpointRecord>,
+}
+
+#[cfg(test)]
+impl WorkspaceMarketFactory {
+    /// A factory whose new endpoints wait unstarted in the returned queue, so a test can open
+    /// tabs without a provider session.
+    pub(super) fn unstarted(market: MarketService) -> (Self, UnstartedWorkspaceAdditions) {
+        let (additions, queued) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
+        let first_identity = || Arc::new(AtomicU64::new(100));
+        (
+            Self {
+                market,
+                additions,
+                next_workspace_id: first_identity(),
+                next_pane_id: first_identity(),
+                next_consumer_id: first_identity(),
+            },
+            UnstartedWorkspaceAdditions { _queued: queued },
+        )
+    }
+}
 fn allocate_workspace_id(next_workspace_id: &AtomicU64) -> Result<u64, String> {
     next_workspace_id
         .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)

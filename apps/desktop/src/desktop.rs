@@ -42,6 +42,8 @@ mod fullscreen_hint;
 mod indicator_menu;
 #[path = "components/keyboard_shortcuts.rs"]
 mod keyboard_shortcuts;
+#[path = "components/layouts_view.rs"]
+mod layouts_view;
 #[path = "desktop/local_state.rs"]
 mod local_state;
 #[path = "desktop/market_screener.rs"]
@@ -134,12 +136,12 @@ use aeris_contracts::{
     WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState,
-    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
-    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceLayoutState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
@@ -292,8 +294,8 @@ use terminal_chrome::{
     watchlist_step, window_move_gesture_transition, workspace_title_bar,
 };
 use terminal_view::{
-    TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, terminal_root,
-    workspace_tab_strip, workspace_tabs_root,
+    TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, restored_workspace_tab,
+    terminal_root, workspace_tab_strip, workspace_tabs_root,
 };
 use time_sales_panel::TimeSalesPanelState;
 use toaster::Toaster;
@@ -551,7 +553,10 @@ mod workspace_persistence;
 use workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceLayoutShutdownWait};
 
 mod chart_drawings;
-use chart_drawings::{DrawingInstrument, PaneDrawings, SharedDrawings};
+use chart_drawings::{LayoutDrawings, PaneDrawingSync};
+
+mod layout_library;
+use layout_library::LayoutLibrary;
 
 actions!(
     aeris,
@@ -566,6 +571,7 @@ actions!(
         MoveWorkspaceLeft,
         MoveWorkspaceRight,
         CloseWorkspace,
+        SaveActiveLayout,
         SplitPaneHorizontal,
         SplitPaneVertical,
         ClosePane,
@@ -1546,7 +1552,7 @@ struct RetainedChartPresentation {
     indicators: Vec<ChartIndicatorState>,
     price_precision: Option<u8>,
     chart_state: Option<WorkspaceChartState>,
-    drawings: PaneDrawings,
+    drawings: PaneDrawingSync,
     rejected_saved: RejectedSavedPresentation,
 }
 
@@ -4939,7 +4945,12 @@ struct WorkspacePane {
 
 struct WorkspaceTab {
     id: u64,
+    /// The name of the saved layout the tab shows.
     label: String,
+    saved_layout_id: u64,
+    /// The arrangement this tab last autosaved, so two tabs showing one layout with different
+    /// arrangements do not overwrite each other on every save; the last change wins.
+    autosaved_snapshot: Option<WorkspaceTabState>,
     panes: Vec<WorkspacePane>,
     active_pane: usize,
     layout: AerisChartWorkspace,
@@ -5269,6 +5280,10 @@ struct TerminalApp {
     workspace_persistence: Option<WorkspaceLayoutPersistence>,
     persisted_layout: Vec<WorkspaceTabState>,
     persisted_active_workspace_id: u64,
+    layout_library: LayoutLibrary,
+    persisted_layout_library_revision: u64,
+    /// The working drawing set of every saved layout an open tab shows, shared by those tabs.
+    layout_drawings: BTreeMap<u64, LayoutDrawings>,
     workspace_error: Option<String>,
     workspace_drag: Option<WorkspaceDragState>,
     watchlist_drag: Option<WatchlistDragState>,
@@ -5317,6 +5332,8 @@ struct TerminalApp {
     chart_chrome: chart_chrome::ChartChromePreferences,
     window_move_pending: bool,
     closing: bool,
+    /// The start page, layout menu and layout dialogs.
+    layouts_ui: layouts_view::LayoutsUi,
 }
 
 fn workspace_switch(active: usize, next: usize, workspace_count: usize) -> Option<(usize, usize)> {
@@ -5349,65 +5366,61 @@ fn workspace_label(index: usize) -> String {
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
     workspaces
         .iter()
-        .map(|workspace| {
-            let layout = workspace.layout.layout();
-            let pane_weights = layout.basis_points();
-            WorkspaceTabState {
-                workspace_id: workspace.id,
-                label: workspace.label.clone(),
-                split_axis: layout_root_axis(&layout) as i32,
-                panes: workspace
-                    .panes
-                    .iter()
-                    .filter_map(|pane| {
-                        let surface = pane.surface.read(cx);
-                        let instrument = surface.product.clone()?;
-                        let viewport =
-                            surface
-                                .chart
-                                .as_ref()
-                                .map_or(surface.restored_viewport, |chart| {
-                                    let chart = chart.read(cx);
-                                    durable_workspace_viewport(
-                                        surface.restored_viewport,
-                                        chart.has_market_data(),
-                                        chart.is_at_latest(),
-                                        chart.visible_time_range_unix_nanos(),
-                                    )
-                                });
-                        Some(WorkspacePaneState {
-                            pane_id: pane.id,
-                            consumer_id: pane.consumer_id,
-                            kind: WorkspacePaneKind::Chart as i32,
-                            instrument: Some(instrument.clone()),
-                            series: None,
-                            viewport_start_unix_nanos: viewport.map(|range| range.0),
-                            viewport_end_unix_nanos: viewport.map(|range| range.1),
-                            size_basis_points: pane_weights
-                                .iter()
-                                .find_map(|(pane_id, basis)| {
-                                    (*pane_id == pane.id).then_some(*basis)
-                                })
-                                .unwrap_or(1),
-                            generation: workspace.generation.max(1),
-                            chart: surface.workspace_chart_state(cx),
-                            side_panel_visibility: u32::from(surface.side_panels.0),
-                            side_panel_width: surface
-                                .side_panel_width
-                                .round()
-                                .to_u32()
-                                .unwrap_or(400),
-                            side_panel_split_basis_points: surface.side_panel_split_basis_points,
-                            interval: surface.interval.label().to_string(),
-                        })
-                    })
-                    .collect(),
-                active_pane_id: workspace.panes[workspace.active_pane].id,
-                generation: workspace.generation.max(1),
-                layout: Some(workspace_layout_state(&layout)),
-            }
-        })
+        .map(|workspace| workspace_tab_state(workspace, cx))
         .collect()
+}
+
+fn workspace_tab_state(workspace: &WorkspaceTab, cx: &App) -> WorkspaceTabState {
+    let layout = workspace.layout.layout();
+    let pane_weights = layout.basis_points();
+    WorkspaceTabState {
+        workspace_id: workspace.id,
+        label: workspace.label.clone(),
+        split_axis: layout_root_axis(&layout) as i32,
+        panes: workspace
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let surface = pane.surface.read(cx);
+                let instrument = surface.product.clone()?;
+                let viewport = surface
+                    .chart
+                    .as_ref()
+                    .map_or(surface.restored_viewport, |chart| {
+                        let chart = chart.read(cx);
+                        durable_workspace_viewport(
+                            surface.restored_viewport,
+                            chart.has_market_data(),
+                            chart.is_at_latest(),
+                            chart.visible_time_range_unix_nanos(),
+                        )
+                    });
+                Some(WorkspacePaneState {
+                    pane_id: pane.id,
+                    consumer_id: pane.consumer_id,
+                    kind: WorkspacePaneKind::Chart as i32,
+                    instrument: Some(instrument.clone()),
+                    series: None,
+                    viewport_start_unix_nanos: viewport.map(|range| range.0),
+                    viewport_end_unix_nanos: viewport.map(|range| range.1),
+                    size_basis_points: pane_weights
+                        .iter()
+                        .find_map(|(pane_id, basis)| (*pane_id == pane.id).then_some(*basis))
+                        .unwrap_or(1),
+                    generation: workspace.generation.max(1),
+                    chart: surface.workspace_chart_state(cx),
+                    side_panel_visibility: u32::from(surface.side_panels.0),
+                    side_panel_width: surface.side_panel_width.round().to_u32().unwrap_or(400),
+                    side_panel_split_basis_points: surface.side_panel_split_basis_points,
+                    interval: surface.interval.label().to_string(),
+                })
+            })
+            .collect(),
+        active_pane_id: workspace.panes[workspace.active_pane].id,
+        generation: workspace.generation.max(1),
+        layout: Some(workspace_layout_state(&layout)),
+        saved_layout_id: workspace.saved_layout_id,
+    }
 }
 
 fn layout_root_axis(layout: &ChartWorkspaceLayout) -> WorkspaceSplitAxis {
@@ -5598,6 +5611,8 @@ fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) ->
 }
 
 mod workspace_tabs;
+
+mod layout_tabs;
 
 struct ConfiguredDesktop {
     market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
@@ -6108,6 +6123,7 @@ fn command_key_action(
         CommandId::MoveWorkspaceLeft => Box::new(MoveWorkspaceLeft),
         CommandId::MoveWorkspaceRight => Box::new(MoveWorkspaceRight),
         CommandId::CloseWorkspace => Box::new(CloseWorkspace),
+        CommandId::SaveLayout => Box::new(SaveActiveLayout),
         CommandId::SplitHorizontal => Box::new(SplitPaneHorizontal),
         CommandId::SplitVertical => Box::new(SplitPaneVertical),
         CommandId::ClosePane => Box::new(ClosePane),
@@ -6132,7 +6148,10 @@ fn command_key_action(
         | CommandId::Interval5Minutes
         | CommandId::Interval15Minutes
         | CommandId::Interval1Hour
-        | CommandId::Interval1Day => return None,
+        | CommandId::Interval1Day
+        | CommandId::ToggleLayoutAutosave
+        | CommandId::CopyLayout
+        | CommandId::OpenRecentLayout => return None,
     })
 }
 

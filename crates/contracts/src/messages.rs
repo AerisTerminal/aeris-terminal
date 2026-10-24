@@ -201,6 +201,34 @@ pub struct WorkspaceState {
     /// Bounded user-named drawing style templates shared by every chart.
     #[prost(message, repeated, tag = "20")]
     pub drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    /// Bounded library of user-named saved layouts; every workspace tab shows one of them.
+    #[prost(message, repeated, tag = "21")]
+    pub saved_layouts: Vec<WorkspaceSavedLayoutState>,
+}
+
+/// One user-named saved layout: a pane arrangement plus the drawings of every instrument
+/// shown on it, shared by every tab and pane that shows the layout.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceSavedLayoutState {
+    /// Stable non-zero identity referenced by `WorkspaceTabState::saved_layout_id`.
+    #[prost(uint64, tag = "1")]
+    pub layout_id: u64,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    /// Whether every change is written to the saved layout. Off keeps changes in the working
+    /// state until an explicit save.
+    #[prost(bool, tag = "3")]
+    pub autosave: bool,
+    #[prost(int64, tag = "4")]
+    pub saved_at_unix_ms: i64,
+    #[prost(int64, tag = "5")]
+    pub last_opened_unix_ms: i64,
+    /// Saved pane arrangement. Its panes never carry drawings; those live in tag 7.
+    #[prost(message, optional, tag = "6")]
+    pub tab: Option<WorkspaceTabState>,
+    /// Saved drawings of every instrument shown on the layout, most recently used first.
+    #[prost(message, repeated, tag = "7")]
+    pub instrument_drawings: Vec<WorkspaceInstrumentDrawingsState>,
 }
 
 /// One user-named drawing style template: the Aeris Charts template document of one drawing
@@ -363,7 +391,8 @@ pub struct WorkspaceChartState {
     /// Which parts of the chart legend show. Absent in legacy workspaces means all shown.
     #[prost(message, optional, tag = "20")]
     pub legend: Option<WorkspaceChartLegendState>,
-    /// Drawings of each instrument the pane has shown, most recently used first.
+    /// Drawings of each instrument the pane showed in workspaces saved before saved layouts
+    /// owned drawings. Read only to migrate them into the layout; new saves leave it empty.
     #[prost(message, repeated, tag = "21")]
     pub instrument_drawings: Vec<WorkspaceInstrumentDrawingsState>,
 }
@@ -775,6 +804,9 @@ pub struct WorkspaceTabState {
     /// Authoritative nested workspace layout. Legacy flat fields remain for migration.
     #[prost(message, optional, tag = "7")]
     pub layout: Option<WorkspaceLayoutState>,
+    /// The saved layout the tab shows. Zero in workspaces saved before the layout library.
+    #[prost(uint64, tag = "8")]
+    pub saved_layout_id: u64,
 }
 
 /// Provider-neutral identity of one demanded bar series.

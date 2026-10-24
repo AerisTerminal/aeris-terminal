@@ -99,7 +99,7 @@ pub(super) fn market_summary_requirements(
 impl TerminalApp {
     /// Gives every restored pane the shared market wake and its resource class, and persists
     /// the layout when a pane's chart state changes.
-    fn wire_restored_surfaces(
+    pub(super) fn wire_restored_surfaces(
         workspaces: &[WorkspaceTab],
         active: usize,
         market_frame_wake: &UiWake,
@@ -187,6 +187,12 @@ impl TerminalApp {
         Self::wire_restored_surfaces(&workspaces, active, &market_frame_wake, cx);
         let persisted_watchlist = init.watchlist_entries.clone();
         let watchlist = restore_watchlist(init.watchlist_entries);
+        let (layout_library, layout_drawings) = layout_tabs::restored_layouts(
+            init.saved_layouts,
+            &mut workspaces,
+            layout_tabs::now_unix_ms(&lifecycle),
+            cx,
+        );
         let persisted_layout = workspace_layout_tabs(&workspaces, cx);
         let persisted_active_workspace_id = workspaces[active].id;
         Self {
@@ -209,6 +215,9 @@ impl TerminalApp {
             workspace_persistence,
             persisted_layout,
             persisted_active_workspace_id,
+            layout_library,
+            persisted_layout_library_revision: 0,
+            layout_drawings,
             workspace_error: init.workspace_notice,
             workspace_drag: None,
             watchlist_drag: None,
@@ -260,6 +269,7 @@ impl TerminalApp {
             chart_chrome: init.chart_chrome,
             window_move_pending: false,
             closing: false,
+            layouts_ui: layouts_view::LayoutsUi::default(),
         }
     }
 
@@ -336,15 +346,6 @@ impl TerminalApp {
                     });
                 }
             }
-        }
-    }
-
-    pub(super) fn share_workspace_drawings(&self, cx: &mut Context<Self>) {
-        for workspace in &self.workspaces {
-            workspace_surface::share_workspace_drawings(
-                &workspace.panes.iter().map(|pane| &pane.surface),
-                cx,
-            );
         }
     }
 
@@ -607,6 +608,9 @@ impl TerminalApp {
     /// tab, or the active pane's chrome or chart) rather than on a text field, so workspace
     /// shortcuts may act.
     pub(super) fn workspace_keyboard_focused(&self, window: &Window, cx: &App) -> bool {
+        if self.layouts_ui.covers_workspace() {
+            return false;
+        }
         self.chrome_focus.is_focused(window)
             || self.workspaces[self.active].focus.is_focused(window)
             || self
@@ -618,7 +622,9 @@ impl TerminalApp {
     /// Returns keyboard focus to the visible workspace: the active pane's chart on the terminal
     /// page, otherwise the shell.
     pub(super) fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pages.view != market_screener::AppView::Terminal {
+        if self.pages.view != market_screener::AppView::Terminal
+            || self.layouts_ui.start_page_shown()
+        {
             self.chrome_focus.focus(window, cx);
             return;
         }
@@ -722,7 +728,7 @@ impl TerminalApp {
         preferences
     }
 
-    fn set_workspace_resource_class(
+    pub(super) fn set_workspace_resource_class(
         &self,
         workspace_index: usize,
         resource_class: ConsumerResourceClass,
@@ -737,7 +743,7 @@ impl TerminalApp {
         }
     }
 
-    fn refresh_workspace_focus_order(&mut self) {
+    pub(super) fn refresh_workspace_focus_order(&mut self) {
         for workspace in &mut self.workspaces {
             workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
         }
@@ -2483,14 +2489,17 @@ impl TerminalApp {
         if self.closing {
             return;
         }
+        let layout = workspace_layout_tabs(&self.workspaces, cx);
+        self.autosave_layouts(&layout);
         let Some(persistence) = self.workspace_persistence.as_ref() else {
             return;
         };
-        let layout = workspace_layout_tabs(&self.workspaces, cx);
         let active_workspace_id = self.workspaces[self.active].id;
         let watchlist = self.watchlist_entries();
+        let library_revision = self.layout_library.revision();
         if layout == self.persisted_layout
             && active_workspace_id == self.persisted_active_workspace_id
+            && library_revision == self.persisted_layout_library_revision
             && !self.chart_settings_persistence_dirty
             && !self.drawing_templates_persistence_dirty
             && !self.watchlist_persistence_dirty
@@ -2504,12 +2513,14 @@ impl TerminalApp {
             self.chart_settings_templates.clone(),
             watchlist.clone(),
             self.drawing_templates.clone(),
+            self.layout_library.states(),
         ) {
             self.workspace_error = Some(error);
             return;
         }
         self.persisted_layout = layout;
         self.persisted_active_workspace_id = active_workspace_id;
+        self.persisted_layout_library_revision = library_revision;
         self.chart_settings_persistence_dirty = false;
         self.drawing_templates_persistence_dirty = false;
         self.persisted_watchlist = watchlist;
@@ -2519,6 +2530,7 @@ impl TerminalApp {
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
         if next < self.workspaces.len() {
             self.show_terminal_view(cx);
+            self.hide_start_page(cx);
         }
         let Some((previous, next)) = workspace_switch(self.active, next, self.workspaces.len())
         else {
@@ -2631,6 +2643,10 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.layouts_ui.start_page_shown() {
+            self.close_start_page(window, cx);
+            return;
+        }
         let tab_id = self.workspaces[self.active].id;
         self.close_workspace(tab_id, window, cx);
     }
@@ -2727,7 +2743,28 @@ impl TerminalApp {
         }
     }
 
+    /// Closes a tab, first asking whether to save a layout it shows with unsaved changes.
     pub(super) fn close_workspace(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let unsaved = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == tab_id)
+            .is_some_and(|index| self.layout_tab_has_unsaved_changes(index, cx));
+        if unsaved {
+            self.prompt_layout_close(layouts_view::ClosePrompt::Tab(tab_id), window, cx);
+            return;
+        }
+        self.close_workspace_now(tab_id, window, cx);
+    }
+
+    /// Closes a tab without asking; unsaved changes of a layout no other tab shows are
+    /// discarded.
+    pub(super) fn close_workspace_now(
         &mut self,
         tab_id: u64,
         window: &mut Window,
@@ -2749,6 +2786,8 @@ impl TerminalApp {
         let Some(next_active_id) = active_workspace_after_close(&ids, active_id, tab_id) else {
             return;
         };
+        // Publishes the closing tab's last drawing edits while its layout still has a tab.
+        self.sync_layout_drawings(cx);
         let Some(index) = self
             .workspaces
             .iter()
@@ -2772,6 +2811,7 @@ impl TerminalApp {
                 workspace.retire_market_worker(workspace_cx);
             });
         }
+        self.retain_open_layout_drawings();
         self.active = self
             .workspaces
             .iter()
@@ -2790,46 +2830,51 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens a new tab with one chart of the active chart's market and interval, showing a
+    /// new layout named `name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no more tabs can open, the name is invalid or taken, the
+    /// library is full or the chart cannot start.
+    pub(super) fn add_workspace(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let maximum = current_plan_limits().workspaces;
         if self.workspaces.len() >= maximum {
-            self.workspace_error = Some(format!(
+            return Err(format!(
                 "Your plan supports at most {maximum} open workspaces"
             ));
-            cx.notify();
-            return;
         }
-        let Some(factory) = self.workspace_factory.clone() else {
-            return;
-        };
+        let factory = self
+            .workspace_factory
+            .clone()
+            .ok_or_else(|| "This window cannot open another tab".to_string())?;
+        self.layout_library.check_new_layout(name)?;
         let active = self.active_surface();
         let (product, interval) = {
             let active = active.read(cx);
-            let Some(product) = active.product.clone() else {
-                self.workspace_error =
-                    Some("The active workspace has no market to copy".to_string());
-                cx.notify();
-                return;
-            };
+            let product = active
+                .product
+                .clone()
+                .ok_or_else(|| "The active workspace has no market to copy".to_string())?;
             (product, active.interval)
         };
-        let pane = match factory.create_workspace(product, interval) {
-            Ok(worker) => worker,
-            Err(error) => {
-                self.workspace_error = Some(error);
-                cx.notify();
-                return;
-            }
-        };
+        let pane = factory.create_workspace(product, interval)?;
         let workspace_id = pane.workspace_id;
         let pane_id = pane.pane_id;
         let consumer_id = pane.consumer_id;
         let layout = match AerisChartWorkspace::new(pane_id, CHART_PANE_CAPACITY) {
             Ok(layout) => layout,
             Err(error) => {
-                self.workspace_error = Some(error.to_string());
-                cx.notify();
-                return;
+                let mut pane = pane;
+                if let Some(retirement) = pane.worker.begin_retirement() {
+                    self.lifecycle.retire_market_worker(retirement, cx);
+                }
+                return Err(error.to_string());
             }
         };
         let surface = workspace_surface_entity(
@@ -2846,6 +2891,30 @@ impl TerminalApp {
             workspace.apply_theme(&self.theme, workspace_cx);
             workspace.set_market_message_wake(self.market_frame_wake.callback());
         });
+        let mut workspace = WorkspaceTab {
+            id: workspace_id,
+            label: String::new(),
+            saved_layout_id: 0,
+            autosaved_snapshot: None,
+            panes: vec![WorkspacePane {
+                id: pane_id,
+                consumer_id,
+                surface: surface.clone(),
+            }],
+            active_pane: 0,
+            layout,
+            maximized_pane: None,
+            swallow_pane_mouse_up: false,
+            generation: 1,
+            focus: cx.focus_handle(),
+        };
+        if let Err(error) = self.assign_new_layout(&mut workspace, name, cx) {
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_market_resource_class(ConsumerResourceClass::Detached, surface_cx);
+                surface.retire_market_worker(surface_cx);
+            });
+            return Err(error);
+        }
         cx.observe(&surface, |app, surface, cx| {
             if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
                 app.persist_workspace_layout_if_changed(cx);
@@ -2855,26 +2924,13 @@ impl TerminalApp {
         .detach();
         self.show_terminal_view(cx);
         self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
-        self.workspaces.push(WorkspaceTab {
-            id: workspace_id,
-            label: format!("Workspace {workspace_id}"),
-            panes: vec![WorkspacePane {
-                id: pane_id,
-                consumer_id,
-                surface,
-            }],
-            active_pane: 0,
-            layout,
-            maximized_pane: None,
-            swallow_pane_mouse_up: false,
-            generation: 1,
-            focus: cx.focus_handle(),
-        });
+        self.workspaces.push(workspace);
         self.refresh_workspace_focus_order();
         self.active = self.workspaces.len() - 1;
         self.workspace_error = None;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
+        Ok(())
     }
 
     pub(super) fn new_workspace(
@@ -2883,7 +2939,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.add_workspace(window, cx);
+        self.open_start_page(window, cx);
     }
 
     fn split_active_pane(
@@ -3219,6 +3275,7 @@ impl TerminalApp {
         if self.closing {
             return false;
         }
+        self.sync_layout_drawings(cx);
         self.persist_workspace_layout_if_changed(cx);
         self.closing = true;
         if let Some(persistence) = self.workspace_persistence.as_ref() {
@@ -3231,15 +3288,33 @@ impl TerminalApp {
         true
     }
 
+    /// Closes the window, first asking whether to save layouts with unsaved changes.
     pub(super) fn close_window(
         &mut self,
         _: &CloseWindow,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.claim_close(cx) {
+        if self.window_should_close(window, cx) {
             window.remove_window();
         }
+    }
+
+    /// Whether the window may close now. A window with unsaved layouts asks first and stays
+    /// open; otherwise the close is claimed, so it is claimed exactly once.
+    pub(super) fn window_should_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.closing {
+            return true;
+        }
+        if !self.unsaved_layout_names(cx).is_empty() {
+            self.prompt_layout_close(layouts_view::ClosePrompt::Window, window, cx);
+            return false;
+        }
+        self.claim_close(cx)
     }
 
     /// Handles the open command palette's navigation keys, returning whether the key was used.
@@ -3284,6 +3359,14 @@ impl TerminalApp {
         if self.keyboard_shortcuts_open {
             if event.keystroke.key.as_str() == "escape" {
                 self.close_keyboard_shortcuts(window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.layouts_ui.modal_open() {
+            if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                self.cancel_layout_modal(window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
             }
@@ -3335,9 +3418,15 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.layouts_ui.menu_open() {
+            self.close_layout_menus(cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.chart_context_menu.is_some()
             || self.chart_settings_menu.is_some()
             || self.pages.view != market_screener::AppView::Terminal
+            || self.layouts_ui.start_page_shown()
         {
             return;
         }

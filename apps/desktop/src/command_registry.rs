@@ -35,6 +35,10 @@ pub enum CommandId {
     MoveWorkspaceLeft,
     MoveWorkspaceRight,
     CloseWorkspace,
+    SaveLayout,
+    ToggleLayoutAutosave,
+    CopyLayout,
+    OpenRecentLayout,
     SplitHorizontal,
     SplitVertical,
     ClosePane,
@@ -47,7 +51,7 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 40] = [
         Self::OpenPalette,
         Self::ToggleFullscreen,
         Self::MinimizeWindow,
@@ -75,6 +79,10 @@ impl CommandId {
         Self::MoveWorkspaceLeft,
         Self::MoveWorkspaceRight,
         Self::CloseWorkspace,
+        Self::SaveLayout,
+        Self::ToggleLayoutAutosave,
+        Self::CopyLayout,
+        Self::OpenRecentLayout,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::ClosePane,
@@ -115,7 +123,11 @@ impl CommandId {
             | Self::SelectPreviousWorkspace
             | Self::MoveWorkspaceLeft
             | Self::MoveWorkspaceRight
-            | Self::CloseWorkspace => CommandGroup::Workspaces,
+            | Self::CloseWorkspace
+            | Self::SaveLayout
+            | Self::ToggleLayoutAutosave
+            | Self::CopyLayout
+            | Self::OpenRecentLayout => CommandGroup::Workspaces,
             Self::SplitHorizontal | Self::SplitVertical | Self::ClosePane => CommandGroup::Panes,
             Self::ToggleOneClickTrading
             | Self::BuyMarket
@@ -494,6 +506,30 @@ pub const COMMANDS: &[CommandSpec] = &[
         &["ctrl-w"],
     ),
     spec(
+        CommandId::SaveLayout,
+        "Save layout",
+        "workspace layout save",
+        &["ctrl-s"],
+    ),
+    spec(
+        CommandId::ToggleLayoutAutosave,
+        "Layout autosave",
+        "workspace layout autosave toggle on off",
+        &[],
+    ),
+    spec(
+        CommandId::CopyLayout,
+        "Make a copy of layout",
+        "workspace layout copy duplicate save as",
+        &[],
+    ),
+    spec(
+        CommandId::OpenRecentLayout,
+        "Open recent layout",
+        "workspace layout reopen recent closed tab",
+        &[],
+    ),
+    spec(
         CommandId::SplitHorizontal,
         "Split pane horizontally",
         "layout",
@@ -527,7 +563,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         CommandId::SellMarket,
         "Trading: Sell market",
         "order",
-        &["ctrl-s"],
+        &["ctrl-shift-s"],
     ),
     spec(
         CommandId::CancelAll,
@@ -814,7 +850,7 @@ mod tests {
             labels(trading),
             [
                 ("Buy market", "Ctrl+B".to_string()),
-                ("Sell market", "Ctrl+S".to_string()),
+                ("Sell market", "Ctrl+Shift+S".to_string()),
                 ("Cancel all", "Ctrl+Shift+X".to_string()),
                 ("Flatten account", "Ctrl+Shift+F".to_string()),
                 ("Kill switch", "Ctrl+Shift+K".to_string()),
@@ -827,6 +863,10 @@ mod tests {
                 .map(|(_, rows)| labels(rows))
                 .expect("section")
         };
+        assert!(
+            section(CommandGroup::Workspaces).contains(&("Save layout", "Ctrl+S".to_string())),
+            "Ctrl+S saves the layout"
+        );
         assert_eq!(
             section(CommandGroup::Panes).last(),
             Some(&("Maximize or restore pane", "Alt+Click".to_string()))

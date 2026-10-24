@@ -236,6 +236,10 @@ impl TerminalApp {
             }
             CommandId::SplitVertical => self.split_pane_vertical(&SplitPaneVertical, window, cx),
             CommandId::ClosePane => self.close_active_pane(&ClosePane, window, cx),
+            CommandId::SaveLayout
+            | CommandId::ToggleLayoutAutosave
+            | CommandId::CopyLayout
+            | CommandId::OpenRecentLayout => self.run_layout_command(command, window, cx),
             CommandId::ToggleOneClickTrading => {
                 self.toggle_one_click_trading(&ToggleOneClickTrading, window, cx);
             }
@@ -383,7 +387,7 @@ impl TerminalApp {
         self.track_chart_fullscreen(window);
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
-        self.share_workspace_drawings(cx);
+        self.sync_layout_drawings(cx);
         self.sync_drawing_context_toolbar(cx);
         self.dispatch_due_economic_event_rules(cx);
         self.sync_market_summaries(cx);
@@ -403,10 +407,16 @@ impl TerminalApp {
     }
 
     fn rendered_title_bar(&self, terminal: &Entity<Self>, window: &Window, cx: &App) -> AnyElement {
+        let unsaved = self.layout_unsaved_flags(cx);
         workspace_title_bar(
             terminal,
             &WorkspaceTabBarState {
                 workspaces: &self.workspaces,
+                unsaved: &unsaved,
+                start_page: self
+                    .layouts_ui
+                    .start_page_open()
+                    .then(|| self.layouts_ui.start_page_shown()),
                 market_summaries: &self.market_summaries,
                 active: self.active,
                 enabled: self.workspace_factory.is_some(),
@@ -523,7 +533,7 @@ impl TerminalApp {
 
     fn rendered_header(
         &self,
-        _terminal: &Entity<Self>,
+        terminal: &Entity<Self>,
         surface: &Entity<WorkspaceSurface>,
         cx: &App,
     ) -> impl IntoElement + use<> {
@@ -532,9 +542,14 @@ impl TerminalApp {
             .chart
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
+        let layout_menu = self.layout_menu_button(
+            terminal,
+            self.layout_tab_has_unsaved_changes(self.active, cx),
+        );
         terminal_header(
             surface,
             active_header_state(workspace, &self.theme, has_data, cx),
+            layout_menu,
         )
     }
 }
@@ -578,6 +593,7 @@ impl Render for TerminalApp {
                 fullscreen_focus.focus(window, cx);
             })
             .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(Self::save_active_layout_shortcut))
             .on_action(cx.listener(Self::toggle_one_click_trading))
             .on_action(cx.listener(Self::trading_buy_market))
             .on_action(cx.listener(Self::trading_sell_market))
@@ -625,6 +641,32 @@ impl TerminalApp {
             .children(self.keyboard_shortcuts_layer(terminal))
             .children(self.rendered_command_palette(terminal, cx))
             .children(self.trading_confirmation_layer(terminal))
+            .children(self.layouts_dialog_layer(terminal, cx))
+    }
+
+    /// The start page under the title bar, in place of the active workspace. Only
+    /// shell-level overlays apply.
+    fn rendered_start_page_view(
+        &self,
+        terminal: &Entity<Self>,
+        start_page: AnyElement,
+        window: &Window,
+        cx: &App,
+    ) -> Div {
+        let placement = title_bar_placement(window.is_fullscreen(), self.chart_chrome.window_frame);
+        let (title_bar, frameless_reveal_zone) =
+            self.rendered_title_bars(terminal, window, placement, Instant::now(), cx);
+        self.page_root()
+            .children(title_bar)
+            .child(start_page)
+            .children(fullscreen_hint_layer(&self.fullscreen_hint, &self.theme))
+            .children(frameless_reveal_zone)
+            .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
+            .children(self.app_navigation_overlay(terminal, window.viewport_size()))
+            .children(self.keyboard_shortcuts_layer(terminal))
+            .children(self.rendered_command_palette(terminal, cx))
+            .children(self.trading_confirmation_layer(terminal))
+            .children(self.layouts_dialog_layer(terminal, cx))
     }
 
     fn rendered_terminal_page(
@@ -633,6 +675,9 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        if let Some(start_page) = self.rendered_start_page(terminal, cx) {
+            return self.rendered_start_page_view(terminal, start_page, window, cx);
+        }
         let terminal = terminal.clone();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
@@ -668,6 +713,7 @@ impl TerminalApp {
         let command_palette = self.rendered_command_palette(&terminal, cx);
         let keyboard_shortcuts = self.keyboard_shortcuts_layer(&terminal);
         let trading_confirmation = self.trading_confirmation_layer(&terminal);
+        let layouts_dialog = self.layouts_dialog_layer(&terminal, cx);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
         let header = self.rendered_header(&terminal, &active, cx);
@@ -699,7 +745,8 @@ impl TerminalApp {
                 .children(drawing_tool_menu)
                 .children(keyboard_shortcuts)
                 .children(command_palette)
-                .children(trading_confirmation);
+                .children(trading_confirmation)
+                .children(layouts_dialog);
         }
         self.page_root()
             .children(title_bar)
@@ -725,6 +772,7 @@ impl TerminalApp {
             .children(keyboard_shortcuts)
             .children(command_palette)
             .children(trading_confirmation)
+            .children(layouts_dialog)
     }
 }
 
@@ -870,7 +918,8 @@ impl Render for WorkspaceSplitDrag {
 #[derive(Clone, Copy)]
 struct WorkspaceTabRenderState {
     index: usize,
-    active: usize,
+    /// The selected tab; none while the start page is shown.
+    active: Option<usize>,
     workspace_count: usize,
     drag_enabled: bool,
     drag_translation: Option<f32>,
@@ -935,21 +984,24 @@ fn workspace_add_button(
         .button_size(ButtonSize::Sm)
         .round()
         .icon(header_icon(HugeIcon::Add))
-        .aria_label("Create workspace")
+        .aria_label("New tab")
         .disabled(!enabled)
         .on_press(move |_, window, cx| {
-            terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
+            terminal.update(cx, |terminal, cx| terminal.open_start_page(window, cx));
         })
 }
 
+/// A tab names the layout it shows, marked while the layout has unsaved changes, with the
+/// active chart's exchange mark and daily change.
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
+    unsaved: bool,
     market_summaries: &BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     theme: &AerisTheme,
     cx: &App,
 ) -> (String, String, Div, Option<String>) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
-    let label = terminal_instrument_label(surface);
+    let label = workspace.label.clone();
     let summary = (!surface.showing_superseded_series())
         .then(|| {
             surface.product.as_ref().and_then(|instrument| {
@@ -959,7 +1011,7 @@ fn workspace_tab_content(
         .flatten();
     let values = summary.map_or_else(MarketSummaryValues::default, MarketSummaryEntry::values);
     let change_label = workspace_tab_change_label(values);
-    let aria_label = workspace_tab_aria_label(&label, change_label.as_deref());
+    let aria_label = workspace_tab_aria_label(&label, unsaved, change_label.as_deref());
     let change_color = values
         .change
         .map_or(theme.colors.text_muted, |value| match value.cmp(&0) {
@@ -988,6 +1040,7 @@ fn workspace_tab_content(
                 .whitespace_nowrap()
                 .child(label.clone()),
         )
+        .children(unsaved.then(|| layouts_view::unsaved_layout_dot(theme)))
         .children(change_label.clone().map(|change| {
             div()
                 .flex_none()
@@ -1002,6 +1055,7 @@ fn workspace_tab_content(
 
 fn workspace_tab_width(
     label: &str,
+    unsaved: bool,
     change: Option<&str>,
     show_close: bool,
     window: &Window,
@@ -1031,11 +1085,13 @@ fn workspace_tab_width(
         font.features = platform_tabular_numerals();
         measure(change, rem * 0.75, font)
     });
-    workspace_tab_width_from_measurements(label_width, change_width, show_close)
+    let marker_width = unsaved.then_some(layouts_view::UNSAVED_LAYOUT_DOT_SIZE);
+    workspace_tab_width_from_measurements(label_width, marker_width, change_width, show_close)
 }
 
 fn workspace_tab_width_from_measurements(
     label_width: f32,
+    marker_width: Option<f32>,
     change_width: Option<f32>,
     show_close: bool,
 ) -> f32 {
@@ -1043,6 +1099,9 @@ fn workspace_tab_width_from_measurements(
         + WORKSPACE_TAB_EXCHANGE_GLYPH
         + WORKSPACE_TAB_CONTENT_GAP
         + label_width;
+    if let Some(marker_width) = marker_width {
+        width += WORKSPACE_TAB_CONTENT_GAP + marker_width;
+    }
     if let Some(change_width) = change_width {
         width += WORKSPACE_TAB_CONTENT_GAP + change_width;
     }
@@ -1055,13 +1114,16 @@ fn workspace_tab_width_from_measurements(
 
 fn workspace_tab_widths(
     visuals: &[(String, String, Div, Option<String>)],
+    unsaved: &[bool],
     show_close: bool,
     window: &Window,
 ) -> Vec<f32> {
     visuals
         .iter()
-        .map(|(label, _, _, change)| {
-            workspace_tab_width(label, change.as_deref(), show_close, window)
+        .enumerate()
+        .map(|(index, (label, _, _, change))| {
+            let unsaved = unsaved.get(index).copied().unwrap_or(false);
+            workspace_tab_width(label, unsaved, change.as_deref(), show_close, window)
         })
         .collect()
 }
@@ -1070,9 +1132,14 @@ fn workspace_tab_change_label(values: MarketSummaryValues) -> Option<String> {
     values.change_percent.map(|value| format!("{value:+.2}%"))
 }
 
-fn workspace_tab_aria_label(label: &str, change: Option<&str>) -> String {
+fn workspace_tab_aria_label(label: &str, unsaved: bool, change: Option<&str>) -> String {
+    let label = if unsaved {
+        format!("{label}, unsaved changes")
+    } else {
+        label.to_string()
+    };
     change.map_or_else(
-        || label.to_string(),
+        || label.clone(),
         |change| format!("{label}, change {change}"),
     )
 }
@@ -1093,7 +1160,7 @@ fn workspace_tab(
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
     let tab_id = workspace.id;
-    let selected = index == state.active;
+    let selected = Some(index) == state.active;
     let select_terminal = terminal.clone();
     let key_terminal = terminal.clone();
     let middle_click_terminal = terminal.clone();
@@ -1167,13 +1234,17 @@ pub(super) fn workspace_tab_strip(
     let workspaces = state.workspaces;
     let enabled = state.enabled;
     let theme = state.theme;
-    let colors = theme.colors;
     let close_drag_enabled = workspace_tab_close_drag_enabled(workspaces.len());
     let visuals: Vec<_> = workspaces
         .iter()
-        .map(|workspace| workspace_tab_content(workspace, state.market_summaries, &theme, cx))
+        .enumerate()
+        .map(|(index, workspace)| {
+            let unsaved = state.unsaved.get(index).copied().unwrap_or(false);
+            workspace_tab_content(workspace, unsaved, state.market_summaries, &theme, cx)
+        })
         .collect();
-    let tab_widths = workspace_tab_widths(&visuals, close_drag_enabled, window);
+    let tab_widths = workspace_tab_widths(&visuals, state.unsaved, close_drag_enabled, window);
+    let selected_tab = (state.start_page != Some(true)).then_some(state.active);
     let drag_widths = tab_widths.clone();
     let tabs = workspaces
         .iter()
@@ -1185,7 +1256,7 @@ pub(super) fn workspace_tab_strip(
                 workspace,
                 &WorkspaceTabRenderState {
                     index,
-                    active: state.active,
+                    active: selected_tab,
                     workspace_count: workspaces.len(),
                     drag_enabled: enabled && close_drag_enabled,
                     drag_translation: close_drag_enabled
@@ -1204,7 +1275,6 @@ pub(super) fn workspace_tab_strip(
                 tab_widths[index],
             )
         });
-    let add_terminal = terminal.clone();
     let move_terminal = terminal.clone();
     let end_terminal = terminal.clone();
     let add_enabled = enabled && workspaces.len() < MAXIMUM_OPEN_WORKSPACES;
@@ -1238,31 +1308,88 @@ pub(super) fn workspace_tab_strip(
             end_terminal.update(cx, |terminal, cx| terminal.end_workspace_drag(window, cx));
         })
         .children(enabled.then_some(tabs).into_iter().flatten())
-        .children(enabled.then(|| {
-            chrome_tooltip(
-                "add_workspace",
-                "Create workspace",
-                workspace_add_button(add_terminal, add_enabled, &theme),
-                &theme,
-            )
-        }))
-        .children(enabled.then(|| {
-            div()
-                .id("workspace_tab_drop_target")
-                .h(px(chart_chrome::CHART_CONTROL_SIZE))
-                .min_w(px(16.0))
-        }))
-        .children(state.error.map(|error| {
-            chrome_tooltip(
-                "workspace_creation_error",
-                error.to_string(),
-                div()
-                    .size(px(7.0))
-                    .rounded_full()
-                    .bg(gpui_color(colors.danger)),
-                &theme,
-            )
-        }))
+        .children(
+            state
+                .start_page
+                .filter(|_| enabled)
+                .map(|shown| start_page_tab(terminal, shown, &theme)),
+        )
+        .children(
+            enabled
+                .then(|| workspace_tab_strip_end(terminal, add_enabled, &theme))
+                .into_iter()
+                .flatten(),
+        )
+        .children(
+            state
+                .error
+                .map(|error| workspace_creation_error(error, &theme)),
+        )
+}
+
+fn workspace_creation_error(error: &str, theme: &AerisTheme) -> AnyElement {
+    chrome_tooltip(
+        "workspace_creation_error",
+        error.to_string(),
+        div()
+            .size(px(7.0))
+            .rounded_full()
+            .bg(gpui_color(theme.colors.danger)),
+        theme,
+    )
+    .into_any_element()
+}
+
+/// The "New tab" button and the drop target after the last tab.
+fn workspace_tab_strip_end(
+    terminal: &Entity<TerminalApp>,
+    add_enabled: bool,
+    theme: &AerisTheme,
+) -> [AnyElement; 2] {
+    [
+        chrome_tooltip(
+            "add_workspace",
+            "New tab",
+            workspace_add_button(terminal.clone(), add_enabled, theme),
+            theme,
+        )
+        .into_any_element(),
+        div()
+            .id("workspace_tab_drop_target")
+            .h(px(chart_chrome::CHART_CONTROL_SIZE))
+            .min_w(px(16.0))
+            .into_any_element(),
+    ]
+}
+
+/// The "New tab" placeholder: selected while the start page shows, closable, never a
+/// workspace.
+fn start_page_tab(terminal: &Entity<TerminalApp>, shown: bool, theme: &AerisTheme) -> AnyElement {
+    let (resting_fill, selected_fill) = workspace_tab_surface_colors(theme);
+    let show = terminal.clone();
+    let close = terminal.clone();
+    Tab::new("start_page_tab", theme)
+        .chrome(resting_fill, selected_fill)
+        .selected(shown)
+        .h(px(chart_chrome::CHART_CONTROL_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .text_sm()
+        .aria_label("New tab")
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            show.update(cx, |terminal, cx| terminal.open_start_page(window, cx));
+        })
+        .child(div().whitespace_nowrap().child("New tab"))
+        .child(
+            close_button("close_start_page", theme, move |window, cx| {
+                close.update(cx, |terminal, cx| terminal.close_start_page(window, cx));
+            })
+            .aria_label("Close New tab"),
+        )
+        .into_any_element()
 }
 
 pub(super) fn terminal_root(
@@ -1288,6 +1415,8 @@ pub(super) fn terminal_root(
             workspaces: vec![WorkspaceTab {
                 id: 1,
                 label: workspace_label(0),
+                saved_layout_id: 0,
+                autosaved_snapshot: None,
                 panes: vec![WorkspacePane {
                     id: 1,
                     consumer_id: 1,
@@ -1310,6 +1439,7 @@ pub(super) fn terminal_root(
             chart_settings_templates: Vec::new(),
             watchlist_entries: Vec::new(),
             drawing_templates: Vec::new(),
+            saved_layouts: Vec::new(),
             workspace_notice: None,
         },
         lifecycle,
@@ -1329,6 +1459,8 @@ pub(super) struct TerminalShellInit {
     pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     pub(super) drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    /// A tab showing no layout of this library is given a new one.
+    pub(super) saved_layouts: Vec<WorkspaceSavedLayoutState>,
     pub(super) workspace_notice: Option<String>,
 }
 
@@ -1361,11 +1493,8 @@ fn terminal_shell_root(
         )
         .detach();
     let closing_terminal = terminal.clone();
-    window.on_window_should_close(cx, move |_, cx| {
-        closing_terminal.update(cx, |terminal, cx| {
-            terminal.claim_close(cx);
-        });
-        true
+    window.on_window_should_close(cx, move |window, cx| {
+        closing_terminal.update(cx, |terminal, cx| terminal.window_should_close(window, cx))
     });
     // A focused element that leaves the screen (a replaced chart, a hidden tab strip, a closed
     // pane or dialog) would otherwise route every key to the bare window root, where no
@@ -1411,6 +1540,77 @@ pub(super) struct WorkspaceTabsRestore<'a> {
     pub(super) notice: Option<String>,
 }
 
+/// Builds the open tab `tab` describes from the market panes started for it, which it takes
+/// out of `market_panes`. Every restored or opened tab is built here. `None` when none of its
+/// panes started or its layout is invalid; the panes it did take are then dropped with it.
+pub(super) fn restored_workspace_tab(
+    tab: &WorkspaceTabState,
+    market_panes: &mut Vec<engine_market_worker::WorkspaceMarketPane>,
+    lifecycle: &DesktopLifecycle,
+    chart_chrome: chart_chrome::ChartChromePreferences,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<WorkspaceTab> {
+    let mut panes = Vec::with_capacity(tab.panes.len());
+    for persisted in &tab.panes {
+        let Some(index) = market_panes.iter().position(|pane| {
+            pane.workspace_id == tab.workspace_id && pane.pane_id == persisted.pane_id
+        }) else {
+            continue;
+        };
+        let pane = market_panes.remove(index);
+        panes.push(WorkspacePane {
+            id: pane.pane_id,
+            consumer_id: pane.consumer_id,
+            surface: workspace_surface_entity(
+                pane.startup,
+                pane.worker,
+                lifecycle,
+                chart_chrome,
+                WorkspaceSurfaceRestore {
+                    chart: persisted.chart.clone(),
+                    side_panel: Some((
+                        persisted.side_panel_visibility,
+                        persisted.side_panel_width,
+                        persisted.side_panel_split_basis_points,
+                    )),
+                },
+                window,
+                cx,
+            ),
+        });
+    }
+    if panes.is_empty() {
+        return None;
+    }
+    let layout = tab.layout.as_ref().and_then(chart_workspace_layout)?;
+    let pane_order = layout.leaf_ids();
+    panes.sort_by_key(|pane| {
+        pane_order
+            .iter()
+            .position(|pane_id| *pane_id == pane.id)
+            .unwrap_or(usize::MAX)
+    });
+    let active_pane = panes
+        .iter()
+        .position(|pane| pane.id == tab.active_pane_id)
+        .unwrap_or(0);
+    let layout = AerisChartWorkspace::restore(&layout, CHART_PANE_CAPACITY).ok()?;
+    Some(WorkspaceTab {
+        id: tab.workspace_id,
+        label: tab.label.clone(),
+        saved_layout_id: tab.saved_layout_id,
+        autosaved_snapshot: None,
+        panes,
+        active_pane,
+        layout,
+        maximized_pane: None,
+        swallow_pane_mouse_up: false,
+        generation: tab.generation,
+        focus: cx.focus_handle(),
+    })
+}
+
 pub(super) fn workspace_tabs_root(
     mut market_panes: Vec<engine_market_worker::WorkspaceMarketPane>,
     restored: WorkspaceTabsRestore<'_>,
@@ -1421,69 +1621,13 @@ pub(super) fn workspace_tabs_root(
     cx: &mut App,
 ) -> Entity<TerminalApp> {
     let plan = restored_workspace_shell_plan(restored.state);
-    let mut workspaces = Vec::with_capacity(plan.workspace_tabs.len());
-    for tab in plan.workspace_tabs {
-        let mut panes = Vec::with_capacity(tab.panes.len());
-        for persisted in &tab.panes {
-            let Some(index) = market_panes.iter().position(|pane| {
-                pane.workspace_id == tab.workspace_id && pane.pane_id == persisted.pane_id
-            }) else {
-                continue;
-            };
-            let pane = market_panes.remove(index);
-            panes.push(WorkspacePane {
-                id: pane.pane_id,
-                consumer_id: pane.consumer_id,
-                surface: workspace_surface_entity(
-                    pane.startup,
-                    pane.worker,
-                    lifecycle,
-                    chart_chrome,
-                    WorkspaceSurfaceRestore {
-                        chart: persisted.chart.clone(),
-                        side_panel: Some((
-                            persisted.side_panel_visibility,
-                            persisted.side_panel_width,
-                            persisted.side_panel_split_basis_points,
-                        )),
-                    },
-                    window,
-                    cx,
-                ),
-            });
-        }
-        if panes.is_empty() {
-            continue;
-        }
-        let Some(layout) = tab.layout.as_ref().and_then(chart_workspace_layout) else {
-            continue;
-        };
-        let pane_order = layout.leaf_ids();
-        panes.sort_by_key(|pane| {
-            pane_order
-                .iter()
-                .position(|pane_id| *pane_id == pane.id)
-                .unwrap_or(usize::MAX)
-        });
-        let active_pane = panes
-            .iter()
-            .position(|pane| pane.id == tab.active_pane_id)
-            .unwrap_or(0);
-        let Ok(layout) = AerisChartWorkspace::restore(&layout, CHART_PANE_CAPACITY) else {
-            continue;
-        };
-        workspaces.push(WorkspaceTab {
-            id: tab.workspace_id,
-            label: tab.label.clone(),
-            panes,
-            active_pane,
-            layout,
-            maximized_pane: None,
-            swallow_pane_mouse_up: false,
-            generation: tab.generation,
-            focus: cx.focus_handle(),
-        });
-    }
+    let workspaces = plan
+        .workspace_tabs
+        .iter()
+        .filter_map(|tab| {
+            restored_workspace_tab(tab, &mut market_panes, lifecycle, chart_chrome, window, cx)
+        })
+        .collect();
     terminal_shell_root(
         TerminalShellInit {
             workspaces,
@@ -1496,6 +1640,7 @@ pub(super) fn workspace_tabs_root(
             chart_settings_templates: restored.state.chart_settings_templates.clone(),
             watchlist_entries: restored.state.watchlist_entries.clone(),
             drawing_templates: restored.state.drawing_templates.clone(),
+            saved_layouts: restored.state.saved_layouts.clone(),
             workspace_notice: restored.notice,
         },
         lifecycle,
@@ -1544,18 +1689,24 @@ mod tests {
         });
         assert_eq!(change.as_deref(), Some("+6.00%"));
         assert_eq!(
-            workspace_tab_aria_label("BTC-USD", change.as_deref()),
-            "BTC-USD, change +6.00%"
+            workspace_tab_aria_label("Scalping", false, change.as_deref()),
+            "Scalping, change +6.00%"
+        );
+        assert_eq!(
+            workspace_tab_aria_label("Scalping", true, None),
+            "Scalping, unsaved changes"
         );
     }
 
     #[test]
     fn workspace_tab_width_tracks_content_and_preserves_trailing_space() {
-        let without_close = workspace_tab_width_from_measurements(100.0, Some(50.0), false);
+        let without_close = workspace_tab_width_from_measurements(100.0, None, Some(50.0), false);
         assert!((without_close - 198.0).abs() < f32::EPSILON);
-        let with_close = workspace_tab_width_from_measurements(100.0, Some(50.0), true);
+        let with_close = workspace_tab_width_from_measurements(100.0, None, Some(50.0), true);
         assert!((with_close - 230.0).abs() < f32::EPSILON);
-        let capped = workspace_tab_width_from_measurements(1_000.0, None, false);
+        let unsaved = workspace_tab_width_from_measurements(100.0, Some(6.0), Some(50.0), false);
+        assert!(unsaved > without_close, "the unsaved marker gets room");
+        let capped = workspace_tab_width_from_measurements(1_000.0, None, None, false);
         assert!((capped - WORKSPACE_TAB_MAX_WIDTH).abs() < f32::EPSILON);
     }
 }

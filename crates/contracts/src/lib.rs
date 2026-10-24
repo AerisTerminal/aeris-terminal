@@ -26,10 +26,10 @@ pub use messages::{
     WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState, WorkspaceInstrumentDrawingsState,
     WorkspaceLayoutState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
     WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 pub use provider::{
     ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence, ProviderFeedLevel,

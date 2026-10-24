@@ -346,60 +346,26 @@ fn initial_symbol_browser(_: &MarketWorkerStartup) -> rithmic_shell::RithmicSymb
     rithmic_shell::RithmicSymbolBrowser::default()
 }
 
-fn import_drawings(chart: &mut AerisChartView, drawings: &WorkspaceInstrumentDrawingsState) {
-    if let Err(error) = chart.import_drawings_json(&drawings.chart_state_json) {
-        diagnostic!("Aeris persisted drawings could not be restored: {error}");
-    }
-}
-
-/// Keeps the charts of one workspace that show the same instrument on one drawing set. Each
-/// committed edit reaches every sibling pane, and a chart that opened without drawings adopts a
-/// sibling's: a chart showing the instrument first, then the set a pane remembers.
-pub(super) fn share_workspace_drawings<'a>(
+/// Keeps the charts of every pane showing one saved layout on the layout's drawing set: every
+/// pane first publishes its chart's committed edits, then every pane imports the revisions it
+/// does not show yet. Returns whether the set changed.
+pub(super) fn sync_layout_drawings<'a>(
     panes: &(impl Iterator<Item = &'a Entity<WorkspaceSurface>> + Clone),
+    drawings: &mut LayoutDrawings,
     cx: &mut App,
-) {
-    let siblings = |index: usize| {
-        panes
-            .clone()
-            .enumerate()
-            .filter(move |(sibling, _)| *sibling != index)
-            .map(|(_, pane)| pane)
-    };
-    for (index, pane) in panes.clone().enumerate() {
-        let Some(shared) = pane.update(cx, |surface, cx| surface.take_drawings_publication(cx))
-        else {
-            continue;
-        };
-        for sibling in siblings(index) {
-            sibling.update(cx, |surface, cx| {
-                surface.receive_shared_drawings(&shared, cx);
-            });
-        }
+) -> bool {
+    let mut changed = false;
+    for pane in panes.clone() {
+        changed |= pane.update(cx, |surface, cx| {
+            surface.publish_layout_drawings(drawings, cx)
+        });
     }
-    for (index, pane) in panes.clone().enumerate() {
-        let Some(instrument) =
-            pane.update(cx, |surface, cx| surface.take_drawings_peer_request(cx))
-        else {
-            continue;
-        };
-        let shared = siblings(index)
-            .find_map(|sibling| sibling.read(cx).live_drawings(&instrument, cx))
-            .or_else(|| {
-                siblings(index).find_map(|sibling| {
-                    sibling
-                        .read(cx)
-                        .retained_chart_presentation
-                        .drawings
-                        .remembered_for(&instrument)
-                })
-            });
-        if let Some(shared) = shared {
-            pane.update(cx, |surface, cx| {
-                surface.receive_shared_drawings(&shared, cx);
-            });
-        }
+    for pane in panes.clone() {
+        pane.update(cx, |surface, cx| {
+            surface.import_layout_drawings(drawings, cx);
+        });
     }
+    changed
 }
 
 fn restored_market_selection(
@@ -2014,12 +1980,7 @@ struct PanePresentation {
 }
 
 impl PanePresentation {
-    fn apply(
-        &self,
-        chart: &Entity<AerisChartView>,
-        drawings: Option<&WorkspaceInstrumentDrawingsState>,
-        cx: &mut Context<WorkspaceSurface>,
-    ) -> bool {
+    fn apply(&self, chart: &Entity<AerisChartView>, cx: &mut Context<WorkspaceSurface>) -> bool {
         let state = &self.state;
         let indicators = state
             .indicators
@@ -2081,9 +2042,6 @@ impl PanePresentation {
                 chart.set_axis_appearance(axis);
             }
             failed |= chart.restore_indicator_states(&indicators).is_err();
-            if let Some(drawings) = drawings {
-                import_drawings(chart, drawings);
-            }
             if let Some(price_axis) = price_axis {
                 chart.restore_price_axis_menu_state(price_axis);
             }
@@ -2110,7 +2068,9 @@ impl WorkspaceSurface {
             .or_else(|| self.retained_chart_presentation.chart_state.clone())
             .map(|mut state| {
                 PanePersistence(self).apply_surface_fields(&mut state);
-                state.instrument_drawings = self.retained_chart_presentation.drawings.remembered();
+                state.instrument_drawings.clear();
+                state.chart_state_json.clear();
+                state.locked_drawing_ids.clear();
                 state
             })
     }
@@ -2123,13 +2083,6 @@ impl WorkspaceSurface {
         if !chart.has_market_data() {
             return self.unloaded_chart_state();
         }
-        let instrument_drawings = match self.retained_chart_presentation.drawings.persisted(chart) {
-            Ok(drawings) => drawings,
-            Err(error) => {
-                diagnostic!("Aeris drawings could not be serialized: {error}");
-                return self.unloaded_chart_state();
-            }
-        };
         let price_axis = chart
             .price_axis_menu_state(0, false)
             .or_else(|| chart.price_axis_menu_state(0, true))
@@ -2158,7 +2111,6 @@ impl WorkspaceSurface {
             )),
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
             legend: Some(persisted_chart_legend(chart.legend_options())),
-            instrument_drawings,
             ..WorkspaceChartState::default()
         };
         PanePersistence(self).apply_surface_fields(&mut state);
@@ -2218,14 +2170,7 @@ impl WorkspaceSurface {
             order_quantity,
             order_ticket,
             chart_chrome,
-            retained_chart_presentation: RetainedChartPresentation {
-                drawings: PaneDrawings::restored(
-                    restored_chart_state
-                        .as_ref()
-                        .map_or(&[], |state| state.instrument_drawings.as_slice()),
-                ),
-                ..RetainedChartPresentation::default()
-            },
+            retained_chart_presentation: RetainedChartPresentation::default(),
             restored_chart_state,
             restored_rithmic,
             interval,
@@ -2256,9 +2201,7 @@ impl WorkspaceSurface {
         let Some(chart) = self.chart.as_ref() else {
             return;
         };
-        let failed = PanePersistence(self)
-            .presentation(None)
-            .apply(chart, None, cx);
+        let failed = PanePersistence(self).presentation(None).apply(chart, cx);
         if failed {
             Self::post_chart_restore_failure(cx);
         } else {
@@ -3561,36 +3504,25 @@ impl WorkspaceSurface {
         // An open settings session previews unconfirmed edits; restore the drawing before
         // its state is carried into the new chart.
         self.close_drawing_settings_dialog(false, cx);
-        self.remember_chart_drawings(cx);
-        let drawings = self
-            .retained_chart_presentation
+        self.capture_outgoing_drawings(cx);
+        // The layout's drawings of the new instrument are imported by the next drawing sync,
+        // which runs before the chart is first drawn.
+        self.retained_chart_presentation
             .drawings
             .begin_chart(self.product.as_ref());
         let mut restore_failed = if let Some(restored) = self.restored_chart_state.take() {
             self.retained_chart_presentation.rejected_saved =
                 RejectedSavedPresentation::of(&restored);
-            let drawings = drawings.or_else(|| {
-                chart_drawings::legacy_pane_drawings(
-                    &restored.chart_state_json,
-                    &restored.locked_drawing_ids,
-                    self.product.as_ref(),
-                )
-            });
             PanePersistence(self)
                 .presentation(Some(&restored))
-                .apply(&chart, drawings.as_ref(), cx)
+                .apply(&chart, cx)
         } else if let Some(state) = &self.retained_chart_presentation.chart_state {
             PanePersistence(self)
                 .presentation(Some(state))
-                .apply(&chart, drawings.as_ref(), cx)
+                .apply(&chart, cx)
         } else {
             self.apply_retained_indicators_to_chart(&chart, cx);
-            if let Some(drawings) = drawings {
-                chart.update(cx, |chart, _| import_drawings(chart, &drawings));
-            }
-            PanePersistence(self)
-                .presentation(None)
-                .apply(&chart, None, cx)
+            PanePersistence(self).presentation(None).apply(&chart, cx)
         };
         restore_failed |= self.retained_chart_presentation.rejected_saved.any();
         if restore_failed {
@@ -5571,69 +5503,56 @@ impl WorkspaceSurface {
             self.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
             self.retained_chart_presentation.price_precision =
                 chart.read(cx).selected_price_precision();
-            self.remember_chart_drawings(cx);
+            self.capture_outgoing_drawings(cx);
             self.retained_chart_presentation.chart_state = self.workspace_chart_state(cx);
         }
     }
 
-    fn take_drawings_publication(&mut self, cx: &App) -> Option<SharedDrawings> {
-        let chart = self.chart.as_ref()?.read(cx);
+    fn publish_layout_drawings(&mut self, layout: &mut LayoutDrawings, cx: &App) -> bool {
+        let chart = self.chart.as_ref().map(|chart| chart.read(cx));
         self.retained_chart_presentation
             .drawings
-            .take_publication(chart)
+            .publish(chart, layout)
             .unwrap_or_else(|error| {
-                diagnostic!("Aeris drawings could not be shared: {error}");
-                None
+                diagnostic!("Aeris drawings could not be saved to the layout: {error}");
+                false
             })
     }
 
-    fn take_drawings_peer_request(&mut self, cx: &App) -> Option<DrawingInstrument> {
-        let chart = self.chart.as_ref()?.read(cx);
-        self.retained_chart_presentation
-            .drawings
-            .take_peer_request(chart)
-    }
-
-    fn live_drawings(&self, instrument: &DrawingInstrument, cx: &App) -> Option<SharedDrawings> {
-        let chart = self.chart.as_ref()?.read(cx);
-        self.retained_chart_presentation
-            .drawings
-            .live(instrument, chart)
-            .unwrap_or_else(|error| {
-                diagnostic!("Aeris drawings could not be shared: {error}");
-                None
-            })
-    }
-
-    fn receive_shared_drawings(&mut self, shared: &SharedDrawings, cx: &mut Context<Self>) {
-        let drawings = &mut self.retained_chart_presentation.drawings;
-        let received = match self.chart.clone() {
-            Some(chart) => chart.update(cx, |chart, chart_cx| {
-                let received = drawings.receive(shared, Some(chart));
-                if !matches!(received, Ok(false)) {
-                    chart_cx.notify();
-                }
-                received
-            }),
-            None => drawings.receive(shared, None),
+    fn import_layout_drawings(&mut self, layout: &LayoutDrawings, cx: &mut Context<Self>) {
+        let Some(chart) = self.chart.clone() else {
+            return;
         };
-        match received {
+        let drawings = &mut self.retained_chart_presentation.drawings;
+        let imported = chart.update(cx, |chart, chart_cx| {
+            let imported = drawings.import(chart, layout);
+            if !matches!(imported, Ok(false)) {
+                chart_cx.notify();
+            }
+            imported
+        });
+        match imported {
             Ok(false) => return,
             Ok(true) => {}
-            Err(error) => diagnostic!("Aeris shared drawings could not be applied: {error}"),
+            Err(error) => diagnostic!("Aeris layout drawings could not be shown: {error}"),
         }
-        self.chart_persistence_dirty = true;
         cx.notify();
     }
 
-    fn remember_chart_drawings(&mut self, cx: &App) {
+    /// Adopts `layout` as the drawing set the chart already shows.
+    pub(super) fn rebind_layout_drawings(&mut self, layout: &LayoutDrawings) {
+        self.retained_chart_presentation.drawings.rebind(layout);
+    }
+
+    /// Keeps the chart's unpublished drawing edits for the next sync before it is replaced.
+    fn capture_outgoing_drawings(&mut self, cx: &App) {
         let Some(chart) = &self.chart else {
             return;
         };
         if let Err(error) = self
             .retained_chart_presentation
             .drawings
-            .remember(chart.read(cx))
+            .capture_outgoing(chart.read(cx))
         {
             diagnostic!("Aeris drawings could not be serialized: {error}");
         }

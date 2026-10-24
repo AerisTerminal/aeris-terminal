@@ -1752,14 +1752,6 @@ mod instrument_drawings {
             .expect("loaded chart state")
     }
 
-    fn saved_instruments(state: &WorkspaceChartState) -> Vec<&str> {
-        state
-            .instrument_drawings
-            .iter()
-            .map(|drawings| drawings.instrument_id.as_str())
-            .collect()
-    }
-
     #[gpui::test]
     fn pane_settings_saved_during_chart_loading_match_the_loaded_chart(cx: &mut TestAppContext) {
         use prost::Message as _;
@@ -1929,48 +1921,61 @@ mod instrument_drawings {
 
     #[gpui::test]
     fn drawings_return_when_switching_back_and_after_a_restart(cx: &mut TestAppContext) {
+        let mut layout = LayoutDrawings::default();
         let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
+        let panes = [surface.clone()];
         show(&surface, "A", cx);
-        surface.update(cx, |surface, cx| {
-            let chart = surface.chart.clone().expect("chart");
-            chart.update(cx, |chart, _| {
-                chart
-                    .import_drawings_json(LOCKED_LINE)
-                    .expect("drawing imports");
-            });
-        });
+        share(&panes, &mut layout, cx);
+        draw(&surface, LOCKED_LINE, cx);
         assert_eq!(drawing_count(&surface, cx), 1);
 
+        // The switch replaces the chart before a sync publishes the edit.
         show(&surface, "B", cx);
+        assert!(
+            share(&panes, &mut layout, cx),
+            "the replaced chart's edit is kept"
+        );
         assert_eq!(
             drawing_count(&surface, cx),
             0,
             "drawings stay on their market"
         );
+        assert_eq!(layout_instruments(&layout), ["A"]);
+        assert!(layout.has_unsaved_changes());
         let on_b = saved(&surface, cx);
-        assert_eq!(saved_instruments(&on_b), ["A"]);
+        assert!(
+            on_b.instrument_drawings.is_empty(),
+            "the layout owns drawings"
+        );
         assert_eq!(on_b.chart_state_json, "");
 
         show(&surface, "A", cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_count(&surface, cx), 1);
-        let on_a = saved(&surface, cx);
-        assert_eq!(saved_instruments(&on_a), ["A"]);
-        assert_eq!(
-            on_a.instrument_drawings[0].locked_drawing_ids,
-            Vec::<u32>::new()
-        );
+        assert_eq!(layout.entries()[0].locked_drawing_ids, Vec::<u32>::new());
         assert_eq!(
             locked_count(&surface, cx),
             1,
             "the lock travels in the document"
         );
+        layout.mark_saved();
+        assert!(
+            !share(&panes, &mut layout, cx),
+            "showing drawings changes nothing"
+        );
+        assert!(!layout.has_unsaved_changes());
 
+        let mut restarted = LayoutDrawings::from_saved(&layout.entries());
         let (reopened, _reopened_requests, cx) = open_surface(cx, instrument("B"), Some(on_b));
+        let panes = [reopened.clone()];
         show(&reopened, "B", cx);
+        share(&panes, &mut restarted, cx);
         assert_eq!(drawing_count(&reopened, cx), 0);
         show(&reopened, "A", cx);
+        share(&panes, &mut restarted, cx);
         assert_eq!(drawing_count(&reopened, cx), 1);
         assert_eq!(locked_count(&reopened, cx), 1);
+        assert!(!restarted.has_unsaved_changes());
     }
 
     fn locked_count(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> usize {
@@ -1982,19 +1987,24 @@ mod instrument_drawings {
     }
 
     #[gpui::test]
-    fn legacy_drawings_restore_onto_the_panes_instrument_only(cx: &mut TestAppContext) {
-        let legacy = WorkspaceChartState {
-            chart_state_json: LEGACY_LINE.to_string(),
-            locked_drawing_ids: vec![1],
-            ..WorkspaceChartState::default()
-        };
-        let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(legacy));
+    fn legacy_drawings_restore_onto_their_instrument_only(cx: &mut TestAppContext) {
+        let legacy = crate::desktop::chart_drawings::legacy_pane_drawings(
+            LEGACY_LINE,
+            &[1],
+            Some(&instrument("A")),
+        )
+        .expect("legacy drawings upgrade");
+        let mut layout = LayoutDrawings::from_saved(&[legacy]);
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
+        let panes = [surface.clone()];
         show(&surface, "A", cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_count(&surface, cx), 1);
         assert_eq!(locked_count(&surface, cx), 1);
-        assert_eq!(saved_instruments(&saved(&surface, cx)), ["A"]);
+        assert_eq!(layout_instruments(&layout), ["A"]);
 
         show(&surface, "B", cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_count(&surface, cx), 0);
     }
 
@@ -2010,8 +2020,23 @@ mod instrument_drawings {
         });
     }
 
-    fn share(panes: &[Entity<WorkspaceSurface>], cx: &mut VisualTestContext) {
-        cx.update(|_, cx| share_workspace_drawings(&panes.iter(), cx));
+    /// One sync of the layout's panes, as every frame runs.
+    fn share(
+        panes: &[Entity<WorkspaceSurface>],
+        layout: &mut LayoutDrawings,
+        cx: &mut VisualTestContext,
+    ) -> bool {
+        cx.update(|_, cx| sync_layout_drawings(&panes.iter(), layout, cx))
+    }
+
+    fn layout_instruments(layout: &LayoutDrawings) -> Vec<String> {
+        let mut instruments = layout
+            .entries()
+            .into_iter()
+            .map(|drawings| drawings.instrument_id)
+            .collect::<Vec<_>>();
+        instruments.sort();
+        instruments
     }
 
     fn drawing_revision(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> u64 {
@@ -2026,23 +2051,25 @@ mod instrument_drawings {
 
     #[gpui::test]
     fn panes_showing_one_instrument_share_its_drawings(cx: &mut TestAppContext) {
+        let mut layout = LayoutDrawings::default();
         let (first, _first_requests, cx) = open_surface(cx, instrument("A"), None);
         let (second, _second_requests, cx) = open_surface(cx, instrument("A"), None);
         let panes = [first.clone(), second.clone()];
         show(&first, "A", cx);
+        share(&panes, &mut layout, cx);
         draw(&first, LINE, cx);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
 
         show(&second, "A", cx);
         assert_eq!(drawing_count(&second, cx), 0);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_count(&second, cx), 1, "a new pane adopts them");
 
         draw(&second, TWO_LINES, cx);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_count(&first, cx), 2, "edits reach the other pane");
         let settled = drawing_revision(&first, cx);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_revision(&first, cx), settled, "nothing echoes back");
 
         first.update(cx, |surface, cx| {
@@ -2052,33 +2079,81 @@ mod instrument_drawings {
                 .expect("chart")
                 .update(cx, |chart, _| chart.clear_drawings());
         });
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(
             drawing_count(&second, cx),
             0,
             "a clear reaches the other pane"
         );
+        assert!(layout.entries().is_empty(), "a cleared set is not saved");
 
         show(&second, "B", cx);
         draw(&first, LINE, cx);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(
             drawing_count(&second, cx),
             0,
             "drawings stay on their market"
         );
         show(&second, "A", cx);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(drawing_count(&second, cx), 1, "switching back adopts them");
 
         show(&first, "B", cx);
         draw(&second, TWO_LINES, cx);
-        share(&panes, cx);
+        share(&panes, &mut layout, cx);
         show(&first, "A", cx);
+        share(&panes, &mut layout, cx);
         assert_eq!(
             drawing_count(&first, cx),
             2,
             "a pane showing another market remembers the current set"
         );
+    }
+
+    /// Drawings belong to the layout, not to the pane that drew them: a pane split off a
+    /// chart and closed again never takes another instrument's drawings with it.
+    #[gpui::test]
+    fn a_split_pane_switching_instrument_keeps_every_instruments_drawings(cx: &mut TestAppContext) {
+        let mut layout = LayoutDrawings::default();
+        let (original, _original_requests, cx) = open_surface(cx, instrument("BTC"), None);
+        show(&original, "BTC", cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        draw(&original, LINE, cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        show(&original, "HYPE", cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        draw(&original, TWO_LINES, cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        show(&original, "BTC", cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        assert_eq!(drawing_count(&original, cx), 1);
+
+        let (split, _split_requests, cx) = open_surface(cx, instrument("BTC"), None);
+        let panes = [original.clone(), split.clone()];
+        show(&split, "BTC", cx);
+        share(&panes, &mut layout, cx);
+        assert_eq!(
+            drawing_count(&split, cx),
+            1,
+            "the split shows BTC's drawings"
+        );
+        show(&split, "HYPE", cx);
+        share(&panes, &mut layout, cx);
+        assert_eq!(
+            drawing_count(&split, cx),
+            2,
+            "the split shows HYPE's drawings"
+        );
+        assert_eq!(layout_instruments(&layout), ["BTC", "HYPE"]);
+
+        // The split pane closes; the remaining pane switches to HYPE.
+        show(&original, "HYPE", cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        assert_eq!(drawing_count(&original, cx), 2, "HYPE's drawings remain");
+        show(&original, "BTC", cx);
+        share(std::slice::from_ref(&original), &mut layout, cx);
+        assert_eq!(drawing_count(&original, cx), 1, "BTC's drawings remain");
+        assert_eq!(layout_instruments(&layout), ["BTC", "HYPE"]);
     }
 }

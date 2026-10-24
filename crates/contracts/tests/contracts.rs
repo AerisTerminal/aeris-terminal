@@ -2,10 +2,10 @@ use aeris_contracts::{
     AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
     ProviderState, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
     WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -107,6 +107,7 @@ fn workspace_tab() -> WorkspaceTabState {
             pane_id: 7,
             ..WorkspaceLayoutState::default()
         }),
+        saved_layout_id: 0,
     }
 }
 
@@ -239,10 +240,40 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
             name: "Orange".into(),
             template_json: r#"{"name":"Orange","kind":"trend_line","options":{}}"#.into(),
         }],
+        saved_layouts: Vec::new(),
     };
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");
     assert_eq!(decoded, workspace);
+}
+
+#[test]
+fn saved_layouts_round_trip_with_the_tab_that_shows_them() {
+    let mut tab = workspace_tab();
+    tab.saved_layout_id = 3;
+    let workspace = WorkspaceState {
+        active_workspace_id: tab.workspace_id,
+        workspace_tabs: vec![tab.clone()],
+        saved_layouts: vec![WorkspaceSavedLayoutState {
+            layout_id: 3,
+            name: "Futures".into(),
+            autosave: false,
+            saved_at_unix_ms: 1_700_000_000_000,
+            last_opened_unix_ms: 1_700_000_100_000,
+            tab: Some(tab),
+            instrument_drawings: vec![WorkspaceInstrumentDrawingsState {
+                provider: "rithmic".into(),
+                instrument_id: "instrument:rithmic:CME:MNQU6".into(),
+                chart_state_json: r#"{"schema":"aeris_charts-drawings"}"#.into(),
+                locked_drawing_ids: Vec::new(),
+            }],
+        }],
+        ..WorkspaceState::default()
+    };
+    let decoded =
+        WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");
+    assert_eq!(decoded, workspace);
+    assert_eq!(decoded.workspace_tabs[0].saved_layout_id, 3);
 }
 
 #[test]

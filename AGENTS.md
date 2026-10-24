@@ -99,6 +99,13 @@ violations and missing verification explicitly, and never describe them as satis
 - Desktop workspace and chart-chrome persistence paths and chart-chrome save receipts come from
   the instance's `DesktopServices` persistence owner. No process-global chart-chrome save state
   or implicit process-wide workspace path lookup may return.
+- Saved layouts are owned by the desktop `LayoutLibrary` (bounded at 100; creating past the
+  bound is refused, never evicts a user layout). Every workspace tab shows one saved layout, and
+  a layout's chart drawings are one per-instrument `LayoutDrawings` set shared by every pane of
+  every tab showing it. Panes publish committed edits into that set and import its newer
+  revisions; panes never own or remember drawings, and no pane-to-pane drawing sync may return.
+  Pane chart state persists no drawings. A layout with autosave off changes only on an explicit
+  save and reopens at its last saved version after a restart.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

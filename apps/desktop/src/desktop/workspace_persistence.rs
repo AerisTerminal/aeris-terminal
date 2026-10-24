@@ -11,6 +11,7 @@ struct WorkspaceLayoutRequest {
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -146,6 +147,7 @@ impl WorkspaceLayoutPersistence {
         chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
         watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
         drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+        saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
     ) -> Result<(), String> {
         let Some(generation) = self.layout_generation.get().checked_add(1) else {
             let error = "workspace layout generation is exhausted".to_string();
@@ -162,6 +164,7 @@ impl WorkspaceLayoutPersistence {
             chart_settings_templates,
             watchlist_entries,
             drawing_templates,
+            saved_layouts,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
@@ -194,6 +197,7 @@ impl WorkspaceLayoutPersistence {
         self.request_with_chart_settings(
             active_workspace_id,
             workspace_tabs,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -304,6 +308,11 @@ fn run_workspace_layout_persistence(
             .collect();
         current.watchlist_entries = request.watchlist_entries;
         current.drawing_templates = request.drawing_templates;
+        current.saved_layouts = request
+            .saved_layouts
+            .iter()
+            .map(|layout| WorkspaceSavedLayoutState::clone(layout))
+            .collect();
         let completed = local_state::save_workspace(&current, &path).map(|()| current);
         *durability
             .lock()
@@ -426,6 +435,11 @@ mod tests {
                 vec![template.clone()],
                 vec![watchlist_entry.clone()],
                 vec![drawing_template.clone()],
+                local_state::default_workspace()
+                    .saved_layouts
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect(),
             )
             .expect("request");
 
@@ -434,6 +448,7 @@ mod tests {
         assert_eq!(request.chart_settings_templates, vec![template]);
         assert_eq!(request.watchlist_entries, vec![watchlist_entry]);
         assert_eq!(request.drawing_templates, vec![drawing_template]);
+        assert_eq!(request.saved_layouts.len(), 1);
     }
 
     #[test]

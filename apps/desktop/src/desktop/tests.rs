@@ -479,6 +479,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
 }
 
 mod timeframe_input {
+    use super::super::layouts_view::{ClosePrompt, LayoutNamePurpose};
     use super::super::order_flow_dialog::{OrderFlowColorTarget, OrderFlowDialogDraft};
     use super::super::*;
     use aeris_desktop::market_worker::{
@@ -1401,6 +1402,30 @@ mod timeframe_input {
     }
 
     fn terminal_harness(cx: &mut TestAppContext) -> (Entity<TerminalApp>, &mut VisualTestContext) {
+        terminal_harness_with(cx, DesktopLifecycle::new_for_test(), None)
+    }
+
+    /// A terminal that opens new tabs; their market endpoints wait unstarted in the returned
+    /// queue.
+    fn tabbed_terminal_harness(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TerminalApp>,
+        engine_market_worker::UnstartedWorkspaceAdditions,
+        &mut VisualTestContext,
+    ) {
+        let lifecycle = DesktopLifecycle::new_for_test();
+        let (factory, additions) =
+            engine_market_worker::WorkspaceMarketFactory::unstarted(lifecycle.market().clone());
+        let (terminal, cx) = terminal_harness_with(cx, lifecycle, Some(factory));
+        (terminal, additions, cx)
+    }
+
+    fn terminal_harness_with(
+        cx: &mut TestAppContext,
+        lifecycle: DesktopLifecycle,
+        factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    ) -> (Entity<TerminalApp>, &mut VisualTestContext) {
         let product = local_state::default_workspace().watchlist_entries[0]
             .instrument
             .clone()
@@ -1427,8 +1452,8 @@ mod timeframe_input {
                     worker_label: "timeframe_test".into(),
                 })),
                 worker,
-                None,
-                &DesktopLifecycle::new_for_test(),
+                factory,
+                &lifecycle,
                 chart_chrome::ChartChromePreferences::default(),
                 window,
                 cx,
@@ -2265,8 +2290,551 @@ mod timeframe_input {
             Some(applied)
         );
     }
-}
 
+    fn update_terminal<R>(
+        terminal: &Entity<TerminalApp>,
+        cx: &mut VisualTestContext,
+        update: impl FnOnce(&mut TerminalApp, &mut Window, &mut Context<TerminalApp>) -> R,
+    ) -> R {
+        cx.update(|window, cx| terminal.update(cx, |terminal, cx| update(terminal, window, cx)))
+    }
+
+    /// Turns autosave off for the layout of the tab at `index` and saves a different version
+    /// of it, so the tab has unsaved changes. Returns the saved version.
+    fn make_layout_unsaved(
+        terminal: &Entity<TerminalApp>,
+        index: usize,
+        cx: &mut VisualTestContext,
+    ) -> WorkspaceTabState {
+        update_terminal(terminal, cx, |terminal, _, _| {
+            let layout_id = terminal.workspaces[index].saved_layout_id;
+            let library = &mut terminal.layout_library;
+            library
+                .set_autosave(layout_id, false)
+                .expect("manual layout");
+            let mut saved = library
+                .get(layout_id)
+                .and_then(|layout| layout.tab.clone())
+                .expect("saved arrangement");
+            saved.panes[0].interval = "1d".to_string();
+            library
+                .save(layout_id, &saved, Vec::new(), 1)
+                .expect("saved version");
+            library
+                .get(layout_id)
+                .and_then(|layout| layout.tab.clone())
+                .expect("saved arrangement")
+        })
+    }
+
+    fn tab_layouts(
+        terminal: &Entity<TerminalApp>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(u64, String)> {
+        cx.read(|cx| {
+            terminal
+                .read(cx)
+                .workspaces
+                .iter()
+                .map(|workspace| (workspace.saved_layout_id, workspace.label.clone()))
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn the_start_page_is_one_transient_tab_that_a_new_layout_replaces(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let page = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                let layouts = &terminal.read(cx).layouts_ui;
+                (layouts.start_page_open(), layouts.start_page_shown())
+            })
+        };
+        let tab_count =
+            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).workspaces.len());
+        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-t");
+        assert_eq!(page(cx), (true, true), "Ctrl+T shows the start page");
+        update_terminal(&terminal, cx, TerminalApp::open_start_page);
+        assert_eq!(page(cx), (true, true), "there is one placeholder");
+        assert_eq!(tab_count(cx), 1, "the placeholder is not a workspace");
+        assert!(!cx.update(|window, cx| terminal.read(cx).workspace_keyboard_focused(window, cx)));
+
+        let first = cx.read(|cx| terminal.read(cx).workspaces[0].id);
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.select_workspace_id(first, cx);
+        });
+        assert_eq!(
+            page(cx),
+            (true, false),
+            "a workspace tab hides the placeholder"
+        );
+        update_terminal(&terminal, cx, TerminalApp::open_start_page);
+        assert_eq!(page(cx), (true, true), "the placeholder shows again");
+
+        update_terminal(&terminal, cx, TerminalApp::create_layout_from_start_page);
+        assert_eq!(
+            page(cx),
+            (false, false),
+            "the new layout replaces the placeholder"
+        );
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(terminal.workspace_error, None);
+            assert_eq!(terminal.workspaces.len(), 2);
+            assert_eq!(terminal.active, 1);
+            let created = &terminal.workspaces[1];
+            assert!(
+                created
+                    .label
+                    .starts_with(layout_library::UNTITLED_LAYOUT_NAME)
+            );
+            assert_eq!(
+                terminal
+                    .layout_library
+                    .get(created.saved_layout_id)
+                    .map(|layout| layout.name.as_str()),
+                Some(created.label.as_str())
+            );
+        });
+
+        update_terminal(&terminal, cx, TerminalApp::open_start_page);
+        update_terminal(&terminal, cx, TerminalApp::close_start_page);
+        assert_eq!(page(cx), (false, false));
+        assert_eq!(
+            tab_count(cx),
+            2,
+            "closing the placeholder closes no workspace"
+        );
+    }
+
+    #[gpui::test]
+    fn saved_layouts_open_from_the_start_page_even_when_a_tab_shows_them(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let (first_layout, first_name) = tab_layouts(&terminal, cx)[0].clone();
+        let copy = update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.copy_saved_layout(first_layout, cx)
+        })
+        .expect("a copy");
+        for layout_id in [copy, first_layout] {
+            update_terminal(&terminal, cx, TerminalApp::open_start_page);
+            update_terminal(&terminal, cx, |terminal, window, cx| {
+                terminal.open_layout_from_start_page(layout_id, window, cx);
+            });
+        }
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(terminal.workspace_error, None);
+            assert!(!terminal.layouts_ui.start_page_open());
+            assert_eq!(terminal.active, 2);
+        });
+        assert_eq!(
+            tab_layouts(&terminal, cx),
+            vec![
+                (first_layout, first_name.clone()),
+                (copy, format!("{first_name} copy")),
+                (first_layout, first_name),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn renaming_a_layout_is_validated_and_relabels_every_tab_showing_it(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let first_layout = tab_layouts(&terminal, cx)[0].0;
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.add_workspace("Second", window, cx)
+        })
+        .expect("a second tab");
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.open_saved_layout(first_layout, window, cx)
+        })
+        .expect("the first layout in a third tab");
+        let rename = |name: &str, cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, |terminal, window, cx| {
+                terminal.open_layout_name_dialog(
+                    LayoutNamePurpose::Rename(first_layout),
+                    window,
+                    cx,
+                );
+                let input = terminal
+                    .layouts_ui
+                    .name_input()
+                    .expect("name field")
+                    .clone();
+                input.update(cx, |input, cx| {
+                    input.set_value(name.to_string(), window, cx);
+                });
+                terminal.confirm_layout_name(window, cx);
+                terminal
+                    .layouts_ui
+                    .name_dialog()
+                    .map(|(_, error)| error.unwrap_or_default().to_string())
+            })
+        };
+        let labels = |cx: &mut VisualTestContext| {
+            tab_layouts(&terminal, cx)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>()
+        };
+        let original = labels(cx);
+        for refused in [" second ".to_string(), "   ".to_string(), "x".repeat(65)] {
+            let error = rename(&refused, cx).expect("the dialog stays open");
+            assert!(!error.is_empty(), "{refused:?} is refused with a reason");
+            assert_eq!(labels(cx), original);
+        }
+        assert_eq!(
+            rename("  Scalping  ", cx),
+            None,
+            "a valid name closes the dialog"
+        );
+        assert_eq!(labels(cx), ["Scalping", "Second", "Scalping"]);
+        assert_eq!(
+            rename("SCALPING", cx),
+            None,
+            "a layout may change its own case"
+        );
+        assert_eq!(
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .layout_library
+                    .get(first_layout)
+                    .map(|layout| layout.name.clone())
+            }),
+            Some("SCALPING".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn the_layout_name_dialog_checks_names_while_typing_and_answers_enter_and_escape(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, cx) = terminal_harness(cx);
+        let (layout_id, name) = tab_layouts(&terminal, cx)[0].clone();
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.copy_saved_layout(layout_id, cx)
+        })
+        .expect("a copy");
+        let dialog_open = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).layouts_ui.name_dialog().is_some())
+        };
+        let open_rename = |cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, |terminal, window, cx| {
+                terminal.open_layout_name_dialog(LayoutNamePurpose::Rename(layout_id), window, cx);
+            });
+            cx.run_until_parked();
+        };
+
+        open_rename(cx);
+        cx.simulate_keystrokes("escape");
+        assert!(!dialog_open(cx), "Escape cancels");
+        assert_eq!(tab_layouts(&terminal, cx), [(layout_id, name.clone())]);
+
+        open_rename(cx);
+        cx.simulate_input(&format!("{name} copy"));
+        assert!(
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .layouts_ui
+                    .name_dialog()
+                    .is_some_and(|(_, error)| error.is_some())
+            }),
+            "a taken name shows its error while typing"
+        );
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            let input = terminal
+                .layouts_ui
+                .name_input()
+                .expect("name field")
+                .clone();
+            input.update(cx, |input, cx| input.set_value("Swing", window, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        assert!(!dialog_open(cx), "Enter confirms");
+        assert_eq!(
+            tab_layouts(&terminal, cx),
+            [(layout_id, "Swing".to_string())]
+        );
+    }
+
+    #[gpui::test]
+    fn an_open_layout_cannot_be_deleted_and_a_closed_one_asks_first(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let open = tab_layouts(&terminal, cx)[0].0;
+        let copy = update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.copy_saved_layout(open, cx)
+        })
+        .expect("a copy");
+        let state = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                let terminal = terminal.read(cx);
+                (
+                    terminal.layouts_ui.delete_confirmation(),
+                    terminal.layout_library.get(open).is_some(),
+                    terminal.layout_library.get(copy).is_some(),
+                )
+            })
+        };
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.request_layout_delete(open, cx);
+        });
+        assert_eq!(
+            state(cx),
+            (None, true, true),
+            "an open layout is not deleted"
+        );
+        let error = cx.read(|cx| terminal.read(cx).workspace_error.clone());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("is open in a tab")),
+            "{error:?}"
+        );
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.request_layout_delete(copy, cx);
+        });
+        assert_eq!(state(cx), (Some(copy), true, true), "deleting asks first");
+        update_terminal(&terminal, cx, TerminalApp::cancel_layout_modal);
+        assert_eq!(state(cx), (None, true, true), "cancel keeps the layout");
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.request_layout_delete(copy, cx);
+        });
+        update_terminal(&terminal, cx, TerminalApp::confirm_layout_delete);
+        assert_eq!(state(cx), (None, true, false), "confirming deletes it");
+    }
+
+    #[gpui::test]
+    fn a_full_library_refuses_new_layouts_without_evicting_any(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let open = tab_layouts(&terminal, cx)[0].0;
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            while terminal.layout_library.states().len() < layout_library::MAXIMUM_SAVED_LAYOUTS {
+                terminal
+                    .copy_saved_layout(open, cx)
+                    .expect("room for another copy");
+            }
+        });
+        let full = layout_library::full_library_message();
+        assert_eq!(
+            update_terminal(&terminal, cx, |terminal, _, cx| {
+                terminal.copy_saved_layout(open, cx)
+            }),
+            Err(full.clone())
+        );
+
+        update_terminal(&terminal, cx, TerminalApp::open_start_page);
+        update_terminal(&terminal, cx, TerminalApp::create_layout_from_start_page);
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(terminal.workspace_error.as_ref(), Some(&full));
+            assert_eq!(terminal.workspaces.len(), 1, "no tab opens");
+            assert!(terminal.layouts_ui.start_page_shown());
+        });
+
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.open_layout_name_dialog(LayoutNamePurpose::Create, window, cx);
+            terminal.confirm_layout_name(window, cx);
+        });
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(
+                terminal.layouts_ui.name_dialog(),
+                Some((LayoutNamePurpose::Create, Some(full.as_str())))
+            );
+            assert_eq!(terminal.workspaces.len(), 1);
+            assert_eq!(
+                terminal.layout_library.states().len(),
+                layout_library::MAXIMUM_SAVED_LAYOUTS
+            );
+            assert!(terminal.layout_library.get(open).is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_s_saves_a_layout_with_unsaved_changes(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        let unsaved =
+            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).layout_unsaved_flags(cx));
+        let confirming = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
+        };
+        assert_eq!(unsaved(cx), [false]);
+        make_layout_unsaved(&terminal, 0, cx);
+        assert_eq!(
+            unsaved(cx),
+            [true],
+            "a manual layout shows its unsaved changes"
+        );
+
+        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-s");
+        assert_eq!(unsaved(cx), [false], "Ctrl+S saves the layout");
+        assert!(!confirming(cx), "saving is not a trade");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("s").expect("key"),
+        });
+
+        make_layout_unsaved(&terminal, 0, cx);
+        cx.simulate_keystrokes("ctrl-shift-s");
+        assert_eq!(unsaved(cx), [true], "Ctrl+Shift+S does not save");
+
+        make_layout_unsaved(&terminal, 0, cx);
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.set_active_layout_autosave(true, cx)
+        })
+        .expect("autosave on");
+        assert_eq!(
+            unsaved(cx),
+            [false],
+            "a layout with autosave on never has unsaved changes"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_a_tab_with_unsaved_changes_asks_to_save_or_discard(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let prompt =
+            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).layouts_ui.close_prompt());
+        let open_tab = |name: &str, cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, |terminal, window, cx| {
+                terminal.add_workspace(name, window, cx).expect("a new tab");
+                let workspace = &terminal.workspaces[terminal.active];
+                (workspace.id, workspace.saved_layout_id)
+            })
+        };
+        let close = |tab_id: u64, cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, |terminal, window, cx| {
+                terminal.close_workspace(tab_id, window, cx);
+            });
+        };
+        let saved = |layout_id: u64, cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .layout_library
+                    .get(layout_id)
+                    .and_then(|layout| layout.tab.clone())
+            })
+        };
+
+        let (clean, _) = open_tab("Clean", cx);
+        close(clean, cx);
+        assert_eq!(
+            prompt(cx),
+            None,
+            "a tab without unsaved changes closes at once"
+        );
+        assert_eq!(tab_layouts(&terminal, cx).len(), 1);
+
+        let (kept, kept_layout) = open_tab("Kept", cx);
+        let edited = make_layout_unsaved(&terminal, 1, cx);
+        close(kept, cx);
+        assert_eq!(prompt(cx), Some(ClosePrompt::Tab(kept)));
+        update_terminal(&terminal, cx, TerminalApp::cancel_layout_modal);
+        assert_eq!(prompt(cx), None);
+        assert_eq!(tab_layouts(&terminal, cx).len(), 2, "cancel keeps the tab");
+        close(kept, cx);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.finish_layout_close(true, window, cx);
+        });
+        assert_eq!(tab_layouts(&terminal, cx).len(), 1);
+        assert_ne!(
+            saved(kept_layout, cx),
+            Some(edited),
+            "save and close saves the tab"
+        );
+
+        let (discarded, discarded_layout) = open_tab("Discarded", cx);
+        let edited = make_layout_unsaved(&terminal, 1, cx);
+        close(discarded, cx);
+        assert_eq!(prompt(cx), Some(ClosePrompt::Tab(discarded)));
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.finish_layout_close(false, window, cx);
+        });
+        assert_eq!(prompt(cx), None);
+        assert_eq!(tab_layouts(&terminal, cx).len(), 1);
+        assert_eq!(
+            saved(discarded_layout, cx),
+            Some(edited),
+            "discard and close keeps the saved version"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_window_asks_once_about_unsaved_layouts(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let layout_id = tab_layouts(&terminal, cx)[0].0;
+        let edited = make_layout_unsaved(&terminal, 0, cx);
+        let state = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                let terminal = terminal.read(cx);
+                (terminal.layouts_ui.close_prompt(), terminal.closing)
+            })
+        };
+        let should_close = |cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, TerminalApp::window_should_close)
+        };
+
+        assert!(
+            !should_close(cx),
+            "a window with unsaved layouts stays open to ask"
+        );
+        assert_eq!(state(cx), (Some(ClosePrompt::Window), false));
+        update_terminal(&terminal, cx, TerminalApp::cancel_layout_modal);
+        assert_eq!(state(cx), (None, false), "cancel keeps the window open");
+
+        assert!(!should_close(cx));
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.finish_layout_close(false, window, cx);
+        });
+        assert_eq!(
+            state(cx),
+            (None, true),
+            "discard and close claims the close"
+        );
+        assert_eq!(
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .layout_library
+                    .get(layout_id)
+                    .and_then(|layout| layout.tab.clone())
+            }),
+            Some(edited),
+            "the saved version is what the next start opens"
+        );
+    }
+
+    #[gpui::test]
+    fn a_window_without_unsaved_layouts_closes_at_once(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        assert!(update_terminal(
+            &terminal,
+            cx,
+            TerminalApp::window_should_close
+        ));
+        assert!(cx.read(|cx| terminal.read(cx).closing));
+        assert_eq!(
+            cx.read(|cx| terminal.read(cx).layouts_ui.close_prompt()),
+            None
+        );
+        assert!(
+            update_terminal(&terminal, cx, TerminalApp::window_should_close),
+            "a claimed close is not claimed again"
+        );
+    }
+}
 #[test]
 fn chart_execution_time_converts_runtime_nanoseconds_to_utc_seconds_exactly() {
     assert_eq!(
@@ -2387,6 +2955,27 @@ fn escape_exits_fullscreen_without_stealing_regular_escape() {
     );
     assert_eq!(fullscreen_escape_command("escape", false), None);
     assert_eq!(fullscreen_escape_command("enter", true), None);
+}
+
+#[test]
+fn ctrl_s_saves_the_layout_and_ctrl_shift_s_sells_at_market() {
+    let bindings = desktop_key_bindings().expect("the registry shortcuts bind");
+    let actions = |chord: &str| {
+        let typed = [gpui::Keystroke::parse(chord).expect("chord")];
+        bindings
+            .iter()
+            .filter(|binding| binding.match_keystrokes(&typed) == Some(false))
+            .map(|binding| binding.action().name())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        actions("ctrl-s"),
+        [gpui::Action::name(&super::SaveActiveLayout)]
+    );
+    assert_eq!(
+        actions("ctrl-shift-s"),
+        [gpui::Action::name(&super::TradingSellMarket)]
+    );
 }
 
 #[test]

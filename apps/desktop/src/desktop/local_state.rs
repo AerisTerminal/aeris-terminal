@@ -7,8 +7,8 @@ use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
     WorkspaceChartStudyState, WorkspaceDrawingTemplateState, WorkspaceLayoutState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspaceSavedLayoutState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_market_data::ChartInterval;
@@ -115,7 +115,7 @@ fn load_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
         return Err("workspace file exceeds the local persistence bound".to_string());
     }
     WorkspaceState::decode(bytes.as_slice())
-        .map(sanitize_workspace)
+        .map(restored_workspace)
         .map_err(|error| error.to_string())
 }
 
@@ -162,7 +162,7 @@ fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String
     }
     match envelope.payload {
         Some(legacy_workspace_envelope::Payload::WorkspaceState(workspace)) => {
-            Ok(sanitize_workspace(workspace))
+            Ok(restored_workspace(workspace))
         }
         None => Err("legacy workspace file does not contain workspace state".to_string()),
     }
@@ -230,6 +230,31 @@ pub(super) fn default_workspace() -> WorkspaceState {
         side_panel_split_basis_points: 5_000,
         interval: ChartInterval::Minute1.label().to_string(),
     };
+    let tab = WorkspaceTabState {
+        workspace_id: 1,
+        label: super::layout_library::UNTITLED_LAYOUT_NAME.to_string(),
+        split_axis: WorkspaceSplitAxis::Horizontal as i32,
+        panes: vec![pane],
+        active_pane_id: 1,
+        generation: 1,
+        layout: Some(WorkspaceLayoutState {
+            pane_id: 1,
+            split_axis: WorkspaceSplitAxis::Horizontal as i32,
+            ratio_basis_points: 10_000,
+            first: None,
+            second: None,
+        }),
+        saved_layout_id: 1,
+    };
+    let saved_layout = WorkspaceSavedLayoutState {
+        layout_id: 1,
+        name: tab.label.clone(),
+        autosave: true,
+        saved_at_unix_ms: 0,
+        last_opened_unix_ms: 0,
+        tab: Some(super::layout_library::normalized_layout_tab(&tab)),
+        instrument_drawings: Vec::new(),
+    };
     WorkspaceState {
         provider: "hyperliquid".to_string(),
         market: "BTC-USDC".to_string(),
@@ -239,27 +264,14 @@ pub(super) fn default_workspace() -> WorkspaceState {
         schema_revision: WORKSPACE_SCHEMA_REVISION,
         layout_generation: 1,
         active_workspace_id: 1,
-        workspace_tabs: vec![WorkspaceTabState {
-            workspace_id: 1,
-            label: "Workspace 1".to_string(),
-            split_axis: WorkspaceSplitAxis::Horizontal as i32,
-            panes: vec![pane],
-            active_pane_id: 1,
-            generation: 1,
-            layout: Some(WorkspaceLayoutState {
-                pane_id: 1,
-                split_axis: WorkspaceSplitAxis::Horizontal as i32,
-                ratio_basis_points: 10_000,
-                first: None,
-                second: None,
-            }),
-        }],
+        workspace_tabs: vec![tab],
         chart_settings_templates: Vec::new(),
         default_chart_settings: None,
         watchlist_entries: vec![WorkspaceWatchlistEntryState {
             instrument: Some(instrument),
         }],
         drawing_templates: Vec::new(),
+        saved_layouts: vec![saved_layout],
     }
 }
 
@@ -289,11 +301,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     // causing every real provider event and freshly resolved selection to be
     // rejected as stale. Rebase every durable instrument copy to the initial
     // process generation while preserving its stable provider/instrument route.
-    for pane in workspace
-        .workspace_tabs
-        .iter_mut()
-        .flat_map(|tab| tab.panes.iter_mut())
-    {
+    for pane in workspace_panes(&mut workspace) {
         if let Some(instrument) = pane.instrument.as_mut() {
             rebase_durable_instrument(instrument);
         }
@@ -324,11 +332,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     // Earlier revisions docked the ticket inside the order book, so an open book keeps it.
     let ticket_in_order_book = workspace.schema_revision < WORKSPACE_SCHEMA_REVISION;
     workspace.schema_revision = workspace.schema_revision.max(WORKSPACE_SCHEMA_REVISION);
-    for pane in workspace
-        .workspace_tabs
-        .iter_mut()
-        .flat_map(|tab| tab.panes.iter_mut())
-    {
+    for pane in workspace_panes(&mut workspace) {
         sanitize_side_panels(pane, ticket_in_order_book);
         let Some(chart) = &mut pane.chart else {
             continue;
@@ -358,9 +362,6 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
             .price_alerts
             .truncate(aeris_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
         chart.studies = sanitize_studies(std::mem::take(&mut chart.studies));
-        chart.instrument_drawings = super::chart_drawings::bounded_instrument_drawings(
-            std::mem::take(&mut chart.instrument_drawings),
-        );
         if chart
             .appearance
             .as_ref()
@@ -382,6 +383,31 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         }
         chart.chart_link_flags &= 0b11;
     }
+    super::layout_library::sanitize_saved_layouts(&mut workspace);
+    workspace
+}
+
+/// The panes of every open tab and of every saved layout's arrangement.
+fn workspace_panes(
+    workspace: &mut WorkspaceState,
+) -> impl Iterator<Item = &mut WorkspacePaneState> {
+    workspace
+        .workspace_tabs
+        .iter_mut()
+        .chain(
+            workspace
+                .saved_layouts
+                .iter_mut()
+                .filter_map(|layout| layout.tab.as_mut()),
+        )
+        .flat_map(|tab| tab.panes.iter_mut())
+}
+
+/// A loaded workspace as the desktop restores it. Unlike `sanitize_workspace`, which also runs
+/// on every save, this reopens each layout with autosave off at its last saved version.
+fn restored_workspace(workspace: WorkspaceState) -> WorkspaceState {
+    let mut workspace = sanitize_workspace(workspace);
+    super::layout_library::reopen_saved_manual_layouts(&mut workspace);
     workspace
 }
 
@@ -1023,6 +1049,8 @@ mod tests {
         workspace.workspace_revision = 9;
         workspace.layout_generation = 17;
 
+        workspace.saved_layouts[0].name = "Execution".to_string();
+
         let tab = workspace.workspace_tabs.first_mut().expect("default tab");
         tab.workspace_id = 42;
         tab.label = "Execution".to_string();
@@ -1036,7 +1064,13 @@ mod tests {
         first.side_panel_visibility = 3;
         first.side_panel_width = 420;
         first.side_panel_split_basis_points = 6_250;
-        first.chart = Some(round_trip_chart_state());
+        // The saved layout owns drawings; a current workspace keeps none on its panes.
+        first.chart = Some(WorkspaceChartState {
+            chart_state_json: String::new(),
+            locked_drawing_ids: Vec::new(),
+            instrument_drawings: Vec::new(),
+            ..round_trip_chart_state()
+        });
         let instrument = first.instrument.as_mut().expect("default instrument");
         instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
         instrument.provider_symbol = "ETH".to_string();
@@ -1094,6 +1128,135 @@ mod tests {
         save_workspace_to_path(&workspace, &path).expect("workspace saves");
         let restored = load_workspace_from_path(&path).expect("workspace reloads");
         assert_eq!(restored, workspace);
+
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    /// A workspace saved before the layout library: one tab whose two panes each kept their
+    /// own drawings, and an order book docked without its ticket.
+    fn workspace_before_layouts() -> WorkspaceState {
+        let mut workspace = default_workspace();
+        workspace.saved_layouts.clear();
+        let tab = &mut workspace.workspace_tabs[0];
+        tab.saved_layout_id = 0;
+        tab.label = "Execution".to_string();
+        let mut second = tab.panes[0].clone();
+        second.pane_id = 2;
+        second.consumer_id = 2;
+        second
+            .instrument
+            .as_mut()
+            .expect("instrument")
+            .instrument_id = "hyperliquid:perp:SOL".to_string();
+        tab.panes[0].chart = Some(round_trip_chart_state());
+        tab.panes[0].side_panel_visibility =
+            u32::from(super::super::SidePanel::OrderBook.persisted_bit());
+        second.chart = Some(WorkspaceChartState {
+            instrument_drawings: Vec::new(),
+            ..round_trip_chart_state()
+        });
+        tab.panes.push(second);
+        tab.active_pane_id = 2;
+        tab.layout = Some(WorkspaceLayoutState {
+            pane_id: 0,
+            split_axis: WorkspaceSplitAxis::Vertical as i32,
+            ratio_basis_points: 5_000,
+            first: Some(Box::new(WorkspaceLayoutState {
+                pane_id: 1,
+                ..WorkspaceLayoutState::default()
+            })),
+            second: Some(Box::new(WorkspaceLayoutState {
+                pane_id: 2,
+                ..WorkspaceLayoutState::default()
+            })),
+        });
+        workspace
+    }
+
+    #[test]
+    fn a_workspace_saved_before_layouts_migrates_its_drawings_into_one_layout_once() {
+        let path = temporary_workspace_path();
+        save_workspace_to_path(&workspace_before_layouts(), &path).expect("workspace saves");
+        let restored = load_workspace_from_path(&path).expect("workspace reloads");
+
+        let [layout] = restored.saved_layouts.as_slice() else {
+            panic!("one layout per tab: {:?}", restored.saved_layouts);
+        };
+        let tab = &restored.workspace_tabs[0];
+        assert_eq!(
+            (tab.saved_layout_id, tab.label.as_str()),
+            (layout.layout_id, "Execution")
+        );
+        assert_eq!(layout.name, "Execution");
+        assert!(
+            layout.autosave,
+            "a migrated tab keeps saving on every change"
+        );
+        assert_eq!(
+            layout.tab,
+            Some(super::super::layout_library::normalized_layout_tab(tab))
+        );
+        let instruments = layout
+            .instrument_drawings
+            .iter()
+            .map(|drawings| drawings.instrument_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instruments,
+            ["hyperliquid:perp:SOL", "ETH", "hyperliquid:perp:BTC"],
+            "the active pane's drawings first, then the other pane's"
+        );
+        for pane in &tab.panes {
+            let chart = pane.chart.as_ref().expect("chart");
+            assert!(
+                chart.instrument_drawings.is_empty(),
+                "the layout owns drawings"
+            );
+            assert_eq!(chart.chart_state_json, "");
+            assert_eq!(chart.locked_drawing_ids, Vec::<u32>::new());
+        }
+        let order_entry = u32::from(super::super::SidePanel::OrderEntry.persisted_bit());
+        assert_eq!(
+            tab.panes[0].side_panel_visibility & order_entry,
+            0,
+            "the current schema does not dock the ticket into the order book again"
+        );
+
+        save_workspace_to_path(&restored, &path).expect("migrated workspace saves");
+        let reloaded = load_workspace_from_path(&path).expect("migrated workspace reloads");
+        assert_eq!(reloaded, restored, "the migration runs once");
+
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn a_manual_layout_restarts_at_its_saved_version() {
+        let path = temporary_workspace_path();
+        let mut workspace = sanitize_workspace(workspace_before_layouts());
+        workspace.saved_layouts[0].autosave = false;
+        let saved_version = workspace.saved_layouts[0].tab.clone();
+        let tab = &mut workspace.workspace_tabs[0];
+        tab.panes[0].size_basis_points = 2_500;
+        assert_ne!(
+            Some(super::super::layout_library::normalized_layout_tab(tab)),
+            saved_version
+        );
+
+        save_workspace_to_path(&workspace, &path).expect("workspace saves");
+        let restored = load_workspace_from_path(&path).expect("workspace reloads");
+        let tab = &restored.workspace_tabs[0];
+        assert_eq!(
+            Some(super::super::layout_library::normalized_layout_tab(tab)),
+            saved_version,
+            "unsaved changes are discarded"
+        );
+        assert_eq!(tab.workspace_id, workspace.workspace_tabs[0].workspace_id);
+        assert!(
+            tab.panes.iter().all(|pane| pane.pane_id > 2),
+            "reopened panes take fresh identities"
+        );
 
         let parent = path.parent().expect("temporary workspace parent");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
