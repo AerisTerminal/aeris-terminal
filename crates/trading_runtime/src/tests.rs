@@ -40,6 +40,23 @@ pub(crate) const VENUE_CAPABILITIES: aeris_trading::venue::VenueCapabilities =
         client_order_id_limit: 50,
     };
 
+/// Answers the attach-time reconcile of one broker account with an empty venue snapshot, so
+/// the account takes new orders in that venue generation.
+pub(crate) fn settle_reconcile(service: &TradingService, generation: u64, broker_account: &str) {
+    service
+        .demo_venue_inbox()
+        .push(aeris_trading::venue::VenueEvent {
+            session_generation: generation,
+            broker_account: broker_account.into(),
+            update: aeris_trading::venue::VenueUpdate::Snapshot(
+                aeris_trading::venue::VenueSnapshot::default(),
+            ),
+            observed_unix_nanos: 1,
+        })
+        .expect("reconcile snapshot");
+    service.status().expect("owner settles the reconcile");
+}
+
 pub(crate) fn config(directory: &TestDirectory) -> TradingServiceConfig {
     TradingServiceConfig {
         database_path: directory.0.join("trading.sqlite3"),
@@ -142,9 +159,10 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
             starting_equity: None,
         })
         .expect("broker account");
-    let (_generation, _receiver) = service
+    let (generation, _receiver) = service
         .attach_demo_venue(VENUE_CAPABILITIES)
         .expect("venue");
+    settle_reconcile(&service, generation, "fixture-demo");
     let mut request = market_order("unknown-grid", OrderSide::Buy, 1, 1_000);
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
@@ -477,6 +495,63 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("shutdown");
+}
+
+#[test]
+fn off_grid_or_unsupported_amendments_are_rejected_without_committing_facts() {
+    let directory = TestDirectory::new("off-grid-amend");
+    let (service, _clock) = routed_fixture(
+        &directory,
+        &instrument(),
+        market_feed::route(),
+        10_000,
+        10_025,
+    );
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut request = market_order("off-grid-amend", OrderSide::Buy, 1, 1_000);
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    let accepted = service.place_order(request).expect("accepted");
+    let before = service.snapshot().expect("before");
+    // 90.13 is not a multiple of the fixture's 0.25 tick.
+    let off_grid = ModifyOrder {
+        client_order_id: accepted.client_order_id.clone(),
+        time_in_force: TimeInForce::GoodTillCancelled,
+        limit_price: Some(FixedPoint::try_new(9_013, 2).expect("price")),
+        stop_price: None,
+        modified_unix_nanos: 2_000,
+        provenance: provenance(2, 2_000),
+    };
+    assert_eq!(
+        service.modify_order(off_grid).expect_err("off grid"),
+        aeris_trading::RejectReason::OffGrid.to_string()
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+
+    let mut stop = market_order("unsupported-tif-amend", OrderSide::Buy, 3, 1_000);
+    stop.order_type = OrderType::Stop;
+    stop.time_in_force = TimeInForce::GoodTillCancelled;
+    stop.stop_price = Some(FixedPoint::try_new(10_100, 2).expect("stop"));
+    let stop = service.place_order(stop).expect("stop accepted");
+    let before = service.snapshot().expect("before tif change");
+    assert_eq!(
+        service
+            .modify_order(ModifyOrder {
+                client_order_id: stop.client_order_id.clone(),
+                time_in_force: TimeInForce::ImmediateOrCancel,
+                limit_price: None,
+                stop_price: stop.stop_price,
+                modified_unix_nanos: 2_000,
+                provenance: provenance(4, 2_000),
+            })
+            .expect_err("stop cannot be immediate"),
+        aeris_trading::RejectReason::TifNotSupported.to_string()
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
 
 #[test]

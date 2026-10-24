@@ -83,7 +83,7 @@ fn route_capabilities_resolve_day_and_protection_policy() {
     );
     assert_eq!(
         broker.effective_tif(OrderType::Limit, TimeInForce::Day),
-        TimeInForce::GoodTillCancelled
+        TimeInForce::Day
     );
     assert_eq!(
         broker.effective_tif(OrderType::Market, TimeInForce::Day),

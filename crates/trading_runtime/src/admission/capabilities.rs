@@ -35,13 +35,11 @@ impl RouteCapabilities {
         }
     }
 
+    /// A broker market order is always immediate-or-cancel; every other instruction keeps
+    /// its requested time in force, and the broker reports a DAY order's session expiry.
     pub const fn effective_tif(self, kind: OrderType, requested: TimeInForce) -> TimeInForce {
         if matches!(kind, OrderType::Market) && matches!(self.tif_policy, TifPolicy::Broker) {
             TimeInForce::ImmediateOrCancel
-        } else if matches!(requested, TimeInForce::Day)
-            && matches!(self.tif_policy, TifPolicy::Broker)
-        {
-            TimeInForce::GoodTillCancelled
         } else {
             requested
         }

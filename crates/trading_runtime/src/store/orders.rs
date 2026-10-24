@@ -393,24 +393,34 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         if let Some(broker_order_id) = binding {
-            transaction
-                .execute(
-                    "UPDATE broker_orders SET broker_order_id = ?1, session_generation = ?2,
-                        updated_unix_nanos = ?3 WHERE order_id = ?4",
-                    params![
-                        broker_order_id,
-                        sqlite_i64(order.provenance.session_generation)?,
-                        order.provenance.observed_unix_nanos,
-                        order.id.as_str(),
-                    ],
-                )
-                .map_err(database_error)?;
+            bind_broker_order(&transaction, order, broker_order_id)?;
         }
         release_bracket_levels(&transaction, released)?;
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
         StepTx::commit_revision(transaction).map_err(database_error)
     }
+}
+
+/// Records the broker order id the venue reported for an owner order.
+pub(super) fn bind_broker_order(
+    transaction: &Transaction<'_>,
+    order: &Order,
+    broker_order_id: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "UPDATE broker_orders SET broker_order_id = ?1, session_generation = ?2,
+                updated_unix_nanos = ?3 WHERE order_id = ?4",
+            params![
+                broker_order_id,
+                sqlite_i64(order.provenance.session_generation)?,
+                order.provenance.observed_unix_nanos,
+                order.id.as_str(),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
 }
 
 /// Drops the bracket levels of entries that ended; the venue released or cancelled them.

@@ -80,11 +80,12 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
             starting_equity: None,
         })
         .expect("demo account");
-    let (_generation, outbound) = service
+    let (generation, outbound) = service
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("venue");
     // Attachment starts by requesting reconciliation for existing broker accounts.
     while outbound.try_recv().is_ok() {}
+    crate::tests::settle_reconcile(&service, generation, "fixture-demo");
     let before = service.snapshot().expect("before");
     let price = |units| FixedPoint::try_new(units, 2).expect("price");
     for (case, request, reason) in shared_refusals() {
@@ -156,7 +157,7 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
 }
 
 #[test]
-fn broker_day_entry_maps_to_gtc_before_the_venue_request() {
+fn broker_day_entry_keeps_day_in_the_venue_request() {
     let directory = TestDirectory::new("broker-day-capabilities");
     let service = start_service(&directory);
     service.register_instrument(instrument()).expect("terms");
@@ -173,20 +174,21 @@ fn broker_day_entry_maps_to_gtc_before_the_venue_request() {
             starting_equity: None,
         })
         .expect("demo account");
-    let (_generation, outbound) = service
+    let (generation, outbound) = service
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("venue");
     while outbound.try_recv().is_ok() {}
+    crate::tests::settle_reconcile(&service, generation, "fixture-demo");
     let mut entry = market_order("broker-day", OrderSide::Buy, 1, 1_000);
     entry.account_id = broker_id;
     entry.order_type = OrderType::Limit;
     entry.time_in_force = TimeInForce::Day;
     entry.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
     let accepted = service.place_order(entry).expect("broker accepts DAY");
-    assert_eq!(accepted.time_in_force, TimeInForce::GoodTillCancelled);
+    assert_eq!(accepted.time_in_force, TimeInForce::Day);
     let VenueRequest::Place(sent) = outbound.try_recv().expect("place request") else {
         panic!("expected broker placement");
     };
-    assert_eq!(sent.time_in_force, TimeInForce::GoodTillCancelled);
+    assert_eq!(sent.time_in_force, TimeInForce::Day);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }

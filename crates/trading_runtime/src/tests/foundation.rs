@@ -121,9 +121,10 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
         .expect("instrument");
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("register");
-    let (_generation, _requests) = service
+    let (generation, _requests) = service
         .attach_demo_venue(super::VENUE_CAPABILITIES)
         .expect("venue");
+    super::settle_reconcile(&service, generation, "fixture-ref");
     let limit = super::VENUE_CAPABILITIES.client_order_id_limit;
     let mut request = market_order(&"x".repeat(limit + 1), OrderSide::Buy, 1, 1_000);
     request.account_id = broker.id.clone();
@@ -316,9 +317,10 @@ fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
     service.status().expect("owner drains verified terms");
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("broker");
-    let (_generation, _requests) = service
+    let (generation, _requests) = service
         .attach_demo_venue(super::VENUE_CAPABILITIES)
         .expect("venue");
+    super::settle_reconcile(&service, generation, "fixture-ref");
     for (index, feature) in ["bracket", "trailing", "break-even"].iter().enumerate() {
         let mut template = bracket_template();
         template.template_id = format!("foundation-{feature}");

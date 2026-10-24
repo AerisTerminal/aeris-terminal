@@ -678,6 +678,9 @@ fn refresh_trading_pnl(
         .spawn(async move { service.snapshot() });
     cx.spawn(async move |terminal, cx| {
         let result = snapshot.await;
+        if let Ok(snapshot) = &result {
+            feedback.record_venue_notices(&snapshot.venue_notices);
+        }
         if let Ok(snapshot) = &result
             && let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
                 if terminal.bottom_panel.apply_snapshot(snapshot) {

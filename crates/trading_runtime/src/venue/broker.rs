@@ -47,9 +47,10 @@ impl TradingCore {
             .map(|account| account.id.clone())
     }
 
-    /// A reconcile for one broker account. Deals are replayed from the earlier of its
-    /// oldest open order and its latest recorded deal, so anything that executed while the
-    /// owner was not listening is applied before the snapshot settles open orders.
+    /// A reconcile for one broker account. Deals are replayed from the earliest of its
+    /// oldest open order, its latest recorded deal and its earliest deal the owner could not
+    /// account, so anything that executed while the owner was not listening, or before an
+    /// instrument registered, is applied before the snapshot settles open orders.
     pub(crate) fn reconcile_request(&self, account: &TradingAccount) -> Option<VenueRequest> {
         let broker_account = account.broker_ref.clone()?;
         let oldest_open = self
@@ -66,10 +67,14 @@ impl TradingCore {
             .filter(|fill| fill.account_id == account.id)
             .map(|fill| fill.execution_unix_nanos)
             .max();
-        let deals_since_unix_nanos = match (oldest_open, latest_deal) {
-            (Some(open), Some(deal)) => Some(open.min(deal)),
-            (open, deal) => open.or(deal),
-        };
+        let deals_since_unix_nanos = [
+            oldest_open,
+            latest_deal,
+            self.unaccounted_deal_floor(&account.id),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         Some(VenueRequest::Reconcile {
             broker_account,
             deals_since_unix_nanos,
@@ -208,6 +213,7 @@ impl TradingCore {
         if self.venue_outbound.is_none() {
             return Err(DEMO_VENUE_UNAVAILABLE.into());
         }
+        self.require_broker_ready(&command.account_id)?;
         let instrument = self
             .state
             .instruments
@@ -345,6 +351,12 @@ impl TradingCore {
         {
             return Err("modified order scales do not match the instrument".into());
         }
+        crate::core::admission::validate_order_prices(
+            instrument,
+            command.limit_price,
+            command.stop_price,
+        )
+        .map_err(|reason| reason.to_string())?;
         let candidate = Order {
             limit_price: command.limit_price,
             stop_price: command.stop_price,
@@ -445,7 +457,7 @@ impl TradingCore {
         })
     }
 
-    fn send_venue_request(&self, request: VenueRequest) -> Result<(), String> {
+    pub(super) fn send_venue_request(&self, request: VenueRequest) -> Result<(), String> {
         request.validate().map_err(|error| error.to_string())?;
         self.venue_outbound
             .as_ref()
@@ -523,15 +535,21 @@ impl TradingCore {
         })
     }
 
-    /// Reverses the account's broker position in one instrument: exits it and places one
-    /// risk-checked market order for the opposite quantity. Nothing is placed unless the exit
-    /// was requested, so a failed exit can never double the position.
+    /// Reverses the account's broker position in one instrument: exits it and, once the
+    /// venue's fills or reconcile show the position flat, places one risk-checked market
+    /// order for the opposite quantity. The opening order waits for the flat position, so
+    /// an exit that fails, fills late or overlaps it can never double the position; a
+    /// reverse whose position does not close within its deadline is dropped with a notice.
     pub(crate) fn reverse_broker_position(
         &mut self,
         account_id: &TradingAccountId,
         instrument_id: &InstrumentId,
         provenance: &TradingProvenance,
     ) -> Result<FlattenOutcome, String> {
+        self.require_broker_ready(account_id)?;
+        if self.reverse_waiting(account_id, instrument_id) {
+            return Err("a reverse of this position is already waiting for its exit".into());
+        }
         let net = self
             .state
             .positions
@@ -551,12 +569,6 @@ impl TradingCore {
             net.scale(),
         )
         .map_err(|error| error.to_string())?;
-        let outcome = self.flatten_broker_account(account_id, Some(instrument_id))?;
-        if outcome.pending_exits.is_empty() {
-            return Err(outcome
-                .incomplete
-                .unwrap_or_else(|| "the position exit could not be requested".into()));
-        }
         let order = PlaceOrder {
             client_order_id: ClientOrderId::try_new(format!(
                 "ct-reverse-{}",
@@ -574,7 +586,21 @@ impl TradingCore {
             submitted_unix_nanos: provenance.observed_unix_nanos,
             provenance: provenance.clone(),
         };
-        self.place_broker_order(&order)?;
+        // The durable marker lands before the exit is requested, so a restart can always
+        // report a reverse it will not complete.
+        self.hold_reverse(order, self.command_now)?;
+        let outcome = match self.flatten_broker_account(account_id, Some(instrument_id)) {
+            Ok(outcome) if !outcome.pending_exits.is_empty() => outcome,
+            exited => {
+                self.release_reverse(account_id, instrument_id)?;
+                return Err(match exited {
+                    Ok(outcome) => outcome
+                        .incomplete
+                        .unwrap_or_else(|| "the position exit could not be requested".into()),
+                    Err(error) => error,
+                });
+            }
+        };
         Ok(outcome)
     }
 
@@ -593,6 +619,16 @@ impl TradingCore {
         let Some(account_id) = self.venue_account(&event.broker_account) else {
             return Ok(());
         };
+        if let VenueUpdate::Fill(fill) = &event.update
+            && !self.state.instruments.contains_key(&fill.instrument_id)
+        {
+            return self.record_unresolved_contract(
+                &account_id,
+                &fill.instrument_id,
+                Some(fill.executed_unix_nanos),
+                "its instrument is not registered",
+            );
+        }
         match &self.owner_scaled(&account_id, &event.update)? {
             VenueUpdate::AccountObserved(_) => Ok(()),
             VenueUpdate::Order {
@@ -604,12 +640,23 @@ impl TradingCore {
                 client_order_id,
                 reason,
             } => self.apply_refusal(&account_id, client_order_id, reason),
-            VenueUpdate::Fill(fill) => {
-                if self.apply_broker_fill(&account_id, fill)? {
-                    self.evaluate_live_risk(event.observed_unix_nanos)?;
+            VenueUpdate::Fill(fill) => match self.apply_broker_fill(&account_id, fill) {
+                Ok(applied) => {
+                    self.complete_flat_reverses(&account_id)?;
+                    if applied {
+                        self.evaluate_live_risk(event.observed_unix_nanos)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
+                // A deal that cannot be accounted keeps the account's new orders blocked
+                // and floors its next replay until a reconcile accounts it.
+                Err(error) => self.record_unresolved_contract(
+                    &account_id,
+                    &fill.instrument_id,
+                    Some(fill.executed_unix_nanos),
+                    &error,
+                ),
+            },
             VenueUpdate::Position(position) => {
                 if self.apply_open_pnl(&account_id, position)? {
                     self.evaluate_live_risk(event.observed_unix_nanos)?;
@@ -634,7 +681,15 @@ impl TradingCore {
                 self.state.broker_balances.insert(account_id, *balance);
                 self.bump_revision()
             }
-            VenueUpdate::Snapshot(snapshot) => self.apply_snapshot(&account_id, snapshot),
+            VenueUpdate::Snapshot(snapshot) => {
+                self.apply_snapshot(&account_id, snapshot)?;
+                self.complete_flat_reverses(&account_id)
+            }
+            VenueUpdate::OperationFailed {
+                operation,
+                failure,
+                reason,
+            } => self.apply_operation_failure(&account_id, operation, *failure, reason),
         }
     }
 
@@ -746,7 +801,8 @@ impl TradingCore {
         let (account, instrument) = self.deal_terms(account_id, report)?;
         let provenance = self.venue_provenance();
         let sequence = self.state.next_sequence;
-        let (current, mirror) = self.deal_order(account_id, report, &provenance)?;
+        let (current, origin) = self.deal_order(account_id, report, sequence, &provenance)?;
+        let mirror = origin == DealOrigin::Mirrored;
         let fill = Fill {
             id: FillId::try_new(format!("ct-fill-{}", report.broker_deal_id))
                 .map_err(|error| error.to_string())?,
@@ -799,6 +855,7 @@ impl TradingCore {
                 order: &updated,
                 event: &event,
                 mirror: mirror.then_some((&current, report.broker_order_id.as_str())),
+                claimed: (origin == DealOrigin::Claimed).then_some(report.broker_order_id.as_str()),
                 broker_deal_id: &report.broker_deal_id,
                 position: &position,
                 cost_basis,
@@ -825,7 +882,7 @@ impl TradingCore {
                 next_sequence: sequence + 1,
             },
         );
-        if mirror {
+        if origin != DealOrigin::Bound {
             self.state
                 .orders
                 .bind_broker(report.broker_order_id.clone(), current.id);
@@ -860,25 +917,39 @@ impl TradingCore {
         Ok((account, instrument))
     }
 
-    /// The order a deal belongs to: its bound order, or a mirror of a broker-originated order
-    /// first seen through this deal. Reports whether the order is a new mirror.
+    /// The order a deal belongs to: its bound order; an Aeris order the broker has not
+    /// acknowledged yet, matched by client order id within the account, which the deal
+    /// binds; or a mirror of a broker-originated order first seen through this deal, keyed
+    /// by the owner sequence `sequence`.
     fn deal_order(
         &self,
         account_id: &TradingAccountId,
         report: &BrokerFill,
+        sequence: u64,
         provenance: &TradingProvenance,
-    ) -> Result<(Order, bool), String> {
-        if let Some(order) = self
+    ) -> Result<(Order, DealOrigin), String> {
+        let bound = self
             .state
             .orders
             .broker_owner(&report.broker_order_id)
             .and_then(|order_id| self.state.orders.get(order_id))
             .filter(|order| order.account_id == *account_id)
-        {
+            .map(|order| (order, DealOrigin::Bound));
+        let known = bound.or_else(|| {
+            let client = report.client_order_id.as_deref()?;
+            self.state
+                .orders
+                .by_client_str(client)
+                .filter(|order| {
+                    order.account_id == *account_id && self.broker_order_id(&order.id).is_none()
+                })
+                .map(|order| (order, DealOrigin::Claimed))
+        });
+        if let Some((order, origin)) = known {
             if report.quantity.scale() != order.quantity.scale() {
                 return Err("broker fill quantity scale does not match the order".into());
             }
-            return Ok((order.clone(), false));
+            return Ok((order.clone(), origin));
         }
         let order = Self::mirror_order(
             account_id,
@@ -886,10 +957,11 @@ impl TradingCore {
             &report.instrument_id,
             report.side,
             report.quantity,
+            sequence,
             provenance,
         )?;
         order.validate().map_err(|error| error.to_string())?;
-        Ok((order, true))
+        Ok((order, DealOrigin::Mirrored))
     }
 
     fn deal_quantity(
@@ -907,16 +979,17 @@ impl TradingCore {
 
     /// A broker-originated order (a released bracket exit, a venue exit, or an order placed
     /// outside Aeris), accepted as a working market order. Its client id is namespaced by the
-    /// broker order id, because brokers reuse request ids across sessions.
+    /// broker order id, because brokers reuse request ids across sessions. Its id comes from
+    /// the durable owner sequence, the same counter that keys orders Aeris places.
     fn mirror_order(
         account_id: &TradingAccountId,
         broker_order_id: &str,
         instrument_id: &InstrumentId,
         side: OrderSide,
         quantity: FixedPoint,
+        sequence: u64,
         provenance: &TradingProvenance,
     ) -> Result<Order, String> {
-        let sequence = provenance.source_sequence;
         let order = Order {
             id: OrderId::try_new(format!("broker-order-{sequence}"))
                 .map_err(|error| error.to_string())?,
@@ -972,7 +1045,6 @@ impl TradingCore {
         {
             return Err("broker order quantity scale does not match the instrument".into());
         }
-        // The venue sequence keys the mirror's id; the owner sequence keys its event.
         let sequence = self.state.next_sequence;
         let provenance = self.broker_provenance(self.command_now, sequence);
         let mut order = Self::mirror_order(
@@ -981,6 +1053,7 @@ impl TradingCore {
             &report.instrument_id,
             report.side,
             report.quantity,
+            sequence,
             &provenance,
         )?;
         order.order_type = order_type;
@@ -1051,7 +1124,11 @@ impl TradingCore {
             .collect()
     }
 
-    fn is_flat(&self, account_id: &TradingAccountId, instrument_id: &InstrumentId) -> bool {
+    pub(super) fn is_flat(
+        &self,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+    ) -> bool {
         self.state
             .positions
             .get(&(account_id.clone(), instrument_id.clone()))
@@ -1102,17 +1179,17 @@ impl TradingCore {
             let provenance = updated.provenance.clone();
             self.record_broker_transition(updated, kind, detail, None, provenance, None)?;
         }
-        self.rebase_positions(account_id, &snapshot.positions)
+        let unregistered = self.rebase_positions(account_id, &snapshot.positions)?;
+        self.settle_reconciled(account_id, &unregistered)
     }
 
-    /// Rebases every position of the account the venue disagrees with. Positions in
-    /// instruments the owner has not registered cannot be accounted and are reported after
-    /// the rest are settled.
+    /// Rebases every position of the account the venue disagrees with and returns the
+    /// instruments the owner has not registered, whose positions cannot be accounted yet.
     fn rebase_positions(
         &mut self,
         account_id: &TradingAccountId,
         reports: &[VenuePosition],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<InstrumentId>, String> {
         let mut instruments = self
             .state
             .positions
@@ -1126,7 +1203,7 @@ impl TradingCore {
         let mut unregistered = Vec::new();
         for instrument_id in instruments {
             if !self.state.instruments.contains_key(&instrument_id) {
-                unregistered.push(instrument_id.as_str().to_string());
+                unregistered.push(instrument_id);
                 continue;
             }
             let report = reports
@@ -1134,14 +1211,7 @@ impl TradingCore {
                 .find(|report| report.instrument_id == instrument_id);
             self.rebase_position(account_id, &instrument_id, report)?;
         }
-        if unregistered.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "the broker reports positions in unregistered instruments: {}",
-                unregistered.join(", ")
-            ))
-        }
+        Ok(unregistered)
     }
 
     /// Replaces a ledger position the venue disagrees with by the venue's net quantity and
@@ -1576,6 +1646,17 @@ fn broker_report_detail(state: BrokerOrderState) -> &'static str {
         BrokerOrderState::CancelRejected => "cancel rejected",
         BrokerOrderState::Rejected => "rejected",
     }
+}
+
+/// How a broker deal found its owner order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DealOrigin {
+    /// The order the deal's broker order id is already bound to.
+    Bound,
+    /// An Aeris order the broker has not acknowledged yet, found by its client order id.
+    Claimed,
+    /// A broker-originated order first seen through this deal.
+    Mirrored,
 }
 
 fn outbound_error<T>(error: &TrySendError<T>) -> String {

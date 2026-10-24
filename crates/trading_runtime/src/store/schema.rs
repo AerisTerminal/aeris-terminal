@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -372,6 +372,22 @@ pub(super) const MIGRATION_V28: &str = "
      quantity_units INTEGER NOT NULL, quantity_scale INTEGER NOT NULL,
      PRIMARY KEY(order_id, side, ticks)
  ) STRICT;";
+/// Broker recovery facts that must survive a restart: contracts whose deals or positions the
+/// owner could not account (the earliest such deal floors the account's deal replay), and
+/// reverses waiting for their exit, which the next start reports instead of completing.
+pub(super) const MIGRATION_V29: &str = "
+ CREATE TABLE broker_unresolved_contracts (
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     instrument_id TEXT NOT NULL,
+     first_deal_unix_nanos INTEGER,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;
+ CREATE TABLE broker_pending_reverses (
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     instrument_id TEXT NOT NULL,
+     requested_unix_nanos INTEGER NOT NULL,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -542,6 +558,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 27,
         to: 28,
         sql: MIGRATION_V28,
+    },
+    Migration {
+        from: 28,
+        to: 29,
+        sql: MIGRATION_V29,
     },
 ];
 

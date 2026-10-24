@@ -187,6 +187,86 @@ fn day_acceptance_fixes_session_deadline_and_restores_it() {
 }
 
 #[test]
+fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
+    let directory = TestDirectory::new("day-amend-deadline");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    let mut request = market_order("amend-day", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    let placed = service.place_order(request).expect("gtc accepted");
+    assert_eq!(placed.expires_at_unix_nanos, None);
+    let amend = |time_in_force, limit| ModifyOrder {
+        client_order_id: placed.client_order_id.clone(),
+        time_in_force,
+        limit_price: Some(FixedPoint::try_new(limit, 2).unwrap()),
+        stop_price: None,
+        modified_unix_nanos: 1_000_000_000_000,
+        provenance: provenance(2, 1_000_000_000_000),
+    };
+    let day = service
+        .modify_order(amend(TimeInForce::Day, 9_900))
+        .expect("to day");
+    assert_eq!(day.time_in_force, TimeInForce::Day);
+    assert_eq!(day.expires_at_unix_nanos, Some(2_000_000_000_000));
+    // A later session report never moves the deadline fixed when the order became DAY.
+    feed.push(MarketFeedEvent::Session(
+        aeris_trading::market::InstrumentSession {
+            instrument_id: route().instrument_id,
+            provider_generation: 1,
+            phase: SessionPhase::Open,
+            source: CalendarSourceKind::ProviderCalendar,
+            session_end_unix_nanos: Some(3_000_000_000_000),
+            next_open_unix_nanos: None,
+        },
+    ))
+    .expect("later session");
+    service.status().expect("drain");
+    let still_day = service
+        .modify_order(amend(TimeInForce::Day, 9_875))
+        .expect("day to day");
+    assert_eq!(still_day.expires_at_unix_nanos, Some(2_000_000_000_000));
+    service.shutdown(Duration::from_secs(5)).unwrap();
+
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = TradingService::start(configuration).unwrap();
+    let restored = restarted
+        .snapshot()
+        .unwrap()
+        .orders
+        .into_iter()
+        .find(|order| order.id == placed.id)
+        .expect("restored order");
+    assert_eq!(restored, still_day);
+    let gtc = restarted
+        .modify_order(amend(TimeInForce::GoodTillCancelled, 9_875))
+        .expect("to gtc");
+    assert_eq!(gtc.expires_at_unix_nanos, None);
+    // Without the feed's verified session no DAY deadline exists, so the change is refused.
+    let before = restarted.snapshot().unwrap();
+    assert_eq!(
+        restarted
+            .modify_order(amend(TimeInForce::Day, 9_875))
+            .expect_err("no session"),
+        aeris_trading::RejectReason::SessionUnknown.to_string()
+    );
+    assert_eq!(restarted.snapshot().unwrap(), before);
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+#[test]
 fn day_order_expires_on_owner_boundary_before_late_quote() {
     let directory = TestDirectory::new("day-owner-expiry");
     let (service, clock) = feed_service(&directory);
@@ -1465,10 +1545,11 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
             starting_equity: None,
         })
         .expect("demo account");
-    let (_generation, outbound) = service
+    let (generation, outbound) = service
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("venue");
     while outbound.try_recv().is_ok() {}
+    crate::tests::settle_reconcile(&service, generation, "fixture-demo");
     let feed = service
         .attach_market_feed(Arc::new(RecordedInterest::default()))
         .expect("feed");

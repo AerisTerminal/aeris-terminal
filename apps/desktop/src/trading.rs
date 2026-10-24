@@ -18,6 +18,8 @@ pub struct TradingCommandFeedback {
 struct TradingFeedbackState {
     revision: u64,
     latest: Option<TradingCommandFeedback>,
+    /// The sequence of the newest broker venue notice already shown.
+    venue_notice_seen: u64,
 }
 
 /// The status of commands issued by one desktop instance, shared with its panes.
@@ -66,6 +68,30 @@ impl TradingFeedback {
                 is_error: true,
             },
         });
+    }
+
+    /// Shows the trading owner's venue notices this instance has not shown yet as one error
+    /// line, newest last. A notice shows once; older ones are still in the diagnostics log.
+    pub fn record_venue_notices(&self, notices: &[aeris_trading_runtime::VenueNotice]) {
+        let unseen = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let unseen = notices
+                .iter()
+                .filter(|notice| notice.sequence > state.venue_notice_seen)
+                .map(|notice| notice.detail.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            if let Some(newest) = notices.iter().map(|notice| notice.sequence).max() {
+                state.venue_notice_seen = state.venue_notice_seen.max(newest);
+            }
+            unseen
+        };
+        if !unseen.is_empty() {
+            self.record(Err(unseen));
+        }
     }
 
     #[must_use]
@@ -1014,7 +1040,32 @@ pub fn prepare_flatten_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{account_flatten_scope, parse_usd_equity, prepare_simulated_order};
+    use super::{
+        TradingFeedback, account_flatten_scope, parse_usd_equity, prepare_simulated_order,
+    };
+
+    #[test]
+    fn venue_notices_show_once_on_the_feedback_line() {
+        let feedback = TradingFeedback::default();
+        let notice = |sequence: u64, detail: &str| aeris_trading_runtime::VenueNotice {
+            sequence,
+            account_id: aeris_trading::TradingAccountId::try_new("broker-demo-1").expect("id"),
+            observed_unix_nanos: 1,
+            detail: detail.to_string(),
+        };
+        feedback.record_venue_notices(&[notice(1, "exit refused"), notice(2, "cancel unanswered")]);
+        let shown = feedback.latest().expect("notice shown");
+        assert!(shown.is_error);
+        assert_eq!(shown.message, "exit refused · cancel unanswered");
+        feedback.record_venue_notices(&[notice(1, "exit refused"), notice(2, "cancel unanswered")]);
+        assert_eq!(
+            feedback.latest().expect("unchanged").revision,
+            shown.revision
+        );
+        feedback
+            .record_venue_notices(&[notice(2, "cancel unanswered"), notice(3, "reverse dropped")]);
+        assert_eq!(feedback.latest().expect("newer").message, "reverse dropped");
+    }
 
     #[test]
     fn account_flatten_command_targets_all_instruments_but_only_the_selected_account() {

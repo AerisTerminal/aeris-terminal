@@ -78,14 +78,13 @@ pub(crate) fn validate_price_grid(grid: PriceGrid, price: FixedPoint) -> Result<
     }
 }
 
+/// The price-grid check every placement and amendment applies to its limit and stop.
 pub(crate) fn validate_order_prices(
     instrument: &TradingInstrument,
-    command: &PlaceOrder,
+    limit_price: Option<FixedPoint>,
+    stop_price: Option<FixedPoint>,
 ) -> Result<(), RejectReason> {
-    for price in [command.limit_price, command.stop_price]
-        .into_iter()
-        .flatten()
-    {
+    for price in [limit_price, stop_price].into_iter().flatten() {
         validate_price_grid(instrument.contract.price_grid, price)?;
     }
     Ok(())
@@ -258,7 +257,7 @@ pub(crate) fn validate_common_order(
     if command.order_type == OrderType::RestingAt {
         return Err(RejectReason::QuoteUnavailable);
     }
-    validate_order_prices(instrument, command)?;
+    validate_order_prices(instrument, command.limit_price, command.stop_price)?;
     if open_orders.saturating_add(staged_orders) >= MAXIMUM_OPEN_ORDERS {
         return Err(RejectReason::CapacityExceeded);
     }
@@ -466,6 +465,7 @@ impl TradingCore {
         self.state.venue_generation = generation;
         self.venue_ingestion = 0;
         self.connected_broker_accounts.clear();
+        self.broker_sync.attached();
         self.bump_revision()?;
         Ok((generation, receiver))
     }
@@ -665,10 +665,13 @@ impl TradingCore {
             return Ok(());
         }
         self.store.put_instrument(&instrument)?;
+        let instrument_id = instrument.instrument_id.clone();
         self.state
             .instruments
-            .insert(instrument.instrument_id.clone(), instrument);
-        self.bump_revision()
+            .insert(instrument_id.clone(), instrument);
+        self.bump_revision()?;
+        self.instrument_registered(&instrument_id);
+        Ok(())
     }
 
     pub(super) fn place_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
@@ -970,29 +973,8 @@ impl TradingCore {
             risk,
         )?;
         let expires_at_unix_nanos = if command.time_in_force == TimeInForce::Day {
-            // Legacy replay fixtures do not install a routed market calendar. Real
-            // admission always requires the owner session supplied by the feed.
-            #[cfg(test)]
-            let legacy_deadline = if self
-                .state
-                .market_routes
-                .contains_key(&command.instrument_id)
-            {
-                None
-            } else {
-                crate::market::feed::next_utc_midnight(self.command_now)
-            };
-            #[cfg(not(test))]
-            let legacy_deadline: Option<i64> = None;
             Some(
-                legacy_deadline
-                    .map_or_else(
-                        || {
-                            self.quote_book
-                                .day_deadline(&command.instrument_id, self.command_now)
-                        },
-                        Ok,
-                    )
+                self.simulated_day_deadline(&command.instrument_id)
                     .map_err(|reason| reason.to_string())?,
             )
         } else {
@@ -1040,6 +1022,24 @@ impl TradingCore {
         };
         event.validate().map_err(|error| error.to_string())?;
         Ok((order, event))
+    }
+
+    /// The session close a simulated DAY order accepted now expires at, from the owner's
+    /// verified session for the instrument. Placement and amendment both use this deadline.
+    pub(crate) fn simulated_day_deadline(
+        &self,
+        instrument_id: &InstrumentId,
+    ) -> Result<i64, RejectReason> {
+        // Legacy replay fixtures do not install a routed market calendar. Real
+        // admission always requires the owner session supplied by the feed.
+        #[cfg(test)]
+        if !self.state.market_routes.contains_key(instrument_id)
+            && let Some(deadline) = crate::market::feed::next_utc_midnight(self.command_now)
+        {
+            return Ok(deadline);
+        }
+        self.quote_book
+            .day_deadline(instrument_id, self.command_now)
     }
 
     pub(super) fn validate_managed_exit(&self, command: &PlaceOrder) -> Result<(), String> {

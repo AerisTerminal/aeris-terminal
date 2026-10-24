@@ -615,6 +615,7 @@ impl Session<'_> {
                 "an account reconcile did not complete".into(),
             ));
         }
+        self.expire_pending(now)?;
         self.retry_waiting()?;
         for _ in 0..REQUESTS_PER_TURN {
             match self.requests.try_recv() {

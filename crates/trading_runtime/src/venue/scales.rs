@@ -56,7 +56,8 @@ impl TradingCore {
             VenueUpdate::AccountObserved(_)
             | VenueUpdate::Refused { .. }
             | VenueUpdate::Position(_)
-            | VenueUpdate::BracketLevelMoved { .. } => update.clone(),
+            | VenueUpdate::BracketLevelMoved { .. }
+            | VenueUpdate::OperationFailed { .. } => update.clone(),
         })
     }
 

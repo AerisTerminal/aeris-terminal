@@ -217,6 +217,7 @@ impl TradingCore {
         if changed {
             self.bump_revision()
                 .map_err(MarketConsumerError::Persistence)?;
+            self.instrument_registered(&id);
         }
         Ok(())
     }

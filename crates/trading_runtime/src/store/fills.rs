@@ -1,9 +1,10 @@
 use super::{
     BTreeMap, BrokerFillRecord, CostBasis, Fill, FillAccounting, FillId, FixedPoint, InstrumentId,
     OrderId, Position, StepTx, TradeCycle, TradingAccountId, TradingStore, VecDeque,
-    database_error, decode_provenance, encode_provenance, fixed, insert_event_row,
-    insert_order_row, params, parse_side, release_bracket_levels, sqlite_i64, update_next_sequence,
-    upsert_discipline_state, upsert_position, upsert_position_basis, upsert_risk_rule_state,
+    bind_broker_order, database_error, decode_provenance, encode_provenance, fixed,
+    insert_event_row, insert_order_row, params, parse_side, release_bracket_levels, sqlite_i64,
+    update_next_sequence, upsert_discipline_state, upsert_position, upsert_position_basis,
+    upsert_risk_rule_state,
 };
 
 pub(super) fn insert_fill_accounting(
@@ -106,6 +107,9 @@ impl TradingStore {
                 .map_err(database_error)?;
         }
         let order = record.order;
+        if let Some(broker_order_id) = record.claimed {
+            bind_broker_order(&transaction, order, broker_order_id)?;
+        }
         transaction
             .execute(
                 "UPDATE orders SET status = ?1, quantity_units = ?2, quantity_scale = ?3,

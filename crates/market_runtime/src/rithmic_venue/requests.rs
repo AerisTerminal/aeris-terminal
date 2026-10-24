@@ -1,7 +1,12 @@
 //! Owner requests translated to Rithmic order-plant commands, and the bookkeeping that
 //! attributes Rithmic's replies to them. Replies to new, modify and cancel commands carry
 //! the client order id or the basket id; level moves and exits run one at a time, so their
-//! reply belongs to the one outstanding request.
+//! reply belongs to the one outstanding request, and cancel-all replies, which carry no
+//! identity, are answered in the order they were sent.
+//!
+//! Every outstanding request has a response deadline. One that passes it, or that is
+//! evicted to keep the bookkeeping bounded, is reported to the owner as unanswered and is
+//! never resubmitted; the owner reconciles the account instead.
 
 use super::{
     reconcile::Reconcile,
@@ -18,13 +23,24 @@ use aeris_rithmic_protocol_adapter::{
 };
 use aeris_trading::{
     ClientOrderId,
-    venue::{BracketSide, VenueAmendment, VenueOrder, VenueRequest},
+    venue::{
+        BracketSide, OperationFailure, VenueAmendment, VenueOperation, VenueOrder, VenueRequest,
+        VenueUpdate,
+    },
 };
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
-/// Commands awaiting Rithmic's reply. Replies that never arrive are bounded by evicting
-/// the oldest entry; the next reconcile settles such an order.
+/// Order commands awaiting Rithmic's reply; past this bound the oldest is reported as
+/// unanswered.
 const MAXIMUM_PENDING: usize = 256;
+/// Cancel-all requests awaiting Rithmic's reply; past this bound the oldest is reported as
+/// unanswered.
+const MAXIMUM_PENDING_CANCEL_ALL: usize = 64;
+/// Longest wait for Rithmic's reply to an order command, level move, exit or cancel-all.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// The owner's outbound queue holds at most 64 requests, so more waiting requests mean
 /// the busy lane is not draining.
 const MAXIMUM_WAITING: usize = 64;
@@ -58,6 +74,7 @@ pub(super) struct PendingCommand {
     key: String,
     pub(super) broker_account: String,
     pub(super) client_order_id: ClientOrderId,
+    deadline: Instant,
 }
 
 /// The one outstanding bracket level move.
@@ -67,21 +84,127 @@ pub(super) struct PendingLevel {
     pub(super) side: BracketSide,
     pub(super) from_ticks: i32,
     pub(super) to_ticks: i32,
+    deadline: Instant,
+}
+
+impl PendingLevel {
+    pub(super) fn operation(&self) -> VenueOperation {
+        VenueOperation::MoveBracketLevel {
+            entry_broker_order_id: self.entry.clone(),
+            side: self.side,
+            current_ticks: self.from_ticks,
+            new_ticks: self.to_ticks,
+        }
+    }
+}
+
+/// The one outstanding position exit.
+pub(super) struct PendingExit {
+    pub(super) broker_account: String,
+    pub(super) instrument_id: InstrumentId,
+    deadline: Instant,
+}
+
+struct PendingCancelAll {
+    broker_account: String,
+    deadline: Instant,
+}
+
+/// An operation to report to the owner as failed for one broker account.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct Failed {
+    pub(super) broker_account: String,
+    pub(super) operation: VenueOperation,
+}
+
+impl Failed {
+    fn command(command: PendingCommand) -> Self {
+        Self {
+            broker_account: command.broker_account,
+            operation: VenueOperation::OrderCommand {
+                client_order_id: command.client_order_id,
+            },
+        }
+    }
 }
 
 #[derive(Default)]
 pub(super) struct Pending {
     commands: VecDeque<PendingCommand>,
     pub(super) level: Option<PendingLevel>,
-    pub(super) exit: bool,
+    pub(super) exit: Option<PendingExit>,
+    cancel_alls: VecDeque<PendingCancelAll>,
 }
 
 impl Pending {
-    fn sent(&mut self, command: PendingCommand) {
-        if self.commands.len() >= MAXIMUM_PENDING {
-            self.commands.pop_front();
-        }
+    /// Records a sent command, returning the oldest one when the bound evicts it.
+    fn sent(&mut self, command: PendingCommand) -> Option<Failed> {
+        let evicted = (self.commands.len() >= MAXIMUM_PENDING)
+            .then(|| self.commands.pop_front())
+            .flatten()
+            .map(Failed::command);
         self.commands.push_back(command);
+        evicted
+    }
+
+    /// Records a sent cancel-all, returning the oldest one when the bound evicts it.
+    fn sent_cancel_all(&mut self, broker_account: String, deadline: Instant) -> Option<Failed> {
+        let evicted = (self.cancel_alls.len() >= MAXIMUM_PENDING_CANCEL_ALL)
+            .then(|| self.cancel_alls.pop_front())
+            .flatten()
+            .map(|evicted| Failed {
+                broker_account: evicted.broker_account,
+                operation: VenueOperation::CancelAll,
+            });
+        self.cancel_alls.push_back(PendingCancelAll {
+            broker_account,
+            deadline,
+        });
+        evicted
+    }
+
+    /// The account of the oldest outstanding cancel-all, which a cancel-all reply answers.
+    pub(super) fn cancel_all_answered(&mut self) -> Option<String> {
+        self.cancel_alls
+            .pop_front()
+            .map(|pending| pending.broker_account)
+    }
+
+    /// Removes every request whose response deadline has passed. Each queue holds its
+    /// entries in deadline order because every entry gets the same timeout from a
+    /// monotonic clock.
+    pub(super) fn expire(&mut self, now: Instant) -> Vec<Failed> {
+        let mut expired = Vec::new();
+        while let Some(command) = self
+            .commands
+            .pop_front_if(|command| command.deadline <= now)
+        {
+            expired.push(Failed::command(command));
+        }
+        while let Some(cancel_all) = self
+            .cancel_alls
+            .pop_front_if(|cancel_all| cancel_all.deadline <= now)
+        {
+            expired.push(Failed {
+                broker_account: cancel_all.broker_account,
+                operation: VenueOperation::CancelAll,
+            });
+        }
+        if let Some(level) = self.level.take_if(|level| level.deadline <= now) {
+            expired.push(Failed {
+                operation: level.operation(),
+                broker_account: level.broker_account,
+            });
+        }
+        if let Some(exit) = self.exit.take_if(|exit| exit.deadline <= now) {
+            expired.push(Failed {
+                broker_account: exit.broker_account,
+                operation: VenueOperation::ExitPosition {
+                    instrument_id: exit.instrument_id,
+                },
+            });
+        }
+        expired
     }
 
     /// Removes the command a reply answers. A refusal without the identifying field is
@@ -242,6 +365,7 @@ impl Session<'_> {
                 side: *side,
                 from_ticks: *current_ticks,
                 to_ticks: *new_ticks,
+                deadline: self.command_deadline(),
             }),
             VenueRequest::CancelAll { broker_account } => self.cancel_all(broker_account),
             VenueRequest::ExitPosition {
@@ -305,6 +429,7 @@ impl Session<'_> {
                 key: order.client_order_id.as_str().to_string(),
                 broker_account: order.broker_account.clone(),
                 client_order_id: order.client_order_id.clone(),
+                deadline: self.command_deadline(),
             },
         )
     }
@@ -344,6 +469,7 @@ impl Session<'_> {
                 key: amendment.broker_order_id.clone(),
                 broker_account: amendment.broker_account.clone(),
                 client_order_id: amendment.client_order_id.clone(),
+                deadline: self.command_deadline(),
             },
         )
     }
@@ -369,6 +495,7 @@ impl Session<'_> {
                 key: broker_order_id.to_string(),
                 broker_account: broker_account.to_string(),
                 client_order_id: client_order_id.clone(),
+                deadline: self.command_deadline(),
             },
         )
     }
@@ -381,14 +508,16 @@ impl Session<'_> {
     ) -> Result<Dispatch, SessionEnd> {
         match outcome {
             Outcome::Sent => {
-                self.pending.sent(command);
+                if let Some(evicted) = self.pending.sent(command) {
+                    self.report_evicted(evicted, MAXIMUM_PENDING)?;
+                }
                 Ok(Dispatch::Done)
             }
             Outcome::Busy => Ok(Dispatch::Busy),
             Outcome::Refused(reason) => {
                 self.emit(
                     &command.broker_account,
-                    aeris_trading::venue::VenueUpdate::Refused {
+                    VenueUpdate::Refused {
                         client_order_id: command.client_order_id,
                         reason,
                     },
@@ -398,9 +527,78 @@ impl Session<'_> {
         }
     }
 
+    fn command_deadline(&self) -> Instant {
+        self.context.clock.monotonic() + COMMAND_TIMEOUT
+    }
+
+    pub(super) fn report_failed(
+        &self,
+        failed: Failed,
+        failure: OperationFailure,
+        reason: String,
+    ) -> Result<(), SessionEnd> {
+        self.emit(
+            &failed.broker_account,
+            VenueUpdate::OperationFailed {
+                operation: failed.operation,
+                failure,
+                reason,
+            },
+        )
+    }
+
+    pub(super) fn refuse(
+        &self,
+        broker_account: &str,
+        operation: VenueOperation,
+        reason: String,
+    ) -> Result<(), SessionEnd> {
+        let failed = Failed {
+            broker_account: broker_account.to_string(),
+            operation,
+        };
+        self.report_failed(failed, OperationFailure::Refused, reason)
+    }
+
+    fn report_evicted(&self, evicted: Failed, bound: usize) -> Result<(), SessionEnd> {
+        diagnostic!("Aeris broker venue stopped waiting for a Rithmic reply beyond its bound");
+        self.report_failed(
+            evicted,
+            OperationFailure::Unanswered,
+            format!("more than {bound} requests awaited Rithmic's reply"),
+        )
+    }
+
+    /// Reports every outstanding request Rithmic has not answered within its deadline.
+    pub(super) fn expire_pending(&mut self, now: Instant) -> Result<(), SessionEnd> {
+        let expired = self.pending.expire(now);
+        if !expired.is_empty() {
+            diagnostic!(
+                "Aeris broker venue: Rithmic did not answer {} requests in time",
+                expired.len()
+            );
+        }
+        for failed in expired {
+            self.report_failed(
+                failed,
+                OperationFailure::Unanswered,
+                format!(
+                    "Rithmic did not answer within {} seconds",
+                    COMMAND_TIMEOUT.as_secs()
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
     fn move_level(&mut self, level: PendingLevel) -> Result<Dispatch, SessionEnd> {
         let Some(account) = find(&self.accounts, &level.broker_account) else {
             diagnostic!("Aeris broker venue could not move a bracket level: {NOT_CONNECTED}");
+            self.refuse(
+                &level.broker_account,
+                level.operation(),
+                NOT_CONNECTED.into(),
+            )?;
             return Ok(Dispatch::Done);
         };
         let request = BracketLevelUpdateRequest {
@@ -421,34 +619,42 @@ impl Session<'_> {
             Outcome::Busy => Dispatch::Busy,
             Outcome::Refused(reason) => {
                 diagnostic!("Aeris broker venue could not move a bracket level: {reason}");
+                self.refuse(&level.broker_account, level.operation(), reason)?;
                 Dispatch::Done
             }
         })
     }
 
     fn cancel_all(&mut self, broker_account: &str) -> Result<Dispatch, SessionEnd> {
-        let Some(account) = find(&self.accounts, broker_account) else {
-            diagnostic!("Aeris broker venue could not cancel all orders: {NOT_CONNECTED}");
-            return Ok(Dispatch::Done);
-        };
-        Ok(
-            match sent(
-                self.plants
-                    .orders
-                    .cancel_all_orders(CancelAllOrdersRequest {
+        let outcome =
+            match find(&self.accounts, broker_account) {
+                None => Outcome::Refused(NOT_CONNECTED.into()),
+                Some(account) => sent(self.plants.orders.cancel_all_orders(
+                    CancelAllOrdersRequest {
                         account: account.key(),
                         user_type: self.user_type,
                         placement: PLACEMENT,
-                    }),
-            )? {
-                Outcome::Sent => Dispatch::Done,
-                Outcome::Busy => Dispatch::Busy,
-                Outcome::Refused(reason) => {
-                    diagnostic!("Aeris broker venue could not cancel all orders: {reason}");
-                    Dispatch::Done
+                    },
+                ))?,
+            };
+        Ok(match outcome {
+            Outcome::Sent => {
+                let deadline = self.command_deadline();
+                if let Some(evicted) = self
+                    .pending
+                    .sent_cancel_all(broker_account.to_string(), deadline)
+                {
+                    self.report_evicted(evicted, MAXIMUM_PENDING_CANCEL_ALL)?;
                 }
-            },
-        )
+                Dispatch::Done
+            }
+            Outcome::Busy => Dispatch::Busy,
+            Outcome::Refused(reason) => {
+                diagnostic!("Aeris broker venue could not cancel all orders: {reason}");
+                self.refuse(broker_account, VenueOperation::CancelAll, reason)?;
+                Dispatch::Done
+            }
+        })
     }
 
     fn exit_position(
@@ -473,12 +679,20 @@ impl Session<'_> {
         };
         Ok(match outcome {
             Outcome::Sent => {
-                self.pending.exit = true;
+                self.pending.exit = Some(PendingExit {
+                    broker_account: broker_account.to_string(),
+                    instrument_id: instrument_id.clone(),
+                    deadline: self.command_deadline(),
+                });
                 Dispatch::Done
             }
             Outcome::Busy => Dispatch::Busy,
             Outcome::Refused(reason) => {
                 diagnostic!("Aeris broker venue could not exit a position: {reason}");
+                let operation = VenueOperation::ExitPosition {
+                    instrument_id: instrument_id.clone(),
+                };
+                self.refuse(broker_account, operation, reason)?;
                 Dispatch::Done
             }
         })
@@ -495,6 +709,11 @@ impl Session<'_> {
             return Ok(Dispatch::Busy);
         }
         let Some(account) = find(&self.accounts, broker_account) else {
+            self.refuse(
+                broker_account,
+                VenueOperation::Reconcile,
+                NOT_CONNECTED.into(),
+            )?;
             return Ok(Dispatch::Done);
         };
         let deadline = self.context.clock.monotonic() + RECONCILE_TIMEOUT;
@@ -536,11 +755,15 @@ impl Session<'_> {
     pub(super) fn begin_snapshot(
         &mut self,
         broker_account: String,
-        deadline: std::time::Instant,
+        deadline: Instant,
     ) -> Result<(), SessionEnd> {
         self.reconcile = None;
         let Some(account) = find(&self.accounts, &broker_account) else {
-            return Ok(());
+            return self.refuse(
+                &broker_account,
+                VenueOperation::Reconcile,
+                NOT_CONNECTED.into(),
+            );
         };
         self.plants
             .orders
@@ -581,11 +804,30 @@ mod tests {
     }
 
     fn command(command: Command, key: &str, client: &str) -> PendingCommand {
+        command_until(command, key, client, Instant::now() + COMMAND_TIMEOUT)
+    }
+
+    fn command_until(
+        command: Command,
+        key: &str,
+        client: &str,
+        deadline: Instant,
+    ) -> PendingCommand {
         PendingCommand {
             command,
             key: key.into(),
             broker_account: "account-1".into(),
             client_order_id: ClientOrderId::try_new(client).expect("client id"),
+            deadline,
+        }
+    }
+
+    fn order_command(account: &str, client: &str) -> Failed {
+        Failed {
+            broker_account: account.into(),
+            operation: VenueOperation::OrderCommand {
+                client_order_id: ClientOrderId::try_new(client).expect("client id"),
+            },
         }
     }
 
@@ -623,11 +865,111 @@ mod tests {
                 .answered(Command::Place, Some("client-1"), false)
                 .is_some()
         );
-        for index in 0..=MAXIMUM_PENDING {
-            pending.sent(command(Command::Cancel, &index.to_string(), "client-4"));
+    }
+
+    #[test]
+    fn commands_evicted_beyond_the_bound_are_reported_unanswered() {
+        let mut pending = Pending::default();
+        for index in 0..MAXIMUM_PENDING {
+            let client = format!("client-{index}");
+            let sent = command(Command::Cancel, &index.to_string(), &client);
+            assert_eq!(pending.sent(sent), None);
         }
+        let evicted = pending.sent(command(Command::Cancel, "last", "client-last"));
+        assert_eq!(evicted, Some(order_command("account-1", "client-0")));
         assert!(pending.answered(Command::Cancel, Some("0"), true).is_none());
         assert!(pending.answered(Command::Cancel, Some("1"), true).is_some());
+
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        for index in 0..MAXIMUM_PENDING_CANCEL_ALL {
+            assert_eq!(
+                pending.sent_cancel_all(format!("account-{index}"), deadline),
+                None
+            );
+        }
+        assert_eq!(
+            pending.sent_cancel_all("account-last".into(), deadline),
+            Some(Failed {
+                broker_account: "account-0".into(),
+                operation: VenueOperation::CancelAll,
+            })
+        );
+        assert_eq!(pending.cancel_all_answered().as_deref(), Some("account-1"));
+    }
+
+    #[test]
+    fn requests_past_their_deadline_expire_once_and_answered_ones_never_do() {
+        let start = Instant::now();
+        let early = start + COMMAND_TIMEOUT;
+        let late = early + Duration::from_secs(1);
+        let mut pending = Pending::default();
+        pending.sent(command_until(Command::Place, "client-1", "client-1", early));
+        pending.sent(command_until(
+            Command::Modify,
+            "basket-2",
+            "client-2",
+            early,
+        ));
+        pending.sent(command_until(Command::Cancel, "basket-3", "client-3", late));
+        assert!(
+            pending
+                .answered(Command::Modify, Some("basket-2"), false)
+                .is_some()
+        );
+        pending.sent_cancel_all("account-1".into(), early);
+        pending.sent_cancel_all("account-2".into(), late);
+        pending.level = Some(PendingLevel {
+            broker_account: "account-3".into(),
+            entry: "entry".into(),
+            side: BracketSide::Stop,
+            from_ticks: 8,
+            to_ticks: 12,
+            deadline: early,
+        });
+        let instrument_id = InstrumentId::try_new("instrument:rithmic:CME:ESZ5").expect("id");
+        pending.exit = Some(PendingExit {
+            broker_account: "account-4".into(),
+            instrument_id: instrument_id.clone(),
+            deadline: late,
+        });
+
+        assert_eq!(pending.expire(start), Vec::new());
+        assert_eq!(
+            pending.expire(early),
+            vec![
+                order_command("account-1", "client-1"),
+                Failed {
+                    broker_account: "account-1".into(),
+                    operation: VenueOperation::CancelAll,
+                },
+                Failed {
+                    broker_account: "account-3".into(),
+                    operation: VenueOperation::MoveBracketLevel {
+                        entry_broker_order_id: "entry".into(),
+                        side: BracketSide::Stop,
+                        current_ticks: 8,
+                        new_ticks: 12,
+                    },
+                },
+            ]
+        );
+        assert_eq!(pending.expire(early), Vec::new(), "each expires once");
+        assert_eq!(
+            pending.expire(late),
+            vec![
+                order_command("account-1", "client-3"),
+                Failed {
+                    broker_account: "account-2".into(),
+                    operation: VenueOperation::CancelAll,
+                },
+                Failed {
+                    broker_account: "account-4".into(),
+                    operation: VenueOperation::ExitPosition { instrument_id },
+                },
+            ]
+        );
+        assert!(pending.level.is_none() && pending.exit.is_none());
+        assert_eq!(pending.cancel_all_answered(), None);
     }
 
     #[test]

@@ -153,7 +153,7 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V28 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V29 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -186,6 +186,15 @@ violations and missing verification explicitly, and never describe them as satis
   reconcile snapshot that disagrees with the ledger rebases the position in one transaction.
   Broker accounts write no cash-ledger entries (their balance is the venue's), and a broker venue
   declares its `VenueCapabilities` (held bracket levels, client order id length) when attached.
+  V29 adds `broker_unresolved_contracts` and `broker_pending_reverses`. A broker account admits no
+  new risk-increasing order until the current venue session has reconciled it, nor while it holds an
+  unresolved contract (a fill or position the owner could not account, which also lowers the
+  reconcile replay floor); cancels, exits and flatten stay allowed. Broker mirror order IDs come from
+  the owner sequence, a fill before its ack binds the unbound order by client id, and a reverse sends
+  only its exit until the position is flat; a reverse still waiting at restart is dropped with a
+  recovery notice. Venue refusals arrive as `VenueUpdate::OperationFailed` and become bounded owner
+  `VenueNotice`s (32) shown on the desktop feedback line; every relay command has a 30-second
+  deadline, and an unanswered command forces a reconcile.
   Old P&L tables and per-fill columns remain unread until their deferred removal migration.
   Store-open preflight scratch cleanup may remove only exact preflight directories containing
   solely the expected database copy and SQLite sidecars; preserve unknown contents and report

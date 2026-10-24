@@ -10,6 +10,7 @@ mod retention;
 mod risk;
 mod schema;
 mod user_records;
+mod venue_sync;
 #[cfg(test)]
 use export::write_atomic;
 #[cfg(test)]
@@ -19,11 +20,12 @@ pub use schema::SCHEMA_VERSION;
 pub(crate) use schema::preflight_existing_database;
 #[cfg(test)]
 use schema::*;
+pub(crate) use venue_sync::UnresolvedContracts;
 use {
     ledger::{fixed, optional_fixed, split_optional, upsert_position, upsert_position_basis},
     orders::{
-        decode_provenance, encode_contract, encode_provenance, insert_event_row, insert_order_row,
-        parse_side, release_bracket_levels, update_next_sequence,
+        bind_broker_order, decode_provenance, encode_contract, encode_provenance, insert_event_row,
+        insert_order_row, parse_side, release_bracket_levels, update_next_sequence,
     },
     risk::{upsert_discipline_state, upsert_risk_rule_state},
     schema::sweep_stale_preflight_directories,
@@ -236,6 +238,8 @@ pub(super) struct StoredState {
     pub venue_generation: u64,
     /// The last balance each broker account reported.
     pub broker_balances: BTreeMap<TradingAccountId, FixedPoint>,
+    /// Contracts of each broker account whose deals or positions are not accounted yet.
+    pub unresolved_contracts: UnresolvedContracts,
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
     pub risk_rule_states: BTreeMap<TradingAccountId, RiskRuleState>,
@@ -319,6 +323,8 @@ pub(super) struct BrokerFillRecord<'a> {
     pub event: &'a OrderEvent,
     /// A broker-originated order first seen through this deal, with its broker order id.
     pub mirror: Option<(&'a Order, &'a str)>,
+    /// The broker order id an unacknowledged Aeris order first learns through this deal.
+    pub claimed: Option<&'a str>,
     pub broker_deal_id: &'a str,
     /// The account's position in the instrument after this deal, with its exact basis.
     pub position: &'a Position,
@@ -470,6 +476,7 @@ impl TradingStore {
         let broker_brackets = self.load_broker_brackets()?;
         let venue_generation = self.metadata("venue_generation")?;
         let broker_balances = self.load_broker_balances()?;
+        let unresolved_contracts = self.load_unresolved_contracts()?;
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
         let risk_rule_states = self.load_risk_rule_states()?;
@@ -505,6 +512,7 @@ impl TradingStore {
             broker_brackets,
             venue_generation,
             broker_balances,
+            unresolved_contracts,
             risk_profiles,
             risk_locks,
             risk_rule_states,
@@ -783,7 +791,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 28);
+        assert_eq!(SCHEMA_VERSION, 29);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

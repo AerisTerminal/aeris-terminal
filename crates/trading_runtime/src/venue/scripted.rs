@@ -59,6 +59,11 @@ fn setup(
         Ok(VenueRequest::Reconcile { broker_account, deals_since_unix_nanos: None })
             if broker_account == BROKER_ACCOUNT
     ));
+    // The account takes new orders once that reconcile's snapshot settles it.
+    service
+        .demo_venue_inbox()
+        .push(venue(1, VenueUpdate::Snapshot(VenueSnapshot::default())))
+        .expect("reconcile snapshot");
     let feed = service
         .attach_market_feed(std::sync::Arc::new(
             crate::tests::market_feed::RecordedInterest::default(),
@@ -199,6 +204,7 @@ fn fill(deal: &str, broker_order_id: &str, quantity: i64) -> BrokerFill {
     BrokerFill {
         broker_deal_id: deal.into(),
         broker_order_id: broker_order_id.into(),
+        client_order_id: None,
         instrument_id: instrument().instrument_id,
         side: OrderSide::Buy,
         price: point(9_000, 2),
@@ -1353,9 +1359,10 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
             "{account:?} locked"
         );
     }
-    let _venue = service
+    let (generation, _receiver) = service
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("attach");
+    crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
     assert!(
         service
             .place_order(request("after-kill"))
@@ -1432,22 +1439,24 @@ fn the_simulator_never_fills_a_broker_order() {
 }
 
 #[test]
-fn day_pending_orders_rest_good_till_cancelled_and_market_orders_fill_or_cancel() {
-    let (_directory, service, receiver) = setup("venue-time-in-force");
+fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
+    let (directory, service, receiver) = setup("venue-time-in-force");
     let day_limit = PlaceOrder {
         time_in_force: TimeInForce::Day,
         ..limit_request("day-limit", 9_000)
     };
     let placed = service.place_order(day_limit).expect("limit");
-    assert_eq!(placed.time_in_force, TimeInForce::GoodTillCancelled);
+    assert_eq!(placed.time_in_force, TimeInForce::Day);
+    // The broker reports a DAY order's session expiry; the owner schedules none.
+    assert_eq!(placed.expires_at_unix_nanos, None);
     let VenueRequest::Place(sent) = receiver.try_recv().expect("place") else {
         panic!("a place request");
     };
-    assert_eq!(sent.time_in_force, TimeInForce::GoodTillCancelled);
+    assert_eq!(sent.time_in_force, TimeInForce::Day);
     let market = service.place_order(request("day-market")).expect("market");
     assert_eq!(market.time_in_force, TimeInForce::ImmediateOrCancel);
+    assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
 
-    // A desktop modify still names its day intent and is accepted.
     service
         .demo_venue_inbox()
         .push(venue(
@@ -1464,9 +1473,60 @@ fn day_pending_orders_rest_good_till_cancelled_and_market_orders_fill_or_cancel(
         provenance: crate::tests::provenance(7, 3_000),
     };
     assert_eq!(
+        service
+            .modify_order(ModifyOrder {
+                time_in_force: TimeInForce::GoodTillCancelled,
+                ..modify.clone()
+            })
+            .expect_err("the broker keeps its time in force"),
+        "the broker cannot change an order's time in force"
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
         service.modify_order(modify).expect("modify").status,
         OrderStatus::PendingModify
     );
+    assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Amend(_))));
+    let current = service
+        .snapshot()
+        .expect("snapshot")
+        .orders
+        .into_iter()
+        .find(|order| order.id == placed.id)
+        .expect("order");
+    assert_eq!(current.time_in_force, TimeInForce::Day);
+    assert_broker_orders_survive_restart(&directory, &service);
+}
+
+#[test]
+fn an_off_grid_broker_amendment_is_rejected_before_it_is_recorded_or_routed() {
+    let (_directory, service, receiver) = setup("venue-off-grid-amend");
+    let placed = service
+        .place_order(limit_request("off-grid-amend", 9_000))
+        .expect("limit");
+    assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            order_update(report(&placed, "1201", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("accepted");
+    let before = service.snapshot().expect("before");
+    // 90.13 is not a multiple of the fixture's 0.25 tick.
+    let error = service
+        .modify_order(ModifyOrder {
+            client_order_id: placed.client_order_id.clone(),
+            time_in_force: TimeInForce::GoodTillCancelled,
+            limit_price: Some(point(9_013, 2)),
+            stop_price: None,
+            modified_unix_nanos: 3_000,
+            provenance: crate::tests::provenance(7, 3_000),
+        })
+        .expect_err("off grid");
+    assert_eq!(error, aeris_trading::RejectReason::OffGrid.to_string());
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(service.snapshot().expect("unchanged"), before);
 }
 
 #[test]
@@ -1836,4 +1896,392 @@ fn venue_reports_are_brought_to_the_owner_scales_exactly() {
         broker_position(&service).map(|position| position.net_quantity),
         Some(point(1, 0))
     );
+}
+
+/// Every request the owner sent so far, without waiting.
+fn sent(receiver: &aeris_trading::venue_outbox::VenueRequestReceiver) -> Vec<VenueRequest> {
+    std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+}
+
+fn other_instrument() -> crate::TradingInstrument {
+    let mut other = instrument();
+    other.instrument_id =
+        aeris_instruments::InstrumentId::try_new("instrument:fixture:CME:NQZ6").expect("other");
+    other
+}
+
+fn latest_notice(service: &TradingService) -> String {
+    service
+        .snapshot()
+        .expect("snapshot")
+        .venue_notices
+        .last()
+        .expect("venue notice")
+        .detail
+        .clone()
+}
+
+#[test]
+fn deals_first_seen_on_the_broker_take_owner_sequence_ids_that_never_collide() {
+    let (directory, service, _receiver) = setup("mirror-ids");
+    let inbox = service.demo_venue_inbox();
+    for (index, broker_order_id) in ["900", "901", "902"].into_iter().enumerate() {
+        service
+            .place_order(limit_request(&format!("placed-{index}"), 9_000))
+            .expect("placed before a mirrored deal");
+        inbox
+            .push(venue(
+                1,
+                VenueUpdate::Fill(fill(&format!("mirror-{index}"), broker_order_id, 1)),
+            ))
+            .expect("broker-originated deal");
+        service
+            .place_order(limit_request(&format!("after-{index}"), 9_000))
+            .expect("an order placed after a mirrored deal gets a fresh id");
+    }
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(service.status().expect("status").venue_error, None);
+    assert_eq!(snapshot.orders.len(), 9);
+    let ids = snapshot
+        .orders
+        .iter()
+        .map(|order| order.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), 9, "every order id is unique");
+    assert_eq!(
+        broker_position(&service).expect("position").net_quantity,
+        point(3, 0)
+    );
+    assert_broker_orders_survive_restart(&directory, &service);
+}
+
+#[test]
+fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror() {
+    let (directory, service, _receiver) = setup("deal-before-ack");
+    let placed = service.place_order(request("early-deal")).expect("place");
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Fill(BrokerFill {
+                client_order_id: Some(placed.client_order_id.as_str().into()),
+                ..fill("early-1", "501", 1)
+            }),
+        ))
+        .expect("deal before ack");
+    inbox
+        .push(venue(
+            1,
+            order_update(report(&placed, "501", 1), BrokerOrderState::Accepted),
+        ))
+        .expect("late ack");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.orders.len(), 1, "no mirror of the placed order");
+    assert_eq!(snapshot.orders[0].id, placed.id);
+    assert_eq!(snapshot.orders[0].status, OrderStatus::Filled);
+    assert_eq!(snapshot.fills.len(), 1);
+    assert_eq!(snapshot.fills[0].order_id, placed.id);
+    assert_eq!(
+        broker_position(&service).expect("position").net_quantity,
+        point(1, 0)
+    );
+    // The binding is durable: a replay of the deal after a restart changes nothing.
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let (generation, _receiver) = restarted
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reattach");
+    restarted
+        .demo_venue_inbox()
+        .push(venue(
+            generation,
+            VenueUpdate::Fill(fill("early-1", "501", 1)),
+        ))
+        .expect("replayed deal");
+    let restored = restarted.snapshot().expect("restored");
+    assert_eq!(restored.orders.len(), 1);
+    assert_eq!(restored.fills.len(), 1);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
+fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
+    let (_directory, service, _receiver) = setup("reconcile-gate");
+    service.place_order(request("ready")).expect("reconciled");
+    let (generation, receiver) = service
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reattach");
+    let refused = service
+        .place_order(request("before-reconcile"))
+        .expect_err("not reconciled in this generation");
+    assert!(refused.contains("being reconciled"), "{refused}");
+    assert!(matches!(
+        sent(&receiver).as_slice(),
+        [VenueRequest::Reconcile { .. }]
+    ));
+    crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
+    service
+        .place_order(request("after-reconcile"))
+        .expect("reconciled again");
+    // An unanswered request makes the venue state uncertain: the account is reconciled
+    // again and takes no new orders until that reconcile settles it.
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            generation,
+            VenueUpdate::OperationFailed {
+                operation: aeris_trading::venue::VenueOperation::CancelAll,
+                failure: aeris_trading::venue::OperationFailure::Unanswered,
+                reason: "no reply within 30 seconds".into(),
+            },
+        ))
+        .expect("unanswered");
+    assert!(latest_notice(&service).contains("did not answer"));
+    assert!(matches!(
+        sent(&receiver).as_slice(),
+        [VenueRequest::Place(_), VenueRequest::Reconcile { .. }]
+    ));
+    assert!(
+        service
+            .place_order(request("while-uncertain"))
+            .expect_err("uncertain")
+            .contains("being reconciled")
+    );
+    crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
+    service
+        .place_order(request("settled"))
+        .expect("settled again");
+}
+
+#[test]
+fn a_refused_exit_is_reported_to_the_user() {
+    let (_directory, service, _receiver) = setup("refused-exit");
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            VenueUpdate::OperationFailed {
+                operation: aeris_trading::venue::VenueOperation::ExitPosition {
+                    instrument_id: instrument().instrument_id,
+                },
+                failure: aeris_trading::venue::OperationFailure::Refused,
+                reason: "no position".into(),
+            },
+        ))
+        .expect("refused exit");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.venue_notices.len(), 1);
+    assert_eq!(snapshot.venue_notices[0].account_id, broker().id);
+    assert!(snapshot.venue_notices[0].detail.contains("refused"));
+    assert_eq!(service.status().expect("status").venue_error, None);
+}
+
+#[test]
+fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
+    let (directory, service, _receiver) = setup("unresolved-contract");
+    let other = other_instrument();
+    let unaccounted = BrokerFill {
+        instrument_id: other.instrument_id.clone(),
+        executed_unix_nanos: 2_000,
+        ..fill("other-1", "950", 1)
+    };
+    service
+        .demo_venue_inbox()
+        .push(venue(1, VenueUpdate::Fill(unaccounted.clone())))
+        .expect("deal in an unregistered contract");
+    assert_eq!(service.status().expect("status").venue_error, None);
+    assert!(latest_notice(&service).contains("cannot be accounted"));
+    let blocked = service
+        .place_order(request("while-unresolved"))
+        .expect_err("blocked");
+    assert!(blocked.contains("blocked"), "{blocked}");
+    // Flatten stays available.
+    service
+        .flatten(crate::FlattenScope {
+            account: Some(broker().id),
+            instrument: None,
+        })
+        .expect("flatten while blocked");
+
+    // The unaccounted deal survives a restart and floors the next replay.
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let (generation, receiver) = restarted
+        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .expect("reattach");
+    assert!(matches!(
+        sent(&receiver).as_slice(),
+        [VenueRequest::Reconcile {
+            deals_since_unix_nanos: Some(2_000),
+            ..
+        }]
+    ));
+    crate::tests::settle_reconcile(&restarted, generation, BROKER_ACCOUNT);
+    assert!(
+        restarted
+            .place_order(request("still-unresolved"))
+            .expect_err("still blocked")
+            .contains("blocked")
+    );
+
+    // Registering the contract reconciles the account; the replayed deal and the snapshot
+    // account it, and new orders are available again.
+    restarted
+        .register_instrument(other.clone())
+        .expect("register the contract");
+    assert!(matches!(
+        sent(&receiver).as_slice(),
+        [VenueRequest::Reconcile {
+            deals_since_unix_nanos: Some(2_000),
+            ..
+        }]
+    ));
+    let inbox = restarted.demo_venue_inbox();
+    inbox
+        .push(venue(generation, VenueUpdate::Fill(unaccounted)))
+        .expect("replayed deal");
+    inbox
+        .push(venue(
+            generation,
+            VenueUpdate::Snapshot(VenueSnapshot {
+                orders: Vec::new(),
+                positions: vec![VenuePosition {
+                    instrument_id: other.instrument_id.clone(),
+                    ..position(1)
+                }],
+            }),
+        ))
+        .expect("reconcile snapshot");
+    assert!(latest_notice(&restarted).contains("new orders are available again"));
+    let accounted = restarted
+        .snapshot()
+        .expect("snapshot")
+        .positions
+        .into_iter()
+        .find(|position| position.instrument_id == other.instrument_id)
+        .expect("accounted position");
+    assert_eq!(accounted.net_quantity, point(1, 0));
+    let feed = restarted
+        .attach_market_feed(std::sync::Arc::new(
+            crate::tests::market_feed::RecordedInterest::default(),
+        ))
+        .expect("market feed");
+    crate::tests::bootstrap_live_feed(&feed, &instrument(), crate::tests::market_feed::route());
+    crate::tests::push_live_quote(&feed, &instrument(), 1, 10_000, 10_025, 2);
+    restarted
+        .place_order(limit_request("accounted", 9_000))
+        .expect("new orders resume");
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
+fn a_reverse_opens_the_opposite_position_only_after_its_exit_flattens() {
+    let (_directory, service, receiver) = setup("managed-reverse");
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(1, VenueUpdate::Fill(fill("long-1", "700", 1))))
+        .expect("long position");
+    sent(&receiver);
+    let outcome = service
+        .reverse_position_at(broker().id, instrument().instrument_id)
+        .expect("reverse requested");
+    assert_eq!(outcome.pending_exits.len(), 1);
+    assert!(
+        matches!(
+            sent(&receiver).as_slice(),
+            [VenueRequest::ExitPosition { .. }]
+        ),
+        "only the exit is sent while the position is open"
+    );
+    assert!(
+        service
+            .reverse_position_at(broker().id, instrument().instrument_id)
+            .expect_err("one reverse at a time")
+            .contains("already waiting")
+    );
+    inbox
+        .push(venue(1, VenueUpdate::Fill(sell("exit-1", "701", 1, 9_000))))
+        .expect("exit fill");
+    service.status().expect("owner applies the exit fill");
+    let requests = sent(&receiver);
+    let [VenueRequest::Place(entry)] = requests.as_slice() else {
+        panic!("the opening order follows the flat position: {requests:?}");
+    };
+    assert_eq!(
+        (entry.side, entry.order_type, entry.quantity),
+        (OrderSide::Sell, OrderType::Market, point(1, 0))
+    );
+}
+
+#[test]
+fn a_reverse_whose_exit_fails_never_opens_the_opposite_position() {
+    let (_directory, service, receiver) = setup("failed-reverse");
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(1, VenueUpdate::Fill(fill("long-1", "700", 1))))
+        .expect("long position");
+    service
+        .reverse_position_at(broker().id, instrument().instrument_id)
+        .expect("reverse requested");
+    sent(&receiver);
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::OperationFailed {
+                operation: aeris_trading::venue::VenueOperation::ExitPosition {
+                    instrument_id: instrument().instrument_id,
+                },
+                failure: aeris_trading::venue::OperationFailure::Refused,
+                reason: "exit refused".into(),
+            },
+        ))
+        .expect("refused exit");
+    // A later flat position (for example a manual close) places nothing.
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Fill(sell("manual-1", "702", 1, 9_000)),
+        ))
+        .expect("manual close");
+    service.status().expect("owner applies the close");
+    assert_eq!(sent(&receiver), Vec::new());
+    let notices = service.snapshot().expect("snapshot").venue_notices;
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.detail.contains("reverse was cancelled"))
+    );
+}
+
+#[test]
+fn a_reverse_waiting_at_shutdown_is_reported_at_the_next_start_and_never_completed() {
+    let (directory, service, _receiver) = setup("interrupted-reverse");
+    service
+        .demo_venue_inbox()
+        .push(venue(1, VenueUpdate::Fill(fill("long-1", "700", 1))))
+        .expect("long position");
+    service
+        .reverse_position_at(broker().id, instrument().instrument_id)
+        .expect("reverse requested");
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let notices = restarted.snapshot().expect("restored").recovery_notices;
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].kind,
+        crate::RecoveryNoticeKind::InterruptedReverse
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+    let again = start_service(&directory);
+    assert_eq!(
+        again.snapshot().expect("reported once").recovery_notices,
+        []
+    );
+    again.shutdown(Duration::from_secs(2)).expect("shutdown");
 }

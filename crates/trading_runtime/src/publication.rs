@@ -9,7 +9,7 @@
 //! `lagged = true` with a freshly resynchronized working set.
 
 use crate::service::Command;
-use crate::{OrderGroup, PositionPnl, RecoveryNotice, RiskLock};
+use crate::{OrderGroup, PositionPnl, RecoveryNotice, RiskLock, VenueNotice};
 use aeris_trading::market::{FeedReason, FeedState};
 use aeris_trading::{AccountPnl, Fill, Order, OrderId, Position, TradingAccount};
 use std::collections::VecDeque;
@@ -48,6 +48,8 @@ pub struct WorkingSet {
     pub risk_locks: Vec<RiskLock>,
     /// Startup repairs the running process performed, published until they are acknowledged.
     pub recovery_notices: Vec<RecoveryNotice>,
+    /// The newest broker venue notices, oldest first.
+    pub venue_notices: Vec<VenueNotice>,
 }
 
 /// A per-order feed projection; never an independent feed or route authority.
@@ -430,6 +432,7 @@ impl crate::TradingCore {
             account_pnl: self.account_pnl()?,
             risk_locks: self.projected_risk_locks(),
             recovery_notices: self.recovery_notices.clone(),
+            venue_notices: self.broker_sync.notices(),
         })
     }
 

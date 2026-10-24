@@ -1585,6 +1585,7 @@ mod tests {
         position.unrealized_pnl = aeris_trading::FixedPoint::try_new(mark, 2).expect("mark");
         aeris_trading_runtime::TradingSnapshot {
             recovery_notices: Vec::new(),
+            venue_notices: Vec::new(),
             revision: 4,
             market_observation_error: None,
             accounts: vec![trading_account(

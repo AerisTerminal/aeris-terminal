@@ -27,8 +27,11 @@ mod risk_owner;
 pub(crate) use groups::chart_bracket_template;
 #[path = "../venue/broker.rs"]
 mod broker;
+#[path = "../venue/broker_sync.rs"]
+mod broker_sync;
 #[path = "../venue/scales.rs"]
 mod scales;
+pub use broker_sync::VENUE_NOTICE_LIMIT;
 
 use self::ledger::{CostBasis, FillAccounting, TradeCycle};
 use self::market::feed::{MarketFeedInbox, QuoteBook};
@@ -471,6 +474,22 @@ pub enum RecoveryNoticeKind {
     InterruptedGroupFill,
     /// Recovered protection no longer matched its position; startup alignment realigned it.
     CoverageRepair,
+    /// A broker reverse waited for its exit when the last process stopped; its opening order
+    /// was not placed.
+    InterruptedReverse,
+}
+
+/// A broker venue outcome the user must see that no order records: a refused or unanswered
+/// exit, cancel-all, bracket move or reconcile, a contract the owner cannot account, or a
+/// reverse that ended without its opening order. The owner keeps the newest
+/// [`VENUE_NOTICE_LIMIT`] in memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VenueNotice {
+    /// Increases by one per notice within this process, so a client shows each once.
+    pub sequence: u64,
+    pub account_id: TradingAccountId,
+    pub observed_unix_nanos: i64,
+    pub detail: String,
 }
 
 /// Bounded immutable projection of current trading state.
@@ -522,6 +541,8 @@ pub struct TradingSnapshot {
     pub protective_orders: Vec<ProtectionView>,
     /// Startup repairs this process performed, raised once at the start that repaired them.
     pub recovery_notices: Vec<RecoveryNotice>,
+    /// The newest broker venue notices, oldest first.
+    pub venue_notices: Vec<VenueNotice>,
 }
 
 /// Trigger prices of the open orders protecting one practice position.
@@ -668,6 +689,8 @@ pub(crate) struct TradingCore {
     /// Broker accounts the current venue generation has announced; the rest are not
     /// reachable now.
     connected_broker_accounts: BTreeSet<TradingAccountId>,
+    /// Per-generation broker readiness, waiting reverses and recent venue notices.
+    broker_sync: broker_sync::BrokerSync,
     /// Startup repairs (legacy awaiting-bracket conversion, group verification) published to
     /// every subscriber's initial working set until M6.10 consumes them as typed events.
     recovery_notices: Vec<RecoveryNotice>,
@@ -1464,6 +1487,7 @@ impl TradingCore {
             venue_inbox,
             venue_ingestion: 0,
             connected_broker_accounts: BTreeSet::new(),
+            broker_sync: broker_sync::BrokerSync::default(),
             recovery_notices: Vec::new(),
             subscribers: BTreeMap::new(),
             next_subscriber_id: 0,
@@ -1492,6 +1516,8 @@ impl TradingCore {
             .map_err(StoreError::Other)?;
         core.store
             .complete_post_group_migrations()
+            .map_err(StoreError::Other)?;
+        core.report_interrupted_reverses()
             .map_err(StoreError::Other)?;
         core.recover_day_deadlines().map_err(StoreError::Other)?;
         // Expire durable DAY deadlines before the service acknowledges startup
@@ -1785,6 +1811,9 @@ impl TradingCore {
         }
         if let Err(error) = self.cancel_due_markets() {
             aeris_observability::diagnostic!("market order timeout persistence failed: {error}");
+        }
+        if let Err(error) = self.expire_due_reverses() {
+            aeris_observability::diagnostic!("broker reverse expiry persistence failed: {error}");
         }
         if let Err(error) = self.roll_risk_sessions(self.command_now) {
             aeris_observability::diagnostic!("risk session rollover persistence failed: {error}");

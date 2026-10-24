@@ -336,10 +336,12 @@ impl TradingCore {
             .min()
     }
 
-    /// The order book bounds this scan to the global open-order capacity.
+    /// The order book bounds this scan to the global open-order capacity; waiting broker
+    /// reverses share the deadline so their expiry runs on the owner timer.
     pub(crate) fn next_order_deadline_unix_nanos(&self) -> Option<i64> {
         self.next_market_timeout_unix_nanos()
             .into_iter()
+            .chain(self.next_reverse_deadline_unix_nanos())
             .chain(self.state.orders.open_orders().filter_map(|order| {
                 (order.time_in_force == TimeInForce::Day
                     && is_simulated(&self.state.accounts, &order.account_id))
@@ -516,10 +518,30 @@ impl TradingCore {
         {
             return Err("modified order scales do not match the instrument".to_string());
         }
+        crate::core::admission::validate_time_in_force(order.order_type, command.time_in_force)
+            .and_then(|()| {
+                crate::core::admission::validate_order_prices(
+                    instrument,
+                    command.limit_price,
+                    command.stop_price,
+                )
+            })
+            .map_err(|reason| reason.to_string())?;
+        // A DAY order keeps the session close fixed at its acceptance; a change to DAY
+        // expires at the current session close, exactly as a DAY placement would.
+        let expires_at_unix_nanos = match (order.time_in_force, command.time_in_force) {
+            (TimeInForce::Day, TimeInForce::Day) => order.expires_at_unix_nanos,
+            (_, TimeInForce::Day) => Some(
+                self.simulated_day_deadline(&order.instrument_id)
+                    .map_err(|reason| reason.to_string())?,
+            ),
+            _ => None,
+        };
         let modified = Order {
             time_in_force: command.time_in_force,
             limit_price: command.limit_price,
             stop_price: command.stop_price,
+            expires_at_unix_nanos,
             provenance: command.provenance.clone(),
             ..order.clone()
         };

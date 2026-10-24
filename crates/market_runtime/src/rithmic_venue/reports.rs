@@ -13,7 +13,7 @@ use aeris_rithmic_protocol_adapter::{
     RithmicInstrumentPnl, RithmicOrderNotification, RithmicRequestKind, RithmicRequestOutcome,
     RithmicTradeRoute,
 };
-use aeris_trading::venue::{BrokerOrder, BrokerOrderState, VenueUpdate};
+use aeris_trading::venue::{BrokerOrder, BrokerOrderState, VenueOperation, VenueUpdate};
 
 /// The broker's reason for refusing a request, or `None` when it did not refuse.
 fn refusal(outcome: &RithmicRequestOutcome) -> Option<String> {
@@ -74,10 +74,7 @@ impl Session<'_> {
                 reply.basket_id.as_deref(),
                 &reply.outcome,
             ),
-            DecodedOrderMessage::PositionExit(reply) => {
-                self.on_exit(&reply.outcome);
-                Ok(())
-            }
+            DecodedOrderMessage::PositionExit(reply) => self.on_exit(&reply.outcome),
             DecodedOrderMessage::RequestComplete(completion) => self.on_completion(
                 completion.request,
                 completion.user_tag.as_deref(),
@@ -290,18 +287,8 @@ impl Session<'_> {
             RithmicRequestKind::UpdateTargetLevel | RithmicRequestKind::UpdateStopLevel => {
                 self.on_level(outcome)
             }
-            RithmicRequestKind::ExitPosition => {
-                self.on_exit(outcome);
-                Ok(())
-            }
-            RithmicRequestKind::CancelAllOrders => {
-                if let Some(reason) = refusal(outcome) {
-                    diagnostic!(
-                        "Aeris broker venue: Rithmic refused to cancel all orders: {reason}"
-                    );
-                }
-                Ok(())
-            }
+            RithmicRequestKind::ExitPosition => self.on_exit(outcome),
+            RithmicRequestKind::CancelAllOrders => self.on_cancel_all(outcome),
             _ => Ok(()),
         }
     }
@@ -328,7 +315,7 @@ impl Session<'_> {
         };
         if let Some(reason) = refusal(outcome) {
             diagnostic!("Aeris broker venue: Rithmic refused to move a bracket level: {reason}");
-            return Ok(());
+            return self.refuse(&level.broker_account, level.operation(), reason);
         }
         self.emit(
             &level.broker_account,
@@ -341,13 +328,29 @@ impl Session<'_> {
         )
     }
 
-    fn on_exit(&mut self, outcome: &RithmicRequestOutcome) {
-        if !std::mem::take(&mut self.pending.exit) {
-            return;
-        }
-        if let Some(reason) = refusal(outcome) {
-            diagnostic!("Aeris broker venue: Rithmic refused to exit a position: {reason}");
-        }
+    fn on_exit(&mut self, outcome: &RithmicRequestOutcome) -> Result<(), SessionEnd> {
+        let Some(exit) = self.pending.exit.take() else {
+            return Ok(());
+        };
+        let Some(reason) = refusal(outcome) else {
+            return Ok(());
+        };
+        diagnostic!("Aeris broker venue: Rithmic refused to exit a position: {reason}");
+        let operation = VenueOperation::ExitPosition {
+            instrument_id: exit.instrument_id,
+        };
+        self.refuse(&exit.broker_account, operation, reason)
+    }
+
+    fn on_cancel_all(&mut self, outcome: &RithmicRequestOutcome) -> Result<(), SessionEnd> {
+        let Some(account) = self.pending.cancel_all_answered() else {
+            return Ok(());
+        };
+        let Some(reason) = refusal(outcome) else {
+            return Ok(());
+        };
+        diagnostic!("Aeris broker venue: Rithmic refused to cancel all orders: {reason}");
+        self.refuse(&account, VenueOperation::CancelAll, reason)
     }
 
     fn on_route(&mut self, route: RithmicTradeRoute) {
@@ -367,7 +370,7 @@ impl Session<'_> {
     }
 
     /// Reports the reconcile's snapshot once both of its answers arrived. A snapshot that
-    /// cannot be reported leaves the account unreconciled, so the owner keeps it closed.
+    /// cannot be reported is a refused reconcile, so the owner keeps the account closed.
     fn finish_reconcile(&mut self) -> Result<(), SessionEnd> {
         if !self.reconcile.as_ref().is_some_and(Reconcile::complete) {
             return Ok(());
@@ -380,7 +383,7 @@ impl Session<'_> {
             Ok(snapshot) => self.emit(&account, VenueUpdate::Snapshot(snapshot)),
             Err(reason) => {
                 diagnostic!("Aeris broker venue could not reconcile an account: {reason}");
-                Ok(())
+                self.refuse(&account, VenueOperation::Reconcile, reason)
             }
         }
     }

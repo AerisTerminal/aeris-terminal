@@ -216,6 +216,7 @@ impl TradingCore {
             planned_legs: self.owned_planned_legs(),
             protective_orders: self.protection_order_views(),
             recovery_notices: self.recovery_notices.clone(),
+            venue_notices: self.broker_sync.notices(),
         })
     }
 

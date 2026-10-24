@@ -1878,11 +1878,12 @@ fn replay_failed_broker_submit_does_not_publish_reserved_request() {
             starting_equity: None,
         })
         .expect("demo account");
-    let (_, requests) = harness.command(attach_venue).expect("attach venue");
+    let (generation, requests) = harness.command(attach_venue).expect("attach venue");
     assert!(matches!(
         requests.try_recv(),
         Ok(crate::venue::VenueRequest::Reconcile { .. })
     ));
+    settle_replay_reconcile(&mut harness, generation);
     let mut order = market_order("broker-commit", OrderSide::Buy, 1, 1_000);
     order.account_id = account_id;
     let before = harness.snapshot().expect("before");
@@ -1896,11 +1897,12 @@ fn replay_failed_broker_submit_does_not_publish_reserved_request() {
     harness.restart().expect("restart after failure");
     assert_eq!(harness.snapshot().expect("disk"), before);
     // The old receiver belongs to the retired generation. Reattach before replaying.
-    let (_, next) = harness.command(attach_venue).expect("new generation");
+    let (generation, next) = harness.command(attach_venue).expect("new generation");
     assert!(matches!(
         next.try_recv(),
         Ok(crate::venue::VenueRequest::Reconcile { .. })
     ));
+    settle_replay_reconcile(&mut harness, generation);
     harness.place_order(order).expect("replay once");
     assert!(matches!(
         next.try_recv(),
@@ -1937,6 +1939,7 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         requests.try_recv(),
         Ok(crate::venue::VenueRequest::Reconcile { .. })
     ));
+    settle_replay_reconcile(&mut harness, generation);
     let mut request = market_order("broker-rollback", OrderSide::Buy, 1, 1_000);
     request.account_id = account_id;
     let placed = harness.place_order(request).expect("place");
@@ -1979,6 +1982,7 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         VenueUpdate::Fill(BrokerFill {
             broker_deal_id: "d1".into(),
             broker_order_id: "501".into(),
+            client_order_id: None,
             instrument_id: placed.instrument_id,
             side: placed.side,
             price: FixedPoint::try_new(9_000, 2).expect("price"),
@@ -2005,6 +2009,20 @@ fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
         .venue_event(&event(generation, deal.update))
         .expect("replayed deal");
     assert_eq!(harness.snapshot().expect("idempotent replay"), committed);
+}
+
+/// Answers the attach-time reconcile of the sanitized broker account with an empty snapshot.
+fn settle_replay_reconcile(harness: &mut ReplayHarness, generation: u64) {
+    harness
+        .venue_event(&crate::venue::VenueEvent {
+            session_generation: generation,
+            broker_account: "sanitized".into(),
+            update: crate::venue::VenueUpdate::Snapshot(
+                aeris_trading::venue::VenueSnapshot::default(),
+            ),
+            observed_unix_nanos: 5_000,
+        })
+        .expect("reconcile snapshot");
 }
 
 fn attach_venue(reply: Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>) -> Command {

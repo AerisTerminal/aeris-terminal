@@ -136,9 +136,18 @@ const fn reported_side(side: RithmicReportedSide) -> OrderSide {
     }
 }
 
-/// The broker's view of one order, or `None` when Rithmic left out a field it needs. A
-/// bracket exit names its entry as its original basket and is reported without a client
-/// order id, so it can never be mistaken for the entry it derives from.
+/// The client order id an order echoes. A bracket exit names its entry as its original
+/// basket and carries the entry's user tag, so it is reported without one and can never
+/// be mistaken for the entry it derives from.
+fn client_order_id(details: &RithmicOrderDetails) -> Option<String> {
+    details
+        .original_basket_id
+        .is_none()
+        .then(|| details.user_tag.clone())
+        .flatten()
+}
+
+/// The broker's view of one order, or `None` when Rithmic left out a field it needs.
 pub(super) fn broker_order(details: &RithmicOrderDetails) -> Option<BrokerOrder> {
     let kind = match details.price_type {
         Some(RithmicReportedPriceType::Market) => BrokerOrderKind::Market,
@@ -152,11 +161,7 @@ pub(super) fn broker_order(details: &RithmicOrderDetails) -> Option<BrokerOrder>
     };
     Some(BrokerOrder {
         broker_order_id: details.basket_id.clone(),
-        client_order_id: details
-            .original_basket_id
-            .is_none()
-            .then(|| details.user_tag.clone())
-            .flatten(),
+        client_order_id: client_order_id(details),
         instrument_id: instrument(&details.exchange, &details.symbol)?,
         side: reported_side(details.side?),
         kind,
@@ -264,6 +269,7 @@ pub(super) fn broker_fill(
     Some(BrokerFill {
         broker_deal_id: format!("{}:{}", order.basket_id, fill.fill_id),
         broker_order_id: order.basket_id.clone(),
+        client_order_id: client_order_id(order),
         instrument_id: instrument(&order.exchange, &order.symbol)?,
         side: reported_side(order.side?),
         price: fixed(fill.price)?,
@@ -497,6 +503,7 @@ mod tests {
         };
         let fill = broker_fill(&notification, 99).expect("fill");
         assert_eq!(fill.broker_deal_id, "basket-1:7");
+        assert_eq!(fill.client_order_id.as_deref(), Some("client-1"));
         assert_eq!(fill.price, point(500_025, 2));
         assert_eq!(fill.quantity, point(1, 0));
         assert_eq!(fill.executed_unix_nanos, 2_000_005_000);
@@ -505,6 +512,19 @@ mod tests {
             Some(BrokerOrderState::Filled)
         );
         assert!(!snapshot_working(None, Some(&notification)));
+
+        let exit = RithmicExchangeOrderNotification {
+            order: RithmicOrderDetails {
+                original_basket_id: Some("entry".into()),
+                ..notification.order.clone()
+            },
+            ..notification
+        };
+        assert_eq!(
+            broker_fill(&exit, 99).expect("exit fill").client_order_id,
+            None,
+            "an exit's deal never claims its entry's id"
+        );
     }
 
     #[test]

@@ -355,6 +355,9 @@ pub struct BrokerOrder {
 pub struct BrokerFill {
     pub broker_deal_id: String,
     pub broker_order_id: String,
+    /// The client order id the broker echoes on the deal's order, as on [`BrokerOrder`]. A
+    /// deal can arrive before the order's first report, so it binds the owner order itself.
+    pub client_order_id: Option<String>,
     pub instrument_id: InstrumentId,
     pub side: OrderSide,
     pub price: FixedPoint,
@@ -380,6 +383,36 @@ pub struct VenuePosition {
 pub struct VenueSnapshot {
     pub orders: Vec<BrokerOrder>,
     pub positions: Vec<VenuePosition>,
+}
+
+/// A venue request whose outcome the owner must learn even though it names no order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VenueOperation {
+    /// A place, amend or cancel of this client order.
+    OrderCommand {
+        client_order_id: ClientOrderId,
+    },
+    CancelAll,
+    ExitPosition {
+        instrument_id: InstrumentId,
+    },
+    MoveBracketLevel {
+        entry_broker_order_id: String,
+        side: BracketSide,
+        current_ticks: i32,
+        new_ticks: i32,
+    },
+    Reconcile,
+}
+
+/// Why a venue operation did not complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationFailure {
+    /// The broker or the relay refused it; nothing changed at the venue.
+    Refused,
+    /// No answer arrived within the relay's deadline; the venue state is uncertain until the
+    /// account is reconciled. The relay never resubmits such a request.
+    Unanswered,
 }
 
 /// One change reported by a broker venue.
@@ -410,6 +443,13 @@ pub enum VenueUpdate {
         balance: FixedPoint,
     },
     Snapshot(VenueSnapshot),
+    /// A request that did not complete. A refused order command is reported as
+    /// [`VenueUpdate::Refused`]; every other failure is reported here.
+    OperationFailed {
+        operation: VenueOperation,
+        failure: OperationFailure,
+        reason: String,
+    },
 }
 
 /// One update for one broker account, stamped with the relay session that saw it.
