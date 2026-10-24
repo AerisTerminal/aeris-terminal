@@ -2113,6 +2113,14 @@ Status: pending
     `InstrumentDescriptor` or remove the provider-specific snapshot parser.
     Descriptor projection, parser deletion, neutrality enforcement and GUI
     evidence remain open; M6.7 is unchecked.
+  - Part 7 (2026-10-24): added `desktop_source_is_provider_neutral` to
+    `aeris_naming_check`. Its production-source scan covers desktop and chart
+    integration, recognizes provider names and ID forms case-insensitively,
+    rejects new files, and fails on stale or duplicate reasoned exceptions.
+    Positive, negative, and stale-entry tests cover the rule. This is an
+    interim file-scoped allow-list for 24 files, not VAL-DSK-024's final
+    assets-only allow-list; descriptor propagation, parser removal, rendering,
+    source cleanup and guarded GUI remain open. M6.7 is unchecked.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed

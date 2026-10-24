@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -18,6 +19,115 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "tmp",
 ];
 const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md", "themes.md"];
+
+/// Temporary, file-scoped exceptions for provider presentation still being moved
+/// behind runtime descriptors in M6.7-M6.9. Each entry must disappear when its
+/// last provider identity disappears; new files cannot silently gain identities.
+const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
+    (
+        "apps/desktop/src/assets.rs",
+        "registered provider logo assets",
+    ),
+    (
+        "apps/desktop/src/components/accounts_panel.rs",
+        "legacy provider account labels",
+    ),
+    (
+        "apps/desktop/src/components/bottom_panel.rs",
+        "legacy provider panel labels",
+    ),
+    (
+        "apps/desktop/src/components/chart_context_menus.rs",
+        "legacy provider chart actions",
+    ),
+    (
+        "apps/desktop/src/components/chart_toolbar_menus.rs",
+        "legacy provider chart actions",
+    ),
+    (
+        "apps/desktop/src/components/order_ticket.rs",
+        "legacy provider ticket labels",
+    ),
+    (
+        "apps/desktop/src/components/platform_menu.rs",
+        "legacy provider menu actions",
+    ),
+    (
+        "apps/desktop/src/components/rithmic_login.rs",
+        "legacy credential form awaiting M6.9",
+    ),
+    (
+        "apps/desktop/src/components/terminal_chrome.rs",
+        "legacy provider chrome",
+    ),
+    (
+        "apps/desktop/src/components/terminal_view.rs",
+        "legacy provider view",
+    ),
+    (
+        "apps/desktop/src/desktop.rs",
+        "legacy provider connection and summary routes",
+    ),
+    (
+        "apps/desktop/src/desktop/local_state.rs",
+        "legacy provider workspace fixture",
+    ),
+    (
+        "apps/desktop/src/desktop/test_support/pane_harness.rs",
+        "diagnostic pane fixtures",
+    ),
+    (
+        "apps/desktop/src/desktop/test_support/provider_instruments.rs",
+        "diagnostic provider fixtures",
+    ),
+    (
+        "apps/desktop/src/desktop/workspace_surface.rs",
+        "legacy provider pane controls",
+    ),
+    (
+        "apps/desktop/src/desktop/workspace_tabs.rs",
+        "legacy provider tab label",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker.rs",
+        "legacy provider bridge fixtures",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker/replay_conversion.rs",
+        "legacy snapshot identity parser",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker/runtime.rs",
+        "legacy provider selection tests",
+    ),
+    (
+        "apps/desktop/src/market_worker.rs",
+        "legacy provider worker fixtures",
+    ),
+    (
+        "apps/desktop/src/readiness_conformance.rs",
+        "legacy provider diagnostic fixture",
+    ),
+    (
+        "apps/desktop/src/rithmic_shell.rs",
+        "legacy provider connection shell awaiting M6.9",
+    ),
+    (
+        "crates/ui/chart_integration/src/engine_bridge.rs",
+        "legacy provider chart fixture",
+    ),
+    (
+        "crates/ui/chart_integration/src/view.rs",
+        "legacy provider chart fixture",
+    ),
+];
+
+fn desktop_provider_identity(source: &str) -> bool {
+    let production = production_source_prefix(source).to_ascii_lowercase();
+    ["rithmic", "tastytrade", "ctrader", "hyperliquid"]
+        .iter()
+        .any(|identity| production.contains(identity))
+}
 
 fn has_process_global_desktop_trading(source: &str) -> bool {
     let production = production_source_prefix(source);
@@ -192,6 +302,13 @@ fn main() -> ExitCode {
         eprintln!("failed to inspect desktop quote boundary: {error}");
         return ExitCode::FAILURE;
     }
+    match desktop_provider_violations(&root) {
+        Ok(found) => violations.extend(found),
+        Err(error) => {
+            eprintln!("failed to inspect desktop provider boundary: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     for path in [
         "crates/market_runtime/src/market_service/coordinator.rs",
         "crates/market_runtime/src/market_service/realtime.rs",
@@ -274,6 +391,49 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(violations)
+}
+
+fn desktop_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut observed = BTreeSet::new();
+    for directory in ["apps/desktop/src", "crates/ui/chart_integration/src"] {
+        collect_desktop_provider_sources(root, &root.join(directory), &mut observed)?;
+    }
+    let mut allowed = BTreeSet::new();
+    let mut violations = Vec::new();
+    for (path, reason) in DESKTOP_PROVIDER_ALLOWLIST {
+        if reason.trim().is_empty()
+            || !allowed.insert((*path).to_string())
+            || !observed.contains(*path)
+        {
+            violations.push(PathBuf::from(path));
+        }
+    }
+    for path in observed.difference(&allowed) {
+        violations.push(PathBuf::from(path));
+    }
+    Ok(violations)
+}
+
+fn collect_desktop_provider_sources(
+    root: &Path,
+    directory: &Path,
+    observed: &mut BTreeSet<String>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_desktop_provider_sources(root, &path, observed)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            && desktop_provider_identity(&fs::read_to_string(&path)?)
+        {
+            observed.insert(
+                relative_to(root, &path)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn violates_desktop_quote_boundary(path: &str, source: &str) -> bool {
@@ -759,6 +919,14 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 mod tests {
     use super::production_source_prefix as production_prefix;
 
+    fn provider_allowlist_matches<'a>(
+        allowed: impl IntoIterator<Item = &'a str>,
+        observed: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        allowed.into_iter().collect::<BTreeSet<_>>()
+            == observed.into_iter().collect::<BTreeSet<_>>()
+    }
+
     #[test]
     fn public_provider_event_requires_typed_epoch_even_after_test_module() {
         assert!(super::public_provider_event_has_raw_generation(
@@ -990,6 +1158,86 @@ mod tests {
         assert!(production.contains("fn before()"));
         assert!(production.contains("fn after() { forbidden(); }"));
         assert!(!production.contains("fn hidden()"));
+    }
+
+    #[test]
+    fn desktop_provider_neutrality_accepts_descriptor_driven_source() {
+        assert!(!super::desktop_provider_identity(
+            "fn label(descriptor: &ProviderDescriptor) -> &str { descriptor.display_name }\n\
+             #[cfg(test)] mod tests { const FIXTURE: &str = \"rithmic-test:\"; }\n"
+        ));
+    }
+
+    #[test]
+    fn desktop_provider_neutrality_rejects_new_identity_and_id_formats() {
+        for identity in [
+            "RITHMIC",
+            "TastyTrade",
+            "cTrader",
+            "HyperLiquid",
+            "instrument:rithmic:EX:SYM",
+            "rithmic-test:contract",
+            "hyperliquid:perp:BTC",
+        ] {
+            assert!(
+                super::desktop_provider_identity(&format!(
+                    "#[cfg(test)] mod tests {{}}\nfn provider() -> &'static str {{ \"{identity}\" }}"
+                )),
+                "{identity} must not be introduced into provider-neutral production"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_provider_neutrality_rejects_stale_allowlist_entries() {
+        assert!(!provider_allowlist_matches(
+            ["apps/desktop/src/old_provider.rs"],
+            std::iter::empty(),
+        ));
+        assert!(provider_allowlist_matches(
+            ["apps/desktop/src/assets.rs"],
+            ["apps/desktop/src/assets.rs"],
+        ));
+    }
+
+    #[test]
+    fn desktop_source_is_provider_neutral() {
+        let expected: BTreeSet<_> = super::DESKTOP_PROVIDER_ALLOWLIST
+            .iter()
+            .map(|(path, reason)| {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{path} needs an exception reason"
+                );
+                *path
+            })
+            .collect();
+        assert_eq!(
+            expected.len(),
+            super::DESKTOP_PROVIDER_ALLOWLIST.len(),
+            "duplicate provider-neutrality exception"
+        );
+        let mut observed = BTreeSet::new();
+        for root in ["apps/desktop/src", "crates/ui/chart_integration/src"] {
+            for path in production_sources_under(root) {
+                let source = fs::read_to_string(&path).expect("source");
+                if super::desktop_provider_identity(&source) {
+                    let relative = relative_string(&path);
+                    assert!(
+                        expected.contains(relative.as_str()),
+                        "{relative} has an unreviewed provider identity"
+                    );
+                    observed.insert(relative);
+                }
+            }
+        }
+        assert!(
+            provider_allowlist_matches(
+                expected.iter().copied(),
+                observed.iter().map(String::as_str),
+            ),
+            "provider-neutrality allow-list has an unreviewed or stale entry: expected {expected:?}, observed {observed:?}"
+        );
     }
 
     #[test]
