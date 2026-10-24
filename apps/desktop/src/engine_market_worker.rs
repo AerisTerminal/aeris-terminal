@@ -1555,8 +1555,14 @@ mod tests {
             4,
             false,
         );
-        let snapshot =
-            replay_runtime_snapshot(&publication, None, 1_000_000_000).expect("snapshot converts");
+        let snapshot = replay_runtime_snapshot(
+            &publication,
+            fixture_futures_contracts()
+                .first()
+                .expect("selected contract"),
+            1_000_000_000,
+        )
+        .expect("snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 2);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.evidence().session_generation, 8);
@@ -1598,7 +1604,7 @@ mod tests {
             1,
             false,
         );
-        assert!(replay_runtime_snapshot(&snapshot, Some(&selected), 1).is_ok());
+        assert!(replay_runtime_snapshot(&snapshot, &selected, 1).is_ok());
         for changed in ["provider", "instrument", "entitlement"] {
             let mut other = selected.clone();
             match changed {
@@ -1608,7 +1614,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                replay_runtime_snapshot(&snapshot, Some(&other), 1).is_err(),
+                replay_runtime_snapshot(&snapshot, &other, 1).is_err(),
                 "{changed} mismatch must reject the snapshot"
             );
         }
@@ -2243,7 +2249,7 @@ mod tests {
         );
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
-        let (chart, delivered) = replay_into_a_chart(&messages);
+        let (chart, delivered) = replay_into_a_chart(&messages, &fixture_futures_contract("MNQ"));
         assert_eq!(delivered, vec![1, 3]);
         assert!(
             chart
@@ -2316,7 +2322,7 @@ mod tests {
 
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
-        let (chart, delivered) = replay_into_a_chart(&messages);
+        let (chart, delivered) = replay_into_a_chart(&messages, &product);
 
         assert_eq!(
             delivered,
@@ -2339,7 +2345,10 @@ mod tests {
     /// what it was handed before painting, so the drain is replayed the same way
     /// here: the bridge queue is bounded, and a host that never applies would
     /// fill it.
-    fn replay_into_a_chart(messages: &[PaneProjectionEvent]) -> (Option<AerisChartView>, Vec<u64>) {
+    fn replay_into_a_chart(
+        messages: &[PaneProjectionEvent],
+        selected: &InstallProviderInstrument,
+    ) -> (Option<AerisChartView>, Vec<u64>) {
         const MARKET_MESSAGES_PER_FRAME: usize = 64;
         let mut chart = None;
         let mut delivered = Vec::new();
@@ -2357,7 +2366,7 @@ mod tests {
                 };
                 let update = match &event.value {
                     MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
-                        replay_runtime_snapshot(snapshot, None, *received_unix_nanos)
+                        replay_runtime_snapshot(snapshot, selected, *received_unix_nanos)
                             .map(ReplayStreamUpdate::Snapshot)
                     }
                     MarketRuntimeEvent::SeriesUpdate(tail) => {
@@ -3351,11 +3360,11 @@ mod tests {
             1,
             false,
         );
-        let snapshot = replay_runtime_snapshot(&publication, None, 1_000_000_000)
+        let snapshot = replay_runtime_snapshot(&publication, &product, 1_000_000_000)
             .expect("HL snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 8);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
-        assert_eq!(snapshot.instrument().symbol, "BTC");
+        assert_eq!(snapshot.instrument().symbol, product.display_symbol);
     }
 
     #[test]

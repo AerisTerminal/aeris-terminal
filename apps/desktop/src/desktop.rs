@@ -3504,7 +3504,7 @@ impl MarketSummaryEntry {
             {
                 engine_market_worker::replay_runtime_snapshot(
                     &snapshot,
-                    Some(&self.instrument),
+                    &self.instrument,
                     received_unix_nanos,
                 )
                 .map(ReplayStreamUpdate::Snapshot)

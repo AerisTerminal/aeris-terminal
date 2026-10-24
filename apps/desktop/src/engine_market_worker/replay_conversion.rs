@@ -11,22 +11,22 @@ use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
-    installed: Option<&InstallProviderInstrument>,
+    installed: &InstallProviderInstrument,
     received: i64,
 ) -> Result<ReplaySnapshot, String> {
     let snapshot = publication.snapshot.as_ref();
     let series = &snapshot.series;
-    if let Some(installed) = installed
-        && (series.provider_id != installed.provider
-            || series.instrument_id != installed.instrument_id
-            || series.entitlement_id != installed.entitlement_id)
+    if series.provider_id != installed.provider
+        || series.instrument_id != installed.instrument_id
+        || series.entitlement_id != installed.entitlement_id
     {
         return Err("engine snapshot does not match the selected instrument".to_string());
     }
     let (venue, symbol, asset_class, provider_currency) = snapshot_instrument(series)?;
     // Provider-reported contract terms are more precise than the id's default.
     let trading_currency = installed
-        .and_then(|product| product.contract_metadata.as_deref())
+        .contract_metadata
+        .as_deref()
         .and_then(|terms| terms.currency.clone())
         .filter(|currency| !currency.trim().is_empty())
         .unwrap_or(provider_currency);
@@ -35,12 +35,16 @@ pub(crate) fn replay_runtime_snapshot(
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_version),
         asset_class,
-        symbol: installed.map_or(symbol, |product| product.display_symbol.clone()),
+        symbol: if installed.display_symbol.is_empty() {
+            symbol
+        } else {
+            installed.display_symbol.clone()
+        },
         venue_id: venue,
         trading_currency,
         precision: InstrumentPrecision::try_new(snapshot.price_scale, snapshot.quantity_scale)
             .map_err(|error| error.to_string())?,
-        price_increment: installed.and_then(|product| product.price_increment),
+        price_increment: installed.price_increment,
         lifecycle: InstrumentLifecycle::Active,
         contract: None,
     };

@@ -103,7 +103,7 @@ pub(super) fn complete_pending_recovery(
                 && snapshot.generation.0.get() == endpoint.active_generation
                 && snapshot.snapshot.provider_generation.0.get() >= product.session_generation =>
         {
-            let replay = replay_runtime_snapshot(snapshot, Some(product), received_unix_nanos)?;
+            let replay = replay_runtime_snapshot(snapshot, product, received_unix_nanos)?;
             // Recovery needs a covering bar. Previously the duplicate
             // MarketGeneration constructor rejected this empty case.
             if replay.bars().is_empty() {

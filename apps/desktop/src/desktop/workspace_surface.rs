@@ -3738,10 +3738,13 @@ impl WorkspaceSurface {
                 if !self.chart_pane_controller.accept_publication(generation) {
                     return;
                 }
+                let Some(product) = self.product.as_ref() else {
+                    return;
+                };
                 let provider = snapshot.snapshot.series.provider_id.clone();
                 let replay = engine_market_worker::replay_runtime_snapshot(
                     &snapshot,
-                    self.product.as_ref(),
+                    product,
                     received_unix_nanos,
                 )
                 .map(ReplayStreamUpdate::Snapshot);
@@ -3850,9 +3853,12 @@ impl WorkspaceSurface {
         {
             return;
         }
+        let Some(product) = self.product.as_ref() else {
+            return;
+        };
         let replay = match engine_market_worker::replay_runtime_snapshot(
             &snapshot,
-            self.product.as_ref(),
+            product,
             received_unix_nanos,
         ) {
             Ok(replay) => replay,

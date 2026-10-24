@@ -2103,6 +2103,16 @@ Status: pending
     runtime selection descriptor is retained through pane and summary
     projection; descriptor rendering, neutrality enforcement and guarded GUI
     evidence remain open. M6.7 is unchecked.
+  - Part 6 (2026-10-24): replay snapshot conversion now requires a selected
+    instrument at every call site. The pane refuses snapshots before its
+    initial selection is adopted, and the bounded chart-bridge fixtures pass
+    the selected instrument instead of bypassing identity checks with `None`.
+    The replay identity regression still rejects provider, instrument and
+    entitlement mismatches; the public-instrument conversion now uses its
+    selected display symbol. This does not yet propagate the original runtime
+    `InstrumentDescriptor` or remove the provider-specific snapshot parser.
+    Descriptor projection, parser deletion, neutrality enforcement and GUI
+    evidence remain open; M6.7 is unchecked.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
