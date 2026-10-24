@@ -704,7 +704,6 @@ impl TerminalApp {
         let button = Button::new("layout_menu", &theme)
             .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
-            .icon(header_icon(HugeIcon::Template))
             .label(workspace.label.clone())
             .children(unsaved.then(|| unsaved_layout_dot(&theme)))
             .caret(header_icon(HugeIcon::ChevronDown))

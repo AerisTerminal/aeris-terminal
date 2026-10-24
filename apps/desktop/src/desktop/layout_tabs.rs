@@ -27,7 +27,7 @@ pub(super) fn restored_layouts(
     for workspace in workspaces {
         let snapshot = normalized_layout_tab(&workspace_tab_state(workspace, cx));
         if library.get(workspace.saved_layout_id).is_none() {
-            let name = library.unique_name(&workspace.label);
+            let name = library.unique_name(layout_library::UNTITLED_LAYOUT_NAME);
             match library.create(&name, &snapshot, Vec::new(), now_unix_ms) {
                 Ok(layout_id) => {
                     workspace.saved_layout_id = layout_id;

@@ -31,7 +31,7 @@ use super::{
     timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
     timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-    workspace_label, workspace_maximize_transition, workspace_split_ratio, workspace_switch,
+    workspace_maximize_transition, workspace_split_ratio, workspace_switch,
     wrapped_workspace_index,
 };
 #[cfg(feature = "diagnostics")]
@@ -3112,8 +3112,6 @@ fn workspace_tabs_switch_one_surface_and_preserve_stable_labels() {
     assert_eq!(wrapped_workspace_index(1, 3, -1), Some(0));
     assert_eq!(wrapped_workspace_index(1, 3, 1), Some(2));
     assert_eq!(wrapped_workspace_index(0, 0, 1), None);
-    assert_eq!(workspace_label(0), "Workspace 1");
-    assert_eq!(workspace_label(7), "Workspace 8");
 }
 
 #[test]

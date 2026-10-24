@@ -577,7 +577,7 @@ fn bound_library_drawing_bytes(layouts: &mut [WorkspaceSavedLayoutState], open: 
 }
 
 /// Repairs the saved layouts of a loaded workspace and gives every tab one: a tab saved before
-/// the layout library becomes a layout with autosave on that holds its panes' drawings. Pane
+/// the layout library becomes an untitled layout with autosave on that holds its panes' drawings. Pane
 /// drawings are cleared afterwards; the layout owns them. Panes must already be sanitized.
 pub(super) fn sanitize_saved_layouts(workspace: &mut WorkspaceState) {
     let open = |tabs: &[WorkspaceTabState]| {
@@ -606,7 +606,7 @@ pub(super) fn sanitize_saved_layouts(workspace: &mut WorkspaceState) {
             tab.label.clone_from(&layout.name);
             continue;
         }
-        let name = library.unique_name(&tab.label);
+        let name = library.unique_name(UNTITLED_LAYOUT_NAME);
         let layout_id = library.next_id();
         library.layouts.push(Arc::new(WorkspaceSavedLayoutState {
             layout_id,

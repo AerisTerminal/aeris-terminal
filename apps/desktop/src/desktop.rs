@@ -5359,10 +5359,6 @@ fn wrapped_workspace_index(
     }
 }
 
-fn workspace_label(index: usize) -> String {
-    format!("Workspace {}", index + 1)
-}
-
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
     workspaces
         .iter()

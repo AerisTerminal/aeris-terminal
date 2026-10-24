@@ -1186,9 +1186,12 @@ mod tests {
         let tab = &restored.workspace_tabs[0];
         assert_eq!(
             (tab.saved_layout_id, tab.label.as_str()),
-            (layout.layout_id, "Execution")
+            (layout.layout_id, "Untitled")
         );
-        assert_eq!(layout.name, "Execution");
+        assert_eq!(
+            layout.name, "Untitled",
+            "a tab's pre-layout label was never shown, so it does not name its layout"
+        );
         assert!(
             layout.autosave,
             "a migrated tab keeps saving on every change"

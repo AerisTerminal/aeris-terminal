@@ -991,8 +991,8 @@ fn workspace_add_button(
         })
 }
 
-/// A tab names the layout it shows, marked while the layout has unsaved changes, with the
-/// active chart's exchange mark and daily change.
+/// A tab shows its active chart's exchange mark, instrument and daily change, marked while
+/// its layout has unsaved changes.
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
     unsaved: bool,
@@ -1001,7 +1001,7 @@ fn workspace_tab_content(
     cx: &App,
 ) -> (String, String, Div, Option<String>) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
-    let label = workspace.label.clone();
+    let label = terminal_instrument_label(surface);
     let summary = (!surface.showing_superseded_series())
         .then(|| {
             surface.product.as_ref().and_then(|instrument| {
@@ -1414,7 +1414,7 @@ pub(super) fn terminal_root(
         TerminalShellInit {
             workspaces: vec![WorkspaceTab {
                 id: 1,
-                label: workspace_label(0),
+                label: layout_library::UNTITLED_LAYOUT_NAME.to_string(),
                 saved_layout_id: 0,
                 autosaved_snapshot: None,
                 panes: vec![WorkspacePane {
