@@ -4982,15 +4982,25 @@ fn unfinished_empty_text_edit_is_removed_on_finish() {
 }
 
 #[test]
-fn brush_capture_commits_on_release_and_returns_to_cursor() {
-    let mut chart = interactive_chart();
-    chart.set_drawing_tool(Some(DrawingKind::Brush));
+fn freehand_tools_stay_armed_between_strokes_until_a_right_click() {
+    for kind in [DrawingKind::Brush, DrawingKind::Highlighter] {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(Some(kind));
 
-    drag(&mut chart, (240.0, 180.0), (320.0, 240.0));
+        drag(&mut chart, (240.0, 180.0), (320.0, 240.0));
+        drag(&mut chart, (340.0, 200.0), (420.0, 260.0));
 
-    assert_eq!(chart.drawing_count(), 1);
-    assert_eq!(chart.drawing_tool(), None);
-    assert!(!chart.engine.brush_create_active());
+        assert_eq!(
+            chart.drawing_count(),
+            2,
+            "{kind:?} draws stroke after stroke"
+        );
+        assert_eq!(chart.drawing_tool(), Some(kind));
+        assert!(!chart.engine.brush_create_active());
+
+        chart.engine.input_context_menu(300.0, 200.0);
+        assert_eq!(chart.drawing_tool(), None, "a right click disarms {kind:?}");
+    }
 }
 
 #[test]
