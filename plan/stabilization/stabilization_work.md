@@ -2003,6 +2003,14 @@ Status: pending
     registration and sanitized removal notices. Recovery and selection
     outcomes, transitional names and literal VAL-DSK-021/022 checks remain;
     M6.6 stays unchecked.
+- Part 8b3g (2026-10-24): initial selection terms now use the same
+  bounded local command outcome projection as recovery and other local
+  replies, rather than a separate mailbox arm. The pane still accepts only
+  the exact pending initial generation; duplicate and retired descriptors
+  remain rejected. A mixed FIFO/control-reserve test and the restored
+  four-pane/retired-descriptor GPUI regressions cover the route. Engine and
+  catalog selection outcomes, metadata-bearing runtime entries and the
+  transitional message/channel names remain; M6.6 and VAL-DSK-021/022 stay open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
@@ -2553,6 +2561,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 M6.6 Part 8b3d refactor(desktop): local catalog and endpoint failures now use one explicitly scoped projection; app failures remain app-scoped and selection failures keep the exact generation fence. A mixed-scope FIFO regression and existing pane redaction/fencing tests cover the change. Recovery, alert and study-removal outcomes and final bridge deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 - 2026-10-24 M6.6 Part 8b3e refactor(desktop): four local command-result mailbox variants share one bounded outcome entry; original request and study fences remain, and unused study-removal error text is not queued. FIFO and pane notice/fence regressions cover the route. Recovery/selection outcomes and final bridge deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 - 2026-10-24 M6.6 Part 8b3f refactor(desktop): superseded and failed local recovery outcomes now share the bounded local command-result projection instead of a separate mailbox arm. The pane still applies the exact selection lifecycle and recovery request fences, including retired replies, while the covering snapshot stays in its coordinator envelope. Mixed local-outcome FIFO, backpressure and GPUI retired-recovery regressions cover the route. Selection outcomes, final bridge type/channel deletion and VAL-DSK-021/022 remain; M6.6 stays unchecked.
+- 2026-10-24 M6.6 Part 8b3g refactor(desktop): initial selection terms share the bounded local command outcome route; exact pending-generation acceptance, duplicate rejection, four-pane restored replies and the FIFO/control reserve are retained. Engine/catalog outcomes, metadata-bearing runtime entries and final message/channel deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 
 ## 7. Known gaps / deferred
 

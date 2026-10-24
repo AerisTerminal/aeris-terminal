@@ -1570,7 +1570,12 @@ mod tests {
         runtime::apply_selection_outcome(&mut record, outcome()).expect("duplicate reply");
         assert!(matches!(
             worker.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::SelectedInstrument { generation, instrument }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                    generation,
+                    instrument
+                }
+            )]
                 if *generation == pane.generation && instrument == expected
         ));
         assert!(!record.initial_selection_pending);

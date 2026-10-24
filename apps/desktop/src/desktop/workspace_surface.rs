@@ -4073,10 +4073,6 @@ impl WorkspaceSurface {
                     self.reject_pending_engine_selection(sequence, cx);
                 }
             }
-            MarketWorkerMessage::SelectedInstrument {
-                generation,
-                instrument,
-            } => self.apply_selected_instrument(generation, instrument),
             MarketWorkerMessage::CatalogSwitchOutcome {
                 sequence,
                 browser_generation,
@@ -4122,6 +4118,10 @@ impl WorkspaceSurface {
     ) {
         use aeris_desktop::market_worker::LocalCommandOutcome;
         match outcome {
+            LocalCommandOutcome::SelectedInstrument {
+                generation,
+                instrument,
+            } => self.apply_selected_instrument(generation, instrument),
             LocalCommandOutcome::Recovery {
                 generation,
                 request_id,

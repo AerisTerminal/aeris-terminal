@@ -318,10 +318,12 @@ fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAp
     for (harness, product, interval) in &mut panes {
         harness
             .publications
-            .send(MarketWorkerMessage::SelectedInstrument {
-                generation: 1,
-                instrument: product.clone(),
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                    generation: 1,
+                    instrument: product.clone(),
+                },
+            ))
             .expect("restored selection reply enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -330,10 +332,12 @@ fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAp
         duplicate.price_increment = Some(999);
         harness
             .publications
-            .send(MarketWorkerMessage::SelectedInstrument {
-                generation: 1,
-                instrument: duplicate,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                    generation: 1,
+                    instrument: duplicate,
+                },
+            ))
             .expect("duplicate reply enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2485,10 +2489,12 @@ fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
         }
         harness
             .publications
-            .send(MarketWorkerMessage::SelectedInstrument {
-                generation: sequence.saturating_sub(1),
-                instrument: stale.clone(),
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                    generation: sequence.saturating_sub(1),
+                    instrument: stale.clone(),
+                },
+            ))
             .expect("retired descriptor enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(

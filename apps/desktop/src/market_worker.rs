@@ -213,6 +213,11 @@ pub enum LocalFailureScope {
 /// Results of local pane commands, fenced by the request sequence or study identity
 /// at the GPUI owner rather than projected as coordinator publications.
 pub enum LocalCommandOutcome {
+    /// Initial selection terms, accepted only for the matching pending generation.
+    SelectedInstrument {
+        generation: u64,
+        instrument: InstallProviderInstrument,
+    },
     /// A locally completed recovery request, fenced by its selection and request identity.
     Recovery {
         generation: u64,
@@ -268,10 +273,6 @@ pub enum MarketWorkerMessage {
     EngineSelectionOutcome {
         sequence: u64,
         succeeded: bool,
-    },
-    SelectedInstrument {
-        generation: u64,
-        instrument: InstallProviderInstrument,
     },
     /// Catalog selection reply, fenced by both pane request and browser generation.
     CatalogSwitchOutcome {
@@ -2080,6 +2081,17 @@ mod tests {
                 },
             ))
             .expect("retired recovery enters control reserve");
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                LocalCommandOutcome::SelectedInstrument {
+                    generation: 12,
+                    instrument: InstallProviderInstrument {
+                        display_symbol: "ETH".into(),
+                        ..InstallProviderInstrument::default()
+                    },
+                },
+            ))
+            .expect("initial selection enters control reserve");
         let (first, _) = receiver.drain_up_to(2);
         assert!(matches!(
             first.as_slice(),
@@ -2112,7 +2124,11 @@ mod tests {
                     request_id: 11,
                     failure: MarketRecoveryFailure::Superseded,
                 }),
+                MarketWorkerMessage::LocalCommandOutcome(
+                    LocalCommandOutcome::SelectedInstrument { generation: 12, instrument }
+                ),
             ] if *reinitialized == study_id && *removed == study_id
+                && instrument.display_symbol == "ETH"
         ));
     }
 

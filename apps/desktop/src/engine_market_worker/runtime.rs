@@ -885,10 +885,12 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::SelectedInstrument {
-                            generation: generation.0.get(),
-                            instrument: selected,
-                        })
+                        .send(MarketWorkerMessage::LocalCommandOutcome(
+                            aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                                generation: generation.0.get(),
+                                instrument: selected,
+                            },
+                        ))
                         .map_err(|error| error.to_string())?;
                 }
                 record.endpoint.active_generation = generation.0.get();
@@ -1165,7 +1167,12 @@ mod tests {
         .expect("duplicate initial outcome");
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::SelectedInstrument { generation: 7, .. }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                    generation: 7,
+                    ..
+                }
+            )]
         ));
 
         record.pending_selection =
