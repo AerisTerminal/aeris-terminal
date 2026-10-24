@@ -865,6 +865,24 @@ fn selection_matches_request(record: &EndpointRecord, generation: u64) -> bool {
     }
 }
 
+fn selection_terms_match(
+    record: &EndpointRecord,
+    descriptor: &aeris_market_runtime::InstrumentDescriptor,
+    series: &aeris_market_runtime::ResolvedSeries,
+) -> bool {
+    let selected = &descriptor.instrument;
+    let requested_interval = record
+        .pending_selection
+        .as_ref()
+        .map_or(record.interval, |(_, _, interval)| *interval);
+    descriptor.entitlement_id == selected.entitlement_id
+        && series.key.provider_id == selected.provider
+        && series.key.instrument_id == selected.instrument_id
+        && series.key.entitlement_id == selected.entitlement_id
+        && series.interval == requested_interval
+        && series.key.period == series.cadence
+}
+
 pub(super) fn apply_selection_outcome(
     record: &mut EndpointRecord,
     outcome: aeris_market_runtime::SelectionOutcome,
@@ -873,10 +891,13 @@ pub(super) fn apply_selection_outcome(
         aeris_market_runtime::SelectionOutcome::Selected {
             generation,
             descriptor,
-            ..
+            series,
         } => {
-            let selected = descriptor.instrument;
             if selection_matches_request(record, generation.0.get()) {
+                if !selection_terms_match(record, &descriptor, &series) {
+                    return Err("runtime selection returned inconsistent catalog terms".into());
+                }
+                let selected = descriptor.instrument;
                 record.product = selected.clone();
                 record.initial_selection_pending = false;
                 if let Some((_, _, interval)) = record.pending_selection.take() {
@@ -1225,6 +1246,74 @@ mod tests {
             )]
         ));
         assert_eq!(record.interval, aeris_market_data::ChartInterval::Hour1);
+    }
+
+    #[test]
+    fn selection_outcome_rejects_inconsistent_descriptor_before_adoption() {
+        use aeris_market_runtime::{
+            InstrumentDescriptor, MarketGenerationId, ResolvedSeries, SelectionOutcome,
+        };
+
+        let product = super::super::fixture_public_crypto();
+        let presentation =
+            super::super::provider_presentation(&product.provider).expect("fixture provider");
+        let (mut pane, mut record) = super::super::worker_endpoint(
+            1,
+            2,
+            product.clone(),
+            41,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            7,
+        );
+        record.initial_selection_pending = false;
+        record.pending_selection =
+            Some((8, product.clone(), aeris_market_data::ChartInterval::Hour1));
+        let descriptor =
+            InstrumentDescriptor::from_install(&product, presentation, true).expect("descriptor");
+        let series = ResolvedSeries::resolve(
+            &product,
+            aeris_market_data::ChartInterval::Hour1,
+            presentation,
+        )
+        .expect("series");
+        let alternate_period = ResolvedSeries::resolve(
+            &product,
+            aeris_market_data::ChartInterval::Minute1,
+            presentation,
+        )
+        .expect("alternate series")
+        .cadence;
+        for mismatch in 0..6 {
+            let mut descriptor = descriptor.clone();
+            let mut series = series.clone();
+            match mismatch {
+                0 => descriptor.entitlement_id.push_str("-other"),
+                1 => series.key.provider_id.push_str("-other"),
+                2 => series.key.instrument_id.push_str("-other"),
+                3 => series.key.entitlement_id.push_str("-other"),
+                4 => series.interval = aeris_market_data::ChartInterval::Minute1,
+                _ => series.key.period = alternate_period,
+            }
+            assert!(
+                apply_selection_outcome(
+                    &mut record,
+                    SelectionOutcome::Selected {
+                        generation: MarketGenerationId(NonZeroU64::new(8).expect("generation")),
+                        descriptor: Box::new(descriptor),
+                        series,
+                    },
+                )
+                .is_err()
+            );
+            assert_eq!(record.product, product);
+            assert_eq!(
+                record.pending_selection.as_ref().map(|pending| pending.0),
+                Some(8)
+            );
+            assert_eq!(record.endpoint.active_generation, 7);
+            assert!(pane.worker.drain_messages().0.is_empty());
+        }
     }
 
     #[test]

@@ -2121,6 +2121,12 @@ Status: pending
     interim file-scoped allow-list for 24 files, not VAL-DSK-024's final
     assets-only allow-list; descriptor propagation, parser removal, rendering,
     source cleanup and guarded GUI remain open. M6.7 is unchecked.
+  - Part 8 (2026-10-24): selection adoption rejects inconsistent runtime
+    descriptor entitlement and resolved series identity, interval or cadence
+    before consuming the pending request or publishing a pane reply. A
+    deterministic endpoint regression exercises each mismatch. Actual
+    descriptor projection, replay parser deletion, final neutrality exceptions
+    and guarded GUI evidence remain open; M6.7 is unchecked.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
@@ -2669,6 +2675,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 M6.6 Part 8b3g refactor(desktop): initial selection terms share the bounded local command outcome route; exact pending-generation acceptance, duplicate rejection, four-pane restored replies and the FIFO/control reserve are retained. Engine/catalog outcomes, metadata-bearing runtime entries and final message/channel deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 - 2026-10-24 M6.7 Part 3 refactor(desktop): delegate series-key catalog identity validation to the runtime descriptor, preserving opaque instrument IDs and exact entitlements; replay snapshot conversion and the remaining M6.7 work stay open.
 - 2026-10-24 M6.7 Part 4 refactor(desktop): relocate synthetic provider instrument constructors into gated test support; replay snapshot identity and the remaining M6.7 work stay open.
+- 2026-10-24 M6.7 Part 8 fix(desktop): reject inconsistent runtime selected descriptors and series before endpoint adoption; six malformed-selection cases preserve the pending request and emit no pane reply. Descriptor projection and M6.7 closeout remain open.
 
 ## 7. Known gaps / deferred
 
