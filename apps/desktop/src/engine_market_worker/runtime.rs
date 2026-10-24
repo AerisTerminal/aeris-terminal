@@ -517,7 +517,11 @@ pub(super) fn deliver_provider_catalog_event(
         changed = true;
     }
     let endpoint = &record.endpoint;
-    match endpoint.messages.send(MarketWorkerMessage::Runtime(event)) {
+    match endpoint
+        .messages
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(event),
+        )) {
         Ok(()) => changed,
         // A released pane cannot receive this catalog result; its command
         // channel closure retires the runtime consumer.
@@ -619,7 +623,9 @@ fn deliver_runtime_price_alert_with_notification(
     notify(trigger);
     endpoint
         .messages
-        .send(MarketWorkerMessage::Runtime(event))
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(event),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -686,7 +692,9 @@ pub(super) fn deliver_runtime_order_book(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::Runtime(event))
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(event),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -708,7 +716,9 @@ pub(super) fn deliver_runtime_trade_tape(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::Runtime(event))
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(event),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -739,7 +749,9 @@ pub(super) fn deliver_runtime_study(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::Runtime(event))
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(event),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -777,7 +789,9 @@ fn deliver_runtime_series_state(
     } else if state.generation.0.get() == endpoint.active_generation {
         endpoint
             .messages
-            .send(MarketWorkerMessage::Runtime(event))
+            .send(MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection::event(event),
+            ))
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -801,7 +815,9 @@ fn deliver_runtime_demand_error(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::Runtime(event))
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(event),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -1023,10 +1039,10 @@ mod tests {
         let (messages, _) = pane.worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: delivered_epoch,
                 value: MarketRuntimeEvent::PriceAlertTriggered(trigger),
-            })] if *delivered_epoch == epoch
+            }, .. })] if *delivered_epoch == epoch
                 && trigger.consumer_id.0.get() == 41
                 && trigger.alert_id == "fixture-alert"
         ));
@@ -1062,14 +1078,14 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
                     state: super::super::SeriesLoadState::Failed,
                     detail: Some(detail),
                     ..
                 }),
-            })] if *received_epoch == epoch && detail == "market unavailable"
+            }, .. })] if *received_epoch == epoch && detail == "market unavailable"
         ));
     }
 
@@ -1107,10 +1123,10 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::DemandError(_),
-            })] if *received_epoch == epoch
+            }, .. })] if *received_epoch == epoch
         ));
     }
 
@@ -1397,10 +1413,15 @@ mod tests {
         assert_eq!(queued.len(), 9);
         assert!(matches!(
             queued.last(),
-            Some(MarketWorkerMessage::Runtime(Fenced {
-                value: MarketRuntimeEvent::ProviderInstrumentSelection(_),
-                ..
-            }))
+            Some(MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    event: Fenced {
+                        value: MarketRuntimeEvent::ProviderInstrumentSelection(_),
+                        ..
+                    },
+                    ..
+                }
+            ))
         ));
         publish_session_statuses(&market, &mut records, false, &clock);
         let (messages, _) = receiver.drain();

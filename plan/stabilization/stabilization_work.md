@@ -2035,6 +2035,14 @@ Status: pending
   readiness, ordering, recovery and GPUI fixtures use the same entry; the
   superseded arms are deleted. The remaining message type and transitional
   channel/enqueue names still block VAL-DSK-021/022 and M6.6.
+- Part 8b3k (2026-10-24): removed the metadata-free `Runtime` arm rather than
+  keeping two coordinator-event routes. Runtime producers and GPUI/worker
+  fixtures now put their original fenced envelopes into `RuntimeProjection`
+  with absent endpoint metadata; the pane and screener project that one route.
+  A mixed metadata-free catalog, stamped provider-state and publication FIFO
+  regression covers the common bounded queue and control reserve. The
+  transitional message/channel/enqueue names and literal VAL-DSK-021/022
+  checks remain, so M6.6 stays unchecked.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

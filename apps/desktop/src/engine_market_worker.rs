@@ -1282,15 +1282,21 @@ mod tests {
                         assert!(!snapshot.snapshot.bars.is_empty());
                         return;
                     }
-                    MarketWorkerMessage::Runtime(Fenced {
-                        value:
-                            MarketRuntimeEvent::SeriesState(MarketSeriesState {
-                                state: SeriesLoadState::Failed,
-                                detail,
-                                ..
-                            }),
-                        ..
-                    }) => panic!("Hyperliquid market runtime startup failed: {detail:?}"),
+                    MarketWorkerMessage::RuntimeProjection(
+                        aeris_desktop::market_worker::RuntimeProjection {
+                            event:
+                                Fenced {
+                                    value:
+                                        MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                                            state: SeriesLoadState::Failed,
+                                            detail,
+                                            ..
+                                        }),
+                                    ..
+                                },
+                            ..
+                        },
+                    ) => panic!("Hyperliquid market runtime startup failed: {detail:?}"),
                     MarketWorkerMessage::LocalFailure {
                         scope: aeris_desktop::market_worker::LocalFailureScope::Selection(_),
                         message,
@@ -1345,10 +1351,10 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::ProviderInstrumentSearchResult(result),
-            })] if *received_epoch == epoch && result.search_generation == 3
+            }, .. })] if *received_epoch == epoch && result.search_generation == 3
         ));
 
         let mut selected = product.clone();
@@ -1372,12 +1378,12 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::ProviderInstrumentSelection(
                     MarketProviderInstrumentSelection { command_generation: 4, instrument, .. }
                 ),
-            })] if *received_epoch == epoch && instrument.selection_generation == 5
+            }, .. })] if *received_epoch == epoch && instrument.selection_generation == 5
         ));
 
         drop(record);
@@ -1696,10 +1702,16 @@ mod tests {
             .0
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::Runtime(Fenced {
-                    value: MarketRuntimeEvent::SeriesState(state),
-                    ..
-                }) => {
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event:
+                            Fenced {
+                                value: MarketRuntimeEvent::SeriesState(state),
+                                ..
+                            },
+                        ..
+                    },
+                ) => {
                     assert!(state.generation.0.get() > 0);
                     Some((state.state, state.detail))
                 }
@@ -2746,13 +2758,18 @@ mod tests {
                 MarketWorkerMessage::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection { .. }
                 ),
-                MarketWorkerMessage::Runtime(Fenced {
-                    value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
-                        state: SeriesLoadState::Live,
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event: Fenced {
+                            value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                                state: SeriesLoadState::Live,
+                                ..
+                            }),
+                            ..
+                        },
                         ..
-                    }),
-                    ..
-                })
+                    }
+                )
             ]
         ));
     }
@@ -2896,13 +2913,18 @@ mod tests {
         );
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
-                value: MarketRuntimeEvent::DemandError(MarketDemandError {
-                    code: EngineFaultCode::Retryable,
+            [MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    event: Fenced {
+                        value: MarketRuntimeEvent::DemandError(MarketDemandError {
+                            code: EngineFaultCode::Retryable,
+                            ..
+                        }),
+                        ..
+                    },
                     ..
-                }),
-                ..
-            })]
+                }
+            )]
         ));
 
         let permanent = MarketDemandError {
@@ -2920,14 +2942,14 @@ mod tests {
         );
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 value: MarketRuntimeEvent::DemandError(MarketDemandError {
                     code: EngineFaultCode::Permanent,
                     detail,
                     ..
                 }),
                 ..
-            })] if detail == "permanent fixture failure"
+            }, .. })] if detail == "permanent fixture failure"
         ));
         assert_eq!(
             demand_error(&retryable),
@@ -2983,13 +3005,18 @@ mod tests {
         assert!(
             matches!(
                 messages.as_slice(),
-                [MarketWorkerMessage::Runtime(Fenced {
-                    value: MarketRuntimeEvent::DemandError(MarketDemandError {
-                        scope: MarketDemandErrorScope::OlderHistory,
+                [MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event: Fenced {
+                            value: MarketRuntimeEvent::DemandError(MarketDemandError {
+                                scope: MarketDemandErrorScope::OlderHistory,
+                                ..
+                            }),
+                            ..
+                        },
                         ..
-                    }),
-                    ..
-                })]
+                    }
+                )]
             ),
             "the pane receives the scoped error and keeps its live chart"
         );
@@ -3071,10 +3098,16 @@ mod tests {
         let frame = messages
             .into_iter()
             .find_map(|message| match message {
-                MarketWorkerMessage::Runtime(Fenced {
-                    value: MarketRuntimeEvent::OrderBookSnapshot(snapshot),
-                    ..
-                }) => runtime_order_book_frame(&snapshot, &product, 1),
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event:
+                            Fenced {
+                                value: MarketRuntimeEvent::OrderBookSnapshot(snapshot),
+                                ..
+                            },
+                        ..
+                    },
+                ) => runtime_order_book_frame(&snapshot, &product, 1),
                 _ => None,
             })
             .expect("Rithmic depth must reach the Order Book panel");
@@ -3151,10 +3184,10 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Runtime(Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 value: MarketRuntimeEvent::TradeTapeSnapshot(snapshot),
                 ..
-            })] if snapshot.revision == 9
+            }, .. })] if snapshot.revision == 9
         ));
     }
 
@@ -3206,18 +3239,18 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::Runtime(Fenced {
+                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::StudyRemoved(first),
                     ..
-                }),
-                MarketWorkerMessage::Runtime(Fenced {
+                }, .. }),
+                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::StudyRemoved(second),
                     ..
-                }),
-                MarketWorkerMessage::Runtime(Fenced {
+                }, .. }),
+                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::StudyOutputsInvalidated(_),
                     ..
-                })
+                }, .. })
             ] if first.generation.is_none()
                 && second.generation.is_some_and(|generation| generation.0.get() == 2)
         ));

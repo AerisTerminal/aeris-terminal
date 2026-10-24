@@ -4045,7 +4045,6 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         match message {
-            MarketWorkerMessage::Runtime(event) => self.apply_fenced_runtime_event(event, None, cx),
             MarketWorkerMessage::RuntimeProjection(projection) => {
                 if let Some(received_unix_nanos) = projection.received_unix_nanos {
                     if let Some(request_id) = projection.recovery_request_id {
