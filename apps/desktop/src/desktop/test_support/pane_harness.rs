@@ -2013,13 +2013,14 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
             Some(request.sequence)
         );
     });
+    let failure = LocalCommandOutcome::CatalogSwitch {
+        sequence: request.sequence,
+        browser_generation: request.browser_generation,
+        result: Err("catalog failed".into()),
+    };
     harness
         .publications
-        .send(MarketWorkerMessage::CatalogSwitchOutcome {
-            sequence: request.sequence,
-            browser_generation: request.browser_generation,
-            result: Err("catalog failed".into()),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(failure))
         .expect("catalog failure");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3234,13 +3235,14 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
         else {
             panic!("expected catalog selection");
         };
+        let failure = LocalCommandOutcome::CatalogSwitch {
+            sequence: request.sequence,
+            browser_generation: request.browser_generation,
+            result: Err("private-credential-sentinel".into()),
+        };
         harness
             .publications
-            .send(MarketWorkerMessage::CatalogSwitchOutcome {
-                sequence: request.sequence,
-                browser_generation: request.browser_generation,
-                result: Err("private-credential-sentinel".into()),
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(failure))
             .expect("fixture failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3278,13 +3280,14 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     else {
         panic!("expected catalog selection");
     };
+    let success = LocalCommandOutcome::CatalogSwitch {
+        sequence: request.sequence,
+        browser_generation: request.browser_generation,
+        result: Ok((instrument, ChartInterval::Minute1)),
+    };
     harness
         .publications
-        .send(MarketWorkerMessage::CatalogSwitchOutcome {
-            sequence: request.sequence,
-            browser_generation: request.browser_generation,
-            result: Ok((instrument, ChartInterval::Minute1)),
-        })
+        .send(MarketWorkerMessage::LocalCommandOutcome(success))
         .expect("fixture commit enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);

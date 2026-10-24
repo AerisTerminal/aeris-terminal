@@ -4073,22 +4073,6 @@ impl WorkspaceSurface {
                     self.reject_pending_engine_selection(sequence, cx);
                 }
             }
-            MarketWorkerMessage::CatalogSwitchOutcome {
-                sequence,
-                browser_generation,
-                result,
-            } => match result {
-                Ok((instrument, interval)) => {
-                    self.apply_catalog_switch(
-                        sequence,
-                        browser_generation,
-                        instrument,
-                        interval,
-                        cx,
-                    );
-                }
-                Err(_) => self.reject_catalog_switch(sequence, browser_generation, cx),
-            },
             MarketWorkerMessage::SessionStatus { generation, status } => match status {
                 aeris_desktop::market_worker::LocalSessionStatus::Connection {
                     state,
@@ -4118,6 +4102,22 @@ impl WorkspaceSurface {
     ) {
         use aeris_desktop::market_worker::LocalCommandOutcome;
         match outcome {
+            LocalCommandOutcome::CatalogSwitch {
+                sequence,
+                browser_generation,
+                result,
+            } => match result {
+                Ok((instrument, interval)) => {
+                    self.apply_catalog_switch(
+                        sequence,
+                        browser_generation,
+                        instrument,
+                        interval,
+                        cx,
+                    );
+                }
+                Err(_) => self.reject_catalog_switch(sequence, browser_generation, cx),
+            },
             LocalCommandOutcome::SelectedInstrument {
                 generation,
                 instrument,

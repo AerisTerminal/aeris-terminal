@@ -865,11 +865,13 @@ pub(super) fn apply_selection_outcome(
                         record
                             .endpoint
                             .messages
-                            .send(MarketWorkerMessage::CatalogSwitchOutcome {
-                                sequence,
-                                browser_generation,
-                                result: Ok((selected, interval)),
-                            })
+                            .send(MarketWorkerMessage::LocalCommandOutcome(
+                                aeris_desktop::market_worker::LocalCommandOutcome::CatalogSwitch {
+                                    sequence,
+                                    browser_generation,
+                                    result: Ok((selected, interval)),
+                                },
+                            ))
                             .map_err(|error| error.to_string())?;
                     } else {
                         record
@@ -915,11 +917,13 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::CatalogSwitchOutcome {
-                            sequence,
-                            browser_generation,
-                            result: Err(format!("{error:?}")),
-                        })
+                        .send(MarketWorkerMessage::LocalCommandOutcome(
+                            aeris_desktop::market_worker::LocalCommandOutcome::CatalogSwitch {
+                                sequence,
+                                browser_generation,
+                                result: Err(format!("{error:?}")),
+                            },
+                        ))
                         .map_err(|send| send.to_string())?;
                 } else {
                     record

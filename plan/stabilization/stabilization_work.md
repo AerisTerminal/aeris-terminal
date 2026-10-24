@@ -2011,6 +2011,14 @@ Status: pending
   four-pane/retired-descriptor GPUI regressions cover the route. Engine and
   catalog selection outcomes, metadata-bearing runtime entries and the
   transitional message/channel names remain; M6.6 and VAL-DSK-021/022 stay open.
+- Part 8b3h (2026-10-24): catalog switch success and failure now use the
+  bounded local command outcome projection, not a separate mailbox arm.
+  Pane acceptance still requires the exact pending request sequence and
+  browser generation; failed selection notices remain sanitized. The mixed
+  FIFO/control-reserve test includes a catalog reply, and the pending
+  lifecycle and retry GPUI regressions cover rejection and success.
+  Engine selection, metadata-bearing runtime entries and transitional
+  message/channel names remain; M6.6 and VAL-DSK-021/022 stay open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

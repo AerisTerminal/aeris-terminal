@@ -213,6 +213,12 @@ pub enum LocalFailureScope {
 /// Results of local pane commands, fenced by the request sequence or study identity
 /// at the GPUI owner rather than projected as coordinator publications.
 pub enum LocalCommandOutcome {
+    /// Catalog selection reply, fenced by the pane request and browser generation.
+    CatalogSwitch {
+        sequence: u64,
+        browser_generation: u64,
+        result: Result<(InstallProviderInstrument, ChartInterval), String>,
+    },
     /// Initial selection terms, accepted only for the matching pending generation.
     SelectedInstrument {
         generation: u64,
@@ -273,12 +279,6 @@ pub enum MarketWorkerMessage {
     EngineSelectionOutcome {
         sequence: u64,
         succeeded: bool,
-    },
-    /// Catalog selection reply, fenced by both pane request and browser generation.
-    CatalogSwitchOutcome {
-        sequence: u64,
-        browser_generation: u64,
-        result: Result<(InstallProviderInstrument, ChartInterval), String>,
     },
 }
 
@@ -2043,21 +2043,19 @@ mod tests {
     fn local_command_outcomes_keep_request_fences_and_fifo() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
         let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
+        let alert = LocalCommandOutcome::PriceAlertSync {
+            sequence: 5,
+            succeeded: false,
+        };
         sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
-                LocalCommandOutcome::PriceAlertSync {
-                    sequence: 5,
-                    succeeded: false,
-                },
-            ))
+            .send(MarketWorkerMessage::LocalCommandOutcome(alert))
             .expect("alert result enters control reserve");
+        let registration = LocalCommandOutcome::StudyRegistration {
+            request_sequence: 7,
+            result: Err("fixture".into()),
+        };
         sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
-                LocalCommandOutcome::StudyRegistration {
-                    request_sequence: 7,
-                    result: Err("fixture".into()),
-                },
-            ))
+            .send(MarketWorkerMessage::LocalCommandOutcome(registration))
             .expect("study result enters control reserve");
         sender
             .send(MarketWorkerMessage::LocalCommandOutcome(
@@ -2067,10 +2065,9 @@ mod tests {
                 },
             ))
             .expect("reinitialization enters control reserve");
+        let removal = LocalCommandOutcome::StudyRemovalFailed { study_id };
         sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
-                LocalCommandOutcome::StudyRemovalFailed { study_id },
-            ))
+            .send(MarketWorkerMessage::LocalCommandOutcome(removal))
             .expect("removal failure enters control reserve");
         sender
             .send(MarketWorkerMessage::LocalCommandOutcome(
@@ -2081,17 +2078,24 @@ mod tests {
                 },
             ))
             .expect("retired recovery enters control reserve");
+        let selected = LocalCommandOutcome::SelectedInstrument {
+            generation: 12,
+            instrument: InstallProviderInstrument {
+                display_symbol: "ETH".into(),
+                ..InstallProviderInstrument::default()
+            },
+        };
         sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
-                LocalCommandOutcome::SelectedInstrument {
-                    generation: 12,
-                    instrument: InstallProviderInstrument {
-                        display_symbol: "ETH".into(),
-                        ..InstallProviderInstrument::default()
-                    },
-                },
-            ))
+            .send(MarketWorkerMessage::LocalCommandOutcome(selected))
             .expect("initial selection enters control reserve");
+        let catalog = LocalCommandOutcome::CatalogSwitch {
+            sequence: 13,
+            browser_generation: 17,
+            result: Err("fixture".into()),
+        };
+        sender
+            .send(MarketWorkerMessage::LocalCommandOutcome(catalog))
+            .expect("catalog selection enters control reserve");
         let (first, _) = receiver.drain_up_to(2);
         assert!(matches!(
             first.as_slice(),
@@ -2126,6 +2130,13 @@ mod tests {
                 }),
                 MarketWorkerMessage::LocalCommandOutcome(
                     LocalCommandOutcome::SelectedInstrument { generation: 12, instrument }
+                ),
+                MarketWorkerMessage::LocalCommandOutcome(
+                    LocalCommandOutcome::CatalogSwitch {
+                        sequence: 13,
+                        browser_generation: 17,
+                        result: Err(_),
+                    }
                 ),
             ] if *reinitialized == study_id && *removed == study_id
                 && instrument.display_symbol == "ETH"
