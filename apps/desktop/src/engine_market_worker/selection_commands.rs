@@ -32,6 +32,7 @@ pub(super) fn fence_recovery_command(
     Ok(None)
 }
 
+#[cfg(test)]
 pub(super) fn initialize_catalog_endpoint(
     market: &MarketService,
     client_id: u64,

@@ -1,10 +1,11 @@
 //! Runtime.
 
+#[cfg(test)]
+use super::initialize_catalog_endpoint;
 use super::{
     EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
     MarketWorkerCommand, PaneProjectionEvent, WorkerEndpoint, complete_pending_recovery,
-    initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
-    process_command,
+    initialize_endpoint, initialize_market_screen_endpoint, mpsc, process_command,
 };
 use aeris_desktop::market_worker::{
     LocalSessionStatus, MarketProjectionSender, MarketWorkerSendError, verified_terms_supersede,
@@ -383,6 +384,7 @@ fn initialize_record(
 ) -> Result<(), String> {
     match record.role {
         EndpointRole::Market => initialize_endpoint(market, client_id, record),
+        #[cfg(test)]
         EndpointRole::RithmicCatalog => initialize_catalog_endpoint(
             market,
             client_id,

@@ -2058,9 +2058,19 @@ Status: pending
   code-complete; milestone GUI, probes and M6.7-M6.12 remain open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
-    `--rithmic` and `--multi-chart` (`desktop.rs`, also used by
-    `tools/test_window_controls.ps1`), `replay_conversion`, `worker_identity` and
+    `replay_conversion`, `worker_identity` and
     `default_product`; the `desktop_source_is_provider_neutral` rule does not exist yet.
+  - Part 1 (2026-10-24): removed the unsupported `--rithmic` and
+    `--multi-chart` startup branches and their two dedicated constructors.
+    Unknown arguments now use the existing error exit before workspace
+    state is loaded. The legacy provider-specific fixture path is separate
+    from those public flags, is test-only, and remains for subsequent
+    descriptor migration. A fresh isolated binary run returned exit 2 in
+    0.47 s and 0.35 s respectively; each reported "unsupported argument",
+    opened no window and wrote no workspace-state.pb. The two temporary
+    validation roots were removed after checking. The window-controls helper
+    no longer advertises the removed multi-chart startup.
+    M6.7 remains unchecked pending descriptors, neutrality rule and GUI.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed

@@ -10,7 +10,7 @@ transitions and 50 fresh-process launches.
 [CmdletBinding()]
 param(
     [string]$BinaryPath = "target/release/aeris_desktop.exe",
-    [ValidateSet("normal", "workspace-tabs", "multi-chart")]
+    [ValidateSet("normal", "workspace-tabs")]
     [string]$Mode = "normal",
     [ValidateRange(1, 1000)]
     [int]$MaximizeCycles = 100,
@@ -121,7 +121,6 @@ function Get-LaunchArguments {
     switch ($Mode) {
         "normal" { return @() }
         "workspace-tabs" { return @("--workspace-tabs") }
-        "multi-chart" { return @("--multi-chart") }
     }
 }
 

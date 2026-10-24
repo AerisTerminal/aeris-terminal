@@ -47,6 +47,7 @@ use aeris_desktop::market_worker::{
     MarketWorkerCommand, MarketWorkerStartup, PaneProjectionEvent, market_projection_channel,
 };
 
+#[cfg(test)]
 const DEFAULT_WORKSPACE_ID: u64 = 1;
 pub(super) const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 256;
@@ -85,6 +86,7 @@ enum EndpointRole {
     /// Chart or market-summary demand for one instrument.
     Market,
     /// Rithmic instrument search before any chart demand exists.
+    #[cfg(test)]
     RithmicCatalog,
     /// Listed-market statistics screens and their selections; never demands a series.
     MarketScreen,
@@ -293,47 +295,6 @@ fn start() -> Result<
         .pop()
         .ok_or_else(|| "Hyperliquid engine worker group is empty".to_string())?;
     Ok((startup, worker, factory))
-}
-
-pub(super) fn start_multi_chart(
-    market: &MarketService,
-    trading: aeris_trading_runtime::TradingService,
-    clock: Arc<dyn Clock>,
-) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
-    let mnq = default_product("MNQ");
-    let es = default_product("ES");
-    let (workers, _factory) = start_group(market.clone(), vec![(1, mnq), (2, es)], trading, clock)?;
-    Ok(workers)
-}
-
-pub(super) fn start_rithmic_catalog(
-    market: &MarketService,
-    trading: aeris_trading_runtime::TradingService,
-    clock: Arc<dyn Clock>,
-) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    let client_id = random_order_book_identity()?;
-    let consumer_id = random_order_book_identity()?;
-    let pane_id = random_order_book_identity()?;
-    let (mut pane, mut endpoint) = worker_endpoint_for_market(
-        market,
-        DEFAULT_WORKSPACE_ID,
-        pane_id,
-        default_product("MNQ"),
-        consumer_id,
-        ChartInterval::Minute1,
-        (None, 0),
-    );
-    pane.startup = MarketWorkerStartup::Rithmic;
-    endpoint.role = EndpointRole::RithmicCatalog;
-    spawn_group(
-        market.clone(),
-        client_id,
-        vec![endpoint],
-        None,
-        trading,
-        clock,
-    )?;
-    Ok((pane.startup, pane.worker))
 }
 
 pub(super) fn start_workspace_tabs(
@@ -545,6 +506,7 @@ struct WorkerEndpoint {
     active: bool,
 }
 
+#[cfg(test)]
 fn start_group(
     market: MarketService,
     configurations: Vec<(u64, InstallProviderInstrument)>,
@@ -814,6 +776,7 @@ use replay_conversion::{replay_bar_definition, snapshot_instrument};
 pub(crate) use replay_conversion::{replay_runtime_snapshot, replay_runtime_tail_update};
 pub(crate) use replay_conversion::{runtime_order_book_frame, series_key};
 
+#[cfg(test)]
 fn default_product(product_id: &str) -> InstallProviderInstrument {
     InstallProviderInstrument {
         provider: "rithmic".to_string(),
@@ -900,11 +863,10 @@ use runtime::{retire_endpoint, run_workers};
 #[path = "engine_market_worker/selection_commands.rs"]
 mod selection_commands;
 #[cfg(test)]
+use selection_commands::initialize_catalog_endpoint;
+#[cfg(test)]
 use selection_commands::retain_depth_visibility;
-use selection_commands::{
-    initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint,
-    process_command,
-};
+use selection_commands::{initialize_endpoint, initialize_market_screen_endpoint, process_command};
 
 #[path = "engine_market_worker/publications.rs"]
 mod publications;

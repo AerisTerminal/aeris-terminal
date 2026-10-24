@@ -5637,8 +5637,8 @@ fn configured_market_workers(
 ) -> Result<Option<ConfiguredDesktop>, String> {
     let mut arguments = command_arguments.into_iter();
     let command = arguments.next();
-    let mut layout = DesktopLayout::Windows;
-    let mut workspace_factory = None;
+    let layout = DesktopLayout::WorkspaceTabs;
+    let workspace_factory;
     let (market_workers, workspace_panes, lifecycle, workspace_notice) =
         if let Some(argument) = command {
             #[cfg(feature = "diagnostics")]
@@ -5651,45 +5651,12 @@ fn configured_market_workers(
                 run_desktop_endurance_command(arguments)?;
                 return Ok(None);
             }
-            if argument == "--rithmic" {
-                if arguments.next().is_some() {
-                    diagnostic!("usage: aeris_desktop --rithmic");
-                    exit_after_account_refresh_quiesce(&services.account_service, 2);
-                }
-                let lifecycle = configure_desktop_state(services);
-                (
-                    vec![engine_market_worker::start_rithmic_catalog(
-                        &services.market,
-                        services.trading.clone(),
-                        Arc::clone(&services.clock),
-                    )?],
-                    Vec::new(),
-                    lifecycle,
-                    String::new(),
-                )
-            } else if argument == "--multi-chart" {
-                if arguments.next().is_some() {
-                    diagnostic!("usage: aeris_desktop --multi-chart");
-                    exit_after_account_refresh_quiesce(&services.account_service, 2);
-                }
-                let lifecycle = configure_desktop_state(services);
-                (
-                    engine_market_worker::start_multi_chart(
-                        &services.market,
-                        services.trading.clone(),
-                        Arc::clone(&services.clock),
-                    )?,
-                    Vec::new(),
-                    lifecycle,
-                    String::new(),
-                )
-            } else if argument == "--workspace-tabs" {
+            if argument == "--workspace-tabs" {
                 if arguments.next().is_some() {
                     diagnostic!("usage: aeris_desktop --workspace-tabs");
                     exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
                 let lifecycle = configure_desktop_state(services);
-                layout = DesktopLayout::WorkspaceTabs;
                 let group = engine_market_worker::start_workspace_tabs(
                     &services.market,
                     &lifecycle.workspace,
@@ -5710,7 +5677,6 @@ fn configured_market_workers(
             // restores pane identity, symbol, interval, viewport and layout and
             // mounts the persistence owner used for subsequent durable changes.
             let lifecycle = configure_desktop_state(services);
-            layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs(
                 &services.market,
                 &lifecycle.workspace,
