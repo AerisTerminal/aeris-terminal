@@ -1640,7 +1640,7 @@ mod instrument_drawings {
     use super::*;
     use aeris_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
     use aeris_desktop::market_worker::{
-        EngineWorkerStartup, MarketWorkerCommand, market_worker_channel,
+        EngineWorkerStartup, MarketWorkerCommand, market_projection_channel,
     };
     use gpui::{TestAppContext, VisualTestContext};
     use std::num::NonZeroUsize;
@@ -1678,7 +1678,7 @@ mod instrument_drawings {
         &mut VisualTestContext,
     ) {
         let (commands, requests) = mpsc::sync_channel(8);
-        let (_publications, messages) = market_worker_channel(NonZeroUsize::MIN);
+        let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
         let (_, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
             commands,

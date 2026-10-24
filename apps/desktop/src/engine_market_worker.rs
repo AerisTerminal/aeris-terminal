@@ -43,8 +43,8 @@ pub(super) use aeris_market_runtime::{
 use aeris_observability::FeedConnectionState;
 
 use aeris_desktop::market_worker::{
-    LocalCommandOutcome, MarketDataWorker, MarketRecoveryFailure, MarketWorkerCommand,
-    MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
+    LocalCommandOutcome, MarketDataWorker, MarketProjectionSender, MarketRecoveryFailure,
+    MarketWorkerCommand, MarketWorkerStartup, PaneProjectionEvent, market_projection_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -535,7 +535,7 @@ fn workspace_identity_high_watermarks(workspace: &WorkspaceState) -> (u64, u64, 
 
 struct WorkerEndpoint {
     consumer_id: u64,
-    messages: MarketWorkerSender,
+    messages: MarketProjectionSender,
     commands: mpsc::Receiver<MarketWorkerCommand>,
     shutdown: mpsc::SyncSender<()>,
     pending_recovery: Option<ReplayRecoveryCommand>,
@@ -643,7 +643,7 @@ fn worker_endpoint_with_wake(
         },
     ));
     let (message_tx, message_rx) =
-        market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
+        market_projection_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let selection_sequence = Arc::new(AtomicU64::new(initial_generation));
@@ -938,7 +938,7 @@ mod tests {
         expected_provider: &str,
         selection_generation: u64,
         realtime: bool,
-        messages: &MarketWorkerSender,
+        messages: &MarketProjectionSender,
     ) -> Result<(), String> {
         if !realtime {
             return Ok(());
@@ -951,7 +951,7 @@ mod tests {
     }
 
     fn series_endpoint(
-        messages: MarketWorkerSender,
+        messages: MarketProjectionSender,
         consumer_id: u64,
         generation: u64,
     ) -> WorkerEndpoint {
@@ -1139,11 +1139,11 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+                PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                         epoch: snapshot_epoch,
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
                     }, received_unix_nanos: Some(11), recovery_request_id: None, .. }),
-                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+                PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                         epoch: tail_epoch,
                         value: MarketRuntimeEvent::SeriesUpdate(_),
                     }, received_unix_nanos: Some(12), recovery_request_id: None, .. }),
@@ -1269,7 +1269,7 @@ mod tests {
             let (messages, disconnected) = worker.drain_messages();
             for message in messages {
                 match message {
-                    MarketWorkerMessage::RuntimeProjection(
+                    PaneProjectionEvent::RuntimeProjection(
                         aeris_desktop::market_worker::RuntimeProjection {
                             event:
                                 Fenced {
@@ -1282,7 +1282,7 @@ mod tests {
                         assert!(!snapshot.snapshot.bars.is_empty());
                         return;
                     }
-                    MarketWorkerMessage::RuntimeProjection(
+                    PaneProjectionEvent::RuntimeProjection(
                         aeris_desktop::market_worker::RuntimeProjection {
                             event:
                                 Fenced {
@@ -1297,7 +1297,7 @@ mod tests {
                             ..
                         },
                     ) => panic!("Hyperliquid market runtime startup failed: {detail:?}"),
-                    MarketWorkerMessage::LocalFailure {
+                    PaneProjectionEvent::LocalFailure {
                         scope: aeris_desktop::market_worker::LocalFailureScope::Selection(_),
                         message,
                     } => {
@@ -1351,7 +1351,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::ProviderInstrumentSearchResult(result),
             }, .. })] if *received_epoch == epoch && result.search_generation == 3
@@ -1378,7 +1378,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::ProviderInstrumentSelection(
                     MarketProviderInstrumentSelection { command_generation: 4, instrument, .. }
@@ -1570,7 +1570,7 @@ mod tests {
         runtime::apply_selection_outcome(&mut record, outcome()).expect("duplicate reply");
         assert!(matches!(
             worker.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                     generation,
                     instrument
@@ -1695,14 +1695,14 @@ mod tests {
     }
 
     fn drained_states(
-        receiver: &aeris_desktop::market_worker::MarketWorkerReceiver,
+        receiver: &aeris_desktop::market_worker::MarketProjectionReceiver,
     ) -> Vec<(SeriesLoadState, Option<String>)> {
         receiver
             .drain()
             .0
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event:
                             Fenced {
@@ -1725,7 +1725,7 @@ mod tests {
     #[test]
     fn retained_partial_history_and_live_repair_keep_fenced_readiness_order() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
+            market_projection_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
         let endpoint = series_endpoint(sender, 1, 1);
         let state = |load_state: SeriesLoadState, detail: Option<&str>| MarketSeriesState {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -1810,7 +1810,7 @@ mod tests {
     #[test]
     fn empty_provider_history_keeps_its_fenced_readiness_reason() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+            market_projection_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let endpoint = series_endpoint(sender, 1, 1);
         let empty = MarketSeriesState {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -1861,7 +1861,7 @@ mod tests {
         )
         .expect("series");
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+            market_projection_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let endpoint = series_endpoint(sender, 1, 1);
         let snapshot = |publication_generation: u64, sequence: u64| {
             runtime_snapshot(
@@ -1912,7 +1912,7 @@ mod tests {
         let forwarded = messages
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event:
                             Fenced {
@@ -1985,7 +1985,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     epoch: delivered_epoch,
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot)
                 }, recovery_request_id: Some(9), received_unix_nanos: Some(1_000_000_000), .. })] if *delivered_epoch == epoch && snapshot.publication_generation == 1 && snapshot.generation.0.get() == 3
@@ -2005,7 +2005,7 @@ mod tests {
         let sender = record.endpoint.messages.clone();
         let mut count = 0;
         loop {
-            match sender.send(MarketWorkerMessage::LocalFailure {
+            match sender.send(PaneProjectionEvent::LocalFailure {
                 scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                 message: "fixture".to_string(),
             }) {
@@ -2023,7 +2023,7 @@ mod tests {
         assert!(record.endpoint.pending_recovery.is_none());
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::Recovery {
                     generation: 3,
                     request_id: 9,
@@ -2035,7 +2035,7 @@ mod tests {
         record.endpoint.pending_recovery = Some(pending);
         for _ in 0..count {
             sender
-                .send(MarketWorkerMessage::LocalFailure {
+                .send(PaneProjectionEvent::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                     message: "fixture".to_string(),
                 })
@@ -2075,7 +2075,7 @@ mod tests {
         assert!(record.endpoint.pending_recovery.is_none());
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::Recovery {
                     generation: 3,
                     request_id: 9,
@@ -2131,7 +2131,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::Recovery {
                     generation: 3,
                     request_id: 9,
@@ -2194,7 +2194,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::Recovery {
                     generation: 7,
                     request_id: 10,
@@ -2225,7 +2225,7 @@ mod tests {
         )
         .expect("series");
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+            market_projection_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let endpoint = series_endpoint(sender, 1, 1);
         let snapshot = runtime_snapshot(
             1,
@@ -2311,8 +2311,9 @@ mod tests {
         const BURST: u64 = 200;
         let product = default_product("MNQ");
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
-        let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
+        let (sender, receiver) = market_projection_channel(
+            NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN),
+        );
         let endpoint = series_endpoint(sender, 1, 1);
 
         assert_eq!(
@@ -2379,13 +2380,13 @@ mod tests {
     /// what it was handed before painting, so the drain is replayed the same way
     /// here: the bridge queue is bounded, and a host that never applies would
     /// fill it.
-    fn replay_into_a_chart(messages: &[MarketWorkerMessage]) -> (Option<AerisChartView>, Vec<u64>) {
+    fn replay_into_a_chart(messages: &[PaneProjectionEvent]) -> (Option<AerisChartView>, Vec<u64>) {
         const MARKET_MESSAGES_PER_FRAME: usize = 64;
         let mut chart = None;
         let mut delivered = Vec::new();
         for frame in messages.chunks(MARKET_MESSAGES_PER_FRAME) {
             for message in frame {
-                let MarketWorkerMessage::RuntimeProjection(
+                let PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event,
                         received_unix_nanos: Some(received_unix_nanos),
@@ -2478,7 +2479,7 @@ mod tests {
             1,
             false,
         );
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let endpoint = series_endpoint(sender, 1, 7);
 
         runtime::deliver_runtime_series_publication(
@@ -2492,7 +2493,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
                     ..
                 }, .. })] if snapshot.snapshot.provider_generation.0.get() == 1
@@ -2501,7 +2502,7 @@ mod tests {
 
     #[test]
     fn engine_recovery_state_remains_explicit_while_history_is_retained() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
                 provider: "rithmic".to_string(),
@@ -2519,7 +2520,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     selection_generation: Some(7),
                     event: Fenced {
@@ -2539,7 +2540,7 @@ mod tests {
     #[test]
     fn newer_provider_session_reaches_the_connection_presentation() {
         let product = default_product("MNQ");
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
                 provider: product.provider.clone(),
@@ -2557,7 +2558,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     selection_generation: Some(7),
                     event: Fenced {
@@ -2575,7 +2576,7 @@ mod tests {
 
     #[test]
     fn engine_online_provider_state_forwards_measured_transport_rtt() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
                 provider: "hyperliquid".to_string(),
@@ -2593,7 +2594,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     event: Fenced {
                         value: MarketRuntimeEvent::ProviderState(ProviderState {
@@ -2675,7 +2676,7 @@ mod tests {
 
     #[test]
     fn calendar_snapshot_connects_to_the_shared_realtime_session() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
                 provider: "rithmic".to_string(),
@@ -2692,7 +2693,7 @@ mod tests {
         .expect("calendar provider state is forwarded");
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     event: Fenced {
                         value: MarketRuntimeEvent::ProviderState(ProviderState {
@@ -2731,7 +2732,7 @@ mod tests {
             1,
             false,
         );
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::new(2).expect("capacity"));
         let endpoint = series_endpoint(sender, 1, 7);
         runtime::deliver_runtime_series_publication(
             &endpoint,
@@ -2755,10 +2756,10 @@ mod tests {
         assert!(matches!(
             receiver.drain().0.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection { .. }
                 ),
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event: Fenced {
                             value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
@@ -2802,7 +2803,7 @@ mod tests {
                 false,
             ))
         };
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::new(4).unwrap());
         let endpoint = series_endpoint(sender, 1, 1);
         assert_eq!(
             runtime::deliver_runtime_series_publication(
@@ -2826,7 +2827,7 @@ mod tests {
         let generations = messages
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event:
                             Fenced {
@@ -2890,7 +2891,7 @@ mod tests {
 
     #[test]
     fn retryable_and_permanent_demand_errors_retain_their_fenced_classification() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::new(2).expect("capacity"));
         let endpoint = series_endpoint(sender, 1, 2);
         let retryable = MarketDemandError {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -2913,7 +2914,7 @@ mod tests {
         );
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     event: Fenced {
                         value: MarketRuntimeEvent::DemandError(MarketDemandError {
@@ -2942,7 +2943,7 @@ mod tests {
         );
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 value: MarketRuntimeEvent::DemandError(MarketDemandError {
                     code: EngineFaultCode::Permanent,
                     detail,
@@ -3005,7 +3006,7 @@ mod tests {
         assert!(
             matches!(
                 messages.as_slice(),
-                [MarketWorkerMessage::RuntimeProjection(
+                [PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event: Fenced {
                             value: MarketRuntimeEvent::DemandError(MarketDemandError {
@@ -3072,7 +3073,7 @@ mod tests {
         let mut product = default_product("MNQ");
         product.selection_generation = 9;
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+            market_projection_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let endpoint = series_endpoint(sender, 1, 1);
         let snapshot = mnq_top_of_book_snapshot(&product);
         let deliver = |snapshot| {
@@ -3098,7 +3099,7 @@ mod tests {
         let frame = messages
             .into_iter()
             .find_map(|message| match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event:
                             Fenced {
@@ -3147,7 +3148,7 @@ mod tests {
     fn trade_tape_publication_is_consumer_and_generation_fenced() {
         let product = default_product("MNQ");
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
+            market_projection_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
         let snapshot = |generation, revision| MarketTradeTapeSnapshot {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::new(generation).unwrap_or(NonZeroU64::MIN)),
@@ -3184,7 +3185,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 value: MarketRuntimeEvent::TradeTapeSnapshot(snapshot),
                 ..
             }, .. })] if snapshot.revision == 9
@@ -3193,7 +3194,7 @@ mod tests {
 
     #[test]
     fn study_publications_keep_the_consumer_envelope_and_selection_fence() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(4).expect("capacity"));
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::new(4).expect("capacity"));
         let endpoint = series_endpoint(sender, 1, 2);
         let removed =
             |consumer, generation: Option<u64>| aeris_market_runtime::MarketStudyRemoved {
@@ -3239,15 +3240,15 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+                PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::StudyRemoved(first),
                     ..
                 }, .. }),
-                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+                PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::StudyRemoved(second),
                     ..
                 }, .. }),
-                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+                PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::StudyOutputsInvalidated(_),
                     ..
                 }, .. })
@@ -3416,7 +3417,7 @@ mod tests {
             1,
             false,
         );
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let endpoint = series_endpoint(sender, 1, 8);
         // This fixture previously stamped a different selection onto converted
         // replay data. The canonical event now carries that selection itself.
@@ -3435,13 +3436,13 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
                     ..
                 }, .. })] if snapshot.snapshot.series.provider_id == "hyperliquid"
                 && snapshot.generation.0.get() == 8
         ));
-        let MarketWorkerMessage::RuntimeProjection(
+        let PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection { event, .. },
         ) = &messages[0]
         else {
@@ -3458,7 +3459,7 @@ mod tests {
 
     #[test]
     fn provider_state_keeps_coordinator_epoch_until_pane_projection() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let endpoint = series_endpoint(sender, 41, 8);
         let event = fenced_event(MarketRuntimeEvent::ProviderState(ProviderState {
             provider: "hyperliquid".into(),
@@ -3473,7 +3474,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     epoch: actual,
                     value: MarketRuntimeEvent::ProviderState(ProviderState {
                         transport_rtt_nanos: Some(12_500_000),
@@ -3485,7 +3486,7 @@ mod tests {
 
     #[test]
     fn provider_state_mismatch_is_rejected_per_endpoint() {
-        let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, _receiver) = market_projection_channel(NonZeroUsize::MIN);
         // A Hyperliquid state update on a Rithmic endpoint misroutes.
         assert!(
             apply_provider_state(

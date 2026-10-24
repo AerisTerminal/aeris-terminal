@@ -2,8 +2,8 @@
 
 use super::*;
 use aeris_desktop::market_worker::{
-    EngineWorkerStartup, LocalCommandOutcome, LocalSessionStatus, MarketWorkerCommand,
-    MarketWorkerSender, market_worker_channel,
+    EngineWorkerStartup, LocalCommandOutcome, LocalSessionStatus, MarketProjectionSender,
+    MarketWorkerCommand, market_projection_channel,
 };
 use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
 use gpui::{TestAppContext, VisualTestContext};
@@ -15,7 +15,7 @@ struct PaneHarness {
     window: Entity<PaneWindow>,
     market: FixtureMarketWorker,
     market_events: FixtureMarketEvents,
-    publications: MarketWorkerSender,
+    publications: MarketProjectionSender,
     commands: Option<mpsc::Receiver<MarketWorkerCommand>>,
 }
 
@@ -62,7 +62,7 @@ impl PaneHarness {
         interval: ChartInterval,
         generation: u64,
         bar_count: usize,
-    ) -> MarketWorkerMessage {
+    ) -> PaneProjectionEvent {
         let series = engine_market_worker::series_key(product, interval).expect("fixture series");
         let route = FixtureSeries {
             series,
@@ -74,7 +74,7 @@ impl PaneHarness {
             .market
             .publish_runtime_snapshot(bar_count, &route, generation, &self.market_events)
             .expect("canonical fixture snapshot");
-        MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+        PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
             event,
             received_unix_nanos: Some(301_000_000_000),
             recovery_request_id: None,
@@ -87,16 +87,16 @@ impl PaneHarness {
         generation: u64,
         state: aeris_contracts::SeriesLoadState,
         detail: &str,
-    ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(
+    ) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
                 self.market_events.readiness(generation, state, detail),
             ),
         )
     }
 
-    fn fixture_recovering(&self, generation: u64, detail: &str) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(
+    fn fixture_recovering(&self, generation: u64, detail: &str) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
                 self.market_events.demand_error(
                     generation,
@@ -155,7 +155,7 @@ impl PaneHarness {
         cx: &mut TestAppContext,
     ) -> (Self, &mut VisualTestContext) {
         let (commands, requests) = mpsc::sync_channel(8);
-        let (publications, messages) = market_worker_channel(NonZeroUsize::new(8).unwrap());
+        let (publications, messages) = market_projection_channel(NonZeroUsize::new(8).unwrap());
         let (_shutdown_sender, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
             commands,
@@ -244,7 +244,7 @@ impl PaneHarness {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
         self.publications
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection::event(
                     self.market_events.readiness(
                         1,
@@ -331,7 +331,7 @@ fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAp
     for (harness, product, interval) in &mut panes {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                     generation: 1,
                     instrument: product.clone(),
@@ -345,7 +345,7 @@ fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAp
         duplicate.price_increment = Some(999);
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                     generation: 1,
                     instrument: duplicate,
@@ -402,7 +402,7 @@ fn pane_harness_one_user_selection_command_and_one_applied_reply(cx: &mut TestAp
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::EngineSelection {
                     sequence,
                     succeeded: true,
@@ -462,7 +462,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
         .expect("selection request");
     harness
         .publications
-        .send(MarketWorkerMessage::SessionStatus {
+        .send(PaneProjectionEvent::SessionStatus {
             generation: 1,
             status: LocalSessionStatus::MarketSession(old_status.clone()),
         })
@@ -473,7 +473,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::SessionStatus {
+        .send(PaneProjectionEvent::SessionStatus {
             generation: 1,
             status: LocalSessionStatus::MarketSession(MarketSessionStatus {
                 instrument_id: "uncommitted instrument".into(),
@@ -487,7 +487,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -496,7 +496,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
         .expect("marker");
     harness
         .publications
-        .send(MarketWorkerMessage::SessionStatus {
+        .send(PaneProjectionEvent::SessionStatus {
             generation: 1,
             status: LocalSessionStatus::MarketSession(old_status.clone()),
         })
@@ -507,7 +507,7 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
     };
     harness
         .publications
-        .send(MarketWorkerMessage::SessionStatus {
+        .send(PaneProjectionEvent::SessionStatus {
             generation: sequence,
             status: LocalSessionStatus::MarketSession(new_status.clone()),
         })
@@ -536,7 +536,7 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
     });
     let events = FixtureMarketEvents::default();
     let frame = |generation, revision| {
-        MarketWorkerMessage::RuntimeProjection(
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(events.order_book(
                 generation,
                 OrderBookPublication {
@@ -594,7 +594,7 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -660,7 +660,7 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             .expect("selection request");
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::EngineSelection {
                     sequence,
                     succeeded: false,
@@ -669,7 +669,7 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
             .expect("selection failure enters mailbox");
         harness
             .publications
-            .send(MarketWorkerMessage::SessionStatus {
+            .send(PaneProjectionEvent::SessionStatus {
                 generation: 1,
                 status: LocalSessionStatus::MarketSession(old_status.clone()),
             })
@@ -735,7 +735,7 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -748,7 +748,7 @@ fn pane_harness_retired_recovery_cannot_fail_the_replacement_chart(cx: &mut Test
     let before = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             aeris_desktop::market_worker::LocalCommandOutcome::Recovery {
                 generation: 1,
                 request_id,
@@ -790,7 +790,7 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
         })
         .expect("recovery request");
     let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
-    let MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+    let PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event,
         received_unix_nanos: Some(received_unix_nanos),
         ..
@@ -801,7 +801,7 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
     let epoch = event.epoch;
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection {
                 event,
                 received_unix_nanos: Some(received_unix_nanos),
@@ -814,7 +814,7 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.chart_state, ChartState::Recovering);
     });
-    let MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+    let PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event,
         received_unix_nanos: Some(received_unix_nanos),
         ..
@@ -825,7 +825,7 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
     assert_eq!(event.epoch, epoch);
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection {
                 event,
                 received_unix_nanos: Some(received_unix_nanos),
@@ -870,7 +870,7 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
         .expect("selection request");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -954,7 +954,7 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
             .expect("selection request");
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::EngineSelection {
                     sequence,
                     succeeded: true,
@@ -1029,7 +1029,7 @@ fn pane_harness_interval_switch_covers_chart_until_replacement(cx: &mut TestAppC
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -1085,7 +1085,7 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -1139,7 +1139,7 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     );
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection {
                 event: stale_delta,
                 received_unix_nanos: Some(841_000_000_000),
@@ -1185,7 +1185,7 @@ fn check_snapshot_switch_order(order: [u8; 3], cx: &mut TestAppContext) {
     let mut replacement_installed = false;
     for event in order {
         let message = match event {
-            0 => MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
+            0 => PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
             }),
@@ -1266,7 +1266,7 @@ fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppCo
     harness.publish_snapshot(12, cx);
     let requests = harness.commands.as_ref().expect("command receiver");
     let reply = |sequence| {
-        MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
+        PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
             sequence,
             succeeded: true,
         })
@@ -1370,13 +1370,13 @@ fn deliver_retired_interval_outcomes(
     harness: &mut PaneHarness,
     cx: &mut VisualTestContext,
     sequences: &[u64],
-    publication: impl Fn(u64) -> MarketWorkerMessage,
+    publication: impl Fn(u64) -> PaneProjectionEvent,
 ) {
     let final_generation = *sequences.last().expect("final request");
     for &generation in sequences[..sequences.len() - 1].iter().rev() {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::EngineSelection {
                     sequence: generation,
                     succeeded: true,
@@ -1418,8 +1418,8 @@ fn runtime_bar_snapshot_message(
     events: &FixtureMarketEvents,
     generation: u64,
     publication_generation: u64,
-) -> MarketWorkerMessage {
-    MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+) -> PaneProjectionEvent {
+    PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event: events.snapshot(
             &FixtureSeries {
                 series: series.clone(),
@@ -1449,7 +1449,7 @@ fn publish_runtime_bar_tail(
     let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection {
                 event: events.update(
                     &FixtureSeries {
@@ -1541,7 +1541,7 @@ fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -1589,7 +1589,7 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
     let readiness = |generation, state, detail: &str| {
-        MarketWorkerMessage::RuntimeProjection(
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
                 events.readiness(generation, state, detail),
             ),
@@ -1619,7 +1619,7 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -1683,7 +1683,7 @@ fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAp
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
     let failed = |generation| {
-        MarketWorkerMessage::RuntimeProjection(
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(events.readiness(
                 generation,
                 SeriesLoadState::Failed,
@@ -1712,7 +1712,7 @@ fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -1749,7 +1749,7 @@ fn pane_harness_runtime_demand_error_projects_only_current_series(cx: &mut TestA
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
     let error = |generation, scope| {
-        MarketWorkerMessage::RuntimeProjection(
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(events.demand_error(
                 generation,
                 scope,
@@ -1812,7 +1812,7 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -1850,7 +1850,7 @@ fn pane_harness_history_unavailable_holds_until_the_runtime_clears_it(cx: &mut T
     });
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
                 harness.market_events.readiness_with_presentation(
                     1,
@@ -1929,7 +1929,7 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             aeris_desktop::market_worker::LocalCommandOutcome::Recovery {
                 generation: 1,
                 request_id,
@@ -1949,7 +1949,7 @@ fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mu
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2018,7 +2018,7 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
     }
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2095,7 +2095,7 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
     };
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(failure))
+        .send(PaneProjectionEvent::LocalCommandOutcome(failure))
         .expect("catalog failure");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2135,7 +2135,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::StudyReinitialization {
                 study_id,
                 result: Err("private-provider-rejection".into()),
@@ -2162,7 +2162,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::StudyReinitialization {
                 study_id,
                 result: Ok(()),
@@ -2184,7 +2184,7 @@ fn pane_harness_local_study_removal_failure_renders_one_notice(cx: &mut TestAppC
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::StudyRemovalFailed { study_id },
             ))
             .expect("study removal failure enters mailbox");
@@ -2222,7 +2222,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
         .expect("selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2243,7 +2243,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
     });
     let events = FixtureMarketEvents::default();
     let removed = |generation| {
-        MarketWorkerMessage::RuntimeProjection(
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(events.study_removed(
                 MarketStudyRemoved {
                     consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -2312,7 +2312,7 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2375,7 +2375,7 @@ fn check_switch_cover_through_ready(
         .expect("replacement selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2493,7 +2493,7 @@ fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestA
         .expect("instrument selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2569,7 +2569,7 @@ fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
         if marker_first {
             harness
                 .publications
-                .send(MarketWorkerMessage::LocalCommandOutcome(
+                .send(PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::EngineSelection {
                         sequence,
                         succeeded: true,
@@ -2579,7 +2579,7 @@ fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
         }
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                     generation: sequence.saturating_sub(1),
                     instrument: stale.clone(),
@@ -2627,7 +2627,7 @@ fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut Tes
     assert_ne!(first, second);
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence: first,
                 succeeded: false,
@@ -2669,7 +2669,7 @@ fn pane_harness_selection_outcome_uses_exact_pending_controller_generation(
         .expect("pending selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -2714,7 +2714,7 @@ fn pane_harness_failed_pending_instrument_keeps_previous_identity(cx: &mut TestA
         .expect("instrument selection");
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: false,
@@ -3090,7 +3090,7 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     };
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(harness.market_events.catalog(
                 aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
                     ProviderInstrumentSearchResult {
@@ -3232,7 +3232,7 @@ fn complete_fixture_search(
 ) {
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(harness.market_events.catalog(
                 aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSearchResult(
                     ProviderInstrumentSearchResult {
@@ -3267,7 +3267,7 @@ fn pane_harness_verified_terms_replace_the_provisional_chart_descriptor(cx: &mut
     for instrument in [other, verified.clone()] {
         harness
             .publications
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection::event(
                     harness.market_events.catalog(
                         aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(
@@ -3345,7 +3345,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
         };
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(failure))
+            .send(PaneProjectionEvent::LocalCommandOutcome(failure))
             .expect("fixture failure enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3390,7 +3390,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     };
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(success))
+        .send(PaneProjectionEvent::LocalCommandOutcome(success))
         .expect("fixture commit enters mailbox");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3480,7 +3480,7 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::PriceAlertSync {
                     sequence: 0,
                     succeeded: false,
@@ -3520,7 +3520,7 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
 
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::PriceAlertSync {
                 sequence: 0,
                 succeeded: true,
@@ -3572,7 +3572,7 @@ fn pane_harness_alert_restore_failure_renders_and_processing_success_clears(
     );
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::PriceAlertSync {
                 sequence: 0,
                 succeeded: true,
@@ -3656,7 +3656,7 @@ fn pane_harness_price_alert_sync_ignores_retired_command_outcomes(cx: &mut TestA
     for (sequence, succeeded, expected_notices) in [(1, false, 0), (2, false, 1), (1, true, 1)] {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::PriceAlertSync {
                     sequence,
                     succeeded,
@@ -3684,7 +3684,7 @@ fn pane_harness_price_alert_sync_ignores_retired_command_outcomes(cx: &mut TestA
     for sequence in [2, 3] {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::PriceAlertSync {
                     sequence,
                     succeeded: true,
@@ -3757,7 +3757,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
         });
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::StudyRegistration {
                     request_sequence: sequence,
                     result: Err("private-credential-sentinel".into()),
@@ -3803,7 +3803,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     ] {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::StudyRegistration {
                     request_sequence: 1,
                     result,
@@ -3818,7 +3818,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     }
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::StudyRegistration {
                 request_sequence: 3,
                 result: Ok(StudyInstanceId::try_from_u64(3).expect("fixture identity")),
@@ -3987,7 +3987,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
     });
     let mut epochs = EpochSequence::<ConsumerTag>::default();
     let connection = |provider: String, generation, state, epoch| {
-        MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+        PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
             event: Fenced {
                 epoch,
                 value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
@@ -4020,7 +4020,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
     });
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(Fenced {
                 epoch: epochs.next(),
                 value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
@@ -4085,7 +4085,7 @@ fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAp
             _ => None,
         })
         .expect("selection");
-    let connection = |generation, state, rtt| MarketWorkerMessage::SessionStatus {
+    let connection = |generation, state, rtt| PaneProjectionEvent::SessionStatus {
         generation,
         status: LocalSessionStatus::Connection {
             state,
@@ -4110,7 +4110,7 @@ fn pane_harness_connection_rejects_pending_and_retired_selection(cx: &mut TestAp
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded: true,
@@ -4151,7 +4151,7 @@ fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_c
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::SessionStatus {
+            .send(PaneProjectionEvent::SessionStatus {
                 generation: 1,
                 status: LocalSessionStatus::Connection {
                     state: FeedConnectionState::Stopped,
@@ -4182,7 +4182,7 @@ fn pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_c
     });
     harness
         .publications
-        .send(MarketWorkerMessage::SessionStatus {
+        .send(PaneProjectionEvent::SessionStatus {
             generation: 1,
             status: LocalSessionStatus::Connection {
                 state: FeedConnectionState::Streaming,
@@ -4297,7 +4297,7 @@ fn pane_harness_catalog_failure_before_selection_does_not_fail_chart(cx: &mut Te
     for _ in 0..2 {
         harness
             .publications
-            .send(MarketWorkerMessage::LocalFailure {
+            .send(PaneProjectionEvent::LocalFailure {
                 scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                 message: "private-catalog-detail".into(),
             })
@@ -4325,7 +4325,7 @@ fn pane_harness_late_catalog_failure_cannot_fail_selected_chart(cx: &mut TestApp
     let chart = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("ready chart"));
     harness
         .publications
-        .send(MarketWorkerMessage::LocalFailure {
+        .send(PaneProjectionEvent::LocalFailure {
             scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
             message: "retired catalog failure".into(),
         })
@@ -4352,7 +4352,7 @@ fn pane_harness_endpoint_failure_is_selection_fenced(cx: &mut TestAppContext) {
     harness.publish_snapshot(12, cx);
     harness
         .publications
-        .send(MarketWorkerMessage::LocalFailure {
+        .send(PaneProjectionEvent::LocalFailure {
             scope: aeris_desktop::market_worker::LocalFailureScope::Selection(2),
             message: "retired endpoint failed".into(),
         })
@@ -4364,7 +4364,7 @@ fn pane_harness_endpoint_failure_is_selection_fenced(cx: &mut TestAppContext) {
     });
     harness
         .publications
-        .send(MarketWorkerMessage::LocalFailure {
+        .send(PaneProjectionEvent::LocalFailure {
             scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
             message: "current endpoint failed".into(),
         })

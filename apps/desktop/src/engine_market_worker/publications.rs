@@ -2,7 +2,7 @@
 
 use super::{
     ChartInterval, InstallProviderInstrument, LocalCommandOutcome, MarketDemandErrorScope,
-    MarketRecoveryFailure, MarketRuntimeEvent, MarketService, MarketWorkerMessage,
+    MarketRecoveryFailure, MarketRuntimeEvent, MarketService, PaneProjectionEvent,
     ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams, demand_error,
     replay_runtime_snapshot, series_key,
 };
@@ -32,7 +32,7 @@ pub(super) fn send_recovery(
     if let Some(previous) = endpoint.pending_recovery {
         endpoint
             .messages
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::Recovery {
                     generation: endpoint.active_generation,
                     request_id: previous.request_id,
@@ -56,7 +56,7 @@ pub(super) fn send_recovery(
     if let Err(error) = demand {
         endpoint
             .messages
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 LocalCommandOutcome::Recovery {
                     generation: endpoint.active_generation,
                     request_id: command.request_id,
@@ -76,7 +76,7 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
     };
     endpoint
         .messages
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::Recovery {
                 generation: endpoint.active_generation,
                 request_id: pending.request_id,
@@ -111,7 +111,7 @@ pub(super) fn complete_pending_recovery(
             }
             endpoint
                 .messages
-                .send(MarketWorkerMessage::RuntimeProjection(
+                .send(PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection::series(
                         event.clone(),
                         received_unix_nanos,
@@ -129,7 +129,7 @@ pub(super) fn complete_pending_recovery(
         {
             endpoint
                 .messages
-                .send(MarketWorkerMessage::LocalCommandOutcome(
+                .send(PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::Recovery {
                         generation: endpoint.active_generation,
                         request_id: command.request_id,

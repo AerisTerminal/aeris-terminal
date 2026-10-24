@@ -703,14 +703,14 @@ impl MarketScreener {
         let (messages, disconnected) = worker.drain_messages_up_to(SCREENER_MESSAGES_PER_POLL);
         for message in messages {
             match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection { event, .. },
                 ) => {
                     if let Some(event) = project_provider_catalog_event(event.value) {
                         outcome.changed |= self.apply_catalog_event(event, &mut outcome.opened);
                     }
                 }
-                MarketWorkerMessage::LocalFailure {
+                PaneProjectionEvent::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                     message,
                 } => {

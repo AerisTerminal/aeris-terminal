@@ -147,7 +147,7 @@ use aeris_design_system::{
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
     MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
+    MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup, PaneProjectionEvent,
     PendingUiDiagnostics, UiDiagnosticsFeedback, verified_terms_supersede,
 };
 use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
@@ -3531,7 +3531,7 @@ impl MarketSummaryEntry {
         let changed = !messages.is_empty() || disconnected;
         for message in messages {
             match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event,
                         received_unix_nanos: Some(received_unix_nanos),
@@ -3539,7 +3539,7 @@ impl MarketSummaryEntry {
                         selection_generation: None,
                     },
                 ) => self.apply_runtime_publication(event, received_unix_nanos),
-                MarketWorkerMessage::LocalFailure {
+                PaneProjectionEvent::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                     message,
                 } => self.message = Some(message),

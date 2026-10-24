@@ -3,7 +3,7 @@
 use super::{
     ConsumerResourceClass, EndpointRecord, FeedConnectionState, InstallProviderInstrument,
     LocalCommandOutcome, MarketPriceAlert, MarketRecoveryFailure, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, ReplayRecoveryCommand, StreamRequirements,
+    MarketWorkerCommand, PaneProjectionEvent, ReplayRecoveryCommand, StreamRequirements,
     WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams, retire_endpoint,
     send_recovery,
 };
@@ -21,7 +21,7 @@ pub(super) fn fence_recovery_command(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             LocalCommandOutcome::Recovery {
                 generation: selection_generation.unwrap_or(endpoint.active_generation),
                 request_id: command.request_id,
@@ -59,7 +59,7 @@ pub(super) fn initialize_endpoint(
     match record
         .endpoint
         .messages
-        .send(MarketWorkerMessage::SessionStatus {
+        .send(PaneProjectionEvent::SessionStatus {
             generation: record.endpoint.active_generation,
             status: aeris_desktop::market_worker::LocalSessionStatus::Connection {
                 state: FeedConnectionState::Discovering,
@@ -369,7 +369,7 @@ fn reinitialize_study(
         .map(|_| ());
     endpoint
         .messages
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             aeris_desktop::market_worker::LocalCommandOutcome::StudyReinitialization {
                 study_id: request.study_id,
                 result,
@@ -387,7 +387,7 @@ fn register_study(
     let result = market.register_study(client_id, endpoint.consumer_id, request.registration);
     endpoint
         .messages
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             aeris_desktop::market_worker::LocalCommandOutcome::StudyRegistration {
                 request_sequence: request.sequence,
                 result,
@@ -406,7 +406,7 @@ fn remove_study(
         Ok(_) => Ok(()),
         Err(_) => endpoint
             .messages
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::StudyRemovalFailed { study_id },
             ))
             .map_err(|error| error.to_string()),
@@ -425,7 +425,7 @@ fn replace_price_alerts(
         .is_ok();
     endpoint
         .messages
-        .send(MarketWorkerMessage::LocalCommandOutcome(
+        .send(PaneProjectionEvent::LocalCommandOutcome(
             aeris_desktop::market_worker::LocalCommandOutcome::PriceAlertSync {
                 sequence,
                 succeeded,

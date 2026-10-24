@@ -4041,11 +4041,11 @@ impl WorkspaceSurface {
 
     fn apply_market_worker_message(
         &mut self,
-        message: MarketWorkerMessage,
+        message: PaneProjectionEvent,
         cx: &mut Context<Self>,
     ) {
         match message {
-            MarketWorkerMessage::RuntimeProjection(projection) => {
+            PaneProjectionEvent::RuntimeProjection(projection) => {
                 if let Some(received_unix_nanos) = projection.received_unix_nanos {
                     if let Some(request_id) = projection.recovery_request_id {
                         self.apply_runtime_recovery(
@@ -4069,10 +4069,10 @@ impl WorkspaceSurface {
                     );
                 }
             }
-            MarketWorkerMessage::LocalFailure { scope, message } => {
+            PaneProjectionEvent::LocalFailure { scope, message } => {
                 self.apply_local_failure(scope, message, cx);
             }
-            MarketWorkerMessage::SessionStatus { generation, status } => match status {
+            PaneProjectionEvent::SessionStatus { generation, status } => match status {
                 aeris_desktop::market_worker::LocalSessionStatus::Connection {
                     state,
                     transport_rtt_nanos,
@@ -4088,7 +4088,7 @@ impl WorkspaceSurface {
                     self.apply_fenced_market_session_status(generation, status, cx);
                 }
             },
-            MarketWorkerMessage::LocalCommandOutcome(outcome) => {
+            PaneProjectionEvent::LocalCommandOutcome(outcome) => {
                 self.apply_local_command_outcome(outcome, cx);
             }
         }
@@ -4478,7 +4478,7 @@ impl WorkspaceSurface {
         })
     }
 
-    fn enqueue_runtime_study(
+    fn dispatch_runtime_study(
         &mut self,
         mut state: PendingRuntimeStudyState,
     ) -> Result<u64, Box<(PendingRuntimeStudyState, String)>> {
@@ -4534,7 +4534,7 @@ impl WorkspaceSurface {
             return;
         }
         let state = self.studies.deferred.remove(index);
-        match self.enqueue_runtime_study(state) {
+        match self.dispatch_runtime_study(state) {
             Ok(_) => {
                 self.studies.registration_retry = None;
                 cx.notify();
@@ -5342,7 +5342,7 @@ impl WorkspaceSurface {
         let chart_update_received = messages.iter().any(|message| {
             matches!(
                 message,
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         received_unix_nanos: Some(_),
                         ..
@@ -7935,7 +7935,7 @@ impl WorkspaceSurface {
                 persist_on_registration: true,
                 blocked: false,
             };
-            if self.enqueue_runtime_study(state).is_err() {
+            if self.dispatch_runtime_study(state).is_err() {
                 Self::post_study_failure("The study could not be queued. Try again.", cx);
                 return false;
             }

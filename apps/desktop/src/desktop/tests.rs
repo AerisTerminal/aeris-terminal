@@ -467,7 +467,7 @@ mod timeframe_input {
     use super::super::order_flow_dialog::{OrderFlowColorTarget, OrderFlowDialogDraft};
     use super::super::*;
     use aeris_desktop::market_worker::{
-        EngineWorkerStartup, MarketWorkerCommand, MarketWorkerSender, market_worker_channel,
+        EngineWorkerStartup, MarketProjectionSender, MarketWorkerCommand, market_projection_channel,
     };
     use gpui::{TestAppContext, VisualTestContext};
     use std::num::NonZeroUsize;
@@ -540,7 +540,7 @@ mod timeframe_input {
     ) -> (
         Entity<WorkspaceSurface>,
         mpsc::Receiver<MarketWorkerCommand>,
-        MarketWorkerSender,
+        MarketProjectionSender,
         &mut VisualTestContext,
     ) {
         let product = local_state::default_workspace().watchlist_entries[0]
@@ -557,11 +557,11 @@ mod timeframe_input {
     ) -> (
         Entity<WorkspaceSurface>,
         mpsc::Receiver<MarketWorkerCommand>,
-        MarketWorkerSender,
+        MarketProjectionSender,
         &mut VisualTestContext,
     ) {
         let (commands, requests) = mpsc::sync_channel(8);
-        let (publications, messages) = market_worker_channel(NonZeroUsize::MIN);
+        let (publications, messages) = market_projection_channel(NonZeroUsize::MIN);
         let (_, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
             commands,
@@ -751,7 +751,7 @@ mod timeframe_input {
             assert_eq!(selections.len(), 1, "one request for {keys}");
             assert_eq!(selections[0].interval, interval);
             publications
-                .send(MarketWorkerMessage::LocalCommandOutcome(
+                .send(PaneProjectionEvent::LocalCommandOutcome(
                     aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                         sequence: selections[0].sequence,
                         succeeded: true,
@@ -822,8 +822,8 @@ mod timeframe_input {
 
     fn tape_message(
         snapshot: aeris_market_runtime::MarketTradeTapeSnapshot,
-    ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(
+    ) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
                 aeris_desktop::test_support::FixtureMarketEvents::default().trade_tape(snapshot),
             ),
@@ -832,8 +832,8 @@ mod timeframe_input {
 
     fn deliver_market_message(
         surface: &Entity<WorkspaceSurface>,
-        publications: &MarketWorkerSender,
-        message: MarketWorkerMessage,
+        publications: &MarketProjectionSender,
+        message: PaneProjectionEvent,
         cx: &mut VisualTestContext,
     ) {
         publications.send(message).expect("market message");
@@ -892,7 +892,7 @@ mod timeframe_input {
         };
         let (surface, requests, publications, cx) = harness_with(cx, product.clone());
         publish_snapshot(&surface, cx);
-        let deliver = |message: MarketWorkerMessage, cx: &mut VisualTestContext| {
+        let deliver = |message: PaneProjectionEvent, cx: &mut VisualTestContext| {
             deliver_market_message(&surface, &publications, message, cx);
         };
         let applied_ordinal =
@@ -922,7 +922,7 @@ mod timeframe_input {
         let five_minutes =
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute5, cx);
         deliver(
-            MarketWorkerMessage::LocalCommandOutcome(
+            PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                     sequence: five_minutes,
                     succeeded: true,
@@ -951,7 +951,7 @@ mod timeframe_input {
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
         deliver(
-            MarketWorkerMessage::LocalCommandOutcome(
+            PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                     sequence: fifteen_minutes,
                     succeeded: true,
@@ -1368,7 +1368,7 @@ mod timeframe_input {
             .clone()
             .expect("default instrument");
         let (commands, _requests) = mpsc::sync_channel(64);
-        let (_publications, messages) = market_worker_channel(NonZeroUsize::MIN);
+        let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
         let (_, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
             commands,

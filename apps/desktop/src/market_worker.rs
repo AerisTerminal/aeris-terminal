@@ -297,7 +297,7 @@ impl RuntimeProjection {
     }
 }
 
-pub enum MarketWorkerMessage {
+pub enum PaneProjectionEvent {
     /// Coordinator events retain their consumer fence and endpoint metadata
     /// through the bounded queue until the pane projects them.
     RuntimeProjection(RuntimeProjection),
@@ -313,13 +313,13 @@ pub enum MarketWorkerMessage {
     LocalCommandOutcome(LocalCommandOutcome),
 }
 
-pub type MarketWorkerSender = PaneProjectionSender<MarketWorkerMessage>;
-pub type MarketWorkerReceiver = PaneProjectionReceiver<MarketWorkerMessage>;
+pub type MarketProjectionSender = PaneProjectionSender<PaneProjectionEvent>;
+pub type MarketProjectionReceiver = PaneProjectionReceiver<PaneProjectionEvent>;
 
-fn is_market_publication(message: &MarketWorkerMessage) -> bool {
+fn is_market_publication(message: &PaneProjectionEvent) -> bool {
     matches!(
         message,
-        MarketWorkerMessage::RuntimeProjection(
+        PaneProjectionEvent::RuntimeProjection(
             RuntimeProjection {
                 received_unix_nanos: Some(_),
                 ..
@@ -374,7 +374,9 @@ impl GenerationCoalescingQueue {
 }
 
 #[must_use]
-pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, MarketWorkerReceiver) {
+pub fn market_projection_channel(
+    capacity: NonZeroUsize,
+) -> (MarketProjectionSender, MarketProjectionReceiver) {
     pane_projection_channel(capacity, is_market_publication)
 }
 
@@ -635,7 +637,7 @@ impl std::ops::Deref for WorkerCommandSender {
 
 pub struct MarketDataWorker {
     commands: Option<WorkerCommandSender>,
-    messages: Option<MarketWorkerReceiver>,
+    messages: Option<MarketProjectionReceiver>,
     shutdown_complete: Option<Receiver<()>>,
     connected: bool,
     ui_diagnostics: Option<UiDiagnosticsSender>,
@@ -648,7 +650,7 @@ impl MarketDataWorker {
     #[must_use]
     pub fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,
-        messages: MarketWorkerReceiver,
+        messages: MarketProjectionReceiver,
         shutdown_complete: Receiver<()>,
         ui_diagnostics: Option<UiDiagnosticsSender>,
         engine_selection_sequence: Option<Arc<AtomicU64>>,
@@ -1164,11 +1166,11 @@ impl MarketDataWorker {
             .map_err(|_| ProviderCommandUnavailable)
     }
 
-    pub fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
+    pub fn drain_messages(&mut self) -> (Vec<PaneProjectionEvent>, bool) {
         self.drain_messages_up_to(usize::MAX)
     }
 
-    pub fn drain_messages_up_to(&mut self, limit: usize) -> (Vec<MarketWorkerMessage>, bool) {
+    pub fn drain_messages_up_to(&mut self, limit: usize) -> (Vec<PaneProjectionEvent>, bool) {
         let Some(receiver) = self.messages.as_ref() else {
             let newly_disconnected = self.connected;
             self.connected = false;
@@ -1268,8 +1270,8 @@ mod tests {
     use super::{
         ChartViewportUpdate, ConsumerResourceClass, LocalCommandOutcome, LocalSessionStatus,
         MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
-        MarketWorkerMessage, PendingUiDiagnostics, UiDiagnosticsFeedback, market_worker_channel,
-        ui_diagnostics_channel,
+        PaneProjectionEvent, PendingUiDiagnostics, UiDiagnosticsFeedback,
+        market_projection_channel, ui_diagnostics_channel,
     };
     use crate::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
     use aeris_contracts::{
@@ -1303,8 +1305,8 @@ mod tests {
         command_generation: u64,
         reason: ProviderCatalogRejectionReason,
         selection: bool,
-    ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
+    ) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
             FixtureMarketEvents::default().catalog(MarketRuntimeEvent::ProviderCatalogRejected {
                 rejection: ProviderCatalogRejected {
                     consumer_id: 1,
@@ -1321,13 +1323,13 @@ mod tests {
     #[test]
     fn fenced_runtime_entries_share_fifo_with_metadata_and_control_reserve() {
         use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         sender
             .send(snapshot_message(&mut worker, 2))
             .expect("publication fills the ordinary slot");
         sender
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection::event(
                     FixtureMarketEvents::default().catalog(
                         MarketRuntimeEvent::ProviderCatalogRejected {
@@ -1346,7 +1348,7 @@ mod tests {
             .expect("metadata-free coordinator control uses the same reserve");
         let mut epochs = EpochSequence::<ConsumerTag>::default();
         let provider_state = |generation, epoch| {
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 selection_generation: Some(generation),
                 event: Fenced {
                     epoch,
@@ -1373,7 +1375,7 @@ mod tests {
         let (first, _) = receiver.drain_up_to(1);
         assert!(matches!(
             first.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection { .. }
             )]
         ));
@@ -1381,14 +1383,14 @@ mod tests {
         assert!(matches!(
             remaining.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     received_unix_nanos: None,
                     selection_generation: None,
                     event: Fenced { value: MarketRuntimeEvent::ProviderCatalogRejected { .. }, .. },
                     ..
                 }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { selection_generation: Some(7), event: Fenced { epoch: actual_first, .. }, .. }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { selection_generation: Some(8), event: Fenced { epoch: actual_second, .. }, .. })
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { selection_generation: Some(7), event: Fenced { epoch: actual_first, .. }, .. }),
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { selection_generation: Some(8), event: Fenced { epoch: actual_second, .. }, .. })
             ] if *actual_first == first_epoch && *actual_second == second_epoch
         ));
     }
@@ -1396,9 +1398,9 @@ mod tests {
     #[test]
     fn local_connection_and_calendar_status_share_fifo_and_selection_stamp() {
         use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         sender
-            .send(MarketWorkerMessage::SessionStatus {
+            .send(PaneProjectionEvent::SessionStatus {
                 generation: 7,
                 status: LocalSessionStatus::Connection {
                     state: aeris_observability::FeedConnectionState::Discovering,
@@ -1415,7 +1417,7 @@ mod tests {
             next_open_unix_nanos: None,
         };
         sender
-            .send(MarketWorkerMessage::SessionStatus {
+            .send(PaneProjectionEvent::SessionStatus {
                 generation: 8,
                 status: LocalSessionStatus::MarketSession(calendar.clone()),
             })
@@ -1425,11 +1427,11 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::SessionStatus {
+                PaneProjectionEvent::SessionStatus {
                     generation: 7,
                     status: LocalSessionStatus::Connection { .. },
                 },
-                MarketWorkerMessage::SessionStatus {
+                PaneProjectionEvent::SessionStatus {
                     generation: 8,
                     status: LocalSessionStatus::MarketSession(status),
                 },
@@ -1437,9 +1439,9 @@ mod tests {
         ));
     }
 
-    fn tail_operation(message: &MarketWorkerMessage) -> Option<SeriesTailOperation> {
+    fn tail_operation(message: &PaneProjectionEvent) -> Option<SeriesTailOperation> {
         match message {
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event:
                     aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesUpdate(update),
@@ -1451,7 +1453,7 @@ mod tests {
         }
     }
 
-    fn book_message(frame: OrderBookFrame) -> MarketWorkerMessage {
+    fn book_message(frame: OrderBookFrame) -> PaneProjectionEvent {
         let event = FixtureMarketEvents::default().order_book(
             frame.selection_generation,
             OrderBookPublication {
@@ -1472,15 +1474,15 @@ mod tests {
                 top_of_book_only: frame.top_of_book_only,
             },
         );
-        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
+        PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
             event,
         ))
     }
 
     fn book_snapshot(
-        message: &MarketWorkerMessage,
+        message: &PaneProjectionEvent,
     ) -> Option<&aeris_market_runtime::MarketOrderBookSnapshot> {
-        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+        let PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
             ..
         }) = message
@@ -1503,9 +1505,9 @@ mod tests {
         }
     }
 
-    fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
+    fn live_tail_sequence(message: &PaneProjectionEvent) -> Option<u64> {
         match message {
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event:
                     aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesUpdate(update),
@@ -1532,8 +1534,8 @@ mod tests {
         }
     }
 
-    fn snapshot_message(fixture: &mut FixtureMarketWorker, count: usize) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+    fn snapshot_message(fixture: &mut FixtureMarketWorker, count: usize) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event: fixture
                 .publish_runtime_snapshot(
                     count,
@@ -1552,8 +1554,8 @@ mod tests {
         generation: u64,
         bar: aeris_market_data::MarketBar,
         operation: SeriesTailOperation,
-    ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+    ) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event: FixtureMarketEvents::default().update(
                 &fixture_series(),
                 1,
@@ -1571,15 +1573,15 @@ mod tests {
     fn status_message(
         state: aeris_contracts::SeriesLoadState,
         detail: &str,
-    ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
+    ) -> PaneProjectionEvent {
+        PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
             FixtureMarketEvents::default().readiness(1, state, detail),
         ))
     }
 
-    fn snapshot_generation(message: &MarketWorkerMessage) -> Option<u64> {
+    fn snapshot_generation(message: &PaneProjectionEvent) -> Option<u64> {
         match message {
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event:
                     aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
@@ -1607,7 +1609,7 @@ mod tests {
     #[test]
     fn dropping_worker_requests_shutdown_without_waiting_for_acknowledgement() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let (observed_tx, observed_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -1641,7 +1643,7 @@ mod tests {
     #[test]
     fn full_retirement_queue_wakes_and_closes_after_draining() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let wakes = Arc::new(AtomicUsize::new(0));
@@ -1675,7 +1677,7 @@ mod tests {
     #[test]
     fn explicit_retirement_moves_the_wait_off_the_caller() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let (observed_tx, observed_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -1708,7 +1710,7 @@ mod tests {
     #[test]
     fn explicit_shutdown_waits_and_leaves_a_reusable_disconnected_handle() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let worker_thread = thread::spawn(move || {
             assert!(matches!(
@@ -1734,7 +1736,7 @@ mod tests {
     #[test]
     fn workspace_visibility_crosses_the_bounded_worker_boundary() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
@@ -1763,7 +1765,7 @@ mod tests {
                 selection_generation: 3,
             }))
             .expect("command mailbox is filled");
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
@@ -1791,7 +1793,7 @@ mod tests {
     #[test]
     fn engine_background_transition_discards_stale_ui_market_publications() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
@@ -1827,7 +1829,7 @@ mod tests {
         let (messages, _) = worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection { .. }
             )]
         ));
@@ -1838,7 +1840,7 @@ mod tests {
 
     #[test]
     fn idempotent_foreground_assignment_preserves_initial_covering_snapshot() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         sender
             .send(snapshot_message(&mut fixture, 2))
@@ -1850,7 +1852,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
@@ -1864,7 +1866,7 @@ mod tests {
 
     #[test]
     fn control_states_preserve_fifo_order_in_the_bounded_mailbox() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         assert!(
             sender
                 .send(status_message(
@@ -1887,10 +1889,10 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(first), ..
                 }, .. }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(second), ..
                 }, .. })
             ] if first.state == aeris_contracts::SeriesLoadState::Resolving
@@ -1905,7 +1907,7 @@ mod tests {
         const FRAME_BUDGET: usize = 64;
         const OUTBOX_EVENTS: u64 = 10_000;
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(256).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(256).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let snapshot = snapshot_message(&mut fixture, 2);
         let mut outbox = (1..=OUTBOX_EVENTS).collect::<VecDeque<_>>();
@@ -1913,7 +1915,7 @@ mod tests {
         let mut overflow_count = 0;
         while next_applied <= OUTBOX_EVENTS {
             while let Some(&generation) = outbox.front() {
-                let MarketWorkerMessage::RuntimeProjection(
+                let PaneProjectionEvent::RuntimeProjection(
                     crate::market_worker::RuntimeProjection { event, .. },
                 ) = &snapshot
                 else {
@@ -1922,7 +1924,7 @@ mod tests {
                 let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
                     panic!("fixture snapshot has series data");
                 };
-                let result = sender.send(MarketWorkerMessage::RuntimeProjection(
+                let result = sender.send(PaneProjectionEvent::RuntimeProjection(
                     crate::market_worker::RuntimeProjection {
                         event: FixtureMarketEvents::default().snapshot(
                             &fixture_series(),
@@ -1960,9 +1962,9 @@ mod tests {
 
     #[test]
     fn fenced_runtime_events_share_publication_capacity_without_suppressing_controls() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let tape = || {
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
                 FixtureMarketEvents::default().trade_tape(MarketTradeTapeSnapshot {
                     consumer_id: MarketConsumerId(NonZeroU64::MIN),
                     generation: MarketGenerationId(NonZeroU64::MIN),
@@ -1997,7 +1999,7 @@ mod tests {
         let (first, _) = receiver.drain_up_to(1);
         assert!(matches!(
             first.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::TradeTapeSnapshot(_),
@@ -2011,14 +2013,14 @@ mod tests {
         assert!(matches!(
             remaining.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesState(_),
                         ..
                     },
                     ..
                 }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::ProviderCatalogRejected { .. },
                         ..
@@ -2041,8 +2043,8 @@ mod tests {
     #[test]
     fn app_scoped_failures_preserve_fifo_order_and_report_backpressure() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        let failure = |generation: u64| MarketWorkerMessage::LocalFailure {
+            market_projection_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
+        let failure = |generation: u64| PaneProjectionEvent::LocalFailure {
             scope: super::LocalFailureScope::Catalog,
             message: generation.to_string(),
         };
@@ -2051,7 +2053,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert_eq!(messages.len(), 2);
         for (index, message) in messages.iter().enumerate() {
-            let MarketWorkerMessage::LocalFailure {
+            let PaneProjectionEvent::LocalFailure {
                 scope: super::LocalFailureScope::Catalog,
                 message,
             } = message
@@ -2082,7 +2084,7 @@ mod tests {
             .into_iter()
             .chain(later)
             .map(|message| {
-                let MarketWorkerMessage::LocalFailure {
+                let PaneProjectionEvent::LocalFailure {
                     scope: super::LocalFailureScope::Catalog,
                     message,
                 } = message
@@ -2097,14 +2099,14 @@ mod tests {
 
     #[test]
     fn local_failures_keep_scope_and_fifo_across_app_and_selection() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::new(2).expect("capacity"));
         for (scope, message) in [
             (super::LocalFailureScope::Catalog, "catalog"),
             (super::LocalFailureScope::Selection(7), "current"),
             (super::LocalFailureScope::Selection(6), "retired"),
         ] {
             sender
-                .send(MarketWorkerMessage::LocalFailure {
+                .send(PaneProjectionEvent::LocalFailure {
                     scope,
                     message: message.into(),
                 })
@@ -2116,7 +2118,7 @@ mod tests {
             .into_iter()
             .chain(rest)
             .map(|entry| match entry {
-                MarketWorkerMessage::LocalFailure { scope, message } => (scope, message),
+                PaneProjectionEvent::LocalFailure { scope, message } => (scope, message),
                 _ => panic!("only local failures were sent"),
             })
             .collect::<Vec<_>>();
@@ -2132,7 +2134,7 @@ mod tests {
 
     #[test]
     fn local_command_outcomes_keep_request_fences_and_fifo() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(2).expect("capacity"));
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::new(2).expect("capacity"));
         let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
         let alert = LocalCommandOutcome::PriceAlertSync {
             sequence: 5,
@@ -2179,18 +2181,18 @@ mod tests {
             engine,
         ] {
             sender
-                .send(MarketWorkerMessage::LocalCommandOutcome(outcome))
+                .send(PaneProjectionEvent::LocalCommandOutcome(outcome))
                 .expect("local outcome enters bounded control reserve");
         }
         let (first, _) = receiver.drain_up_to(2);
         assert!(matches!(
             first.as_slice(),
             [
-                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::PriceAlertSync {
+                PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::PriceAlertSync {
                     sequence: 5,
                     succeeded: false,
                 }),
-                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::StudyRegistration {
+                PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::StudyRegistration {
                     request_sequence: 7,
                     result: Err(_),
                 }),
@@ -2200,31 +2202,31 @@ mod tests {
         assert!(matches!(
             later.as_slice(),
             [
-                MarketWorkerMessage::LocalCommandOutcome(
+                PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::StudyReinitialization {
                         study_id: reinitialized,
                         result: Ok(()),
                     }
                 ),
-                MarketWorkerMessage::LocalCommandOutcome(
+                PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::StudyRemovalFailed { study_id: removed }
                 ),
-                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::Recovery {
+                PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::Recovery {
                     generation: 9,
                     request_id: 11,
                     failure: MarketRecoveryFailure::Superseded,
                 }),
-                MarketWorkerMessage::LocalCommandOutcome(
+                PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::SelectedInstrument { generation: 12, instrument }
                 ),
-                MarketWorkerMessage::LocalCommandOutcome(
+                PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::CatalogSwitch {
                         sequence: 13,
                         browser_generation: 17,
                         result: Err(_),
                     }
                 ),
-                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
+                PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
                     sequence: 19,
                     succeeded: false,
                 }),
@@ -2289,7 +2291,7 @@ mod tests {
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_counter = Arc::clone(&wake_count);
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
         receiver.set_wake(Arc::new(move || {
             wake_counter.fetch_add(1, Ordering::AcqRel);
         }));
@@ -2312,13 +2314,13 @@ mod tests {
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_counter = Arc::clone(&wake_count);
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
         receiver.set_wake(Arc::new(move || {
             wake_counter.fetch_add(1, Ordering::AcqRel);
         }));
         for sequence in 1..=3 {
             sender
-                .send(MarketWorkerMessage::LocalCommandOutcome(
+                .send(PaneProjectionEvent::LocalCommandOutcome(
                     super::LocalCommandOutcome::EngineSelection {
                         sequence,
                         succeeded: true,
@@ -2343,7 +2345,7 @@ mod tests {
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_counter = Arc::clone(&wake_count);
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
         receiver.set_wake(Arc::new(move || {
             wake_counter.fetch_add(1, Ordering::AcqRel);
         }));
@@ -2376,7 +2378,7 @@ mod tests {
         let generations = messages
             .iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     crate::market_worker::RuntimeProjection {
                         event:
                             aeris_market_runtime::fence::Fenced {
@@ -2395,7 +2397,7 @@ mod tests {
     #[test]
     fn queued_append_is_delivered_before_its_same_candle_revision() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         let source = bootstrap
@@ -2441,7 +2443,7 @@ mod tests {
     #[test]
     fn live_tails_for_distinct_bars_are_all_delivered() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         let source = bootstrap
@@ -2479,7 +2481,7 @@ mod tests {
     #[test]
     fn full_market_mailbox_returns_backpressure_without_mutating_queued_bars() {
         let capacity = NonZeroUsize::new(4).expect("capacity is nonzero");
-        let (sender, receiver) = market_worker_channel(capacity);
+        let (sender, receiver) = market_projection_channel(capacity);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         let source = bootstrap
@@ -2490,7 +2492,7 @@ mod tests {
             .expect("tail exists");
         let first_sequence = source.value().source_sequence;
         sender
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection {
                     event: FixtureMarketEvents::default().snapshot(
                         &fixture_series(),
@@ -2538,7 +2540,7 @@ mod tests {
         );
         assert!(matches!(
             messages.first(),
-            Some(MarketWorkerMessage::RuntimeProjection(
+            Some(PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
@@ -2552,7 +2554,7 @@ mod tests {
 
     #[test]
     fn mailbox_wake_fires_for_queued_messages_on_registration() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         sender
             .send(status_message(
                 aeris_contracts::SeriesLoadState::Resolving,
@@ -2572,7 +2574,7 @@ mod tests {
     fn mailbox_wake_fires_when_last_sender_drops() {
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_counter = Arc::clone(&wake_count);
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         receiver.set_wake(Arc::new(move || {
             wake_counter.fetch_add(1, Ordering::AcqRel);
         }));
@@ -2587,7 +2589,7 @@ mod tests {
     fn mailbox_wake_stops_after_receiver_drops() {
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_counter = Arc::clone(&wake_count);
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         receiver.set_wake(Arc::new(move || {
             wake_counter.fetch_add(1, Ordering::AcqRel);
         }));
@@ -2607,10 +2609,10 @@ mod tests {
     #[test]
     fn app_scoped_failures_keep_fifo_order_with_market_publications() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let snapshot = snapshot_message(&mut worker, 2);
-        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+        let PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
             ..
         }) = &snapshot
@@ -2624,7 +2626,7 @@ mod tests {
         assert!(sender.send(snapshot).is_ok());
         assert!(
             sender
-                .send(MarketWorkerMessage::LocalFailure {
+                .send(PaneProjectionEvent::LocalFailure {
                     scope: super::LocalFailureScope::Catalog,
                     message: "fixture".into(),
                 })
@@ -2642,7 +2644,7 @@ mod tests {
         let (first, _) = receiver.drain_up_to(1);
         assert!(matches!(
             first.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(
+            [PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection { .. }
             )]
         ));
@@ -2654,11 +2656,11 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::LocalFailure {
+                PaneProjectionEvent::LocalFailure {
                     scope: super::LocalFailureScope::Catalog,
                     ..
                 },
-                MarketWorkerMessage::RuntimeProjection(
+                PaneProjectionEvent::RuntimeProjection(
                     crate::market_worker::RuntimeProjection { .. }
                 )
             ]
@@ -2667,7 +2669,7 @@ mod tests {
 
     #[test]
     fn terminal_control_preserves_a_queued_covering_snapshot() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         assert!(sender.send(snapshot_message(&mut worker, 2)).is_ok());
         assert!(
@@ -2683,14 +2685,14 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
                         ..
                     },
                     ..
                 }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesState(
                             aeris_market_runtime::MarketSeriesState {
@@ -2708,7 +2710,7 @@ mod tests {
 
     #[test]
     fn market_publication_waits_behind_a_full_control_queue() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         assert!(
             sender
                 .send(status_message(
@@ -2728,7 +2730,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+            [PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                 value: MarketRuntimeEvent::SeriesState(state), ..
             }, .. })] if state.state == aeris_contracts::SeriesLoadState::Ready
                 && state.detail.as_deref() == Some("ready")
@@ -2737,10 +2739,10 @@ mod tests {
 
     #[test]
     fn queued_covering_snapshot_is_unchanged_when_next_update_is_backpressured() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let snapshot = snapshot_message(&mut worker, 2);
-        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+        let PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
             ..
         }) = &snapshot
@@ -2772,10 +2774,10 @@ mod tests {
 
     #[test]
     fn control_messages_remain_fifo_while_market_publication_is_backpressured() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
+            .send(PaneProjectionEvent::LocalCommandOutcome(
                 super::LocalCommandOutcome::EngineSelection {
                     sequence: 7,
                     succeeded: true,
@@ -2798,8 +2800,8 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::LocalCommandOutcome(super::LocalCommandOutcome::EngineSelection { sequence: 7, succeeded: true }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::LocalCommandOutcome(super::LocalCommandOutcome::EngineSelection { sequence: 7, succeeded: true }),
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 }, .. })
             ] if state.detail.as_deref() == Some("switching")
@@ -2808,7 +2810,7 @@ mod tests {
 
     #[test]
     fn terminal_and_failed_recovery_messages_survive_lower_priority_states() {
-        let (error_sender, error_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (error_sender, error_receiver) = market_projection_channel(NonZeroUsize::MIN);
         assert!(
             error_sender
                 .send(status_message(
@@ -2829,10 +2831,10 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(terminal), ..
                 }, .. }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(obsolete), ..
                 }, .. })
             ] if terminal.state == aeris_contracts::SeriesLoadState::Failed
@@ -2841,10 +2843,10 @@ mod tests {
                 && obsolete.detail.as_deref() == Some("obsolete")
         ));
 
-        let (recovery_sender, recovery_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (recovery_sender, recovery_receiver) = market_projection_channel(NonZeroUsize::MIN);
         assert!(
             recovery_sender
-                .send(MarketWorkerMessage::LocalCommandOutcome(
+                .send(PaneProjectionEvent::LocalCommandOutcome(
                     LocalCommandOutcome::Recovery {
                         generation: 1,
                         request_id: 7,
@@ -2865,8 +2867,8 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::Recovery { request_id: 7, .. }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::Recovery { request_id: 7, .. }),
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 }, .. })
             ] if state.detail.as_deref() == Some("obsolete")
@@ -2876,7 +2878,7 @@ mod tests {
     #[test]
     fn successful_recovery_and_newer_stream_update_preserve_fifo_order() {
         let (covered_sender, covered_receiver) =
-            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         let mut bar = *bootstrap.snapshot.bars().last().expect("last bar").value();
@@ -2884,7 +2886,7 @@ mod tests {
         bar.source_sequence += 1;
         bar.exchange_timestamp_seconds += 60;
         bar.exchange_timestamp_unix_nanos = bar.exchange_timestamp_seconds * 1_000_000_000;
-        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+        let PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
             received_unix_nanos: Some(received_unix_nanos),
             ..
@@ -2894,7 +2896,7 @@ mod tests {
         };
         assert!(
             covered_sender
-                .send(MarketWorkerMessage::RuntimeProjection(
+                .send(PaneProjectionEvent::RuntimeProjection(
                     crate::market_worker::RuntimeProjection {
                         event,
                         received_unix_nanos: Some(received_unix_nanos),
@@ -2917,20 +2919,20 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     recovery_request_id: Some(8),
                     ..
                 }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     recovery_request_id: None,
                     ..
                 })
             ]
         ));
 
-        let (stale_sender, stale_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (stale_sender, stale_receiver) = market_projection_channel(NonZeroUsize::MIN);
         let mut stale_fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+        let PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
             received_unix_nanos: Some(received_unix_nanos),
             ..
@@ -2940,7 +2942,7 @@ mod tests {
         };
         assert!(
             stale_sender
-                .send(MarketWorkerMessage::RuntimeProjection(
+                .send(PaneProjectionEvent::RuntimeProjection(
                     crate::market_worker::RuntimeProjection {
                         event,
                         received_unix_nanos: Some(received_unix_nanos),
@@ -2962,8 +2964,8 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { recovery_request_id: Some(9), .. }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { recovery_request_id: Some(9), .. }),
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 }, .. })
             ] if state.detail.as_deref() == Some("network changed")
@@ -2972,7 +2974,7 @@ mod tests {
 
     #[test]
     fn latest_rithmic_catalog_result_is_conflated_without_displacing_market_state() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         assert!(
             sender
                 .send(catalog_rejection(
@@ -2997,14 +2999,14 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::ProviderCatalogRejected {
                         rejection: ProviderCatalogRejected { command_generation: first_generation, .. },
                         selection: false,
                     },
                     ..
                 }, .. }),
-                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
+                PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::ProviderCatalogRejected {
                         rejection: ProviderCatalogRejected { command_generation, reason, .. },
                         selection: true,
@@ -3019,7 +3021,7 @@ mod tests {
 
     #[test]
     fn series_state_survives_catalog_rejection_in_the_bounded_mailbox() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
         assert!(
             sender
@@ -3042,7 +3044,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(
             messages[0],
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(
                         aeris_market_runtime::MarketSeriesState {
@@ -3057,7 +3059,7 @@ mod tests {
         ));
         assert!(matches!(
             messages[1],
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::ProviderCatalogRejected {
                         rejection: ProviderCatalogRejected {
@@ -3076,10 +3078,10 @@ mod tests {
     #[test]
     fn mailbox_does_not_filter_publication_generations() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let snapshot = snapshot_message(&mut fixture, 2);
-        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+        let PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
             ..
         }) = snapshot
@@ -3090,7 +3092,7 @@ mod tests {
             panic!("fixture snapshot contains bars");
         };
         let publication = |generation| {
-            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event: FixtureMarketEvents::default().snapshot(
                     &fixture_series(),
                     1,
@@ -3122,7 +3124,7 @@ mod tests {
     #[test]
     fn order_book_mailbox_preserves_regressing_runtime_order() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let frame = |revision, state| OrderBookFrame {
             provider_id: "rithmic".to_string(),
             instrument_id: "rithmic:CME:MNQ".to_string(),
@@ -3172,7 +3174,7 @@ mod tests {
     #[test]
     fn order_book_mailbox_preserves_newer_frames_after_earlier_frames() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let frame = |revision| OrderBookFrame {
             provider_id: "rithmic".to_string(),
             instrument_id: "rithmic:CME:MNQ".to_string(),
@@ -3212,7 +3214,7 @@ mod tests {
     #[test]
     fn trade_tape_mailbox_preserves_emission_order_per_runtime_generation() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let snapshot = |revision| MarketTradeTapeSnapshot {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::MIN),
@@ -3229,12 +3231,12 @@ mod tests {
         };
         let events = FixtureMarketEvents::default();
         sender
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection::event(events.trade_tape(snapshot(2))),
             ))
             .expect("first tape queues");
         sender
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection::event(events.trade_tape(snapshot(3))),
             ))
             .expect("newer tape queues behind it");
@@ -3242,7 +3244,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: first, .. }), MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { event: second, .. })]
+            [PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: first, .. }), PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: second, .. })]
                 if matches!(&first.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 2)
                     && matches!(&second.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 3)
                     && first.epoch == second.epoch
@@ -3252,7 +3254,7 @@ mod tests {
     #[test]
     fn order_book_mailbox_does_not_reinterpret_session_generations() {
         let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(3).expect("capacity is nonzero"));
+            market_projection_channel(NonZeroUsize::new(3).expect("capacity is nonzero"));
         let frame = |session_generation, selection_generation, revision| OrderBookFrame {
             provider_id: "rithmic".to_string(),
             instrument_id: "rithmic:CME:MNQ".to_string(),
@@ -3302,7 +3304,7 @@ mod tests {
     #[test]
     fn rithmic_catalog_commands_use_the_bounded_worker_channel() {
         let (command_tx, command_rx) = mpsc::sync_channel(2);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
@@ -3358,7 +3360,7 @@ mod tests {
     #[test]
     fn study_commands_preserve_registration_sequence_and_runtime_identity() {
         let (command_tx, command_rx) = mpsc::sync_channel(4);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
@@ -3411,7 +3413,7 @@ mod tests {
     #[test]
     fn foreground_symbol_switch_reports_bounded_overflow_without_advancing_generation() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_message_tx, message_rx) = market_projection_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let sequence = Arc::new(AtomicU64::new(7));
         let worker = MarketDataWorker::from_channels(

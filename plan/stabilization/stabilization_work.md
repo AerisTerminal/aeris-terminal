@@ -135,8 +135,8 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | UI-02 | High | Symbol/interval switching is a UI-owned state machine without generations | M6.3, M6.4 | open |
 | UI-03 | High | Provider-specific identity, entitlement and wording in the desktop | M6.7, M6.8, M6.9 | open |
 | UI-04 | Medium | Symbol selection takes two round trips and startup catalog resolution lives in the desktop | M3.10 (runtime part), M6.5 | M3.10 closes the two-step chart pick and desktop startup catalog ownership; M6.5 retains the broader picker cleanup |
-| UI-05 | Medium | Busy-polling worker loop and duplicated slot/channel command paths | M3.9 (runtime/bridge part), M6.6 | open |
-| UI-06 | Medium | Parallel message model and bespoke mailbox in the desktop | M6.1 (fixture part), M6.6 | open |
+| UI-05 | Medium | Busy-polling worker loop and duplicated slot/channel command paths | M3.9 (runtime/bridge part), M6.6 | closed: waitable coordinator outbox and bounded pane projection queue, no 2 ms polling |
+| UI-06 | Medium | Parallel message model and bespoke mailbox in the desktop | M6.1 (fixture part), M6.6 | closed: one coordinator-fenced runtime projection plus explicit local outcomes in the bounded pane queue |
 | UI-07 | High | `WorkspaceSurface` and `TerminalApp` are god objects with no internal encapsulation | M7.3 (AerisChartView), M7.4 (WorkspaceSurface), M7.5 (TerminalApp) | open |
 | UI-08 | Medium | Trading state duplicated per pane and polled from the render path | M6.10 | open |
 | UI-09 | Medium | Persistence lacks versioning, duplicates atomic-write logic, and silently resets on corruption | M7.7 (duplication/backup), M7.8 | open |
@@ -1549,7 +1549,7 @@ Status: pending
     VAL-DSK-018/019 are covered by those tests and the source/naming rule
     checks. M6.5 code is complete; VAL-DSK-020 remains explicitly unvalidated
     because the maintainer owns the running release desktop (PID 40076).
-- [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
+- [x] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
   - Part 5 route map (Part 24 fence audit; runtime events are delivered in a
     `Fenced<ConsumerTag, MarketRuntimeEvent>` envelope before the desktop
     translates them; names below describe the eventual pane projection, not
@@ -2043,6 +2043,19 @@ Status: pending
   regression covers the common bounded queue and control reserve. The
   transitional message/channel/enqueue names and literal VAL-DSK-021/022
   checks remain, so M6.6 stays unchecked.
+- Part 8b4 (2026-10-24): removed the transitional worker message/channel
+  names and the misleading study enqueue entry point after every coordinator
+  event had moved into the one fenced `RuntimeProjection` route. The remaining
+  `PaneProjectionEvent` is the typed GPUI projection of coordinator events,
+  selection-stamped local statuses/failures and command outcomes; the one
+  bounded `market_projection_channel` carries it with control reserve and
+  explicit full/disconnected results. VAL-DSK-021 literal searches have zero
+  source matches for the old model, polling, recovery `expect` and runtime
+  discarded results. VAL-DSK-022 is covered by
+  `bounded_bridge_drains_ten_thousand_outbox_events_in_emission_order`,
+  which asserts FIFO delivery of 10,000, at most 64 per frame, and counted
+  backpressure, plus the mixed metadata/control-reserve regression. M6.6 is
+  code-complete; milestone GUI, probes and M6.7-M6.12 remain open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

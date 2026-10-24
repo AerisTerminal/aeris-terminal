@@ -2,12 +2,12 @@
 
 use super::{
     EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, WorkerEndpoint, complete_pending_recovery,
+    MarketWorkerCommand, PaneProjectionEvent, WorkerEndpoint, complete_pending_recovery,
     initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
     process_command,
 };
 use aeris_desktop::market_worker::{
-    LocalSessionStatus, MarketWorkerSendError, MarketWorkerSender, verified_terms_supersede,
+    LocalSessionStatus, MarketProjectionSender, MarketWorkerSendError, verified_terms_supersede,
 };
 use aeris_observability::diagnostic;
 use aeris_trading::market::MarketRoute;
@@ -27,7 +27,7 @@ pub(super) fn run_workers(
         match record
             .endpoint
             .messages
-            .send(MarketWorkerMessage::SessionStatus {
+            .send(PaneProjectionEvent::SessionStatus {
                 generation: record.endpoint.active_generation,
                 status: LocalSessionStatus::Connection {
                     state: FeedConnectionState::Discovering,
@@ -255,7 +255,7 @@ fn publish_session_statuses(
         match record
             .endpoint
             .messages
-            .send(MarketWorkerMessage::SessionStatus {
+            .send(PaneProjectionEvent::SessionStatus {
                 generation: record.endpoint.active_generation,
                 status: LocalSessionStatus::MarketSession(status),
             }) {
@@ -351,16 +351,16 @@ fn report_consumer_failure(endpoints: &[EndpointRecord], consumer_id: u64, error
 }
 
 pub(super) fn report_failure(
-    messages: &MarketWorkerSender,
+    messages: &MarketProjectionSender,
     generation: Option<u64>,
     message: String,
 ) {
     let publication = match generation {
-        Some(generation) => MarketWorkerMessage::LocalFailure {
+        Some(generation) => PaneProjectionEvent::LocalFailure {
             scope: aeris_desktop::market_worker::LocalFailureScope::Selection(generation),
             message,
         },
-        None => MarketWorkerMessage::LocalFailure {
+        None => PaneProjectionEvent::LocalFailure {
             scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
             message,
         },
@@ -519,7 +519,7 @@ pub(super) fn deliver_provider_catalog_event(
     let endpoint = &record.endpoint;
     match endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(event),
         )) {
         Ok(()) => changed,
@@ -587,7 +587,7 @@ pub(super) fn deliver_runtime_provider_state(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::selection(
                 event,
                 endpoint.active_generation,
@@ -623,7 +623,7 @@ fn deliver_runtime_price_alert_with_notification(
     notify(trigger);
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(event),
         ))
         .map_err(|error| error.to_string())
@@ -664,7 +664,7 @@ pub(super) fn deliver_runtime_series_publication(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::series(
                 event,
                 received_unix_nanos,
@@ -692,7 +692,7 @@ pub(super) fn deliver_runtime_order_book(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(event),
         ))
         .map_err(|error| error.to_string())
@@ -716,7 +716,7 @@ pub(super) fn deliver_runtime_trade_tape(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(event),
         ))
         .map_err(|error| error.to_string())
@@ -749,7 +749,7 @@ pub(super) fn deliver_runtime_study(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(event),
         ))
         .map_err(|error| error.to_string())
@@ -789,7 +789,7 @@ fn deliver_runtime_series_state(
     } else if state.generation.0.get() == endpoint.active_generation {
         endpoint
             .messages
-            .send(MarketWorkerMessage::RuntimeProjection(
+            .send(PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection::event(event),
             ))
             .map_err(|error| error.to_string())?;
@@ -815,7 +815,7 @@ fn deliver_runtime_demand_error(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeProjection(
+        .send(PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(event),
         ))
         .map_err(|error| error.to_string())
@@ -885,7 +885,7 @@ pub(super) fn apply_selection_outcome(
                         record
                             .endpoint
                             .messages
-                            .send(MarketWorkerMessage::LocalCommandOutcome(
+                            .send(PaneProjectionEvent::LocalCommandOutcome(
                                 aeris_desktop::market_worker::LocalCommandOutcome::CatalogSwitch {
                                     sequence,
                                     browser_generation,
@@ -897,7 +897,7 @@ pub(super) fn apply_selection_outcome(
                         record
                             .endpoint
                             .messages
-                            .send(MarketWorkerMessage::LocalCommandOutcome(aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                            .send(PaneProjectionEvent::LocalCommandOutcome(aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                                 sequence: generation.0.get(),
                                 succeeded: true,
                             }))
@@ -907,7 +907,7 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::LocalCommandOutcome(
+                        .send(PaneProjectionEvent::LocalCommandOutcome(
                             aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                                 generation: generation.0.get(),
                                 instrument: selected,
@@ -937,7 +937,7 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::LocalCommandOutcome(
+                        .send(PaneProjectionEvent::LocalCommandOutcome(
                             aeris_desktop::market_worker::LocalCommandOutcome::CatalogSwitch {
                                 sequence,
                                 browser_generation,
@@ -949,7 +949,7 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::LocalCommandOutcome(
+                        .send(PaneProjectionEvent::LocalCommandOutcome(
                             aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                                 sequence: generation.0.get(),
                                 succeeded: false,
@@ -1039,7 +1039,7 @@ mod tests {
         let (messages, _) = pane.worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: delivered_epoch,
                 value: MarketRuntimeEvent::PriceAlertTriggered(trigger),
             }, .. })] if *delivered_epoch == epoch
@@ -1078,7 +1078,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
                     state: super::super::SeriesLoadState::Failed,
@@ -1123,7 +1123,7 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
+            [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                 epoch: received_epoch,
                 value: MarketRuntimeEvent::DemandError(_),
             }, .. })] if *received_epoch == epoch
@@ -1193,7 +1193,7 @@ mod tests {
         .expect("duplicate initial outcome");
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                     generation: 7,
                     ..
@@ -1215,7 +1215,7 @@ mod tests {
         .expect("duplicate replacement outcome");
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::LocalCommandOutcome(
+            [PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                     sequence: 8,
                     succeeded: true
@@ -1227,13 +1227,13 @@ mod tests {
 
     #[test]
     fn runtime_failure_uses_bounded_pane_mailbox_and_tolerates_retirement() {
-        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        let (messages, receiver) = super::super::market_projection_channel(NonZeroUsize::MIN);
         report_failure(&messages, Some(7), "market unavailable".into());
         let (queued, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::LocalFailure {
+            [PaneProjectionEvent::LocalFailure {
                 scope: aeris_desktop::market_worker::LocalFailureScope::Selection(7),
                 message,
             }] if message == "market unavailable"
@@ -1249,13 +1249,13 @@ mod tests {
 
     #[test]
     fn non_series_endpoint_failure_remains_app_scoped() {
-        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        let (messages, receiver) = super::super::market_projection_channel(NonZeroUsize::MIN);
         report_failure(&messages, None, "catalog unavailable".into());
         let (queued, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
             queued.as_slice(),
-            [MarketWorkerMessage::LocalFailure {
+            [PaneProjectionEvent::LocalFailure {
                 scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                 message,
             }]
@@ -1284,7 +1284,7 @@ mod tests {
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         let first = messages.into_iter().next().expect("first session status");
-        let MarketWorkerMessage::SessionStatus {
+        let PaneProjectionEvent::SessionStatus {
             generation: first_generation,
             status: LocalSessionStatus::MarketSession(first),
         } = first
@@ -1299,7 +1299,7 @@ mod tests {
         let (messages, disconnected) = pane.worker.drain_messages();
         assert!(!disconnected);
         let second = messages.into_iter().next().expect("second session status");
-        let MarketWorkerMessage::SessionStatus {
+        let PaneProjectionEvent::SessionStatus {
             generation: second_generation,
             status: LocalSessionStatus::MarketSession(second),
         } = second
@@ -1327,14 +1327,14 @@ mod tests {
             None,
             1,
         );
-        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        let (messages, receiver) = super::super::market_projection_channel(NonZeroUsize::MIN);
         record.endpoint.messages = messages;
         let mut records = vec![record];
         for _ in 0..9 {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::LocalFailure {
+                .send(PaneProjectionEvent::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                     message: String::new(),
                 })
@@ -1347,7 +1347,7 @@ mod tests {
         publish_session_statuses(&market, &mut records, false, &clock);
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::SessionStatus {
+            [PaneProjectionEvent::SessionStatus {
                 generation: 1,
                 status: LocalSessionStatus::MarketSession(_),
             }]
@@ -1373,7 +1373,7 @@ mod tests {
             None,
             1,
         );
-        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        let (messages, receiver) = super::super::market_projection_channel(NonZeroUsize::MIN);
         record.endpoint.messages = messages;
         let mut records = vec![record];
         publish_session_statuses(&market, &mut records, false, &clock);
@@ -1382,7 +1382,7 @@ mod tests {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::LocalFailure {
+                .send(PaneProjectionEvent::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                     message: String::new(),
                 })
@@ -1413,7 +1413,7 @@ mod tests {
         assert_eq!(queued.len(), 9);
         assert!(matches!(
             queued.last(),
-            Some(MarketWorkerMessage::RuntimeProjection(
+            Some(PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     event: Fenced {
                         value: MarketRuntimeEvent::ProviderInstrumentSelection(_),
@@ -1427,7 +1427,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::SessionStatus {
+            [PaneProjectionEvent::SessionStatus {
                 generation: 1,
                 status: LocalSessionStatus::MarketSession(status),
             }]
@@ -1450,14 +1450,14 @@ mod tests {
             None,
             1,
         );
-        let (messages, receiver) = super::super::market_worker_channel(NonZeroUsize::MIN);
+        let (messages, receiver) = super::super::market_projection_channel(NonZeroUsize::MIN);
         record.endpoint.messages = messages;
         let mut records = vec![record];
         for _ in 0..9 {
             records[0]
                 .endpoint
                 .messages
-                .send(MarketWorkerMessage::LocalFailure {
+                .send(PaneProjectionEvent::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                     message: String::new(),
                 })
@@ -1555,7 +1555,7 @@ mod tests {
         let (messages, _) = pane.worker.drain_messages();
         assert!(messages.iter().any(|message| matches!(
             message,
-            MarketWorkerMessage::LocalCommandOutcome(
+            PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                     sequence: 8,
                     succeeded: true
@@ -1564,7 +1564,7 @@ mod tests {
         )));
         assert!(messages.iter().any(|message| matches!(
             message,
-            MarketWorkerMessage::RuntimeProjection(
+            PaneProjectionEvent::RuntimeProjection(
                 aeris_desktop::market_worker::RuntimeProjection {
                     selection_generation: Some(8),
                     event: Fenced {
@@ -1607,7 +1607,7 @@ mod tests {
         assert!(first.worker.drain_messages().0.is_empty());
         assert!(matches!(
             second.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::LocalFailure {
+            [PaneProjectionEvent::LocalFailure {
                 scope: aeris_desktop::market_worker::LocalFailureScope::Selection(1),
                 message,
             }]

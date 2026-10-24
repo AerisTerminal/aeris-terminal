@@ -14,8 +14,8 @@ use aeris_application::{
     ReplayStreamUpdate, ResnapshotReason,
 };
 use aeris_desktop::market_worker::{
-    MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSendError, MarketWorkerSender,
-    market_worker_channel,
+    MarketProjectionReceiver, MarketProjectionSender, MarketWorkerSendError, PaneProjectionEvent,
+    market_projection_channel,
 };
 use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
 use aeris_instruments::InstrumentPrecision;
@@ -80,8 +80,8 @@ fn fixture_runtime_bars() -> Result<Arc<[MarketBar]>, Box<dyn Error>> {
 fn fixture_bar_message(
     bars: &Arc<[MarketBar]>,
     publication_generation: u64,
-) -> MarketWorkerMessage {
-    MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+) -> PaneProjectionEvent {
+    PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event: FixtureMarketEvents::default().snapshot(
             &fixture_series(),
             1,
@@ -94,8 +94,8 @@ fn fixture_bar_message(
     })
 }
 
-fn runtime_snapshot_generation(message: MarketWorkerMessage) -> Option<u64> {
-    let MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+fn runtime_snapshot_generation(message: PaneProjectionEvent) -> Option<u64> {
+    let PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event,
         ..
     }) = message
@@ -442,12 +442,12 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let mut memory = ProcessMemoryProbe::new()?;
     let bars = fixture_runtime_bars()?;
     let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
-    let (sender, receiver) = market_worker_channel(capacity);
+    let (sender, receiver) = market_projection_channel(capacity);
     let mut mailbox_high_water_items = 0_usize;
     let mut delivered_updates = 0_usize;
     let mut last_delivered_publication_generation = 0_usize;
 
-    let mut observe = |messages: Vec<MarketWorkerMessage>, disconnected: bool| {
+    let mut observe = |messages: Vec<PaneProjectionEvent>, disconnected: bool| {
         if disconnected {
             return Err::<(), Box<dyn Error>>("desktop burst mailbox disconnected".into());
         }
@@ -895,7 +895,7 @@ struct EnduranceEvidenceSnapshot<'a> {
 }
 
 fn observe_endurance_messages(
-    messages: Vec<MarketWorkerMessage>,
+    messages: Vec<PaneProjectionEvent>,
     disconnected: bool,
     counters: &mut EnduranceCounters,
 ) {
@@ -920,8 +920,8 @@ fn observe_endurance_messages(
 }
 
 fn run_endurance_frame(
-    sender: &MarketWorkerSender,
-    receiver: &MarketWorkerReceiver,
+    sender: &MarketProjectionSender,
+    receiver: &MarketProjectionReceiver,
     bars: &Arc<[MarketBar]>,
     gate: &mut FramePollGate,
     counters: &mut EnduranceCounters,
@@ -980,7 +980,7 @@ fn collect_endurance_with_checkpoints(
     }
     let bars = fixture_runtime_bars()?;
     let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
-    let (sender, receiver) = market_worker_channel(capacity);
+    let (sender, receiver) = market_projection_channel(capacity);
     let mut memory = ProcessMemoryProbe::new()?;
     let started = Instant::now();
     let deadline = started + duration;
