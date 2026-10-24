@@ -12,8 +12,8 @@ fn search_result(index: usize) -> InstrumentMenuSelection {
     }
 }
 
-fn expanded_contract(index: usize) -> InstrumentMenuSelection {
-    InstrumentMenuSelection::ExpandedContract {
+fn product_contract(index: usize) -> InstrumentMenuSelection {
+    InstrumentMenuSelection::ProductContract {
         provider: RITHMIC,
         index,
     }
@@ -70,6 +70,11 @@ fn contract(symbol: &str, code: &str, expiration: &str) -> ProviderInstrumentSum
     }
 }
 
+fn delayed(mut contract: ProviderInstrumentSummary) -> ProviderInstrumentSummary {
+    contract.exchange = "CME-Delayed".to_string();
+    contract
+}
+
 fn key(code: &str) -> ProductKey {
     ProductKey {
         provider: RITHMIC,
@@ -88,11 +93,11 @@ fn begin(browser: &mut SymbolBrowser, query: &str) -> SymbolSearchRequest {
     requests.remove(0)
 }
 
-fn labels(browser: &SymbolBrowser) -> Vec<(String, bool)> {
+fn labels(browser: &SymbolBrowser) -> Vec<String> {
     browser
         .menu_entries()
         .into_iter()
-        .map(|entry| (entry.label, entry.nested))
+        .map(|entry| entry.label)
         .collect()
 }
 
@@ -207,7 +212,7 @@ fn rapid_typing_supersedes_without_queueing() {
     assert!(browser.search_pending());
     assert!(browser.apply_results(RITHMIC, latest.request_id, vec![result("ESM7")]));
     assert!(browser.lists_query("ESM"));
-    assert_eq!(browser.begin_contract_searches(), Vec::new());
+    assert!(!browser.search_pending());
 }
 
 #[test]
@@ -251,7 +256,11 @@ fn search_and_selection_rejections_are_fenced_separately() {
         second_search.request_id,
         SymbolSearchFailure::Failed
     ));
-    assert_eq!(browser.status(), SymbolBrowserStatus::Failed);
+    assert_eq!(
+        browser.status(),
+        SymbolBrowserStatus::NoMatches,
+        "a failed search lists nothing rather than an error"
+    );
     assert!(!browser.reject_selection(first_selection.generation));
     assert!(browser.confirm_selection(second_selection.generation));
 }
@@ -309,53 +318,36 @@ fn a_completed_search_rejects_duplicate_and_stale_results() {
 }
 
 #[test]
-fn all_scope_shows_each_provider_section_as_it_answers() {
+fn all_scope_lists_each_provider_as_it_answers_without_headers() {
     let (mut browser, rithmic, hyperliquid) = all_scope();
     assert_eq!(rithmic.request_id, hyperliquid.request_id);
     assert_eq!(rithmic.exchange, None);
     assert_eq!(browser.status(), SymbolBrowserStatus::Searching);
-    let sections: Vec<_> = browser
-        .menu_entries()
-        .into_iter()
-        .map(|entry| (entry.label, entry.detail, entry.section))
-        .collect();
-    assert_eq!(
-        sections,
-        [
-            (
-                terminal_provider_display(RITHMIC).to_string(),
-                Some("Searching".to_string()),
-                true
-            ),
-            (
-                terminal_provider_display(HYPERLIQUID).to_string(),
-                Some("Searching".to_string()),
-                true
-            ),
-        ]
-    );
+    assert_eq!(browser.menu_entries(), Vec::new());
 
     assert!(browser.apply_results(HYPERLIQUID, hyperliquid.request_id, vec![market("BTC")]));
     let entries = browser.menu_entries();
-    assert_eq!(entries.len(), 3, "the faster provider's rows show at once");
-    assert_eq!(entries[0].detail.as_deref(), Some("Searching"));
-    assert!(entries[1].section);
-    assert_eq!(entries[1].detail.as_deref(), Some("1 market"));
-    assert_eq!(entries[2].label, "BTC-USDC");
-    assert_eq!(entries[2].provider, HYPERLIQUID);
+    assert_eq!(entries.len(), 1, "the faster provider's rows show at once");
+    assert_eq!(entries[0].label, "BTC-USDC");
+    assert_eq!(entries[0].provider, HYPERLIQUID);
     assert_eq!(
-        entries[2].action,
+        entries[0].action,
         InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult {
             provider: HYPERLIQUID,
             index: 0
         })
     );
+    assert_eq!(browser.status(), SymbolBrowserStatus::Searching);
 
-    assert!(browser.apply_results(RITHMIC, rithmic.request_id, Vec::new()));
-    assert_eq!(browser.status(), SymbolBrowserStatus::Sections);
+    assert!(browser.apply_results(RITHMIC, rithmic.request_id, vec![result("BTCZ6")]));
     assert_eq!(
-        browser.menu_entries()[0].detail.as_deref(),
-        Some("No matches")
+        labels(&browser),
+        ["BTCZ6", "BTC-USDC"],
+        "providers keep their fixed order"
+    );
+    assert_eq!(
+        browser.status(),
+        SymbolBrowserStatus::Listed(SymbolListingSummary::Markets(2))
     );
 }
 
@@ -367,6 +359,7 @@ fn all_scope_hides_an_unavailable_provider_and_retries_when_ready() {
         rithmic.request_id,
         SymbolSearchFailure::Unavailable
     ));
+    assert!(browser.apply_results(HYPERLIQUID, hyperliquid.request_id, vec![market("BTC")]));
     let entries = browser.menu_entries();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].provider, HYPERLIQUID);
@@ -377,7 +370,10 @@ fn all_scope_hides_an_unavailable_provider_and_retries_when_ready() {
     assert_eq!(retry.query, "BT");
     assert!(retry.request_id > hyperliquid.request_id);
     assert!(browser.retry_lane(RITHMIC).is_none(), "one retry in flight");
-    assert!(browser.retry_lane(HYPERLIQUID).is_none(), "still pending");
+    assert!(
+        browser.retry_lane(HYPERLIQUID).is_none(),
+        "already answered"
+    );
 
     assert!(browser.apply_results(RITHMIC, retry.request_id, vec![result("BTCZ6")]));
     assert!(browser.retry_lane(RITHMIC).is_none(), "already answered");
@@ -385,16 +381,17 @@ fn all_scope_hides_an_unavailable_provider_and_retries_when_ready() {
 }
 
 #[test]
-fn a_failed_provider_section_says_so_without_hiding_others() {
+fn a_failed_provider_lists_nothing_without_hiding_others() {
     let (mut browser, rithmic, hyperliquid) = all_scope();
     assert!(browser.reject_search(RITHMIC, rithmic.request_id, SymbolSearchFailure::Failed));
     assert!(browser.apply_results(HYPERLIQUID, hyperliquid.request_id, vec![market("BTC")]));
     let entries = browser.menu_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].provider, HYPERLIQUID);
     assert_eq!(
-        entries[0].detail.as_deref(),
-        Some("Search failed · try again")
+        browser.status(),
+        SymbolBrowserStatus::Listed(SymbolListingSummary::Markets(1))
     );
-    assert_eq!(entries[1].provider, HYPERLIQUID);
 }
 
 #[test]
@@ -415,6 +412,29 @@ fn exact_symbols_resolve_in_provider_order() {
         ExactSymbolMatch::Found(search_result(0))
     );
     assert_eq!(browser.exact_symbol("NQZ6"), ExactSymbolMatch::Missing);
+}
+
+#[test]
+fn a_product_code_resolves_to_its_nearest_expiry_contract() {
+    let mut browser = single();
+    let search = begin(&mut browser, "NQ");
+    let mut alias = contract("NQ", "NQ", "20261218");
+    alias.kind = ProviderInstrumentKind::FrontMonthAlias;
+    assert!(browser.apply_results(
+        RITHMIC,
+        search.request_id,
+        vec![
+            alias,
+            contract("NQH7", "NQ", "20270319"),
+            contract("NQZ6", "NQ", "20261218"),
+            delayed(contract("NQZ6", "NQ", "20261218")),
+        ],
+    ));
+    assert_eq!(
+        browser.exact_symbol("nq"),
+        ExactSymbolMatch::Found(search_result(1)),
+        "the alias is dropped and the real-time front month wins the tie"
+    );
 }
 
 #[test]
@@ -466,7 +486,7 @@ fn an_exchange_scope_sends_its_exchange_with_every_search() {
     zb.exchange = "CBOT".to_string();
     assert!(browser.apply_results(RITHMIC, listing.request_id, vec![zb]));
     let contracts = browser
-        .toggle_product(&ProductKey {
+        .open_product(&ProductKey {
             provider: RITHMIC,
             code: "ZB".to_string(),
             exchange: "CBOT".to_string(),
@@ -477,17 +497,16 @@ fn an_exchange_scope_sends_its_exchange_with_every_search() {
 }
 
 #[test]
-fn product_listing_shows_collapsed_unselectable_products() {
+fn product_listing_rows_open_their_product() {
     let mut browser = listed_browser();
     let entries = browser.menu_entries();
-    assert_eq!(entries.len(), 2, "a single provider has no section header");
+    assert_eq!(entries.len(), 2, "no provider header above the products");
     assert_eq!(entries[1].label, "NQ");
     assert_eq!(entries[1].description.as_deref(), Some("E-mini Nasdaq-100"));
     assert_eq!(entries[1].detail.as_deref(), Some("futures · CME"));
-    assert_eq!(entries[1].expanded, Some(false));
     assert_eq!(
         entries[1].action,
-        InstrumentMenuAction::ToggleProduct(key("NQ"))
+        InstrumentMenuAction::OpenProduct(key("NQ"))
     );
     assert!(
         browser.select(search_result(1)).is_none(),
@@ -502,70 +521,52 @@ fn product_listing_shows_collapsed_unselectable_products() {
 }
 
 #[test]
-fn expanding_a_product_searches_and_nests_its_contracts() {
+fn opening_a_product_selects_its_nearest_expiry_contract_once() {
     let mut browser = listed_browser();
     let search = browser
-        .toggle_product(&key("NQ"))
+        .open_product(&key("NQ"))
         .expect("an idle lane searches the product's contracts");
     assert_eq!(search.query, "NQ");
     assert_eq!(search.lane, SymbolSearchLane::ProductContracts);
-    assert_eq!(
-        labels(&browser),
-        [
-            ("ES".to_string(), false),
-            ("NQ".to_string(), false),
-            ("Loading contracts".to_string(), true),
-        ]
-    );
-    assert_eq!(
-        browser.menu_entries()[2].action,
-        InstrumentMenuAction::Inert
-    );
+    assert_eq!(labels(&browser), ["ES", "NQ"], "the listing stays as it is");
+    assert_eq!(browser.menu_entries()[1].detail.as_deref(), Some("Opening"));
+    assert_eq!(browser.take_opened_product(), None, "still listing");
 
     assert!(browser.apply_results(
         RITHMIC,
         search.request_id,
         vec![
-            contract("NQZ6", "NQ", "20261218"),
             contract("NQH7", "NQ", "20270319"),
+            delayed(contract("NQZ6", "NQ", "20261218")),
+            contract("NQZ6", "NQ", "20261218"),
+            contract("ESZ6", "ES", "20261218"),
         ],
     ));
-    let entries = browser.menu_entries();
     assert_eq!(
-        entries.len(),
-        4,
-        "the products stay listed around the contracts"
+        browser.take_opened_product(),
+        Some(OpenedProduct::Contract(product_contract(1))),
+        "the earliest expiry on the product's own exchange"
     );
-    assert_eq!(entries[1].expanded, Some(true));
-    assert_eq!(entries[2].label, "NQZ6");
-    assert!(entries[2].nested);
-    assert_eq!(
-        entries[2].description.as_deref(),
-        Some("E-mini Nasdaq-100 (Dec 2026)")
-    );
-    assert_eq!(
-        entries[3].action,
-        InstrumentMenuAction::Select(expanded_contract(1))
-    );
-
+    assert_eq!(browser.take_opened_product(), None, "handed out once");
     let selection = browser
-        .select(expanded_contract(0))
-        .expect("an expanded contract is selectable");
+        .select(product_contract(1))
+        .expect("the opened contract is selectable");
     assert_eq!(selection.instrument.symbol, "NQZ6");
+    assert_eq!(selection.instrument.exchange, "CME");
     assert_eq!(selection.search_generation, search.request_id);
-
-    assert!(browser.toggle_product(&key("NQ")).is_none());
-    assert_eq!(labels(&browser).len(), 2, "collapsing hides the contracts");
-    assert!(browser.select(expanded_contract(0)).is_none());
+    assert_eq!(
+        browser.menu_entries()[1].detail.as_deref(),
+        Some("futures · CME")
+    );
 }
 
 #[test]
-fn expanding_another_product_replaces_the_pending_contract_search() {
+fn opening_another_product_replaces_the_pending_one() {
     let mut browser = listed_browser();
-    let nq = browser.toggle_product(&key("NQ")).expect("NQ contracts");
+    let nq = browser.open_product(&key("NQ")).expect("NQ contracts");
     let es = browser
-        .toggle_product(&key("ES"))
-        .expect("the newer expansion searches at once");
+        .open_product(&key("ES"))
+        .expect("the newer product searches at once");
     assert_eq!(es.query, "ES");
     assert!(
         !browser.apply_results(
@@ -575,124 +576,129 @@ fn expanding_another_product_replaces_the_pending_contract_search() {
         ),
         "the replaced contract search's reply is dropped"
     );
-    assert_eq!(
-        labels(&browser),
-        [
-            ("ES".to_string(), false),
-            ("Loading contracts".to_string(), true),
-            ("NQ".to_string(), false),
-        ]
-    );
     assert!(browser.apply_results(
         RITHMIC,
         es.request_id,
         vec![contract("ESZ6", "ES", "202612")]
     ));
-    assert_eq!(labels(&browser)[1], ("ESZ6".to_string(), true));
+    assert_eq!(
+        browser.take_opened_product(),
+        Some(OpenedProduct::Contract(product_contract(0)))
+    );
 }
 
 #[test]
-fn expanding_during_a_query_search_starts_after_it() {
+fn a_product_without_contracts_is_reported_once() {
+    let mut browser = listed_browser();
+    let search = browser.open_product(&key("NQ")).expect("NQ contracts");
+    assert!(browser.apply_results(
+        RITHMIC,
+        search.request_id,
+        vec![contract("ESZ6", "ES", "202612")]
+    ));
+    assert_eq!(
+        browser.take_opened_product(),
+        Some(OpenedProduct::NoContracts(key("NQ")))
+    );
+    assert_eq!(browser.take_opened_product(), None);
+    assert!(
+        browser.open_product(&key("NQ")).is_some(),
+        "it can open again"
+    );
+}
+
+#[test]
+fn opening_during_a_listing_refresh_opens_nothing() {
     let mut browser = listed_browser();
     let listing = begin(&mut browser, "");
     assert!(
-        browser.toggle_product(&key("NQ")).is_none(),
+        browser.open_product(&key("NQ")).is_none(),
         "the listing is refreshing"
     );
-    assert_eq!(browser.begin_contract_searches(), Vec::new());
     assert!(browser.apply_results(
         RITHMIC,
         listing.request_id,
         vec![product("NQ", Some("E-mini Nasdaq-100"))],
     ));
-    assert!(browser.toggle_product(&key("NQ")).is_some());
+    assert!(browser.open_product(&key("NQ")).is_some());
 }
 
 #[test]
-fn a_rejected_contract_search_collapses_its_product() {
+fn a_rejected_contract_search_lets_the_product_open_again() {
     let mut browser = listed_browser();
-    let search = browser.toggle_product(&key("NQ")).expect("NQ contracts");
+    let search = browser.open_product(&key("NQ")).expect("NQ contracts");
     assert!(browser.reject_search(RITHMIC, search.request_id, SymbolSearchFailure::Failed));
-    assert_eq!(labels(&browser).len(), 2);
+    assert_eq!(browser.take_opened_product(), None);
     assert_eq!(
         browser.status(),
         SymbolBrowserStatus::Listed(SymbolListingSummary::Products(2)),
         "a contract failure leaves the listing intact"
     );
     assert!(
-        browser.toggle_product(&key("NQ")).is_some(),
-        "expanding retries"
+        browser.open_product(&key("NQ")).is_some(),
+        "opening retries"
     );
 }
 
 #[test]
-fn consuming_an_expanded_contract_selection_keeps_the_product_listing() {
+fn consuming_an_opened_contract_selection_keeps_the_product_listing() {
     let mut browser = listed_browser();
-    let search = browser.toggle_product(&key("NQ")).expect("NQ contracts");
+    let search = browser.open_product(&key("NQ")).expect("NQ contracts");
     assert!(browser.apply_results(
         RITHMIC,
         search.request_id,
         vec![contract("NQZ6", "NQ", "202612")]
     ));
-    let selection = browser.select(expanded_contract(0)).expect("contract");
+    let selection = browser.select(product_contract(0)).expect("contract");
     assert!(browser.confirm_selection(selection.generation));
     assert!(browser.consume_completed_search(RITHMIC, selection.search_generation));
     assert_eq!(labels(&browser).len(), 2);
     assert!(browser.lists_query(""));
-    assert_eq!(browser.menu_entries()[1].expanded, Some(false));
+    assert!(browser.select(product_contract(0)).is_none());
 }
 
 #[test]
-fn typed_contracts_group_under_their_product_name() {
+fn typed_contracts_list_flat_with_their_month_and_exchange() {
     let mut browser = listed_browser();
-    let typed = begin(&mut browser, "NQZ6");
+    let typed = begin(&mut browser, "NQ");
+    let mut alias = contract("NQ", "NQ", "20261218");
+    alias.kind = ProviderInstrumentKind::FrontMonthAlias;
     assert!(browser.apply_results(
         RITHMIC,
         typed.request_id,
         vec![
             contract("NQZ6", "NQ", "20261218"),
-            contract("MNQZ6", "MNQ", "20261218"),
             contract("NQH7", "NQ", "20270319"),
+            alias,
+            delayed(contract("NQZ6", "NQ", "20261218")),
+            contract("MNQZ6", "MNQ", "20261218"),
         ],
     ));
-    assert_eq!(
-        labels(&browser),
-        [
-            ("E-mini Nasdaq-100".to_string(), false),
-            ("NQZ6".to_string(), true),
-            ("NQH7".to_string(), true),
-            ("MNQ".to_string(), false),
-            ("MNQZ6".to_string(), true),
-        ]
-    );
+    assert_eq!(labels(&browser), ["NQZ6", "NQH7", "NQZ6", "MNQZ6"]);
     let entries = browser.menu_entries();
-    assert_eq!(entries[0].expanded, Some(true));
-    assert_eq!(entries[0].detail.as_deref(), Some("futures · CME"));
-    assert_eq!(entries[4].description.as_deref(), Some("MNQ contract"));
+    assert_eq!(
+        entries[0].description.as_deref(),
+        Some("E-mini Nasdaq-100 (Dec 2026)")
+    );
+    assert_eq!(entries[0].detail.as_deref(), Some("CME"));
+    assert_eq!(entries[2].detail.as_deref(), Some("CME-Delayed"));
+    assert_eq!(
+        entries[3].description.as_deref(),
+        Some("MNQ contract (Dec 2026)"),
+        "a product the listing does not name keeps the provider's name"
+    );
     assert_eq!(
         entries[2].action,
         InstrumentMenuAction::Select(search_result(2))
     );
     assert_eq!(
         browser.status(),
-        SymbolBrowserStatus::Listed(SymbolListingSummary::Contracts {
-            contracts: 3,
-            products: 2
-        })
+        SymbolBrowserStatus::Listed(SymbolListingSummary::Contracts(4))
     );
-
-    assert!(
-        browser.toggle_product(&key("NQ")).is_none(),
-        "typed groups toggle without a search"
-    );
-    assert_eq!(labels(&browser).len(), 3);
-    assert!(browser.toggle_product(&key("NQ")).is_none());
-    assert_eq!(labels(&browser).len(), 5);
-    assert!(!browser.search_pending());
 }
 
 #[test]
-fn instruments_without_a_product_stay_flat() {
+fn instruments_without_a_product_stay_plain() {
     let mut browser = SymbolBrowser::new(SymbolSearchScope::Provider("hyperliquid"));
     let search = browser.begin_search("").expect("listing").remove(0);
     assert!(browser.apply_results(HYPERLIQUID, search.request_id, vec![market("BTC")]));
@@ -701,8 +707,6 @@ fn instruments_without_a_product_stay_flat() {
     assert_eq!(entries[0].label, "BTC-USDC");
     assert_eq!(entries[0].description, None);
     assert_eq!(entries[0].detail.as_deref(), Some("perpetual"));
-    assert!(!entries[0].nested);
-    assert_eq!(entries[0].expanded, None);
     assert_eq!(
         browser.status(),
         SymbolBrowserStatus::Listed(SymbolListingSummary::Markets(1))

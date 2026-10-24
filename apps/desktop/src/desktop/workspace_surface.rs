@@ -178,6 +178,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         pending_symbol_selection_target: None,
         pending_watchlist_instrument: None,
         pending_mnemonic_symbol: None,
+        product_opening_target: None,
         series_message: "Select a symbol before choosing a series".to_string(),
         symbol_input: init.symbol_input,
         indicator_input: init.indicator_input,
@@ -2751,8 +2752,8 @@ impl WorkspaceSurface {
             self.pending_mnemonic_symbol = None;
             self.chrome_selection = 0;
         }
-        // An empty query opens each provider's own listing: its markets, or the
-        // products whose contracts expand beneath them.
+        // An empty query opens each provider's own listing: its markets, or its
+        // products, each of which opens its front month.
         if let Some(input) = &self.symbol_input {
             input.update(cx, |input, input_cx| {
                 input.set_value("", window, input_cx);
@@ -2811,8 +2812,9 @@ impl WorkspaceSurface {
         self.symbol_browser.menu_entries()
     }
 
-    /// Selects an instrument row or expands or collapses a product row. Reports whether a
-    /// selection was scheduled, which is when a chart menu closes.
+    /// Selects an instrument row, or opens a product row's nearest-expiry contract once its
+    /// contracts are listed. Reports whether a selection was scheduled or a product is
+    /// opening, which is when a chart menu closes.
     pub(super) fn activate_instrument_entry(
         &mut self,
         action: &InstrumentMenuAction,
@@ -2823,12 +2825,17 @@ impl WorkspaceSurface {
             InstrumentMenuAction::Select(selection) => {
                 self.select_instrument(*selection, target, cx)
             }
-            InstrumentMenuAction::ToggleProduct(product) => {
-                if let Some(request) = self.symbol_browser.toggle_product(product) {
-                    self.dispatch_symbol_search(request, cx);
+            InstrumentMenuAction::OpenProduct(product) => {
+                let Some(request) = self.symbol_browser.open_product(product) else {
+                    return false;
+                };
+                self.product_opening_target = Some(target);
+                let dispatched = self.dispatch_symbol_search(request, cx);
+                if !dispatched {
+                    self.product_opening_target = None;
                 }
                 cx.notify();
-                false
+                dispatched
             }
             InstrumentMenuAction::Inert => false,
         }
@@ -6199,32 +6206,19 @@ impl WorkspaceSurface {
         }
         match self.symbol_browser.status() {
             SymbolBrowserStatus::Searching => return "Searching provider markets".into(),
-            SymbolBrowserStatus::Failed => return "The market search failed · try again".into(),
             SymbolBrowserStatus::Listed(SymbolListingSummary::Products(count)) => {
                 return format!(
-                    "{} · expand one for its contracts",
+                    "{} · choose one for its front month",
                     counted(count, "product", "products")
                 );
             }
-            SymbolBrowserStatus::Listed(SymbolListingSummary::Contracts {
-                contracts,
-                products,
-            }) => {
-                return format!(
-                    "{} in {}",
-                    counted(contracts, "contract", "contracts"),
-                    counted(products, "product", "products")
-                );
+            SymbolBrowserStatus::Listed(SymbolListingSummary::Contracts(count)) => {
+                return counted(count, "contract", "contracts");
             }
             SymbolBrowserStatus::Listed(SymbolListingSummary::Markets(count)) => {
                 return format!("{count} matching markets · search to find more");
             }
-            SymbolBrowserStatus::Sections => {
-                return "Matches from each provider · search to narrow".into();
-            }
-            SymbolBrowserStatus::NoMatches => {
-                return "No matching markets · try another search".into();
-            }
+            SymbolBrowserStatus::NoMatches => return "No markets found".into(),
             SymbolBrowserStatus::Idle => {}
         }
         if self.symbol_browser.covers(self.provider)
@@ -6282,8 +6276,7 @@ impl WorkspaceSurface {
         if self.market_worker.try_search_provider(search).is_ok() {
             return true;
         }
-        // A failed contract search collapses its product, so expanding it retries; a failed
-        // query search shows on its provider's section until the next query.
+        // A failed contract search forgets its product, so opening it again retries.
         self.symbol_browser.reject_search(
             request.provider,
             request.request_id,
@@ -6310,9 +6303,26 @@ impl WorkspaceSurface {
         }
     }
 
-    fn dispatch_contract_searches(&mut self, cx: &mut Context<Self>) {
-        for request in self.symbol_browser.begin_contract_searches() {
-            self.dispatch_symbol_search(request, cx);
+    /// Selects an opened product's nearest-expiry contract for the menu that opened it.
+    /// Reports whether a selection was scheduled.
+    fn select_opened_product(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(opened) = self.symbol_browser.take_opened_product() else {
+            return false;
+        };
+        let target = self
+            .product_opening_target
+            .take()
+            .unwrap_or(SymbolSelectionTarget::Chart);
+        match opened {
+            OpenedProduct::Contract(selection) => self.select_instrument(selection, target, cx),
+            OpenedProduct::NoContracts(product) => {
+                Self::post_symbol_selection_notice(
+                    product.provider,
+                    &format!("No {} contracts are listed.", product.code),
+                    cx,
+                );
+                false
+            }
         }
     }
 
@@ -6470,8 +6480,7 @@ impl WorkspaceSurface {
             scope: cx.entity_id().as_u64(),
             kind: "symbol_search",
         }));
-        self.dispatch_contract_searches(cx);
-        if self.resolve_pending_mnemonic(cx) {
+        if self.select_opened_product(cx) || self.resolve_pending_mnemonic(cx) {
             return;
         }
         if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
@@ -6533,8 +6542,7 @@ impl WorkspaceSurface {
             rejection.provider,
             rejection.reason
         );
-        // With several providers in scope each section shows its own state, and a
-        // provider without a catalog session is skipped silently.
+        // With several providers in scope a provider that cannot answer lists nothing.
         if self.symbol_browser.scoped_provider().is_some() {
             Self::post_symbol_search_notice(
                 "The market search could not complete. Try again later.",

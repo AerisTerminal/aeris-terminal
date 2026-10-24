@@ -143,12 +143,7 @@ pub(super) fn instrument_dialog_content(
                 .iter()
                 .enumerate()
                 .map(|(index, instrument)| {
-                    if instrument.section {
-                        instrument_section_header(instrument, theme)
-                    } else {
-                        instrument_dialog_row(app, instrument, index, state, theme)
-                            .into_any_element()
-                    }
+                    instrument_dialog_row(app, instrument, index, state, theme)
                 }),
         );
     }
@@ -417,40 +412,6 @@ fn symbol_scope_flyout(
         .child(panel)
 }
 
-/// The header of one provider's section when several providers are searched, with that
-/// provider's search status.
-fn instrument_section_header(entry: &InstrumentMenuEntry, theme: &AerisTheme) -> AnyElement {
-    let colors = theme.colors;
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .pt_2()
-        .pb_1()
-        .text_xs()
-        .child(provider_exchange_mark(
-            entry.provider,
-            px(14.0),
-            false,
-            &colors,
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(gpui_color(colors.text_default))
-                .child(entry.label.clone()),
-        )
-        .when_some(entry.detail.clone(), |row, detail| {
-            row.child(
-                div()
-                    .text_color(gpui_color(colors.text_secondary))
-                    .child(detail),
-            )
-        })
-        .into_any_element()
-}
 pub(super) fn instrument_dialog_row(
     app: &Entity<WorkspaceSurface>,
     instrument: &InstrumentMenuEntry,
@@ -499,39 +460,13 @@ pub(super) fn instrument_dialog_row(
     if let Some(detail) = &instrument.detail {
         row = row.detail(detail.clone());
     }
-    // Nested rows indent by the provider mark's well so they line up under their product's
-    // label; the product row above already carries the mark.
-    row = if instrument.nested {
-        row.leading(div().flex_none().w(px(CHROME_MENU_ROW_ICON_WELL)))
-    } else {
-        row.leading(provider_exchange_mark(
-            instrument.provider,
-            px(CHROME_MENU_ROW_ICON_WELL),
-            true,
-            &theme.colors,
-        ))
-    };
-    if let Some(expanded) = instrument.expanded {
-        let chevron = header_icon(HugeIcon::ChevronDown).with_size(px(14.0));
-        let toggle = action.clone();
-        row = row.trailing(
-            Button::new(("toggle_symbol_product", index), theme)
-                .variant(ButtonVariant::Ghost)
-                .button_size(ButtonSize::Sm)
-                .icon(if expanded {
-                    chevron
-                } else {
-                    chevron.rotate(0.75)
-                })
-                .aria_label(if expanded { "Collapse" } else { "Expand" })
-                .tab_stop(false)
-                .on_click(move |_, _, cx| {
-                    add_app.update(cx, |app, cx| {
-                        app.activate_instrument_entry(&toggle, target, cx);
-                    });
-                }),
-        );
-    } else if let InstrumentMenuAction::Select(selection) = action {
+    row = row.leading(provider_exchange_mark(
+        instrument.provider,
+        px(CHROME_MENU_ROW_ICON_WELL),
+        true,
+        &theme.colors,
+    ));
+    if let InstrumentMenuAction::Select(selection) = action {
         if state.target == SymbolSelectionTarget::Watchlist {
             row = row.trailing(
                 compact_menu_add_button(("add_watchlist_symbol", index), theme)

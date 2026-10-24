@@ -1164,7 +1164,11 @@ fn reject_undispatched(
 
 fn contract_summary(result: SymbolSearchResult) -> ProviderInstrumentSummary {
     ProviderInstrumentSummary {
-        kind: ProviderInstrumentKind::Instrument,
+        kind: if is_front_month_alias(&result) {
+            ProviderInstrumentKind::FrontMonthAlias
+        } else {
+            ProviderInstrumentKind::Instrument
+        },
         display_symbol: result.symbol.clone(),
         symbol: result.symbol,
         exchange: result.exchange,
@@ -1278,23 +1282,31 @@ fn publish_catalog_callback(
     }
 }
 
-/// Orders search results front month first. Rithmic returns them
-/// alphabetically, which lists far-dated contracts before the active one.
-/// Its expiration dates are `YYYYMMDD`, so text order is date order, and a
-/// real-time exchange such as `CME` sorts before its `CME-Delayed` variant.
+/// Rithmic lists a product's front month a second time under the bare product
+/// code ("MNQ", "Front Month for MNQ - MNQZ6.CME"). It is a moving alias, not a
+/// contract, and the dated contract it points at is listed beside it.
+fn is_front_month_alias(result: &SymbolSearchResult) -> bool {
+    result.product_code.as_deref() == Some(result.symbol.as_str())
+}
+
+/// Orders search results by product, then each exchange's contracts front month
+/// first. Rithmic returns them alphabetically, which lists far-dated contracts
+/// before the active one. Its expiration dates are `YYYYMMDD`, so text order is
+/// date order, and a real-time exchange such as `CME` lists all its contracts
+/// before its `CME-Delayed` variant.
 fn front_month_first(
     left: &ProviderInstrumentSummary,
     right: &ProviderInstrumentSummary,
 ) -> std::cmp::Ordering {
     left.product_code
         .cmp(&right.product_code)
+        .then_with(|| left.exchange.cmp(&right.exchange))
         .then_with(|| {
             left.expiration_date
                 .is_none()
                 .cmp(&right.expiration_date.is_none())
         })
         .then_with(|| left.expiration_date.cmp(&right.expiration_date))
-        .then_with(|| left.exchange.cmp(&right.exchange))
         .then_with(|| left.symbol.cmp(&right.symbol))
 }
 
@@ -3367,7 +3379,7 @@ mod tests {
     }
 
     #[test]
-    fn search_results_are_ordered_front_month_first() {
+    fn search_results_list_each_exchange_front_month_first_and_mark_the_alias() {
         let (publications, published) = publications(1);
         let mut commands = CatalogCommands::default();
         let searched = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
@@ -3389,17 +3401,25 @@ mod tests {
         let ordered = search_result(published.recv().expect("search result is published"))
             .instruments
             .into_iter()
-            .map(|instrument| format!("{}@{}", instrument.symbol, instrument.exchange))
+            .map(|instrument| {
+                let alias = instrument.kind == ProviderInstrumentKind::FrontMonthAlias;
+                format!(
+                    "{}@{}{}",
+                    instrument.symbol,
+                    instrument.exchange,
+                    if alias { " alias" } else { "" }
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             ordered,
             [
                 "ESZ6@CME",
                 "MNQZ6@CME",
-                "MNQ@CME-Delayed",
-                "MNQZ6@CME-Delayed",
                 "MNQH7@CME",
                 "MNQSPREAD@CME",
+                "MNQ@CME-Delayed alias",
+                "MNQZ6@CME-Delayed",
             ]
         );
     }

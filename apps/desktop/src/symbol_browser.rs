@@ -2,9 +2,10 @@
 //!
 //! Each provider in scope answers in its own lane. A new query is sent to every lane at once
 //! and replaces whatever a lane was still waiting for, so a slow provider never delays typing
-//! or another provider's results; replies are fenced by their search identity.
+//! or another provider's results; replies are fenced by their search identity. The menu lists
+//! every lane's answer as one flat list in the fixed provider order.
 
-use super::{TerminalProvider, known_terminal_provider, terminal_provider_display};
+use super::{TerminalProvider, known_terminal_provider};
 use aeris_contracts::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use aeris_desktop::chart_chrome::{ExchangeCode, SymbolSearchScope};
 use std::num::NonZeroUsize;
@@ -19,7 +20,7 @@ const MAXIMUM_LEARNED_EXCHANGES: usize = 32;
 pub(crate) enum SymbolSearchLane {
     /// The typed query, or the provider's listing for an empty one.
     Query,
-    /// The contracts of the expanded product.
+    /// The contracts of the product being opened.
     ProductContracts,
 }
 
@@ -69,7 +70,9 @@ fn product_code(instrument: &ProviderInstrumentSummary) -> Option<&str> {
             .product_code
             .as_deref()
             .unwrap_or(&instrument.symbol),
-        ProviderInstrumentKind::Instrument => instrument.product_code.as_deref()?,
+        ProviderInstrumentKind::Instrument | ProviderInstrumentKind::FrontMonthAlias => {
+            instrument.product_code.as_deref()?
+        }
     };
     (!code.is_empty()).then_some(code)
 }
@@ -82,8 +85,8 @@ pub(crate) enum InstrumentMenuSelection {
         provider: TerminalProvider,
         index: usize,
     },
-    /// A contract of the expanded product.
-    ExpandedContract {
+    /// A contract of the product being opened.
+    ProductContract {
         provider: TerminalProvider,
         index: usize,
     },
@@ -92,7 +95,7 @@ pub(crate) enum InstrumentMenuSelection {
 impl InstrumentMenuSelection {
     pub(crate) const fn provider(self) -> TerminalProvider {
         match self {
-            Self::SearchResult { provider, .. } | Self::ExpandedContract { provider, .. } => {
+            Self::SearchResult { provider, .. } | Self::ProductContract { provider, .. } => {
                 provider
             }
         }
@@ -102,9 +105,9 @@ impl InstrumentMenuSelection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum InstrumentMenuAction {
     Select(InstrumentMenuSelection),
-    /// Shows or hides a product's contracts; a product itself is never selected.
-    ToggleProduct(ProductKey),
-    /// A section header, or a loading or empty notice inside an expanded product.
+    /// Opens the product's nearest-expiry contract; a product itself is never selected.
+    OpenProduct(ProductKey),
+    /// A product without a code to search.
     Inert,
 }
 
@@ -115,37 +118,46 @@ pub(crate) struct InstrumentMenuEntry {
     pub(crate) label: String,
     /// Supporting text after the label, such as a product name and contract month.
     pub(crate) description: Option<String>,
-    /// Muted trailing text: the provider's asset class and, for a product, its exchange. A
-    /// section header shows its provider's search status here.
+    /// Muted trailing text: the provider's asset class and, for a product or a contract, its
+    /// exchange.
     pub(crate) detail: Option<String>,
     pub(crate) checked: bool,
-    /// The row sits under a product header.
-    pub(crate) nested: bool,
-    /// For a product header, whether its contracts are shown.
-    pub(crate) expanded: Option<bool>,
-    /// The header that starts one provider's section when several providers are searched.
-    pub(crate) section: bool,
     pub(crate) action: InstrumentMenuAction,
 }
 
-/// What a lane's latest completed search lists.
+/// What the lanes' latest completed searches list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SymbolListingSummary {
     Products(usize),
-    Contracts { contracts: usize, products: usize },
+    Contracts(usize),
     Markets(usize),
+}
+
+impl SymbolListingSummary {
+    const fn count(self) -> usize {
+        match self {
+            Self::Products(count) | Self::Contracts(count) | Self::Markets(count) => count,
+        }
+    }
+
+    /// Two lanes' summaries together; a mix of kinds counts as markets.
+    const fn combine(self, other: Self) -> Self {
+        let count = self.count() + other.count();
+        match (self, other) {
+            (Self::Products(_), Self::Products(_)) => Self::Products(count),
+            (Self::Contracts(_), Self::Contracts(_)) => Self::Contracts(count),
+            _ => Self::Markets(count),
+        }
+    }
 }
 
 /// How the lanes stand, for the menu footer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SymbolBrowserStatus {
     Searching,
-    Failed,
     Listed(SymbolListingSummary),
-    /// Every answering provider completed without a match.
+    /// Every answering provider completed or failed without a match.
     NoMatches,
-    /// Several providers answered; each section carries its own summary.
-    Sections,
     Idle,
 }
 
@@ -158,13 +170,21 @@ pub(crate) enum ExactSymbolMatch {
     Missing,
 }
 
-/// Why a lane's search ended without results.
+/// Why a lane's search ended without results. Neither is shown as an error: the lane lists
+/// nothing, and an unavailable lane answers again once its provider's catalog is ready.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SymbolSearchFailure {
-    /// The provider has no active catalog session; in a multi-provider scope its section is
-    /// hidden until its catalog is ready.
+    /// The provider has no active catalog session.
     Unavailable,
     Failed,
+}
+
+/// What opening a product came to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OpenedProduct {
+    /// The product's nearest-expiry contract, ready to select.
+    Contract(InstrumentMenuSelection),
+    NoContracts(ProductKey),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,24 +196,19 @@ struct PendingSymbolSearch {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ProductContracts {
-    /// Waits for the lane's query search, which a contract search would supersede.
-    Unrequested,
     Pending(NonZeroUsize),
     Listed {
         search_id: NonZeroUsize,
         contracts: Vec<ProviderInstrumentSummary>,
+        /// Whether its contract was handed out for selection.
+        opened: bool,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductExpansion {
+struct ProductOpening {
     product: ProductKey,
     contracts: ProductContracts,
-}
-
-enum MenuSlot<'a> {
-    Row(usize),
-    Group((&'a str, &'a str), Vec<usize>),
 }
 
 /// One provider's searches.
@@ -205,12 +220,10 @@ struct ProviderLane {
     completed_query: Option<String>,
     failure: Option<SymbolSearchFailure>,
     results: Vec<ProviderInstrumentSummary>,
-    /// The latest product listing. A typed search replaces `results`, and its contract groups
-    /// are still named after these products.
+    /// The latest product listing. A typed search replaces `results`, and its contracts are
+    /// still described by these products' names.
     products: Vec<ProviderInstrumentSummary>,
-    expansion: Option<ProductExpansion>,
-    /// Products of a typed search whose contracts the user hid.
-    collapsed_products: Vec<ProductKey>,
+    opening: Option<ProductOpening>,
 }
 
 impl ProviderLane {
@@ -223,8 +236,7 @@ impl ProviderLane {
             failure: None,
             results: Vec::new(),
             products: Vec::new(),
-            expansion: None,
-            collapsed_products: Vec::new(),
+            opening: None,
         }
     }
 
@@ -247,87 +259,16 @@ impl ProviderLane {
             .iter()
             .filter(|result| result.kind == ProviderInstrumentKind::Product)
             .count();
-        if products > 0 {
-            return Some(SymbolListingSummary::Products(products));
-        }
-        let mut groups: Vec<(&str, &str)> = Vec::new();
-        for result in &self.results {
-            if let Some(code) = product_code(result) {
-                let group = (code, result.exchange.as_str());
-                if !groups.contains(&group) {
-                    groups.push(group);
-                }
-            }
-        }
-        Some(if groups.is_empty() {
-            SymbolListingSummary::Markets(self.results.len())
+        Some(if products > 0 {
+            SymbolListingSummary::Products(products)
+        } else if self
+            .results
+            .iter()
+            .any(|result| product_code(result).is_some())
+        {
+            SymbolListingSummary::Contracts(self.results.len())
         } else {
-            SymbolListingSummary::Contracts {
-                contracts: self.results.len(),
-                products: groups.len(),
-            }
-        })
-    }
-
-    /// A section that has nothing to say is not shown: an unavailable provider, or one never
-    /// searched.
-    fn visible_section(&self) -> bool {
-        self.failure != Some(SymbolSearchFailure::Unavailable)
-            && (self.pending.is_some()
-                || self.completed_search_id.is_some()
-                || self.failure.is_some())
-    }
-
-    fn section_status(&self) -> String {
-        if self.query_pending() {
-            return "Searching".to_string();
-        }
-        if self.failure == Some(SymbolSearchFailure::Failed) {
-            return "Search failed · try again".to_string();
-        }
-        match self.summary() {
-            Some(SymbolListingSummary::Products(count)) => {
-                super::counted(count, "product", "products")
-            }
-            Some(SymbolListingSummary::Contracts { contracts, .. }) => {
-                super::counted(contracts, "contract", "contracts")
-            }
-            Some(SymbolListingSummary::Markets(count)) => {
-                super::counted(count, "market", "markets")
-            }
-            None => "No matches".to_string(),
-        }
-    }
-
-    fn begin_contract_search(
-        &mut self,
-        request_id: NonZeroUsize,
-        exchange: Option<ExchangeCode>,
-    ) -> Option<SymbolSearchRequest> {
-        if self.query_pending() {
-            return None;
-        }
-        let code = self
-            .expansion
-            .as_ref()
-            .filter(|expansion| expansion.contracts == ProductContracts::Unrequested)?
-            .product
-            .code
-            .clone();
-        self.pending = Some(PendingSymbolSearch {
-            id: request_id,
-            query: code.clone(),
-            lane: SymbolSearchLane::ProductContracts,
-        });
-        if let Some(expansion) = self.expansion.as_mut() {
-            expansion.contracts = ProductContracts::Pending(request_id);
-        }
-        Some(SymbolSearchRequest {
-            provider: self.provider,
-            request_id,
-            query: code,
-            lane: SymbolSearchLane::ProductContracts,
-            exchange,
+            SymbolListingSummary::Markets(self.results.len())
         })
     }
 
@@ -339,13 +280,14 @@ impl ProviderLane {
             InstrumentMenuSelection::SearchResult { index, .. } => {
                 (self.results.get(index)?, self.completed_search_id?)
             }
-            InstrumentMenuSelection::ExpandedContract { index, .. } => {
-                match &self.expansion.as_ref()?.contracts {
+            InstrumentMenuSelection::ProductContract { index, .. } => {
+                match &self.opening.as_ref()?.contracts {
                     ProductContracts::Listed {
                         search_id,
                         contracts,
+                        ..
                     } => (contracts.get(index)?, *search_id),
-                    ProductContracts::Unrequested | ProductContracts::Pending(_) => return None,
+                    ProductContracts::Pending(_) => return None,
                 }
             }
         };
@@ -353,205 +295,76 @@ impl ProviderLane {
             .then_some((instrument, search_generation))
     }
 
-    /// The lane's rows: listed products with the expanded one's contracts beneath it, a typed
-    /// search's contracts grouped under their product, and instruments without a product flat.
+    /// The lane's rows in its provider's order: listed products open their nearest contract,
+    /// and every contract or market is its own row.
     fn push_entries(
         &self,
         entries: &mut Vec<InstrumentMenuEntry>,
         selected: Option<&SymbolSelection>,
     ) {
-        let mut slots: Vec<MenuSlot<'_>> = Vec::with_capacity(self.results.len());
         for (index, result) in self.results.iter().enumerate() {
-            let group = (result.kind == ProviderInstrumentKind::Instrument)
-                .then(|| product_code(result))
-                .flatten()
-                .map(|code| (code, result.exchange.as_str()));
-            let Some(group) = group else {
-                slots.push(MenuSlot::Row(index));
-                continue;
-            };
-            match slots.iter_mut().find_map(|slot| match slot {
-                MenuSlot::Group(key, members) if *key == group => Some(members),
-                MenuSlot::Group(..) | MenuSlot::Row(_) => None,
-            }) {
-                Some(members) => members.push(index),
-                None => slots.push(MenuSlot::Group(group, vec![index])),
-            }
-        }
-        for slot in slots {
-            match slot {
-                MenuSlot::Row(index) => {
-                    let result = &self.results[index];
-                    if result.kind == ProviderInstrumentKind::Product {
-                        self.push_listed_product(entries, result, selected);
-                    } else {
-                        entries.push(self.contract_entry(
-                            result,
-                            InstrumentMenuSelection::SearchResult {
-                                provider: self.provider,
-                                index,
-                            },
-                            None,
-                            false,
-                            selected,
-                        ));
-                    }
-                }
-                MenuSlot::Group((code, exchange), members) => {
-                    let product = ProductKey {
-                        provider: self.provider,
-                        code: code.to_string(),
-                        exchange: exchange.to_string(),
-                    };
-                    self.push_contract_group(entries, product, &members, selected);
-                }
-            }
+            entries.push(if result.kind == ProviderInstrumentKind::Product {
+                self.product_entry(result)
+            } else {
+                self.contract_entry(result, index, selected)
+            });
         }
     }
 
-    fn push_listed_product(
-        &self,
-        entries: &mut Vec<InstrumentMenuEntry>,
-        listed: &ProviderInstrumentSummary,
-        selected: Option<&SymbolSelection>,
-    ) {
+    fn product_entry(&self, listed: &ProviderInstrumentSummary) -> InstrumentMenuEntry {
         let product = ProductKey::of(self.provider, listed);
-        let expansion = self
-            .expansion
-            .as_ref()
-            .filter(|expansion| product.as_ref() == Some(&expansion.product));
-        entries.push(InstrumentMenuEntry {
+        let opening = self.opening.as_ref().is_some_and(|opening| {
+            product.as_ref() == Some(&opening.product)
+                && matches!(opening.contracts, ProductContracts::Pending(_))
+        });
+        InstrumentMenuEntry {
             provider: self.provider,
             label: listed.display_symbol.clone(),
             description: listed.name.clone(),
-            detail: product_detail(listed.asset_class.as_deref(), &listed.exchange),
+            detail: if opening {
+                Some("Opening".to_string())
+            } else {
+                product_detail(listed.asset_class.as_deref(), &listed.exchange)
+            },
             checked: false,
-            nested: false,
-            expanded: product.as_ref().map(|_| expansion.is_some()),
-            section: false,
             action: product.map_or(
                 InstrumentMenuAction::Inert,
-                InstrumentMenuAction::ToggleProduct,
+                InstrumentMenuAction::OpenProduct,
             ),
-        });
-        let Some(expansion) = expansion else {
-            return;
-        };
-        match &expansion.contracts {
-            ProductContracts::Unrequested | ProductContracts::Pending(_) => {
-                entries.push(self.notice_entry("Loading contracts"));
-            }
-            ProductContracts::Listed { contracts, .. } if contracts.is_empty() => {
-                entries.push(self.notice_entry("No contracts listed"));
-            }
-            ProductContracts::Listed { contracts, .. } => {
-                entries.extend(contracts.iter().enumerate().map(|(index, contract)| {
-                    self.contract_entry(
-                        contract,
-                        InstrumentMenuSelection::ExpandedContract {
-                            provider: self.provider,
-                            index,
-                        },
-                        listed.name.as_deref(),
-                        true,
-                        selected,
-                    )
-                }));
-            }
         }
-    }
-
-    fn push_contract_group(
-        &self,
-        entries: &mut Vec<InstrumentMenuEntry>,
-        product: ProductKey,
-        members: &[usize],
-        selected: Option<&SymbolSelection>,
-    ) {
-        let listed = self.products.iter().find(|listed| product.names(listed));
-        let name = listed.and_then(|listed| listed.name.as_deref());
-        let collapsed = self.collapsed_products.contains(&product);
-        entries.push(InstrumentMenuEntry {
-            provider: self.provider,
-            label: name.map_or_else(|| product.code.clone(), str::to_string),
-            description: None,
-            detail: product_detail(
-                listed.and_then(|listed| listed.asset_class.as_deref()),
-                &product.exchange,
-            ),
-            checked: false,
-            nested: false,
-            expanded: Some(!collapsed),
-            section: false,
-            action: InstrumentMenuAction::ToggleProduct(product),
-        });
-        if collapsed {
-            return;
-        }
-        entries.extend(members.iter().map(|&index| {
-            self.contract_entry(
-                &self.results[index],
-                InstrumentMenuSelection::SearchResult {
-                    provider: self.provider,
-                    index,
-                },
-                name,
-                true,
-                selected,
-            )
-        }));
     }
 
     fn contract_entry(
         &self,
         instrument: &ProviderInstrumentSummary,
-        selection: InstrumentMenuSelection,
-        product_name: Option<&str>,
-        nested: bool,
+        index: usize,
         selected: Option<&SymbolSelection>,
     ) -> InstrumentMenuEntry {
+        let product = ProductKey::of(self.provider, instrument);
+        let product_name = product
+            .as_ref()
+            .and_then(|product| self.products.iter().find(|listed| product.names(listed)))
+            .and_then(|listed| listed.name.as_deref());
         InstrumentMenuEntry {
             provider: self.provider,
             label: instrument.display_symbol.clone(),
             description: contract_description(product_name, instrument),
-            detail: instrument.asset_class.clone(),
+            // A product's contracts name their exchange so a delayed copy reads apart from
+            // its real-time one.
+            detail: if product.is_some() {
+                product_detail(instrument.asset_class.as_deref(), &instrument.exchange)
+            } else {
+                instrument.asset_class.clone()
+            },
             checked: selected.is_some_and(|selected| {
                 selected.provider == self.provider
                     && selected.instrument.symbol == instrument.symbol
                     && selected.instrument.exchange == instrument.exchange
             }),
-            nested,
-            expanded: None,
-            section: false,
-            action: InstrumentMenuAction::Select(selection),
-        }
-    }
-
-    fn notice_entry(&self, label: &str) -> InstrumentMenuEntry {
-        InstrumentMenuEntry {
-            provider: self.provider,
-            label: label.to_string(),
-            description: None,
-            detail: None,
-            checked: false,
-            nested: true,
-            expanded: None,
-            section: false,
-            action: InstrumentMenuAction::Inert,
-        }
-    }
-
-    fn section_entry(&self) -> InstrumentMenuEntry {
-        InstrumentMenuEntry {
-            provider: self.provider,
-            label: terminal_provider_display(self.provider).to_string(),
-            description: None,
-            detail: Some(self.section_status()),
-            checked: false,
-            nested: false,
-            expanded: None,
-            section: true,
-            action: InstrumentMenuAction::Inert,
+            action: InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult {
+                provider: self.provider,
+                index,
+            }),
         }
     }
 }
@@ -634,8 +447,7 @@ impl SymbolBrowser {
             .iter_mut()
             .map(|lane| {
                 lane.results.clear();
-                lane.expansion = None;
-                lane.collapsed_products.clear();
+                lane.opening = None;
                 lane.failure = None;
                 lane.pending = Some(PendingSymbolSearch {
                     id: request_id,
@@ -684,7 +496,7 @@ impl SymbolBrowser {
         &mut self,
         provider: TerminalProvider,
         request_id: NonZeroUsize,
-        results: Vec<ProviderInstrumentSummary>,
+        mut results: Vec<ProviderInstrumentSummary>,
     ) -> bool {
         if results.len() > self.maximum_results {
             return false;
@@ -695,6 +507,8 @@ impl SymbolBrowser {
         let Some(search) = lane.pending.take_if(|search| search.id == request_id) else {
             return false;
         };
+        // The dated contract an alias follows is listed beside it.
+        results.retain(|result| result.kind != ProviderInstrumentKind::FrontMonthAlias);
         learn_exchanges(&mut self.exchanges, provider, &results);
         match search.lane {
             SymbolSearchLane::Query => {
@@ -711,25 +525,26 @@ impl SymbolBrowser {
                 lane.completed_search_id = Some(request_id);
                 lane.completed_query = Some(search.query);
                 lane.failure = None;
-                lane.collapsed_products.clear();
                 lane.results = results;
             }
             SymbolSearchLane::ProductContracts => {
-                // A product collapsed or replaced while its search ran drops the reply.
-                if let Some(expansion) = lane.expansion.as_mut().filter(|expansion| {
-                    expansion.contracts == ProductContracts::Pending(request_id)
-                }) {
-                    let exchange = expansion.product.exchange.as_str();
+                // A product replaced while its search ran drops the reply.
+                if let Some(opening) = lane
+                    .opening
+                    .as_mut()
+                    .filter(|opening| opening.contracts == ProductContracts::Pending(request_id))
+                {
                     let contracts = results
                         .into_iter()
                         .filter(|result| {
                             result.kind == ProviderInstrumentKind::Instrument
-                                && result.exchange == exchange
+                                && opening.product.names(result)
                         })
                         .collect();
-                    expansion.contracts = ProductContracts::Listed {
+                    opening.contracts = ProductContracts::Listed {
                         search_id: request_id,
                         contracts,
+                        opened: false,
                     };
                 }
             }
@@ -737,71 +552,70 @@ impl SymbolBrowser {
         true
     }
 
-    /// Contract searches of products expanded while their lane's query search ran.
-    pub(crate) fn begin_contract_searches(&mut self) -> Vec<SymbolSearchRequest> {
+    /// Starts listing a product's contracts so its nearest-expiry one can open. Opening
+    /// another product replaces it; a lane refreshing its listing opens nothing.
+    pub(crate) fn open_product(&mut self, product: &ProductKey) -> Option<SymbolSearchRequest> {
         let exchange = self.scope.exchange();
-        let mut requests = Vec::new();
-        for index in 0..self.lanes.len() {
-            let waiting = !self.lanes[index].query_pending()
-                && self.lanes[index]
-                    .expansion
-                    .as_ref()
-                    .is_some_and(|expansion| expansion.contracts == ProductContracts::Unrequested);
-            if waiting {
-                let request_id = self.next_request_id();
-                requests.extend(self.lanes[index].begin_contract_search(request_id, exchange));
-            }
+        let lane_index = self.lanes.iter().position(|lane| {
+            lane.provider == product.provider
+                && !lane.query_pending()
+                && lane.results.iter().any(|result| {
+                    result.kind == ProviderInstrumentKind::Product && product.names(result)
+                })
+        })?;
+        let request_id = self.next_request_id();
+        for lane in &mut self.lanes {
+            lane.opening = None;
         }
-        requests
+        let lane = &mut self.lanes[lane_index];
+        lane.opening = Some(ProductOpening {
+            product: product.clone(),
+            contracts: ProductContracts::Pending(request_id),
+        });
+        lane.pending = Some(PendingSymbolSearch {
+            id: request_id,
+            query: product.code.clone(),
+            lane: SymbolSearchLane::ProductContracts,
+        });
+        Some(SymbolSearchRequest {
+            provider: product.provider,
+            request_id,
+            query: product.code.clone(),
+            lane: SymbolSearchLane::ProductContracts,
+            exchange,
+        })
     }
 
-    /// Shows or hides a product's contracts. Expanding a listed product collapses any other and
-    /// returns its contract search unless its lane's query search is still running; that
-    /// search starts later through `begin_contract_searches`. A typed search's groups toggle
-    /// in place.
-    pub(crate) fn toggle_product(&mut self, product: &ProductKey) -> Option<SymbolSearchRequest> {
-        let exchange = self.scope.exchange();
-        let lane_index = self
-            .lanes
-            .iter()
-            .position(|lane| lane.provider == product.provider)?;
-        let listed = self.lanes[lane_index]
-            .results
-            .iter()
-            .any(|result| result.kind == ProviderInstrumentKind::Product && product.names(result));
-        if !listed {
-            let lane = &mut self.lanes[lane_index];
-            if let Some(index) = lane
-                .collapsed_products
-                .iter()
-                .position(|collapsed| collapsed == product)
-            {
-                lane.collapsed_products.remove(index);
-            } else if lane.results.iter().any(|result| product.names(result)) {
-                lane.collapsed_products.push(product.clone());
-            }
-            return None;
-        }
-        if self.lanes[lane_index]
-            .expansion
-            .as_ref()
-            .is_some_and(|expansion| &expansion.product == product)
-        {
-            self.lanes[lane_index].expansion = None;
-            return None;
-        }
+    /// The opened product's nearest-expiry contract once its contracts are listed, handed out
+    /// once. A product without contracts is forgotten.
+    pub(crate) fn take_opened_product(&mut self) -> Option<OpenedProduct> {
         for lane in &mut self.lanes {
-            lane.expansion = None;
+            let Some(opening) = lane.opening.as_mut() else {
+                continue;
+            };
+            let ProductContracts::Listed {
+                contracts, opened, ..
+            } = &mut opening.contracts
+            else {
+                continue;
+            };
+            if *opened {
+                continue;
+            }
+            let Some(index) = nearest_expiry(contracts.iter().enumerate()) else {
+                let product = opening.product.clone();
+                lane.opening = None;
+                return Some(OpenedProduct::NoContracts(product));
+            };
+            *opened = true;
+            return Some(OpenedProduct::Contract(
+                InstrumentMenuSelection::ProductContract {
+                    provider: lane.provider,
+                    index,
+                },
+            ));
         }
-        self.lanes[lane_index].expansion = Some(ProductExpansion {
-            product: product.clone(),
-            contracts: ProductContracts::Unrequested,
-        });
-        if self.lanes[lane_index].query_pending() {
-            return None;
-        }
-        let request_id = self.next_request_id();
-        self.lanes[lane_index].begin_contract_search(request_id, exchange)
+        None
     }
 
     pub(crate) fn select(&mut self, selection: InstrumentMenuSelection) -> Option<SymbolSelection> {
@@ -837,20 +651,19 @@ impl SymbolBrowser {
             lane.completed_search_id = None;
             lane.completed_query = None;
             lane.results.clear();
-            lane.expansion = None;
-            lane.collapsed_products.clear();
+            lane.opening = None;
             return true;
         }
-        let expanded = lane.expansion.as_ref().is_some_and(|expansion| {
+        let opened = lane.opening.as_ref().is_some_and(|opening| {
             matches!(
-                expansion.contracts,
+                opening.contracts,
                 ProductContracts::Listed { search_id, .. } if search_id == search_generation
             )
         });
-        if expanded {
-            lane.expansion = None;
+        if opened {
+            lane.opening = None;
         }
-        expanded
+        opened
     }
 
     pub(crate) fn confirm_selection(&mut self, generation: NonZeroUsize) -> bool {
@@ -878,8 +691,8 @@ impl SymbolBrowser {
             .map(|selection| selection.provider)
     }
 
-    /// Ends a lane's pending search. A rejected contract search collapses its product so
-    /// expanding it again retries; a rejected query search records why.
+    /// Ends a lane's pending search. A rejected contract search forgets its product so
+    /// opening it again retries; a rejected query search records why.
     pub(crate) fn reject_search(
         &mut self,
         provider: TerminalProvider,
@@ -895,10 +708,10 @@ impl SymbolBrowser {
         match search.lane {
             SymbolSearchLane::Query => lane.failure = Some(failure),
             SymbolSearchLane::ProductContracts => {
-                if lane.expansion.as_ref().is_some_and(|expansion| {
-                    expansion.contracts == ProductContracts::Pending(generation)
+                if lane.opening.as_ref().is_some_and(|opening| {
+                    opening.contracts == ProductContracts::Pending(generation)
                 }) {
-                    lane.expansion = None;
+                    lane.opening = None;
                 }
             }
         }
@@ -912,17 +725,34 @@ impl SymbolBrowser {
     }
 
     /// Finds an exact symbol in provider order, so an earlier provider's market wins over a
-    /// later one's even when the later one answers first.
+    /// later one's even when the later one answers first. A product code finds that
+    /// product's nearest-expiry contract.
     pub(crate) fn exact_symbol(&self, symbol: &str) -> ExactSymbolMatch {
         for lane in &self.lanes {
             if lane.query_pending() {
                 return ExactSymbolMatch::Pending;
             }
-            if let Some(index) = lane.results.iter().position(|instrument| {
-                instrument.kind == ProviderInstrumentKind::Instrument
-                    && (instrument.symbol.eq_ignore_ascii_case(symbol)
-                        || instrument.display_symbol.eq_ignore_ascii_case(symbol))
-            }) {
+            let instruments = || {
+                lane.results
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, instrument)| instrument.kind == ProviderInstrumentKind::Instrument)
+            };
+            let index = instruments()
+                .find(|(_, instrument)| {
+                    instrument.symbol.eq_ignore_ascii_case(symbol)
+                        || instrument.display_symbol.eq_ignore_ascii_case(symbol)
+                })
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    nearest_expiry(instruments().filter(|(_, instrument)| {
+                        instrument
+                            .product_code
+                            .as_deref()
+                            .is_some_and(|code| code.eq_ignore_ascii_case(symbol))
+                    }))
+                });
+            if let Some(index) = index {
                 return ExactSymbolMatch::Found(InstrumentMenuSelection::SearchResult {
                     provider: lane.provider,
                     index,
@@ -977,47 +807,28 @@ impl SymbolBrowser {
         if self.search_pending() {
             return SymbolBrowserStatus::Searching;
         }
-        if let [lane] = self.lanes.as_slice() {
-            if let Some(summary) = lane.summary() {
-                return SymbolBrowserStatus::Listed(summary);
-            }
-            return match lane.failure {
-                Some(_) => SymbolBrowserStatus::Failed,
-                None if lane.completed_search_id.is_some() => SymbolBrowserStatus::NoMatches,
-                None => SymbolBrowserStatus::Idle,
-            };
+        let listed = self
+            .lanes
+            .iter()
+            .filter_map(ProviderLane::summary)
+            .reduce(SymbolListingSummary::combine);
+        if let Some(summary) = listed {
+            return SymbolBrowserStatus::Listed(summary);
         }
-        if self.has_results() {
-            SymbolBrowserStatus::Sections
-        } else if self
-            .lanes
-            .iter()
-            .any(|lane| lane.completed_search_id.is_some())
-        {
+        let answered = self.lanes.iter().any(|lane| {
+            lane.completed_search_id.is_some() || lane.failure == Some(SymbolSearchFailure::Failed)
+        });
+        if answered {
             SymbolBrowserStatus::NoMatches
-        } else if self
-            .lanes
-            .iter()
-            .any(|lane| lane.failure == Some(SymbolSearchFailure::Failed))
-        {
-            SymbolBrowserStatus::Failed
         } else {
             SymbolBrowserStatus::Idle
         }
     }
 
-    /// The menu rows. With several providers in scope each answering provider's rows follow a
-    /// section header carrying its status; an unavailable provider has no section.
+    /// The menu rows: every lane's rows in the fixed provider order.
     pub(crate) fn menu_entries(&self) -> Vec<InstrumentMenuEntry> {
-        let sections = self.lanes.len() > 1;
         let mut entries = Vec::new();
         for lane in &self.lanes {
-            if sections {
-                if !lane.visible_section() {
-                    continue;
-                }
-                entries.push(lane.section_entry());
-            }
             lane.push_entries(&mut entries, self.selected.as_ref());
         }
         entries
@@ -1037,6 +848,25 @@ fn scope_lanes(scope: SymbolSearchScope) -> Vec<ProviderLane> {
             .into_iter()
             .collect(),
     }
+}
+
+/// The index of the earliest-expiring contract; the first one wins a tie, so a provider's
+/// real-time listing is preferred when it orders it first. Without any expiration the first
+/// contract is the nearest.
+fn nearest_expiry<'a>(
+    contracts: impl Iterator<Item = (usize, &'a ProviderInstrumentSummary)>,
+) -> Option<usize> {
+    contracts
+        .min_by_key(|(_, contract)| {
+            let expiration = contract.expiration_date.as_deref().map(expiration_key);
+            (expiration.is_none(), expiration)
+        })
+        .map(|(index, _)| index)
+}
+
+/// An expiration's digits, so `YYYYMMDD` and `YYYY-MM-DD` order by date.
+fn expiration_key(expiration: &str) -> Vec<u8> {
+    expiration.bytes().filter(u8::is_ascii_digit).collect()
 }
 
 fn learn_exchanges(
@@ -1082,18 +912,17 @@ fn product_detail(asset_class: Option<&str>, exchange: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// A contract under a listed product reads as that product's name and its month. Without a
-/// listed name the provider's own contract name is shown as is, since it may already carry
-/// the month.
+/// A dated contract reads as its product's name and its month, the listed product's name
+/// when the listing has one and the provider's own contract name otherwise.
 fn contract_description(
     product_name: Option<&str>,
     contract: &ProviderInstrumentSummary,
 ) -> Option<String> {
     let month = contract.expiration_date.as_deref().and_then(contract_month);
-    match (product_name, month) {
+    match (product_name.or(contract.name.as_deref()), month) {
         (Some(name), Some(month)) => Some(format!("{name} ({month})")),
         (Some(name), None) => Some(name.to_string()),
-        (None, month) => contract.name.clone().or(month),
+        (None, month) => month,
     }
 }
 

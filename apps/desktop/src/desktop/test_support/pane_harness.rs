@@ -3057,8 +3057,8 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
         let toaster = &harness.window.read(cx).toaster;
         assert_eq!(
             harness.pane.read(cx).symbol_selector_status(),
-            "The market search failed · try again",
-            "a full command queue fails the search instead of queueing it"
+            "No markets found",
+            "a full command queue fails the search instead of queueing it; only the notice reports it"
         );
         assert_eq!(toaster.notices().len(), 1);
         assert_eq!(toaster.notices()[0].title, "Symbol search unavailable");
@@ -3121,7 +3121,7 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
         let toaster = &harness.window.read(cx).toaster;
         assert_eq!(
             harness.pane.read(cx).symbol_selector_status(),
-            "No matching markets · try another search"
+            "No markets found"
         );
         assert_eq!(toaster.notices(), []);
         assert_eq!(
@@ -3132,7 +3132,7 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
 }
 
 #[gpui::test]
-fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query(
+fn pane_harness_rithmic_product_opens_its_front_month_from_the_empty_query_listing(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = PaneHarness::open(cx);
@@ -3140,8 +3140,8 @@ fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query
     let searches = || {
         std::iter::from_fn(|| commands.try_recv().ok())
             .filter_map(|command| match command {
-                MarketWorkerCommand::ProviderSearch(request) => Some(request),
-                MarketWorkerCommand::SelectCatalog(_) => panic!("a product is never selected"),
+                MarketWorkerCommand::ProviderSearch(request) => Some(Ok(request)),
+                MarketWorkerCommand::SelectCatalog(request) => Some(Err(request)),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -3163,12 +3163,13 @@ fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query
     });
     let listing = searches();
     assert_eq!(listing.len(), 1, "provider switch sends one listing search");
-    assert_eq!(listing[0].provider, "rithmic");
-    assert_eq!(listing[0].query, "", "an empty query lists products");
+    let listing = listing[0].as_ref().expect("a listing search");
+    assert_eq!(listing.provider, "rithmic");
+    assert_eq!(listing.query, "", "an empty query lists products");
     assert_eq!(query(cx).as_deref(), Some(""));
     complete_fixture_search(
         &harness,
-        &listing[0],
+        listing,
         ProviderInstrumentSummary {
             kind: ProviderInstrumentKind::Product,
             symbol: "NQ".into(),
@@ -3185,55 +3186,61 @@ fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query
         let entries = pane.instrument_entries(cx);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].label, "NQ");
-        assert_eq!(entries[0].expanded, Some(false));
         assert_eq!(
             pane.symbol_selector_status(),
-            "1 product · expand one for its contracts"
+            "1 product · choose one for its front month"
         );
         pane.chrome_selection = 0;
         assert!(
-            !pane.submit_symbol_input(cx),
-            "Enter on a product expands it instead of selecting"
+            pane.submit_symbol_input(cx),
+            "Enter on a product opens its front month"
         );
     });
     let contracts = searches();
     assert_eq!(
         contracts.len(),
         1,
-        "expanding searches the product's contracts"
+        "opening searches the product's contracts before selecting"
     );
-    assert_eq!(contracts[0].query, "NQ");
+    let contracts = contracts[0].as_ref().expect("a contract search");
+    assert_eq!(contracts.query, "NQ");
     assert_eq!(
         query(cx).as_deref(),
         Some(""),
-        "expanding leaves the query empty"
+        "opening leaves the query empty"
     );
-    complete_fixture_search(
+    complete_fixture_search_with(
         &harness,
-        &contracts[0],
-        ProviderInstrumentSummary {
-            kind: ProviderInstrumentKind::Instrument,
-            symbol: "NQZ6".into(),
-            display_symbol: "NQZ6".into(),
-            exchange: "CME".into(),
-            product_code: Some("NQ".into()),
-            expiration_date: Some("20261218".into()),
-            ..ProviderInstrumentSummary::default()
-        },
+        contracts,
+        vec![
+            nq_contract("NQH7", "CME", "20270319"),
+            nq_contract("NQZ6", "CME", "20261218"),
+            nq_contract("NQZ6", "CME-Delayed", "20261218"),
+        ],
     );
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
-        let entries = pane.instrument_entries(cx);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].expanded, Some(true));
-        assert_eq!(entries[1].label, "NQZ6");
-        assert!(entries[1].nested);
-        assert_eq!(
-            entries[1].description.as_deref(),
-            Some("E-mini Nasdaq-100 (Dec 2026)")
-        );
     });
+    let selected = searches();
+    assert_eq!(selected.len(), 1, "the front month is selected at once");
+    let selected = selected[0].as_ref().expect_err("a chart selection");
+    assert_eq!(
+        (selected.symbol.as_str(), selected.exchange.as_str()),
+        ("NQZ6", "CME")
+    );
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+fn nq_contract(symbol: &str, exchange: &str, expiration: &str) -> ProviderInstrumentSummary {
+    ProviderInstrumentSummary {
+        kind: ProviderInstrumentKind::Instrument,
+        symbol: symbol.into(),
+        display_symbol: symbol.into(),
+        exchange: exchange.into(),
+        product_code: Some("NQ".into()),
+        expiration_date: Some(expiration.into()),
+        ..ProviderInstrumentSummary::default()
+    }
 }
 
 /// Scopes the pane's symbol search to its chart provider and starts one search there.
@@ -3293,10 +3300,12 @@ fn pane_harness_all_providers_search_shows_each_answer_as_it_arrives(cx: &mut Te
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         let entries = pane.instrument_entries(cx);
-        assert!(entries[0].section);
-        assert_eq!(entries[0].detail.as_deref(), Some("Searching"));
-        assert!(entries[1].section);
-        assert_eq!(entries[2].label, "BTC-USDC");
+        assert_eq!(
+            entries.len(),
+            1,
+            "no provider headers, only the answer so far"
+        );
+        assert_eq!(entries[0].label, "BTC-USDC");
         assert_eq!(pane.symbol_selector_status(), "Searching provider markets");
     });
 
@@ -3337,6 +3346,14 @@ fn complete_fixture_search(
     request: &SearchProviderInstruments,
     instrument: ProviderInstrumentSummary,
 ) {
+    complete_fixture_search_with(harness, request, vec![instrument]);
+}
+
+fn complete_fixture_search_with(
+    harness: &PaneHarness,
+    request: &SearchProviderInstruments,
+    instruments: Vec<ProviderInstrumentSummary>,
+) {
     harness
         .publications
         .send(PaneProjectionEvent::RuntimeProjection(
@@ -3345,7 +3362,7 @@ fn complete_fixture_search(
                     ProviderInstrumentSearchResult {
                         provider: request.provider.clone(),
                         search_generation: request.search_generation,
-                        instruments: vec![instrument],
+                        instruments,
                         ..ProviderInstrumentSearchResult::default()
                     },
                 ),

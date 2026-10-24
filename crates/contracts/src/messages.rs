@@ -1030,6 +1030,10 @@ pub enum ProviderInstrumentKind {
     /// A product that groups dated contracts. It is never selectable; a search
     /// for its `product_code` lists its contracts.
     Product,
+    /// A provider alias that follows a product's front-month contract. It stays
+    /// resolvable for routes saved on it, but symbol menus list the dated
+    /// contract it points at instead.
+    FrontMonthAlias,
 }
 
 /// Bounded provider-neutral presentation metadata for one search result.

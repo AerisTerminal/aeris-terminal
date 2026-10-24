@@ -3519,9 +3519,6 @@ fn instrument_menu_entry(
         description: None,
         detail: None,
         checked,
-        nested: false,
-        expanded: None,
-        section: false,
         action,
     }
 }
@@ -3559,18 +3556,14 @@ fn instrument_menu_index_follows_the_checked_live_market() {
 }
 
 #[test]
-fn a_typed_search_highlights_its_first_instrument_below_the_product_header() {
+fn the_first_selectable_instrument_skips_product_rows() {
     let product = crate::desktop::symbol_browser::ProductKey {
         provider: TerminalProvider::Rithmic,
         code: "NQ".into(),
         exchange: "CME".into(),
     };
     let entries = [
-        instrument_menu_entry(
-            "E-mini Nasdaq-100",
-            false,
-            InstrumentMenuAction::ToggleProduct(product),
-        ),
+        instrument_menu_entry("NQ", false, InstrumentMenuAction::OpenProduct(product)),
         instrument_menu_entry(
             "NQZ6",
             false,

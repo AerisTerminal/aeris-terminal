@@ -282,7 +282,7 @@ use std::{
 use study_settings_dialog::study_settings_dialog_layer;
 use symbol_browser::{
     ExactSymbolMatch, InstrumentMenuAction, InstrumentMenuEntry, InstrumentMenuSelection,
-    SymbolBrowser, SymbolBrowserStatus, SymbolListingSummary, SymbolSearchFailure,
+    OpenedProduct, SymbolBrowser, SymbolBrowserStatus, SymbolListingSummary, SymbolSearchFailure,
     SymbolSearchRequest,
 };
 use symbol_menu::{
@@ -845,6 +845,8 @@ struct WorkspaceSurface {
     pending_symbol_selection_target: Option<SymbolSelectionTarget>,
     pending_watchlist_instrument: Option<InstallProviderInstrument>,
     pending_mnemonic_symbol: Option<String>,
+    /// The menu target of the product whose front month is opening.
+    product_opening_target: Option<SymbolSelectionTarget>,
     series_message: String,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
