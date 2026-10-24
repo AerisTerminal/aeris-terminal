@@ -3531,11 +3531,14 @@ impl MarketSummaryEntry {
         let changed = !messages.is_empty() || disconnected;
         for message in messages {
             match message {
-                MarketWorkerMessage::RuntimeSeriesPublication {
-                    event,
-                    received_unix_nanos,
-                    recovery_request_id: None,
-                } => self.apply_runtime_publication(event, received_unix_nanos),
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event,
+                        received_unix_nanos: Some(received_unix_nanos),
+                        recovery_request_id: None,
+                        selection_generation: None,
+                    },
+                ) => self.apply_runtime_publication(event, received_unix_nanos),
                 MarketWorkerMessage::LocalFailure {
                     scope: aeris_desktop::market_worker::LocalFailureScope::Catalog,
                     message,

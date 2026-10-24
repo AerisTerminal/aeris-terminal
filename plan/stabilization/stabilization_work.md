@@ -2028,6 +2028,13 @@ Status: pending
   duplicate-reply regressions cover acceptance. Metadata-bearing fenced
   runtime entries and transitional message/channel names remain; M6.6
   and VAL-DSK-021/022 stay open.
+- Part 8b3j (2026-10-24): the two metadata-bearing coordinator-fenced
+  mailbox arms now share one typed runtime projection. Its endpoint selection
+  generation, receipt timestamp and exact recovery request remain attached to
+  the original consumer envelope until the pane projects it. Producer, summary,
+  readiness, ordering, recovery and GPUI fixtures use the same entry; the
+  superseded arms are deleted. The remaining message type and transitional
+  channel/enqueue names still block VAL-DSK-021/022 and M6.6.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

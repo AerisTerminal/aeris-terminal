@@ -252,24 +252,47 @@ pub enum LocalCommandOutcome {
     },
 }
 
+/// Metadata that the coordinator envelope does not carry itself. Selection
+/// generation is captured at the endpoint, never reconstructed at projection.
+pub struct RuntimeProjection {
+    pub event: aeris_market_runtime::MarketConsumerEvent,
+    pub received_unix_nanos: Option<i64>,
+    pub recovery_request_id: Option<u64>,
+    pub selection_generation: Option<u64>,
+}
+
+impl RuntimeProjection {
+    #[must_use]
+    pub fn series(
+        event: aeris_market_runtime::MarketConsumerEvent,
+        received_unix_nanos: i64,
+        recovery_request_id: Option<u64>,
+    ) -> Self {
+        Self {
+            event,
+            received_unix_nanos: Some(received_unix_nanos),
+            recovery_request_id,
+            selection_generation: None,
+        }
+    }
+
+    #[must_use]
+    pub fn selection(event: aeris_market_runtime::MarketConsumerEvent, generation: u64) -> Self {
+        Self {
+            event,
+            received_unix_nanos: None,
+            recovery_request_id: None,
+            selection_generation: Some(generation),
+        }
+    }
+}
+
 pub enum MarketWorkerMessage {
     /// Coordinator events retain their consumer fence through the bounded
     /// queue; the pane projects each event at its owning presentation boundary.
     Runtime(aeris_market_runtime::MarketConsumerEvent),
-    /// Coordinator-fenced bars; a covering recovery snapshot also carries its
-    /// exact pending request, so both projections keep the original envelope.
-    RuntimeSeriesPublication {
-        event: aeris_market_runtime::MarketConsumerEvent,
-        received_unix_nanos: i64,
-        recovery_request_id: Option<u64>,
-    },
-    /// A selection-bound coordinator event whose runtime payload has no
-    /// selection generation. Capture the endpoint's generation at delivery,
-    /// never infer it from the pane when the event is projected.
-    RuntimeSelection {
-        event: aeris_market_runtime::MarketConsumerEvent,
-        generation: u64,
-    },
+    /// Coordinator-fenced event with endpoint-owned metadata.
+    RuntimeProjection(RuntimeProjection),
     /// Local failures share one projection; the scope determines the receiving owner.
     LocalFailure {
         scope: LocalFailureScope,
@@ -288,13 +311,15 @@ pub type MarketWorkerReceiver = PaneProjectionReceiver<MarketWorkerMessage>;
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
-        MarketWorkerMessage::RuntimeSeriesPublication { .. }
-            | MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
-                value: MarketRuntimeEvent::OrderBookSnapshot(_)
-                    | MarketRuntimeEvent::StudyOutputSnapshot(_)
-                    | MarketRuntimeEvent::TradeTapeSnapshot(_),
-                ..
-            })
+        MarketWorkerMessage::RuntimeProjection(RuntimeProjection {
+            received_unix_nanos: Some(_),
+            ..
+        }) | MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
+            value: MarketRuntimeEvent::OrderBookSnapshot(_)
+                | MarketRuntimeEvent::StudyOutputSnapshot(_)
+                | MarketRuntimeEvent::TradeTapeSnapshot(_),
+            ..
+        })
     )
 }
 
@@ -1289,18 +1314,22 @@ mod tests {
             .send(snapshot_message(&mut worker, 2))
             .expect("publication fills the ordinary slot");
         let mut epochs = EpochSequence::<ConsumerTag>::default();
-        let provider_state = |generation, epoch| MarketWorkerMessage::RuntimeSelection {
-            generation,
-            event: Fenced {
-                epoch,
-                value: MarketRuntimeEvent::ProviderState(aeris_contracts::ProviderState {
-                    provider: "fixture".into(),
-                    state: aeris_contracts::ProviderConnectionState::Online,
-                    generation: 4,
-                    detail: None,
-                    transport_rtt_nanos: Some(12_500_000),
-                }),
-            },
+        let provider_state = |generation, epoch| {
+            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                selection_generation: Some(generation),
+                event: Fenced {
+                    epoch,
+                    value: MarketRuntimeEvent::ProviderState(aeris_contracts::ProviderState {
+                        provider: "fixture".into(),
+                        state: aeris_contracts::ProviderConnectionState::Online,
+                        generation: 4,
+                        detail: None,
+                        transport_rtt_nanos: Some(12_500_000),
+                    }),
+                },
+                received_unix_nanos: None,
+                recovery_request_id: None,
+            })
         };
         let first_epoch = epochs.next();
         sender
@@ -1313,20 +1342,16 @@ mod tests {
         let (first, _) = receiver.drain_up_to(1);
         assert!(matches!(
             first.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication { .. }]
+            [MarketWorkerMessage::RuntimeProjection(
+                crate::market_worker::RuntimeProjection { .. }
+            )]
         ));
         let (remaining, _) = receiver.drain();
         assert!(matches!(
             remaining.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSelection {
-                    generation: 7,
-                    event: Fenced { epoch: actual_first, .. },
-                },
-                MarketWorkerMessage::RuntimeSelection {
-                    generation: 8,
-                    event: Fenced { epoch: actual_second, .. },
-                }
+                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { selection_generation: Some(7), event: Fenced { epoch: actual_first, .. }, .. }),
+                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { selection_generation: Some(8), event: Fenced { epoch: actual_second, .. }, .. })
             ] if *actual_first == first_epoch && *actual_second == second_epoch
         ));
     }
@@ -1377,14 +1402,14 @@ mod tests {
 
     fn tail_operation(message: &MarketWorkerMessage) -> Option<SeriesTailOperation> {
         match message {
-            MarketWorkerMessage::RuntimeSeriesPublication {
+            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event:
                     aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesUpdate(update),
                         ..
                     },
                 ..
-            } => Some(update.operation),
+            }) => Some(update.operation),
             _ => None,
         }
     }
@@ -1437,14 +1462,14 @@ mod tests {
 
     fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
         match message {
-            MarketWorkerMessage::RuntimeSeriesPublication {
+            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event:
                     aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesUpdate(update),
                         ..
                     },
                 ..
-            } => Some(update.bar.source_sequence),
+            }) => Some(update.bar.source_sequence),
             _ => None,
         }
     }
@@ -1465,7 +1490,7 @@ mod tests {
     }
 
     fn snapshot_message(fixture: &mut FixtureMarketWorker, count: usize) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeSeriesPublication {
+        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event: fixture
                 .publish_runtime_snapshot(
                     count,
@@ -1474,9 +1499,10 @@ mod tests {
                     &FixtureMarketEvents::default(),
                 )
                 .expect("fixture snapshot publishes"),
-            received_unix_nanos: 0,
+            received_unix_nanos: Some(0),
             recovery_request_id: None,
-        }
+            selection_generation: None,
+        })
     }
 
     fn update_message(
@@ -1484,7 +1510,7 @@ mod tests {
         bar: aeris_market_data::MarketBar,
         operation: SeriesTailOperation,
     ) -> MarketWorkerMessage {
-        MarketWorkerMessage::RuntimeSeriesPublication {
+        MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event: FixtureMarketEvents::default().update(
                 &fixture_series(),
                 1,
@@ -1493,9 +1519,10 @@ mod tests {
                 bar,
                 true,
             ),
-            received_unix_nanos: 0,
+            received_unix_nanos: Some(0),
             recovery_request_id: None,
-        }
+            selection_generation: None,
+        })
     }
 
     fn status_message(
@@ -1507,14 +1534,14 @@ mod tests {
 
     fn snapshot_generation(message: &MarketWorkerMessage) -> Option<u64> {
         match message {
-            MarketWorkerMessage::RuntimeSeriesPublication {
+            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
                 event:
                     aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
                         ..
                     },
                 ..
-            } => Some(snapshot.publication_generation),
+            }) => Some(snapshot.publication_generation),
             _ => None,
         }
     }
@@ -1755,7 +1782,9 @@ mod tests {
         let (messages, _) = worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication { .. }]
+            [MarketWorkerMessage::RuntimeProjection(
+                crate::market_worker::RuntimeProjection { .. }
+            )]
         ));
 
         drop(command_rx);
@@ -1776,13 +1805,15 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication {
-                event: aeris_market_runtime::fence::Fenced {
-                    value: MarketRuntimeEvent::SeriesSnapshot(_),
+            [MarketWorkerMessage::RuntimeProjection(
+                crate::market_worker::RuntimeProjection {
+                    event: aeris_market_runtime::fence::Fenced {
+                        value: MarketRuntimeEvent::SeriesSnapshot(_),
+                        ..
+                    },
                     ..
-                },
-                ..
-            }]
+                }
+            )]
         ));
     }
 
@@ -1837,22 +1868,28 @@ mod tests {
         let mut overflow_count = 0;
         while next_applied <= OUTBOX_EVENTS {
             while let Some(&generation) = outbox.front() {
-                let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &snapshot else {
+                let MarketWorkerMessage::RuntimeProjection(
+                    crate::market_worker::RuntimeProjection { event, .. },
+                ) = &snapshot
+                else {
                     panic!("fixture snapshot is canonical");
                 };
                 let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
                     panic!("fixture snapshot has series data");
                 };
-                let result = sender.send(MarketWorkerMessage::RuntimeSeriesPublication {
-                    event: FixtureMarketEvents::default().snapshot(
-                        &fixture_series(),
-                        1,
-                        generation,
-                        publication.snapshot.bars.clone(),
-                    ),
-                    received_unix_nanos: 0,
-                    recovery_request_id: None,
-                });
+                let result = sender.send(MarketWorkerMessage::RuntimeProjection(
+                    crate::market_worker::RuntimeProjection {
+                        event: FixtureMarketEvents::default().snapshot(
+                            &fixture_series(),
+                            1,
+                            generation,
+                            publication.snapshot.bars.clone(),
+                        ),
+                        received_unix_nanos: Some(0),
+                        recovery_request_id: None,
+                        selection_generation: None,
+                    },
+                ));
                 if result == Err(super::MarketWorkerSendError::Full) {
                     overflow_count += 1;
                     break;
@@ -2285,14 +2322,16 @@ mod tests {
         let generations = messages
             .iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeSeriesPublication {
-                    event:
-                        aeris_market_runtime::fence::Fenced {
-                            value: MarketRuntimeEvent::SeriesUpdate(update),
-                            ..
-                        },
-                    ..
-                } => Some(update.publication_generation),
+                MarketWorkerMessage::RuntimeProjection(
+                    crate::market_worker::RuntimeProjection {
+                        event:
+                            aeris_market_runtime::fence::Fenced {
+                                value: MarketRuntimeEvent::SeriesUpdate(update),
+                                ..
+                            },
+                        ..
+                    },
+                ) => Some(update.publication_generation),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -2397,21 +2436,24 @@ mod tests {
             .expect("tail exists");
         let first_sequence = source.value().source_sequence;
         sender
-            .send(MarketWorkerMessage::RuntimeSeriesPublication {
-                event: FixtureMarketEvents::default().snapshot(
-                    &fixture_series(),
-                    1,
-                    bootstrap.generation.publication_generation(),
-                    bootstrap
-                        .snapshot
-                        .bars()
-                        .iter()
-                        .map(|item| *item.value())
-                        .collect::<Vec<_>>(),
-                ),
-                received_unix_nanos: 0,
-                recovery_request_id: None,
-            })
+            .send(MarketWorkerMessage::RuntimeProjection(
+                crate::market_worker::RuntimeProjection {
+                    event: FixtureMarketEvents::default().snapshot(
+                        &fixture_series(),
+                        1,
+                        bootstrap.generation.publication_generation(),
+                        bootstrap
+                            .snapshot
+                            .bars()
+                            .iter()
+                            .map(|item| *item.value())
+                            .collect::<Vec<_>>(),
+                    ),
+                    received_unix_nanos: Some(0),
+                    recovery_request_id: None,
+                    selection_generation: None,
+                },
+            ))
             .expect("covering snapshot sends");
 
         for offset in 1_u64..=4 {
@@ -2442,13 +2484,15 @@ mod tests {
         );
         assert!(matches!(
             messages.first(),
-            Some(MarketWorkerMessage::RuntimeSeriesPublication {
-                event: aeris_market_runtime::fence::Fenced {
-                    value: MarketRuntimeEvent::SeriesSnapshot(_),
+            Some(MarketWorkerMessage::RuntimeProjection(
+                crate::market_worker::RuntimeProjection {
+                    event: aeris_market_runtime::fence::Fenced {
+                        value: MarketRuntimeEvent::SeriesSnapshot(_),
+                        ..
+                    },
                     ..
-                },
-                ..
-            })
+                }
+            ))
         ));
     }
 
@@ -2512,7 +2556,11 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let snapshot = snapshot_message(&mut worker, 2);
-        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &snapshot else {
+        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            event,
+            ..
+        }) = &snapshot
+        else {
             panic!("canonical fixture snapshot");
         };
         let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
@@ -2540,7 +2588,9 @@ mod tests {
         let (first, _) = receiver.drain_up_to(1);
         assert!(matches!(
             first.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication { .. }]
+            [MarketWorkerMessage::RuntimeProjection(
+                crate::market_worker::RuntimeProjection { .. }
+            )]
         ));
         sender
             .send(delta())
@@ -2554,7 +2604,9 @@ mod tests {
                     scope: super::LocalFailureScope::Catalog,
                     ..
                 },
-                MarketWorkerMessage::RuntimeSeriesPublication { .. }
+                MarketWorkerMessage::RuntimeProjection(
+                    crate::market_worker::RuntimeProjection { .. }
+                )
             ]
         ));
     }
@@ -2577,13 +2629,13 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesPublication {
+                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
                         ..
                     },
                     ..
-                },
+                }),
                 MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(
                         aeris_market_runtime::MarketSeriesState {
@@ -2631,7 +2683,11 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let snapshot = snapshot_message(&mut worker, 2);
-        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &snapshot else {
+        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            event,
+            ..
+        }) = &snapshot
+        else {
             panic!("fixture snapshot is canonical");
         };
         let MarketRuntimeEvent::SeriesSnapshot(publication) = &event.value else {
@@ -2771,21 +2827,24 @@ mod tests {
         bar.source_sequence += 1;
         bar.exchange_timestamp_seconds += 60;
         bar.exchange_timestamp_unix_nanos = bar.exchange_timestamp_seconds * 1_000_000_000;
-        let MarketWorkerMessage::RuntimeSeriesPublication {
+        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
-            received_unix_nanos,
+            received_unix_nanos: Some(received_unix_nanos),
             ..
-        } = snapshot_message(&mut fixture, 2)
+        }) = snapshot_message(&mut fixture, 2)
         else {
             unreachable!("fixture publishes a snapshot");
         };
         assert!(
             covered_sender
-                .send(MarketWorkerMessage::RuntimeSeriesPublication {
-                    event,
-                    received_unix_nanos,
-                    recovery_request_id: Some(8),
-                })
+                .send(MarketWorkerMessage::RuntimeProjection(
+                    crate::market_worker::RuntimeProjection {
+                        event,
+                        received_unix_nanos: Some(received_unix_nanos),
+                        recovery_request_id: Some(8),
+                        selection_generation: None
+                    }
+                ))
                 .is_ok()
         );
         assert!(
@@ -2801,34 +2860,37 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesPublication {
+                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     recovery_request_id: Some(8),
                     ..
-                },
-                MarketWorkerMessage::RuntimeSeriesPublication {
+                }),
+                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
                     recovery_request_id: None,
                     ..
-                }
+                })
             ]
         ));
 
         let (stale_sender, stale_receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut stale_fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let MarketWorkerMessage::RuntimeSeriesPublication {
+        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
             event,
-            received_unix_nanos,
+            received_unix_nanos: Some(received_unix_nanos),
             ..
-        } = snapshot_message(&mut stale_fixture, 2)
+        }) = snapshot_message(&mut stale_fixture, 2)
         else {
             unreachable!("fixture publishes a snapshot");
         };
         assert!(
             stale_sender
-                .send(MarketWorkerMessage::RuntimeSeriesPublication {
-                    event,
-                    received_unix_nanos,
-                    recovery_request_id: Some(9),
-                })
+                .send(MarketWorkerMessage::RuntimeProjection(
+                    crate::market_worker::RuntimeProjection {
+                        event,
+                        received_unix_nanos: Some(received_unix_nanos),
+                        recovery_request_id: Some(9),
+                        selection_generation: None
+                    }
+                ))
                 .is_ok()
         );
         assert!(
@@ -2843,7 +2905,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesPublication { recovery_request_id: Some(9), .. },
+                MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection { recovery_request_id: Some(9), .. }),
                 MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })
@@ -2952,21 +3014,28 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let snapshot = snapshot_message(&mut fixture, 2);
-        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = snapshot else {
+        let MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+            event,
+            ..
+        }) = snapshot
+        else {
             panic!("fixture snapshot is canonical");
         };
         let MarketRuntimeEvent::SeriesSnapshot(publication) = event.value else {
             panic!("fixture snapshot contains bars");
         };
-        let publication = |generation| MarketWorkerMessage::RuntimeSeriesPublication {
-            event: FixtureMarketEvents::default().snapshot(
-                &fixture_series(),
-                1,
-                generation,
-                publication.snapshot.bars.clone(),
-            ),
-            received_unix_nanos: 0,
-            recovery_request_id: None,
+        let publication = |generation| {
+            MarketWorkerMessage::RuntimeProjection(crate::market_worker::RuntimeProjection {
+                event: FixtureMarketEvents::default().snapshot(
+                    &fixture_series(),
+                    1,
+                    generation,
+                    publication.snapshot.bars.clone(),
+                ),
+                received_unix_nanos: Some(0),
+                recovery_request_id: None,
+                selection_generation: None,
+            })
         };
         sender
             .send(publication(2))

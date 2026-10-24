@@ -81,20 +81,25 @@ fn fixture_bar_message(
     bars: &Arc<[MarketBar]>,
     publication_generation: u64,
 ) -> MarketWorkerMessage {
-    MarketWorkerMessage::RuntimeSeriesPublication {
+    MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event: FixtureMarketEvents::default().snapshot(
             &fixture_series(),
             1,
             publication_generation,
             Arc::clone(bars),
         ),
-        received_unix_nanos: 0,
+        received_unix_nanos: Some(0),
         recovery_request_id: None,
-    }
+        selection_generation: None,
+    })
 }
 
 fn runtime_snapshot_generation(message: MarketWorkerMessage) -> Option<u64> {
-    let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = message else {
+    let MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+        event,
+        ..
+    }) = message
+    else {
         return None;
     };
     let MarketRuntimeEvent::SeriesSnapshot(publication) = event.value else {

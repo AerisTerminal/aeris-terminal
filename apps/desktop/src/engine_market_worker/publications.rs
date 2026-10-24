@@ -111,11 +111,13 @@ pub(super) fn complete_pending_recovery(
             }
             endpoint
                 .messages
-                .send(MarketWorkerMessage::RuntimeSeriesPublication {
-                    event: event.clone(),
-                    received_unix_nanos,
-                    recovery_request_id: Some(command.request_id),
-                })
+                .send(MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection::series(
+                        event.clone(),
+                        received_unix_nanos,
+                        Some(command.request_id),
+                    ),
+                ))
                 .map_err(|error| error.to_string())?;
             endpoint.pending_recovery = None;
             Ok(true)

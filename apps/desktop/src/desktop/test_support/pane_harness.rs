@@ -74,11 +74,12 @@ impl PaneHarness {
             .market
             .publish_runtime_snapshot(bar_count, &route, generation, &self.market_events)
             .expect("canonical fixture snapshot");
-        MarketWorkerMessage::RuntimeSeriesPublication {
+        MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
             event,
-            received_unix_nanos: 301_000_000_000,
+            received_unix_nanos: Some(301_000_000_000),
             recovery_request_id: None,
-        }
+            selection_generation: None,
+        })
     }
 
     fn fixture_readiness(
@@ -775,43 +776,49 @@ fn pane_harness_recovery_keeps_fenced_snapshot_until_exact_request_projection(
         })
         .expect("recovery request");
     let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
-    let MarketWorkerMessage::RuntimeSeriesPublication {
+    let MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event,
-        received_unix_nanos,
+        received_unix_nanos: Some(received_unix_nanos),
         ..
-    } = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
+    }) = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
     else {
         unreachable!("fixture publishes a canonical snapshot");
     };
     let epoch = event.epoch;
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeSeriesPublication {
-            event,
-            received_unix_nanos,
-            recovery_request_id: Some(request_id + 1),
-        })
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection {
+                event,
+                received_unix_nanos: Some(received_unix_nanos),
+                recovery_request_id: Some(request_id + 1),
+                selection_generation: None,
+            },
+        ))
         .expect("stale request");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.chart_state, ChartState::Recovering);
     });
-    let MarketWorkerMessage::RuntimeSeriesPublication {
+    let MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event,
-        received_unix_nanos,
+        received_unix_nanos: Some(received_unix_nanos),
         ..
-    } = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
+    }) = harness.fixture_snapshot(&product, ChartInterval::Minute1, 1, 12)
     else {
         unreachable!("fixture publishes a canonical snapshot");
     };
     assert_eq!(event.epoch, epoch);
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeSeriesPublication {
-            event,
-            received_unix_nanos,
-            recovery_request_id: Some(request_id),
-        })
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection {
+                event,
+                received_unix_nanos: Some(received_unix_nanos),
+                recovery_request_id: Some(request_id),
+                selection_generation: None,
+            },
+        ))
         .expect("current recovery");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1118,11 +1125,14 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
     );
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeSeriesPublication {
-            event: stale_delta,
-            received_unix_nanos: 841_000_000_000,
-            recovery_request_id: None,
-        })
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection {
+                event: stale_delta,
+                received_unix_nanos: Some(841_000_000_000),
+                recovery_request_id: None,
+                selection_generation: None,
+            },
+        ))
         .expect("retired update");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -1395,7 +1405,7 @@ fn runtime_bar_snapshot_message(
     generation: u64,
     publication_generation: u64,
 ) -> MarketWorkerMessage {
-    MarketWorkerMessage::RuntimeSeriesPublication {
+    MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
         event: events.snapshot(
             &FixtureSeries {
                 series: series.clone(),
@@ -1407,9 +1417,10 @@ fn runtime_bar_snapshot_message(
             publication_generation,
             [bar].as_slice(),
         ),
-        received_unix_nanos: 301_000_000_000,
+        received_unix_nanos: Some(301_000_000_000),
         recovery_request_id: None,
-    }
+        selection_generation: None,
+    })
 }
 
 fn publish_runtime_bar_tail(
@@ -1424,28 +1435,32 @@ fn publish_runtime_bar_tail(
     let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
     harness
         .publications
-        .send(MarketWorkerMessage::RuntimeSeriesPublication {
-            event: events.update(
-                &FixtureSeries {
-                    series,
-                    provider_generation: provider_generation.0.get(),
-                    price_scale: u8::try_from(product.price_scale).expect("price scale"),
-                    quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
-                },
-                sequence,
-                2,
-                aeris_market_runtime::SeriesTailOperation::Append,
-                aeris_market_data::MarketBar {
-                    source_sequence: 2,
-                    exchange_timestamp_seconds: 600,
-                    exchange_timestamp_unix_nanos: 600_000_000_000,
-                    ..bar
-                },
-                true,
-            ),
-            received_unix_nanos: 601_000_000_000,
-            recovery_request_id: None,
-        })
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection {
+                event: events.update(
+                    &FixtureSeries {
+                        series,
+                        provider_generation: provider_generation.0.get(),
+                        price_scale: u8::try_from(product.price_scale).expect("price scale"),
+                        quantity_scale: u8::try_from(product.quantity_scale)
+                            .expect("quantity scale"),
+                    },
+                    sequence,
+                    2,
+                    aeris_market_runtime::SeriesTailOperation::Append,
+                    aeris_market_data::MarketBar {
+                        source_sequence: 2,
+                        exchange_timestamp_seconds: 600,
+                        exchange_timestamp_unix_nanos: 600_000_000_000,
+                        ..bar
+                    },
+                    true,
+                ),
+                received_unix_nanos: Some(601_000_000_000),
+                recovery_request_id: None,
+                selection_generation: None,
+            },
+        ))
         .expect("tail update");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -3931,8 +3946,8 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
             .clone()
     });
     let mut epochs = EpochSequence::<ConsumerTag>::default();
-    let connection =
-        |provider: String, generation, state, epoch| MarketWorkerMessage::RuntimeSelection {
+    let connection = |provider: String, generation, state, epoch| {
+        MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
             event: Fenced {
                 epoch,
                 value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
@@ -3945,8 +3960,11 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
                     },
                 ),
             },
-            generation,
-        };
+            selection_generation: Some(generation),
+            received_unix_nanos: None,
+            recovery_request_id: None,
+        })
+    };
     harness
         .publications
         .send(connection(

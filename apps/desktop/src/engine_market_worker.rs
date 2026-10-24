@@ -1139,22 +1139,14 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesPublication {
-                    event: Fenced {
+                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                         epoch: snapshot_epoch,
                         value: MarketRuntimeEvent::SeriesSnapshot(_),
-                    },
-                    received_unix_nanos: 11,
-                    recovery_request_id: None,
-                },
-                MarketWorkerMessage::RuntimeSeriesPublication {
-                    event: Fenced {
+                    }, received_unix_nanos: Some(11), recovery_request_id: None, .. }),
+                MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                         epoch: tail_epoch,
                         value: MarketRuntimeEvent::SeriesUpdate(_),
-                    },
-                    received_unix_nanos: 12,
-                    recovery_request_id: None,
-                },
+                    }, received_unix_nanos: Some(12), recovery_request_id: None, .. }),
             ] if *snapshot_epoch == epoch && *tail_epoch == epoch
         ));
     }
@@ -1277,14 +1269,16 @@ mod tests {
             let (messages, disconnected) = worker.drain_messages();
             for message in messages {
                 match message {
-                    MarketWorkerMessage::RuntimeSeriesPublication {
-                        event:
-                            Fenced {
-                                value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
-                                ..
-                            },
-                        ..
-                    } => {
+                    MarketWorkerMessage::RuntimeProjection(
+                        aeris_desktop::market_worker::RuntimeProjection {
+                            event:
+                                Fenced {
+                                    value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                                    ..
+                                },
+                            ..
+                        },
+                    ) => {
                         assert!(!snapshot.snapshot.bars.is_empty());
                         return;
                     }
@@ -1906,14 +1900,16 @@ mod tests {
         let forwarded = messages
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeSeriesPublication {
-                    event:
-                        Fenced {
-                            value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
-                            ..
-                        },
-                    ..
-                } => Some((
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event:
+                            Fenced {
+                                value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                                ..
+                            },
+                        ..
+                    },
+                ) => Some((
                     snapshot.publication_generation,
                     (
                         snapshot
@@ -1977,14 +1973,10 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication {
-                event: aeris_market_runtime::fence::Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     epoch: delivered_epoch,
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot)
-                },
-                recovery_request_id: Some(9),
-                received_unix_nanos: 1_000_000_000,
-            }] if *delivered_epoch == epoch && snapshot.publication_generation == 1 && snapshot.generation.0.get() == 3
+                }, recovery_request_id: Some(9), received_unix_nanos: Some(1_000_000_000), .. })] if *delivered_epoch == epoch && snapshot.publication_generation == 1 && snapshot.generation.0.get() == 3
         ));
     }
 
@@ -2381,11 +2373,13 @@ mod tests {
         let mut delivered = Vec::new();
         for frame in messages.chunks(MARKET_MESSAGES_PER_FRAME) {
             for message in frame {
-                let MarketWorkerMessage::RuntimeSeriesPublication {
-                    event,
-                    received_unix_nanos,
-                    ..
-                } = message
+                let MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event,
+                        received_unix_nanos: Some(received_unix_nanos),
+                        ..
+                    },
+                ) = message
                 else {
                     continue;
                 };
@@ -2486,13 +2480,10 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication {
-                event: Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
                     ..
-                },
-                ..
-            }] if snapshot.snapshot.provider_generation.0.get() == 1
+                }, .. })] if snapshot.snapshot.provider_generation.0.get() == 1
         ));
     }
 
@@ -2516,17 +2507,20 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSelection {
-                generation: 7,
-                event: Fenced {
-                    value: MarketRuntimeEvent::ProviderState(ProviderState {
-                        state: ProviderConnectionState::Recovering,
-                        transport_rtt_nanos: None,
+            [MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    selection_generation: Some(7),
+                    event: Fenced {
+                        value: MarketRuntimeEvent::ProviderState(ProviderState {
+                            state: ProviderConnectionState::Recovering,
+                            transport_rtt_nanos: None,
+                            ..
+                        }),
                         ..
-                    }),
+                    },
                     ..
-                },
-            }]
+                }
+            )]
         ));
     }
 
@@ -2551,17 +2545,19 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSelection {
-                generation: 7,
-                event: Fenced {
-                    value: MarketRuntimeEvent::ProviderState(ProviderState {
-                        state: ProviderConnectionState::Online,
+            [MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    selection_generation: Some(7),
+                    event: Fenced {
+                        value: MarketRuntimeEvent::ProviderState(ProviderState {
+                            state: ProviderConnectionState::Online,
+                            ..
+                        }),
                         ..
-                    }),
+                    },
                     ..
-                },
-                ..
-            }]
+                }
+            )]
         ));
     }
 
@@ -2585,17 +2581,19 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSelection {
-                event: Fenced {
-                    value: MarketRuntimeEvent::ProviderState(ProviderState {
-                        state: ProviderConnectionState::Online,
-                        transport_rtt_nanos: Some(12_500_000),
+            [MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    event: Fenced {
+                        value: MarketRuntimeEvent::ProviderState(ProviderState {
+                            state: ProviderConnectionState::Online,
+                            transport_rtt_nanos: Some(12_500_000),
+                            ..
+                        }),
                         ..
-                    }),
+                    },
                     ..
-                },
-                ..
-            }]
+                }
+            )]
         ));
     }
 
@@ -2682,16 +2680,18 @@ mod tests {
         .expect("calendar provider state is forwarded");
         assert!(matches!(
             receiver.drain().0.as_slice(),
-            [MarketWorkerMessage::RuntimeSelection {
-                event: Fenced {
-                    value: MarketRuntimeEvent::ProviderState(ProviderState {
-                        state: ProviderConnectionState::Connecting,
+            [MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    event: Fenced {
+                        value: MarketRuntimeEvent::ProviderState(ProviderState {
+                            state: ProviderConnectionState::Connecting,
+                            ..
+                        }),
                         ..
-                    }),
+                    },
                     ..
-                },
-                ..
-            }]
+                }
+            )]
         ));
     }
 
@@ -2743,7 +2743,9 @@ mod tests {
         assert!(matches!(
             receiver.drain().0.as_slice(),
             [
-                MarketWorkerMessage::RuntimeSeriesPublication { .. },
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection { .. }
+                ),
                 MarketWorkerMessage::Runtime(Fenced {
                     value: MarketRuntimeEvent::SeriesState(MarketSeriesState {
                         state: SeriesLoadState::Live,
@@ -2807,14 +2809,16 @@ mod tests {
         let generations = messages
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::RuntimeSeriesPublication {
-                    event:
-                        Fenced {
-                            value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
-                            ..
-                        },
-                    ..
-                } => Some(snapshot.publication_generation),
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event:
+                            Fenced {
+                                value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                                ..
+                            },
+                        ..
+                    },
+                ) => Some(snapshot.publication_generation),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -3398,16 +3402,16 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSeriesPublication {
-                event: Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     value: MarketRuntimeEvent::SeriesSnapshot(snapshot),
                     ..
-                },
-                ..
-            }] if snapshot.snapshot.series.provider_id == "hyperliquid"
+                }, .. })] if snapshot.snapshot.series.provider_id == "hyperliquid"
                 && snapshot.generation.0.get() == 8
         ));
-        let MarketWorkerMessage::RuntimeSeriesPublication { event, .. } = &messages[0] else {
+        let MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection { event, .. },
+        ) = &messages[0]
+        else {
             panic!("canonical snapshot");
         };
         let MarketRuntimeEvent::SeriesSnapshot(snapshot) = &event.value else {
@@ -3436,16 +3440,13 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RuntimeSelection {
-                event: Fenced {
+            [MarketWorkerMessage::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
                     epoch: actual,
                     value: MarketRuntimeEvent::ProviderState(ProviderState {
                         transport_rtt_nanos: Some(12_500_000),
                         ..
                     }),
-                },
-                generation: 8,
-            }] if *actual == epoch
+                }, selection_generation: Some(8), .. })] if *actual == epoch
         ));
     }
 

@@ -4046,18 +4046,28 @@ impl WorkspaceSurface {
     ) {
         match message {
             MarketWorkerMessage::Runtime(event) => self.apply_fenced_runtime_event(event, None, cx),
-            MarketWorkerMessage::RuntimeSelection { event, generation } => {
-                self.apply_fenced_runtime_event(event, Some(generation), cx);
-            }
-            MarketWorkerMessage::RuntimeSeriesPublication {
-                event,
-                received_unix_nanos,
-                recovery_request_id,
-            } => {
-                if let Some(request_id) = recovery_request_id {
-                    self.apply_runtime_recovery(event, request_id, received_unix_nanos, cx);
+            MarketWorkerMessage::RuntimeProjection(projection) => {
+                if let Some(received_unix_nanos) = projection.received_unix_nanos {
+                    if let Some(request_id) = projection.recovery_request_id {
+                        self.apply_runtime_recovery(
+                            projection.event,
+                            request_id,
+                            received_unix_nanos,
+                            cx,
+                        );
+                    } else {
+                        self.apply_runtime_series_publication(
+                            projection.event,
+                            received_unix_nanos,
+                            cx,
+                        );
+                    }
                 } else {
-                    self.apply_runtime_series_publication(event, received_unix_nanos, cx);
+                    self.apply_fenced_runtime_event(
+                        projection.event,
+                        projection.selection_generation,
+                        cx,
+                    );
                 }
             }
             MarketWorkerMessage::LocalFailure { scope, message } => {
@@ -5333,7 +5343,12 @@ impl WorkspaceSurface {
         let chart_update_received = messages.iter().any(|message| {
             matches!(
                 message,
-                MarketWorkerMessage::RuntimeSeriesPublication { .. }
+                MarketWorkerMessage::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        received_unix_nanos: Some(_),
+                        ..
+                    }
+                )
             )
         });
         for message in messages {

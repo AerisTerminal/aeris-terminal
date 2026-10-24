@@ -583,10 +583,12 @@ pub(super) fn deliver_runtime_provider_state(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeSelection {
-            event,
-            generation: endpoint.active_generation,
-        })
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::selection(
+                event,
+                endpoint.active_generation,
+            ),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -656,11 +658,13 @@ pub(super) fn deliver_runtime_series_publication(
     }
     endpoint
         .messages
-        .send(MarketWorkerMessage::RuntimeSeriesPublication {
-            event,
-            received_unix_nanos,
-            recovery_request_id: None,
-        })
+        .send(MarketWorkerMessage::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::series(
+                event,
+                received_unix_nanos,
+                None,
+            ),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -1539,17 +1543,19 @@ mod tests {
         )));
         assert!(messages.iter().any(|message| matches!(
             message,
-            MarketWorkerMessage::RuntimeSelection {
-                generation: 8,
-                event: Fenced {
-                    value: MarketRuntimeEvent::ProviderState(super::super::ProviderState {
-                        state: super::super::ProviderConnectionState::Online,
+            MarketWorkerMessage::RuntimeProjection(
+                aeris_desktop::market_worker::RuntimeProjection {
+                    selection_generation: Some(8),
+                    event: Fenced {
+                        value: MarketRuntimeEvent::ProviderState(super::super::ProviderState {
+                            state: super::super::ProviderConnectionState::Online,
+                            ..
+                        }),
                         ..
-                    }),
+                    },
                     ..
-                },
-                ..
-            }
+                }
+            )
         )));
         assert!(records[0].pending_provider_state.is_none());
     }
