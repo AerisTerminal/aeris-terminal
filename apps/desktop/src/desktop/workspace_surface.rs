@@ -4063,16 +4063,6 @@ impl WorkspaceSurface {
             MarketWorkerMessage::LocalFailure { scope, message } => {
                 self.apply_local_failure(scope, message, cx);
             }
-            MarketWorkerMessage::EngineSelectionOutcome {
-                sequence,
-                succeeded,
-            } => {
-                if succeeded {
-                    self.commit_pending_selection(sequence, cx);
-                } else {
-                    self.reject_pending_engine_selection(sequence, cx);
-                }
-            }
             MarketWorkerMessage::SessionStatus { generation, status } => match status {
                 aeris_desktop::market_worker::LocalSessionStatus::Connection {
                     state,
@@ -4102,6 +4092,16 @@ impl WorkspaceSurface {
     ) {
         use aeris_desktop::market_worker::LocalCommandOutcome;
         match outcome {
+            LocalCommandOutcome::EngineSelection {
+                sequence,
+                succeeded,
+            } => {
+                if succeeded {
+                    self.commit_pending_selection(sequence, cx);
+                } else {
+                    self.reject_pending_engine_selection(sequence, cx);
+                }
+            }
             LocalCommandOutcome::CatalogSwitch {
                 sequence,
                 browser_generation,

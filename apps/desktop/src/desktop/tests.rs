@@ -751,10 +751,12 @@ mod timeframe_input {
             assert_eq!(selections.len(), 1, "one request for {keys}");
             assert_eq!(selections[0].interval, interval);
             publications
-                .send(MarketWorkerMessage::EngineSelectionOutcome {
-                    sequence: selections[0].sequence,
-                    succeeded: true,
-                })
+                .send(MarketWorkerMessage::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                        sequence: selections[0].sequence,
+                        succeeded: true,
+                    },
+                ))
                 .expect("switch marker");
             cx.update(|_, cx| {
                 surface.update(cx, |surface, cx| {
@@ -918,10 +920,12 @@ mod timeframe_input {
         let five_minutes =
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute5, cx);
         deliver(
-            MarketWorkerMessage::EngineSelectionOutcome {
-                sequence: five_minutes,
-                succeeded: true,
-            },
+            MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                    sequence: five_minutes,
+                    succeeded: true,
+                },
+            ),
             cx,
         );
         // A rewritten prefix must not invalidate the old chart's resume cursor.
@@ -945,10 +949,12 @@ mod timeframe_input {
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
         deliver(
-            MarketWorkerMessage::EngineSelectionOutcome {
-                sequence: fifteen_minutes,
-                succeeded: true,
-            },
+            MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                    sequence: fifteen_minutes,
+                    succeeded: true,
+                },
+            ),
             cx,
         );
         // Even a higher revision from the retired selection cannot replace the

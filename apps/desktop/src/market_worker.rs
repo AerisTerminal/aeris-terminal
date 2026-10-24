@@ -213,6 +213,11 @@ pub enum LocalFailureScope {
 /// Results of local pane commands, fenced by the request sequence or study identity
 /// at the GPUI owner rather than projected as coordinator publications.
 pub enum LocalCommandOutcome {
+    /// Select-and-demand reply for the exact pending pane request.
+    EngineSelection {
+        sequence: u64,
+        succeeded: bool,
+    },
     /// Catalog selection reply, fenced by the pane request and browser generation.
     CatalogSwitch {
         sequence: u64,
@@ -275,11 +280,6 @@ pub enum MarketWorkerMessage {
         status: LocalSessionStatus,
     },
     LocalCommandOutcome(LocalCommandOutcome),
-    /// A local select-and-demand acknowledgement, fenced by the exact pending sequence.
-    EngineSelectionOutcome {
-        sequence: u64,
-        succeeded: bool,
-    },
 }
 
 pub type MarketWorkerSender = PaneProjectionSender<MarketWorkerMessage>;
@@ -2047,37 +2047,20 @@ mod tests {
             sequence: 5,
             succeeded: false,
         };
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(alert))
-            .expect("alert result enters control reserve");
         let registration = LocalCommandOutcome::StudyRegistration {
             request_sequence: 7,
             result: Err("fixture".into()),
         };
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(registration))
-            .expect("study result enters control reserve");
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
-                LocalCommandOutcome::StudyReinitialization {
-                    study_id,
-                    result: Ok(()),
-                },
-            ))
-            .expect("reinitialization enters control reserve");
+        let reinitialization = LocalCommandOutcome::StudyReinitialization {
+            study_id,
+            result: Ok(()),
+        };
         let removal = LocalCommandOutcome::StudyRemovalFailed { study_id };
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(removal))
-            .expect("removal failure enters control reserve");
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(
-                LocalCommandOutcome::Recovery {
-                    generation: 9,
-                    request_id: 11,
-                    failure: MarketRecoveryFailure::Superseded,
-                },
-            ))
-            .expect("retired recovery enters control reserve");
+        let recovery = LocalCommandOutcome::Recovery {
+            generation: 9,
+            request_id: 11,
+            failure: MarketRecoveryFailure::Superseded,
+        };
         let selected = LocalCommandOutcome::SelectedInstrument {
             generation: 12,
             instrument: InstallProviderInstrument {
@@ -2085,17 +2068,29 @@ mod tests {
                 ..InstallProviderInstrument::default()
             },
         };
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(selected))
-            .expect("initial selection enters control reserve");
         let catalog = LocalCommandOutcome::CatalogSwitch {
             sequence: 13,
             browser_generation: 17,
             result: Err("fixture".into()),
         };
-        sender
-            .send(MarketWorkerMessage::LocalCommandOutcome(catalog))
-            .expect("catalog selection enters control reserve");
+        let engine = LocalCommandOutcome::EngineSelection {
+            sequence: 19,
+            succeeded: false,
+        };
+        for outcome in [
+            alert,
+            registration,
+            reinitialization,
+            removal,
+            recovery,
+            selected,
+            catalog,
+            engine,
+        ] {
+            sender
+                .send(MarketWorkerMessage::LocalCommandOutcome(outcome))
+                .expect("local outcome enters bounded control reserve");
+        }
         let (first, _) = receiver.drain_up_to(2);
         assert!(matches!(
             first.as_slice(),
@@ -2138,6 +2133,10 @@ mod tests {
                         result: Err(_),
                     }
                 ),
+                MarketWorkerMessage::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
+                    sequence: 19,
+                    succeeded: false,
+                }),
             ] if *reinitialized == study_id && *removed == study_id
                 && instrument.display_symbol == "ETH"
         ));
@@ -2228,10 +2227,12 @@ mod tests {
         }));
         for sequence in 1..=3 {
             sender
-                .send(MarketWorkerMessage::EngineSelectionOutcome {
-                    sequence,
-                    succeeded: true,
-                })
+                .send(MarketWorkerMessage::LocalCommandOutcome(
+                    super::LocalCommandOutcome::EngineSelection {
+                        sequence,
+                        succeeded: true,
+                    },
+                ))
                 .expect("switch marker sends");
         }
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2661,10 +2662,12 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         sender
-            .send(MarketWorkerMessage::EngineSelectionOutcome {
-                sequence: 7,
-                succeeded: true,
-            })
+            .send(MarketWorkerMessage::LocalCommandOutcome(
+                super::LocalCommandOutcome::EngineSelection {
+                    sequence: 7,
+                    succeeded: true,
+                },
+            ))
             .expect("switch marker sends");
         assert_eq!(
             sender.send(snapshot_message(&mut worker, 2)),
@@ -2682,7 +2685,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::EngineSelectionOutcome { sequence: 7, succeeded: true },
+                MarketWorkerMessage::LocalCommandOutcome(super::LocalCommandOutcome::EngineSelection { sequence: 7, succeeded: true }),
                 MarketWorkerMessage::Runtime(aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(state), ..
                 })

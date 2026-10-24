@@ -2019,6 +2019,15 @@ Status: pending
   lifecycle and retry GPUI regressions cover rejection and success.
   Engine selection, metadata-bearing runtime entries and transitional
   message/channel names remain; M6.6 and VAL-DSK-021/022 stay open.
+- Part 8b3i (2026-10-24): engine select-and-demand acknowledgements now use
+  the bounded local command outcome projection rather than a separate
+  mailbox arm. The pane still commits or rejects only the exact pending
+  sequence; duplicate and retired replies cannot change the displayed
+  binding. The mixed-outcome FIFO/control-reserve fixture includes a failed
+  engine reply; existing GPUI interval storm, selection failure and
+  duplicate-reply regressions cover acceptance. Metadata-bearing fenced
+  runtime entries and transitional message/channel names remain; M6.6
+  and VAL-DSK-021/022 stay open.
 - [ ] M6.7 descriptor-driven-identity - Render runtime descriptors; remove fake CLI modes; provider-neutrality rule
   - Status (2026-10-23 audit): `default_rithmic_contract_index` is gone. Still present:
     `--rithmic` and `--multi-chart` (`desktop.rs`, also used by

@@ -877,10 +877,10 @@ pub(super) fn apply_selection_outcome(
                         record
                             .endpoint
                             .messages
-                            .send(MarketWorkerMessage::EngineSelectionOutcome {
+                            .send(MarketWorkerMessage::LocalCommandOutcome(aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
                                 sequence: generation.0.get(),
                                 succeeded: true,
-                            })
+                            }))
                             .map_err(|error| error.to_string())?;
                     }
                 } else {
@@ -929,10 +929,12 @@ pub(super) fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::EngineSelectionOutcome {
-                            sequence: generation.0.get(),
-                            succeeded: false,
-                        })
+                        .send(MarketWorkerMessage::LocalCommandOutcome(
+                            aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                                sequence: generation.0.get(),
+                                succeeded: false,
+                            },
+                        ))
                         .map_err(|send| send.to_string())?;
                 }
             }
@@ -1193,10 +1195,12 @@ mod tests {
         .expect("duplicate replacement outcome");
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [MarketWorkerMessage::EngineSelectionOutcome {
-                sequence: 8,
-                succeeded: true
-            }]
+            [MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                    sequence: 8,
+                    succeeded: true
+                }
+            )]
         ));
         assert_eq!(record.interval, aeris_market_data::ChartInterval::Hour1);
     }
@@ -1526,10 +1530,12 @@ mod tests {
         let (messages, _) = pane.worker.drain_messages();
         assert!(messages.iter().any(|message| matches!(
             message,
-            MarketWorkerMessage::EngineSelectionOutcome {
-                sequence: 8,
-                succeeded: true
-            }
+            MarketWorkerMessage::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                    sequence: 8,
+                    succeeded: true
+                }
+            )
         )));
         assert!(messages.iter().any(|message| matches!(
             message,
