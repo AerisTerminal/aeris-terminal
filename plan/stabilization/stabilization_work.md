@@ -2071,6 +2071,13 @@ Status: pending
     validation roots were removed after checking. The window-controls helper
     no longer advertises the removed multi-chart startup.
     M6.7 remains unchecked pending descriptors, neutrality rule and GUI.
+  - Part 2 (2026-10-24): removed the provider-branching worker identity and
+    static provider-specific subscription labels. Initial, live and recovery
+    presentation now use the runtime's provider display descriptor with a
+    provider-keyed diagnostic subscription id. The pane fixture and runtime
+    publication tests retain identity coverage. Instrument descriptor
+    rendering, replay identity conversion, neutrality enforcement and GUI
+    evidence remain open.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed

@@ -4440,7 +4440,10 @@ fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext)
         assert_eq!(pane.chart_state, ChartState::Ready);
         assert_eq!(
             (pane.subscription_id.as_str(), pane.worker_label.as_str()),
-            engine_market_worker::worker_identity("hyperliquid"),
+            (
+                "desktop_runtime_hyperliquid_bars",
+                "Hyperliquid market runtime"
+            ),
             "canonical fixture bars use the runtime's projection identity"
         );
     });

@@ -3785,13 +3785,13 @@ impl WorkspaceSurface {
             }
             ReplayStreamUpdate::Delta(_) => unreachable!("runtime publishes snapshots or tails"),
         };
-        let (subscription_id, worker_label) = engine_market_worker::worker_identity(&provider);
+        let (subscription_id, worker_label) = engine_market_worker::runtime_presentation(&provider);
         self.apply_publication(
             MarketWorkerPublication {
                 update,
                 generation: evidence.with_selection_generation(generation),
-                subscription_id: subscription_id.to_string(),
-                worker_label: worker_label.to_string(),
+                subscription_id,
+                worker_label,
                 ui_diagnostics: None,
             },
             cx,
@@ -3862,15 +3862,15 @@ impl WorkspaceSurface {
             }
         };
         let (subscription_id, worker_label) =
-            engine_market_worker::worker_identity(&snapshot.snapshot.series.provider_id);
+            engine_market_worker::runtime_presentation(&snapshot.snapshot.series.provider_id);
         self.apply_recovery(
             request_id,
             Ok(Box::new(MarketWorkerBootstrap {
                 generation: MarketPublicationGeneration::from_snapshot(&replay)
                     .with_selection_generation(generation),
                 snapshot: replay,
-                subscription_id: subscription_id.to_string(),
-                worker_label: worker_label.to_string(),
+                subscription_id,
+                worker_label,
             })),
             cx,
         );

@@ -52,10 +52,6 @@ const DEFAULT_WORKSPACE_ID: u64 = 1;
 pub(super) const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
-const SUBSCRIPTION_ID: &str = "desktop_runtime_rithmic_bars";
-const WORKER_LABEL: &str = "Rithmic market runtime";
-const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_runtime_hyperliquid_bars";
-const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid market runtime";
 const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST_ENTRIES
     + super::MAXIMUM_OPEN_WORKSPACES * (super::CHART_PANE_CAPACITY + 1);
 
@@ -594,14 +590,14 @@ fn worker_endpoint_with_wake(
     interval: ChartInterval,
     (restored_viewport, initial_generation): (Option<(i64, i64)>, u64),
 ) -> (WorkspaceMarketPane, EndpointRecord) {
-    let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
+    let (subscription_id, worker_label) = runtime_presentation(product.provider.as_str());
     let startup = MarketWorkerStartup::Loading(Box::new(
         aeris_desktop::market_worker::EngineWorkerStartup {
             product: product.clone(),
             interval,
             restored_viewport,
-            subscription_id: subscription_id.to_string(),
-            worker_label: worker_label.to_string(),
+            subscription_id,
+            worker_label,
         },
     ));
     let (message_tx, message_rx) =
@@ -761,12 +757,11 @@ fn provider_presentation(
         .find(|descriptor| descriptor.id == provider)
 }
 
-pub(crate) fn worker_identity(provider: &str) -> (&'static str, &'static str) {
-    if provider == "hyperliquid" {
-        (HYPERLIQUID_SUBSCRIPTION_ID, HYPERLIQUID_WORKER_LABEL)
-    } else {
-        (SUBSCRIPTION_ID, WORKER_LABEL)
-    }
+pub(crate) fn runtime_presentation(provider: &str) -> (String, String) {
+    (
+        format!("desktop_runtime_{provider}_bars"),
+        format!("{} market runtime", provider_display_name(provider)),
+    )
 }
 
 #[path = "engine_market_worker/replay_conversion.rs"]
@@ -3414,9 +3409,27 @@ mod tests {
             panic!("canonical snapshot");
         };
         let (subscription_id, worker_label) =
-            worker_identity(&snapshot.snapshot.series.provider_id);
-        assert_eq!(subscription_id, HYPERLIQUID_SUBSCRIPTION_ID);
-        assert_eq!(worker_label, HYPERLIQUID_WORKER_LABEL);
+            runtime_presentation(&snapshot.snapshot.series.provider_id);
+        assert_eq!(subscription_id, "desktop_runtime_hyperliquid_bars");
+        assert_eq!(worker_label, "Hyperliquid market runtime");
+    }
+
+    #[test]
+    fn runtime_presentation_uses_descriptor_and_never_labels_unknown_provider_as_another() {
+        assert_eq!(
+            runtime_presentation("hyperliquid"),
+            (
+                "desktop_runtime_hyperliquid_bars".to_string(),
+                "Hyperliquid market runtime".to_string()
+            )
+        );
+        assert_eq!(
+            runtime_presentation("fixture-venue"),
+            (
+                "desktop_runtime_fixture-venue_bars".to_string(),
+                "fixture-venue market runtime".to_string()
+            )
+        );
     }
 
     #[test]
