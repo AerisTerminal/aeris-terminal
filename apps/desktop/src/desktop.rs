@@ -4440,13 +4440,14 @@ const fn symbol_input_action(event: &InputEvent) -> SymbolInputAction {
     }
 }
 
+/// Every window opens maximized; the centered 1280x820 bounds are where it restores to.
 fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     let mut bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
     let offset = if window_index == 0 { px(0.0) } else { px(48.0) };
     bounds.origin.x += offset;
     bounds.origin.y += offset;
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(WindowBounds::Maximized(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some("Aeris Terminal".into()),
             appears_transparent: true,

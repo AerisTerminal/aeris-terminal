@@ -57,6 +57,21 @@ use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
 
+#[gpui::test]
+fn every_desktop_window_opens_maximized_and_restores_to_its_default_size(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        for window_index in [0, 1] {
+            let options = super::desktop_window_options(window_index, cx);
+            let Some(gpui::WindowBounds::Maximized(restore)) = options.window_bounds else {
+                panic!("window {window_index} must open maximized");
+            };
+            assert_eq!(restore.size, size(px(1280.0), px(820.0)));
+        }
+    });
+}
+
 #[test]
 fn chart_position_identity_is_shared_by_projection_and_intent_validation() {
     let account = aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("account");
