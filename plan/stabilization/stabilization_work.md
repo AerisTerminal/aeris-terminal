@@ -2088,6 +2088,13 @@ Status: pending
     string syntax; the runtime-issued selection and demand fence own routing.
     Snapshot replay identity parsing, fixture relocation, descriptor
     rendering, neutrality rule and GUI evidence remain open; M6.7 is unchecked.
+  - Part 4 (2026-10-24): relocated the Rithmic futures and public crypto
+    instrument constructors from the market bridge to the diagnostics-gated
+    desktop test-support module. Worker and runtime tests use the shared
+    fixtures rather than embedding fake catalog records in production source;
+    the literal `default_product` source search now has no matches. Snapshot
+    replay identity conversion, descriptor rendering, neutrality enforcement
+    and guarded GUI evidence remain open; M6.7 is unchecked.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
@@ -2635,6 +2642,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 M6.6 Part 8b3f refactor(desktop): superseded and failed local recovery outcomes now share the bounded local command-result projection instead of a separate mailbox arm. The pane still applies the exact selection lifecycle and recovery request fences, including retired replies, while the covering snapshot stays in its coordinator envelope. Mixed local-outcome FIFO, backpressure and GPUI retired-recovery regressions cover the route. Selection outcomes, final bridge type/channel deletion and VAL-DSK-021/022 remain; M6.6 stays unchecked.
 - 2026-10-24 M6.6 Part 8b3g refactor(desktop): initial selection terms share the bounded local command outcome route; exact pending-generation acceptance, duplicate rejection, four-pane restored replies and the FIFO/control reserve are retained. Engine/catalog outcomes, metadata-bearing runtime entries and final message/channel deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 - 2026-10-24 M6.7 Part 3 refactor(desktop): delegate series-key catalog identity validation to the runtime descriptor, preserving opaque instrument IDs and exact entitlements; replay snapshot conversion and the remaining M6.7 work stay open.
+- 2026-10-24 M6.7 Part 4 refactor(desktop): relocate synthetic provider instrument constructors into gated test support; replay snapshot identity and the remaining M6.7 work stay open.
 
 ## 7. Known gaps / deferred
 

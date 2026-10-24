@@ -28,6 +28,10 @@ use aeris_contracts::{
     ProviderConnectionState, ProviderState, SeriesKey, SeriesLoadState, WorkspacePaneState,
     WorkspaceTabState,
 };
+#[cfg(test)]
+use aeris_desktop::test_support::{
+    fixture_futures_contract, fixture_futures_contracts, fixture_public_crypto,
+};
 use aeris_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -280,7 +284,7 @@ fn start() -> Result<
     ),
     String,
 > {
-    let product = default_hyperliquid_product();
+    let product = fixture_public_crypto();
     let (mut workers, factory) = start_group(
         MarketService::start()?,
         vec![(DEFAULT_WORKSPACE_ID, product)],
@@ -771,48 +775,6 @@ use replay_conversion::{replay_bar_definition, snapshot_instrument};
 pub(crate) use replay_conversion::{replay_runtime_snapshot, replay_runtime_tail_update};
 pub(crate) use replay_conversion::{runtime_order_book_frame, series_key};
 
-#[cfg(test)]
-fn default_product(product_id: &str) -> InstallProviderInstrument {
-    InstallProviderInstrument {
-        provider: "rithmic".to_string(),
-        session_generation: 1,
-        selection_generation: 1,
-        instrument_id: format!("instrument:rithmic:CME:{product_id}"),
-        provider_symbol: product_id.to_string(),
-        display_symbol: product_id.to_string(),
-        venue_id: "CME".to_string(),
-        price_scale: 2,
-        quantity_scale: 0,
-        entitlement_id: format!("rithmic-test:CME:{product_id}"),
-        price_increment: None,
-        ..Default::default()
-    }
-}
-
-/// Fresh-install default: Hyperliquid BTC perpetual, one-minute candles.
-#[cfg(test)]
-fn default_hyperliquid_product() -> InstallProviderInstrument {
-    InstallProviderInstrument {
-        provider: "hyperliquid".to_string(),
-        session_generation: 1,
-        selection_generation: 1,
-        instrument_id: "hyperliquid:perp:BTC".to_string(),
-        provider_symbol: "BTC".to_string(),
-        display_symbol: "BTC-USDC".to_string(),
-        venue_id: "Hyperliquid".to_string(),
-        price_scale: 8,
-        quantity_scale: 8,
-        entitlement_id: "hyperliquid-public".to_string(),
-        price_increment: None,
-        ..Default::default()
-    }
-}
-
-#[cfg(test)]
-fn products() -> Vec<InstallProviderInstrument> {
-    ["MNQ", "ES"].into_iter().map(default_product).collect()
-}
-
 fn demand_error(error: &MarketDemandError) -> String {
     let class = match error.code {
         EngineFaultCode::Retryable => "retryable",
@@ -938,7 +900,7 @@ mod tests {
 
     #[test]
     fn depth_visibility_during_startup_resolution_is_retained_for_the_resolved_demand() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (_pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 5);
 
@@ -963,7 +925,7 @@ mod tests {
         let (_pane, mut record) = worker_endpoint(
             1,
             2,
-            default_hyperliquid_product(),
+            fixture_public_crypto(),
             41,
             ChartInterval::Minute1,
             None,
@@ -1042,7 +1004,7 @@ mod tests {
     #[test]
     fn runtime_bar_bridge_keeps_coordinator_envelopes_and_rejects_retired_selection() {
         use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (mut pane, record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
@@ -1119,7 +1081,7 @@ mod tests {
         assert!(allocate_consumer_id(&exhausted).is_err());
         assert_eq!(allocate_pane_id(&next_pane_id), Ok(9));
 
-        let product = products().remove(0);
+        let product = fixture_futures_contracts().remove(0);
         let (_worker, record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
         assert_eq!(record.workspace_id, 2);
@@ -1130,7 +1092,7 @@ mod tests {
 
     #[test]
     fn workspace_endpoint_keeps_click_before_queued_viewport_and_engine_selection() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (pane, record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute1, None, 7);
         let provider_selection = SelectProviderInstrument {
@@ -1179,7 +1141,7 @@ mod tests {
 
     #[test]
     fn catalog_only_rithmic_endpoint_defers_demand_and_starts_selection_at_one() {
-        let placeholder = default_product("MNQ");
+        let placeholder = fixture_futures_contract("MNQ");
         let (mut pane, mut record) = worker_endpoint(
             DEFAULT_WORKSPACE_ID,
             9,
@@ -1196,7 +1158,7 @@ mod tests {
         assert!(!record.role.demands_series());
         assert_eq!(record.endpoint.active_generation, 0);
 
-        let selected = default_product("ES");
+        let selected = fixture_futures_contract("ES");
         assert_eq!(
             pane.worker
                 .try_select_instrument(selected.clone(), ChartInterval::Minute5)
@@ -1274,7 +1236,7 @@ mod tests {
 
     #[test]
     fn rithmic_worker_startup_routes_catalog_events() {
-        let product = products().remove(0);
+        let product = fixture_futures_contracts().remove(0);
         let (mut pane, mut record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
         let MarketWorkerStartup::Loading(startup) = &pane.startup else {
@@ -1393,7 +1355,7 @@ mod tests {
                 pane_id: 7,
                 consumer_id: 9,
                 kind: WorkspacePaneKind::Chart as i32,
-                instrument: Some(default_hyperliquid_product()),
+                instrument: Some(fixture_public_crypto()),
                 series: Some(series),
                 interval: String::new(),
                 generation: 1,
@@ -1421,7 +1383,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, symbol)| {
-                let mut product = default_hyperliquid_product();
+                let mut product = fixture_public_crypto();
                 product.instrument_id = format!("hyperliquid:perp:{symbol}");
                 product.provider_symbol = symbol.into();
                 product.display_symbol = format!("{symbol}-USDC");
@@ -1545,7 +1507,7 @@ mod tests {
             pane_id,
             consumer_id: pane_id,
             kind: WorkspacePaneKind::Chart as i32,
-            instrument: Some(default_hyperliquid_product()),
+            instrument: Some(fixture_public_crypto()),
             interval: interval.to_string(),
             generation: 1,
             ..WorkspacePaneState::default()
@@ -1573,7 +1535,7 @@ mod tests {
             1,
             1,
             series_key(
-                products().first().expect("BTC product"),
+                fixture_futures_contracts().first().expect("BTC product"),
                 ChartInterval::Minute1,
             )
             .expect("series"),
@@ -1619,7 +1581,7 @@ mod tests {
                 1,
                 2,
                 series_key(
-                    products().first().expect("BTC product"),
+                    fixture_futures_contracts().first().expect("BTC product"),
                     ChartInterval::Minute1,
                 )
                 .expect("series"),
@@ -1813,7 +1775,7 @@ mod tests {
     #[test]
     fn covering_snapshots_are_forwarded_to_the_chart_validator() {
         let series = series_key(
-            products().first().expect("BTC product"),
+            fixture_futures_contracts().first().expect("BTC product"),
             ChartInterval::Minute1,
         )
         .expect("series");
@@ -1903,7 +1865,7 @@ mod tests {
 
     #[test]
     fn recovery_completes_from_pushed_snapshot_without_blocking_the_shared_reader() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (mut pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
@@ -1951,7 +1913,7 @@ mod tests {
 
     #[test]
     fn recovery_acknowledgements_keep_pending_request_under_mailbox_backpressure() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (mut pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         let pending = ReplayRecoveryCommand {
@@ -2044,7 +2006,7 @@ mod tests {
 
     #[test]
     fn engine_selection_cancels_old_recovery_before_new_snapshot_can_complete_it() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (mut pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
@@ -2100,7 +2062,7 @@ mod tests {
 
     #[test]
     fn queued_recovery_from_previous_generation_is_rejected_if_selection_advances_first() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (mut pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 7);
         pane.worker
@@ -2177,7 +2139,7 @@ mod tests {
     #[test]
     fn non_contiguous_engine_tail_is_left_for_the_chart_validator() {
         let series = series_key(
-            products().first().expect("BTC product"),
+            fixture_futures_contracts().first().expect("BTC product"),
             ChartInterval::Minute1,
         )
         .expect("series");
@@ -2266,7 +2228,7 @@ mod tests {
         /// Comfortably more than one frame's drain, and more than three seconds
         /// of the old one-event-per-16ms budget.
         const BURST: u64 = 200;
-        let product = default_product("MNQ");
+        let product = fixture_futures_contract("MNQ");
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let (sender, receiver) = market_projection_channel(
             NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN),
@@ -2413,7 +2375,7 @@ mod tests {
 
     #[test]
     fn retained_snapshot_from_older_provider_session_reaches_the_chart_baseline() {
-        let mut product = default_product("MNQ");
+        let mut product = fixture_futures_contract("MNQ");
         product.session_generation = 2;
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let snapshot = runtime_snapshot(
@@ -2496,7 +2458,7 @@ mod tests {
 
     #[test]
     fn newer_provider_session_reaches_the_connection_presentation() {
-        let product = default_product("MNQ");
+        let product = fixture_futures_contract("MNQ");
         let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
@@ -2569,7 +2531,10 @@ mod tests {
 
     #[test]
     fn phase_four_series_keys_cover_required_symbols_and_intervals() {
-        let products = vec![default_product("MNQ"), default_product("ES")];
+        let products = vec![
+            fixture_futures_contract("MNQ"),
+            fixture_futures_contract("ES"),
+        ];
         for product in &products {
             for (interval, seconds) in [
                 (ChartInterval::Minute1, 60),
@@ -2612,7 +2577,7 @@ mod tests {
 
     #[test]
     fn calendar_month_replay_is_explicit_instead_of_approximated_as_thirty_days() {
-        let product = default_product("MNQ");
+        let product = fixture_futures_contract("MNQ");
         let week = replay_bar_definition(
             &series_key(&product, ChartInterval::Week1).expect("week series"),
         )
@@ -2667,7 +2632,7 @@ mod tests {
 
     #[test]
     fn calendar_series_accepts_the_engine_live_handoff() {
-        let product = default_product("MNQ");
+        let product = fixture_futures_contract("MNQ");
         let series = series_key(&product, ChartInterval::Week1).expect("calendar series");
         let snapshot = runtime_snapshot(
             1,
@@ -2734,7 +2699,7 @@ mod tests {
 
     #[test]
     fn replacement_engine_snapshots_are_forwarded_without_a_worker_generation_fence() {
-        let product = default_product("MNQ");
+        let product = fixture_futures_contract("MNQ");
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let snapshot = |provider_generation, publication_generation, source_sequence| {
             MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
@@ -2807,7 +2772,7 @@ mod tests {
         let entitlement = provider_presentation("rithmic")
             .expect("Rithmic presentation")
             .selection_entitlement_id;
-        let mut product = default_product("MNQZ6");
+        let mut product = fixture_futures_contract("MNQZ6");
         product.entitlement_id = entitlement.to_string();
         let series = series_key(&product, ChartInterval::Minute1).expect("selected series");
         assert_eq!(series.entitlement_id, entitlement);
@@ -2817,7 +2782,7 @@ mod tests {
 
     #[test]
     fn series_keys_treat_runtime_catalog_identity_as_opaque() {
-        let mut product = default_product("MNQ");
+        let mut product = fixture_futures_contract("MNQ");
         product.instrument_id = "catalog-contract-42".to_string();
         product.entitlement_id = "selected-grant-42".to_string();
         let series = series_key(&product, ChartInterval::Minute1)
@@ -2922,7 +2887,7 @@ mod tests {
     /// which invalidated the stream the live candle was still updating.
     #[test]
     fn older_history_demand_error_keeps_the_live_chart_and_its_pending_recovery() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let (mut pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
@@ -3029,7 +2994,7 @@ mod tests {
     /// rendered, but never constructed.
     #[test]
     fn rithmic_order_book_snapshot_uses_the_consumers_selection_identity() {
-        let mut product = default_product("MNQ");
+        let mut product = fixture_futures_contract("MNQ");
         product.selection_generation = 9;
         let (sender, receiver) =
             market_projection_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
@@ -3105,7 +3070,7 @@ mod tests {
 
     #[test]
     fn trade_tape_publication_is_consumer_and_generation_fenced() {
-        let product = default_product("MNQ");
+        let product = fixture_futures_contract("MNQ");
         let (sender, receiver) =
             market_projection_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
         let snapshot = |generation, revision| MarketTradeTapeSnapshot {
@@ -3218,7 +3183,7 @@ mod tests {
 
     #[test]
     fn hyperliquid_series_keys_cover_supported_intervals() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         for (interval, seconds) in [
             (ChartInterval::Minute1, 60),
             (ChartInterval::Minute5, 300),
@@ -3243,15 +3208,15 @@ mod tests {
         // Tick candles exist on neither public path.
         assert!(series_key(&product, ChartInterval::Tick100).is_err());
         // Rithmic intervals stay Rithmic-only.
-        assert!(series_key(&default_product("MNQ"), ChartInterval::Day3).is_err());
+        assert!(series_key(&fixture_futures_contract("MNQ"), ChartInterval::Day3).is_err());
     }
 
     #[test]
     fn second_series_keys_exist_only_where_the_provider_serves_second_bars() {
         for interval in [ChartInterval::Second1, ChartInterval::Second30] {
-            assert!(series_key(&default_hyperliquid_product(), interval).is_err());
+            assert!(series_key(&fixture_public_crypto(), interval).is_err());
         }
-        let five = series_key(&default_product("MNQ"), ChartInterval::Second5)
+        let five = series_key(&fixture_futures_contract("MNQ"), ChartInterval::Second5)
             .expect("Rithmic second series");
         assert_eq!(
             five.period,
@@ -3324,7 +3289,7 @@ mod tests {
 
     #[test]
     fn hyperliquid_snapshot_converts_with_eight_place_precision() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let series = series_key(&product, ChartInterval::Minute1).expect("HL series");
         let publication = runtime_snapshot(
             1,
@@ -3355,7 +3320,7 @@ mod tests {
 
     #[test]
     fn hyperliquid_publication_uses_hyperliquid_worker_identity() {
-        let product = default_hyperliquid_product();
+        let product = fixture_public_crypto();
         let snapshot = runtime_snapshot(
             1,
             1,

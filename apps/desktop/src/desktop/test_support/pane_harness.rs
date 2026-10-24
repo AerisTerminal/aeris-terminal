@@ -272,7 +272,7 @@ impl PaneHarness {
 
 #[gpui::test]
 fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAppContext) {
-    let default_product = local_state::default_workspace().watchlist_entries[0]
+    let saved_instrument = local_state::default_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("fixture product");
@@ -287,7 +287,7 @@ fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAp
     .into_iter()
     .enumerate()
     {
-        let mut product = default_product.clone();
+        let mut product = saved_instrument.clone();
         product.instrument_id = format!("hyperliquid:perp:{symbol}");
         product.provider_symbol = symbol.into();
         product.display_symbol = format!("{symbol}-USDC");

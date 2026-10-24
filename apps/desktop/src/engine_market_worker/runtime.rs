@@ -999,7 +999,7 @@ mod tests {
         let (mut pane, record) = super::super::worker_endpoint(
             1,
             2,
-            super::super::default_hyperliquid_product(),
+            super::super::fixture_public_crypto(),
             41,
             aeris_market_data::ChartInterval::Minute1,
             None,
@@ -1055,7 +1055,7 @@ mod tests {
         let (mut pane, record) = super::super::worker_endpoint(
             1,
             2,
-            super::super::default_hyperliquid_product(),
+            super::super::fixture_public_crypto(),
             41,
             aeris_market_data::ChartInterval::Minute1,
             None,
@@ -1096,7 +1096,7 @@ mod tests {
         let (mut pane, record) = super::super::worker_endpoint(
             1,
             2,
-            super::super::default_hyperliquid_product(),
+            super::super::fixture_public_crypto(),
             41,
             aeris_market_data::ChartInterval::Minute1,
             None,
@@ -1134,7 +1134,7 @@ mod tests {
 
     #[test]
     fn initial_and_replacement_selections_accept_one_exact_reply_each() {
-        let product = super::super::default_hyperliquid_product();
+        let product = super::super::fixture_public_crypto();
         let (_pane, mut record) = super::super::worker_endpoint(
             1,
             2,
@@ -1162,7 +1162,7 @@ mod tests {
         };
         use std::num::NonZeroU64;
 
-        let product = super::super::default_hyperliquid_product();
+        let product = super::super::fixture_public_crypto();
         let (mut pane, mut record) = super::super::worker_endpoint(
             1,
             2,
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn market_session_publications_follow_each_desktop_clock() {
         let market = MarketService::start().expect("market runtime");
-        let product = super::super::default_product("ES");
+        let product = super::super::fixture_futures_contract("ES");
         let first_time = 1_781_568_000_000_000_000;
         let second_time = first_time + 5 * 24 * 60 * 60 * 1_000_000_000;
         let clock = ManualClock::new(first_time);
@@ -1323,7 +1323,7 @@ mod tests {
         let (_pane, mut record) = super::super::worker_endpoint(
             1,
             2,
-            super::super::default_product("ES"),
+            super::super::fixture_futures_contract("ES"),
             3,
             super::super::ChartInterval::Minute1,
             None,
@@ -1369,7 +1369,7 @@ mod tests {
         let (_pane, mut record) = super::super::worker_endpoint(
             1,
             2,
-            super::super::default_product("ES"),
+            super::super::fixture_futures_contract("ES"),
             3,
             super::super::ChartInterval::Minute1,
             None,
@@ -1390,7 +1390,7 @@ mod tests {
                 })
                 .expect("fill bounded control reserve");
         }
-        let mut terms = super::super::default_product("ES");
+        let mut terms = super::super::fixture_futures_contract("ES");
         terms.session_generation = 2;
         assert!(deliver_provider_catalog_event(
             &mut records[0],
@@ -1442,7 +1442,7 @@ mod tests {
     fn a_full_or_closed_pane_mailbox_does_not_stop_the_market_worker() {
         let market = MarketService::start().expect("market runtime");
         let clock = ManualClock::new(1_781_568_000_000_000_000);
-        let product = super::super::default_product("ES");
+        let product = super::super::fixture_futures_contract("ES");
         let (_pane, mut record) = super::super::worker_endpoint(
             1,
             2,
@@ -1499,14 +1499,14 @@ mod tests {
         let (mut pane, mut record) = super::super::worker_endpoint(
             1,
             2,
-            super::super::default_hyperliquid_product(),
+            super::super::fixture_public_crypto(),
             41,
             aeris_market_data::ChartInterval::Minute1,
             None,
             7,
         );
         record.initial_selection_pending = false;
-        let selected = super::super::default_product("MNQ");
+        let selected = super::super::fixture_futures_contract("MNQ");
         record.pending_selection = Some((
             8,
             record.product.clone(),
@@ -1585,7 +1585,7 @@ mod tests {
 
     #[test]
     fn a_rejected_pane_event_fails_only_that_pane() {
-        let product = super::super::default_product("ES");
+        let product = super::super::fixture_futures_contract("ES");
         let (mut first, first_record) = super::super::worker_endpoint(
             1,
             2,
