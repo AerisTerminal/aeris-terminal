@@ -2577,6 +2577,9 @@ mod tests {
             "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
             // One bounded catalog command/event boundary for all registered provider workers.
             "crates/market_runtime/src/market_service/mod.rs::ProviderCatalogChannel".to_string(),
+            // The Rithmic catalog worker's one session-command seam, so its single in-flight
+            // search, latest-wins queue and listing cache are tested without a live session.
+            "crates/market_runtime/src/rithmic_realtime.rs::CatalogSession".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"

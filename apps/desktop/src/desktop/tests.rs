@@ -8,16 +8,16 @@ use super::{
     InstrumentMenuEntry, InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN,
     PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
     ProviderCatalogEvent, ProviderConnectionPresentation, SidePanel, SidePanelVisibility,
-    SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP,
-    TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter,
-    TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
-    WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
-    WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_position_id, chart_price_fixed_point,
-    chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
-    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
-    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    SymbolBrowser, SymbolInputAction, SymbolSearchFailure, SymbolSearchScope,
+    SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
+    TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter, TimeSalesSideFilter,
+    TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState,
+    WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+    WorkspaceMaximizeTransition, active_workspace_after_close, bounded_status_detail,
+    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+    chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
+    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_menu_extent,
+    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, counted, current_instrument_menu_index,
     desktop_key_bindings, durable_workspace_viewport, first_selectable_instrument_index,
@@ -26,7 +26,7 @@ use super::{
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, project_provider_catalog_event,
     publication_chart_state, reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
     should_finish_chrome_overlay_close, stabilized_connection_state, symbol_input_action,
-    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    symbol_submit_decision, terminal_provider_id, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
     timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
     timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
@@ -147,11 +147,13 @@ const fn catalog_rejection_order_bookain(
 
 #[test]
 fn instrument_menu_requests_a_listing_only_when_idle_and_not_already_shown() {
-    use crate::desktop::rithmic_shell::RithmicSymbolBrowser;
-    use std::num::NonZeroUsize;
-
-    let startup = NonZeroUsize::MIN;
-    let mut browser = RithmicSymbolBrowser::rithmic_catalog_awaiting_search(startup, "");
+    let provider = TerminalProvider::Rithmic;
+    let mut browser =
+        SymbolBrowser::new(SymbolSearchScope::Provider(terminal_provider_id(provider)));
+    let startup = browser
+        .begin_search("")
+        .expect("listing validates")
+        .remove(0);
     assert!(
         !instrument_listing_refresh_needed(&browser, false, ""),
         "startup search is already pending"
@@ -168,7 +170,7 @@ fn instrument_menu_requests_a_listing_only_when_idle_and_not_already_shown() {
         expiration_date: None,
         asset_class: None,
     };
-    assert!(browser.apply_results(startup, vec![result]));
+    assert!(browser.apply_results(provider, startup.request_id, vec![result]));
     assert!(
         !instrument_listing_refresh_needed(&browser, false, ""),
         "populated listing needs no refresh"
@@ -179,31 +181,30 @@ fn instrument_menu_requests_a_listing_only_when_idle_and_not_already_shown() {
     );
 
     let selection = browser
-        .select(InstrumentMenuSelection::SearchResult(0))
+        .select(InstrumentMenuSelection::SearchResult { provider, index: 0 })
         .expect("catalog result is selectable");
     assert!(
         !instrument_listing_refresh_needed(&browser, true, ""),
         "in-flight selection defers the refresh"
     );
     assert!(browser.confirm_selection(selection.generation));
-    assert!(browser.consume_completed_search(selection.search_generation));
+    assert!(browser.consume_completed_search(provider, selection.search_generation));
     assert!(
         instrument_listing_refresh_needed(&browser, false, ""),
         "consumed selection authorization reopens as a fresh listing"
     );
     let refreshed = browser
         .begin_search("")
-        .expect("runtime provider catalog permits a fresh empty listing query");
+        .expect("runtime provider catalog permits a fresh empty listing query")
+        .remove(0);
     assert_eq!(refreshed.query, "");
     assert!(browser.search_pending());
-    assert!(browser.reject_search(refreshed.request_id));
+    assert!(browser.reject_search(provider, refreshed.request_id, SymbolSearchFailure::Failed));
 
-    browser
-        .retain_latest_search("ETH")
-        .expect("typed query validates");
+    browser.begin_search("ETH").expect("typed query validates");
     assert!(
         !instrument_listing_refresh_needed(&browser, false, ""),
-        "a retained typed query outranks the listing"
+        "a pending typed query outranks the listing"
     );
 }
 
@@ -3513,13 +3514,22 @@ fn instrument_menu_entry(
     action: InstrumentMenuAction,
 ) -> InstrumentMenuEntry {
     InstrumentMenuEntry {
+        provider: TerminalProvider::Rithmic,
         label: label.into(),
         description: None,
         detail: None,
         checked,
         nested: false,
         expanded: None,
+        section: false,
         action,
+    }
+}
+
+const fn search_result(index: usize) -> InstrumentMenuSelection {
+    InstrumentMenuSelection::SearchResult {
+        provider: TerminalProvider::Rithmic,
+        index,
     }
 }
 
@@ -3529,12 +3539,12 @@ fn instrument_menu_index_follows_the_checked_live_market() {
         instrument_menu_entry(
             "BTC/USD",
             false,
-            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(0)),
+            InstrumentMenuAction::Select(search_result(0)),
         ),
         instrument_menu_entry(
             "ETH/USD",
             true,
-            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(1)),
+            InstrumentMenuAction::Select(search_result(1)),
         ),
     ];
     assert_eq!(current_instrument_menu_index(&entries), Some(1));
@@ -3542,7 +3552,7 @@ fn instrument_menu_index_follows_the_checked_live_market() {
         current_instrument_menu_index(&[instrument_menu_entry(
             "AAVE/USD",
             false,
-            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(0)),
+            InstrumentMenuAction::Select(search_result(0)),
         )]),
         None
     );
@@ -3550,7 +3560,8 @@ fn instrument_menu_index_follows_the_checked_live_market() {
 
 #[test]
 fn a_typed_search_highlights_its_first_instrument_below_the_product_header() {
-    let product = crate::desktop::rithmic_shell::ProductKey {
+    let product = crate::desktop::symbol_browser::ProductKey {
+        provider: TerminalProvider::Rithmic,
         code: "NQ".into(),
         exchange: "CME".into(),
     };
@@ -3563,7 +3574,7 @@ fn a_typed_search_highlights_its_first_instrument_below_the_product_header() {
         instrument_menu_entry(
             "NQZ6",
             false,
-            InstrumentMenuAction::Select(InstrumentMenuSelection::SearchResult(0)),
+            InstrumentMenuAction::Select(search_result(0)),
         ),
     ];
     assert_eq!(first_selectable_instrument_index(&entries), Some(1));

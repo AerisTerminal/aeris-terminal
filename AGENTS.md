@@ -269,6 +269,9 @@ the check.
   Every search and selection carries a 45-second response deadline after which the coordinator
   rejects it as timed out, and a catalog rejection names its search or selection lane explicitly;
   consumers never infer the lane from the rejection reason.
+- Symbol search keeps one catalog-search slot per consumer and provider. The Rithmic catalog runs at
+  most one search at a time, keeps only each consumer's latest queued search (rejecting the replaced one
+  as superseded) and caches its product listing once per session generation (at most 128 products).
 - Chart selections, including startup and restored instruments, resolve and install demand through
   the coordinator's `select_and_demand` command; desktop code never owns startup catalog resolution
   or interprets provider display text as a readiness signal.

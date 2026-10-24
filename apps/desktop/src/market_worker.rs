@@ -3316,6 +3316,7 @@ mod tests {
             query: "ES".to_string(),
             maximum_results: 16,
             categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            exchange: None,
         };
         let selection = SelectProviderInstrument {
             startup_resolve: false,

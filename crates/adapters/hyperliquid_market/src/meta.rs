@@ -34,16 +34,25 @@ impl HyperliquidCatalog {
         self.instruments.get(instrument_id)
     }
 
-    /// Case-insensitive substring search over display, wire, and stable id.
+    /// Case-insensitive substring search over display, wire, and stable id,
+    /// restricted to one exact venue when `venue` is given.
     ///
     /// An exact wire, display, or stable-id match ranks first so a query for
     /// `BTC` resolves the core perpetual deterministically instead of
     /// depending on where it sorts among dozens of partial matches.
     #[must_use]
-    pub fn search(&self, query: &str, maximum_results: usize) -> Vec<HyperliquidInstrument> {
+    pub fn search(
+        &self,
+        query: &str,
+        venue: Option<&str>,
+        maximum_results: usize,
+    ) -> Vec<HyperliquidInstrument> {
         let query = query.trim().to_ascii_lowercase();
         let mut scored: Vec<(u8, &HyperliquidInstrument)> = Vec::new();
         for instrument in self.instruments.values() {
+            if venue.is_some_and(|venue| instrument.venue != venue) {
+                continue;
+            }
             let display = instrument.display.to_ascii_lowercase();
             let wire = instrument.wire_coin.to_ascii_lowercase();
             let stable = instrument.instrument_id.to_ascii_lowercase();
@@ -453,7 +462,7 @@ mod tests {
         catalog.set_day_notional_volume("@1", "9000000.25");
         catalog.set_day_notional_volume("ETH", "1250000.5000000001");
 
-        let results = catalog.search("", 3);
+        let results = catalog.search("", None, 3);
         assert_eq!(results[0].instrument_id, "hyperliquid:spot:1:BTC/USDC");
         assert_eq!(results[1].instrument_id, "hyperliquid:perp:ETH");
         assert_eq!(results[2].instrument_id, "hyperliquid:perp:BTC");
@@ -537,7 +546,7 @@ mod tests {
     #[test]
     fn search_ranks_display_before_wire_and_stable_id() {
         let catalog = decode_catalog(&bundle()).expect("catalog");
-        let results = catalog.search("btc", 10);
+        let results = catalog.search("btc", None, 10);
         assert_ne!(results, [] as [HyperliquidInstrument; 0]);
         assert!(
             results
@@ -550,15 +559,41 @@ mod tests {
     fn search_resolves_exact_wire_symbols_deterministically() {
         let catalog = decode_catalog(&bundle()).expect("catalog");
         // Exact matches win over partials no matter how many exist.
-        let results = catalog.search("BTC", 10);
+        let results = catalog.search("BTC", None, 10);
         assert_eq!(
             results.first().map(|first| first.wire_coin.as_str()),
             Some("BTC")
         );
-        let indexed = catalog.search("@1", 10);
+        let indexed = catalog.search("@1", None, 10);
         assert_eq!(
             indexed.first().map(|first| first.wire_coin.as_str()),
             Some("@1")
         );
+    }
+
+    #[test]
+    fn search_restricted_to_a_venue_ranks_and_bounds_only_its_markets() {
+        let catalog = decode_catalog(&bundle()).expect("catalog");
+        let venues = |venue, maximum_results| {
+            catalog
+                .search("btc", Some(venue), maximum_results)
+                .into_iter()
+                .map(|instrument| (instrument.instrument_id, instrument.venue))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            venues("xyz", 10),
+            [("hyperliquid:builder:xyz:BTC".to_string(), "xyz".to_string())]
+        );
+        assert_eq!(
+            venues("Hyperliquid", 1),
+            [(
+                "hyperliquid:perp:BTC".to_string(),
+                "Hyperliquid".to_string()
+            )],
+            "the bound applies after the venue filter"
+        );
+        assert_eq!(venues("unlisted", 10), [] as [(String, String); 0]);
     }
 }

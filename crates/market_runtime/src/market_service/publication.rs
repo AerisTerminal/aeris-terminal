@@ -261,7 +261,7 @@ impl ConsumerEvents {
             || self.startup_catalog_selection.is_some()
             || self.startup_catalog_search.is_some()
             || self.catalog_selection.is_some()
-            || self.catalog_search.is_some()
+            || !self.catalog_search.is_empty()
             || self.catalog_screen.is_some()
     }
 
@@ -288,19 +288,25 @@ impl ConsumerEvents {
                     .or_else(|| self.startup_catalog_selection.take())
                     .or_else(|| self.startup_catalog_search.take())
                     .or_else(|| self.catalog_selection.take())
-                    .or_else(|| self.catalog_search.take())
+                    .or_else(|| self.catalog_search.pop_first().map(|(_, event)| event))
                     .or_else(|| self.catalog_screen.take())
             })
     }
 
-    pub(super) fn catalog_search_slot(
+    /// Replaces or clears the pending search answer for `provider`. Startup
+    /// re-resolution keeps its one slot; interactive searches keep one per provider.
+    pub(super) fn set_catalog_search(
         &mut self,
         kind: super::CommandKind,
-    ) -> &mut Option<MarketRuntimeEvent> {
+        provider: &str,
+        event: Option<MarketRuntimeEvent>,
+    ) {
         if kind == super::CommandKind::StartupResolve {
-            &mut self.startup_catalog_search
+            self.startup_catalog_search = event;
+        } else if let Some(event) = event {
+            self.catalog_search.insert(provider.to_owned(), event);
         } else {
-            &mut self.catalog_search
+            self.catalog_search.remove(provider);
         }
     }
 

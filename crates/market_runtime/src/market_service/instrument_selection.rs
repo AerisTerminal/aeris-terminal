@@ -25,6 +25,10 @@ pub(super) fn validate_provider_search(search: &SearchProviderInstruments) -> Re
         || usize::try_from(search.maximum_results).unwrap_or(usize::MAX)
             > MAXIMUM_CATALOG_INSTRUMENTS
         || (!search.query.trim().is_empty() && !valid_catalog_field(&search.query))
+        || search
+            .exchange
+            .as_deref()
+            .is_some_and(|exchange| !valid_catalog_field(exchange))
     {
         return Err("provider instrument search is invalid".to_string());
     }
@@ -366,6 +370,7 @@ impl Coordinator<'_> {
             query,
             maximum_results: 32,
             categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            exchange: None,
         };
         let dispatched = self
             .providers
@@ -621,13 +626,13 @@ impl Coordinator<'_> {
         {
             self.command_fences.record(
                 consumer_id,
-                provider,
+                provider.clone(),
                 kind,
                 generation,
                 self.clock.monotonic(),
             );
             if let Some(events) = self.events.get_mut(&consumer_id) {
-                *events.catalog_search_slot(kind) = None;
+                events.set_catalog_search(kind, &provider, None);
             }
         }
         let _ = reply.send(result);
@@ -1051,8 +1056,12 @@ impl Coordinator<'_> {
             result.search_generation,
         );
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            *events.catalog_search_slot(kind) =
-                Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
+            let provider = result.provider.clone();
+            events.set_catalog_search(
+                kind,
+                &provider,
+                Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result)),
+            );
         }
     }
 
@@ -1335,15 +1344,23 @@ impl Coordinator<'_> {
             rejection.command_generation,
         );
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            let slot = if selection {
-                events.catalog_selection_slot(kind)
+            if selection {
+                *events.catalog_selection_slot(kind) =
+                    Some(MarketRuntimeEvent::ProviderCatalogRejected {
+                        rejection,
+                        selection,
+                    });
             } else {
-                events.catalog_search_slot(kind)
-            };
-            *slot = Some(MarketRuntimeEvent::ProviderCatalogRejected {
-                rejection,
-                selection,
-            });
+                let provider = rejection.provider.clone();
+                events.set_catalog_search(
+                    kind,
+                    &provider,
+                    Some(MarketRuntimeEvent::ProviderCatalogRejected {
+                        rejection,
+                        selection,
+                    }),
+                );
+            }
         }
     }
 }

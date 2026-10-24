@@ -81,6 +81,8 @@ mod side_panel_dock;
 mod study_packages;
 #[path = "components/study_settings_dialog.rs"]
 mod study_settings_dialog;
+#[path = "symbol_browser.rs"]
+mod symbol_browser;
 #[path = "components/symbol_menu.rs"]
 mod symbol_menu;
 #[path = "components/terminal_chrome.rs"]
@@ -131,17 +133,17 @@ use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
-    ProviderInstrumentKind, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState,
-    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
-    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState,
-    WorkspaceLayoutState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument, SeriesKey,
+    WorkspaceBigTradesState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
+    WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
+    WorkspaceChartStudyState, WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
+    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
+    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSavedLayoutState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
@@ -174,7 +176,7 @@ use big_trades_dialog::big_trades_dialog_layer;
 use catalog_projection::{
     ProviderCatalogCommand, ProviderCatalogEvent, project_provider_catalog_event,
 };
-use chart_chrome::SymbolSearchCategory;
+use chart_chrome::{ExchangeCode, SymbolSearchCategory, SymbolSearchScope};
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, SETTINGS_CONTROL_WIDTH, chart_context_menu_layer,
     chart_settings_menu_layer, clamp_panel_origin_within, color_dot_button, color_swatch_button,
@@ -262,7 +264,6 @@ use price_alert_dialog::{
     runtime_price_alerts,
 };
 use reqwest_client::ReqwestClient;
-use rithmic_shell::{InstrumentMenuAction, InstrumentMenuEntry, InstrumentMenuSelection};
 use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
 use std::{
     borrow::Cow,
@@ -279,6 +280,11 @@ use std::{
     time::{Duration, Instant},
 };
 use study_settings_dialog::study_settings_dialog_layer;
+use symbol_browser::{
+    ExactSymbolMatch, InstrumentMenuAction, InstrumentMenuEntry, InstrumentMenuSelection,
+    SymbolBrowser, SymbolBrowserStatus, SymbolListingSummary, SymbolSearchFailure,
+    SymbolSearchRequest,
+};
 use symbol_menu::{
     InstrumentSelectorAvailability, InstrumentSelectorMenu, InstrumentSelectorState,
     instrument_dialog_content, instrument_selector,
@@ -725,14 +731,11 @@ fn instrument_interval(
 /// the search it came from (one-shot selection authorization), and closing the menu
 /// clears the query, so an idle browser that no longer lists `query` searches again.
 fn instrument_listing_refresh_needed(
-    browser: &rithmic_shell::RithmicSymbolBrowser,
+    browser: &SymbolBrowser,
     selection_pending: bool,
     query: &str,
 ) -> bool {
-    !selection_pending
-        && !browser.lists_query(query)
-        && !browser.search_pending()
-        && !browser.has_retained_search()
+    !selection_pending && !browser.lists_query(query) && !browser.search_pending()
 }
 
 #[cfg(feature = "diagnostics")]
@@ -836,7 +839,7 @@ struct WorkspaceSurface {
     order_quantity: order_quantity::OrderQuantityControls,
     order_ticket: order_ticket::OrderTicketControls,
     chart_trading_visibility: ChartTradingVisibilitySettings,
-    symbol_browser: rithmic_shell::RithmicSymbolBrowser,
+    symbol_browser: SymbolBrowser,
     market_state: WorkspaceMarketState,
     symbol_selection_target: SymbolSelectionTarget,
     pending_symbol_selection_target: Option<SymbolSelectionTarget>,
@@ -862,7 +865,6 @@ struct WorkspaceSurface {
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
-    symbol_provider: TerminalProvider,
     product: Option<InstallProviderInstrument>,
     interval: ChartInterval,
     chart_pane_controller: chart_pane_controller::ChartPaneController,
@@ -1502,7 +1504,7 @@ struct WorkspaceMenuState {
     accounts_placement: chart_context_menus::FloatingPanelPlacement,
     /// Why the last quick-timeframe submission was rejected; cleared by an edit or close.
     quick_timeframe_error: Option<QuickTimeframeError>,
-    /// The symbol menu's provider and category dropdown, opened from the search-field logo.
+    /// The symbol menu's search-scope dropdown, opened from the search-field logo.
     symbol_provider_menu: SymbolProviderMenu,
 }
 
@@ -1511,8 +1513,8 @@ enum SymbolProviderMenu {
     #[default]
     Closed,
     Open,
-    /// Open with the Markets flyout (category toggles) shown beside it.
-    MarketsFlyout,
+    /// Open with a provider's exchange and category flyout shown beside it.
+    Flyout(TerminalProvider),
 }
 
 impl SymbolProviderMenu {
@@ -1520,14 +1522,17 @@ impl SymbolProviderMenu {
         !matches!(self, Self::Closed)
     }
 
-    const fn markets_flyout_open(self) -> bool {
-        matches!(self, Self::MarketsFlyout)
+    const fn flyout_provider(self) -> Option<TerminalProvider> {
+        match self {
+            Self::Flyout(provider) => Some(provider),
+            Self::Closed | Self::Open => None,
+        }
     }
 
     const fn toggled(self) -> Self {
         match self {
             Self::Closed => Self::Open,
-            Self::Open | Self::MarketsFlyout => Self::Closed,
+            Self::Open | Self::Flyout(_) => Self::Closed,
         }
     }
 }
@@ -1542,9 +1547,6 @@ struct QuickTimeframeError {
 #[derive(Default)]
 struct WorkspaceMarketState {
     symbol_selection_pending: bool,
-    /// The first catalog-ready event loads the default listing once; later
-    /// searches belong to the trader.
-    catalog_listing_started: bool,
 }
 
 #[derive(Default)]
@@ -3081,7 +3083,6 @@ fn counted(count: usize, singular: &str, plural: &str) -> String {
 struct HeaderState {
     theme: AerisTheme,
     provider: TerminalProvider,
-    symbol_provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
     chart_type: ChartType,

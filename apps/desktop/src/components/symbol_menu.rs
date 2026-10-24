@@ -16,11 +16,26 @@ pub(super) fn provider_exchange_mark(
         .and_then(|descriptor| assets::ExchangeLogo::for_logo_key(descriptor.logo_key))
     {
         Some(logo) => exchange_mark(logo, size, well, colors).into_any_element(),
-        // No square logo exists for this provider; a generic glyph sits in the same tile and
-        // is inset like the logos' own artwork so every mark reads at one size.
-        None => mark_tile(size, well, colors)
-            .child(header_icon(HugeIcon::Chart).with_size(size * 0.6))
-            .into_any_element(),
+        None => generic_mark(size, well, colors),
+    }
+}
+
+/// A generic glyph in the logo tile, inset like the logos' own artwork so every mark reads
+/// at one size: for a provider without a square logo, and for a search of every provider.
+fn generic_mark(size: Pixels, well: bool, colors: &aeris_design_system::ThemeColors) -> AnyElement {
+    mark_tile(size, well, colors)
+        .child(header_icon(HugeIcon::Chart).with_size(size * 0.6))
+        .into_any_element()
+}
+
+fn scope_mark(
+    scope: SymbolSearchScope,
+    size: Pixels,
+    colors: &aeris_design_system::ThemeColors,
+) -> AnyElement {
+    match scope.provider().and_then(known_terminal_provider) {
+        Some(provider) => provider_exchange_mark(provider, size, false, colors),
+        None => generic_mark(size, false, colors),
     }
 }
 
@@ -81,16 +96,19 @@ pub(super) struct InstrumentSelectorState {
     pub(super) input: Option<Entity<InputState>>,
     pub(super) availability: InstrumentSelectorAvailability,
     pub(super) provider: TerminalProvider,
-    pub(super) menu_provider: TerminalProvider,
+    /// Which providers or exchange the menu searches.
+    pub(super) scope: SymbolSearchScope,
     pub(super) menu: InstrumentSelectorMenu,
     pub(super) scroll: ScrollHandle,
     pub(super) target: SymbolSelectionTarget,
-    /// The runtime reported no stored connection or login for the menu's provider; the menu
-    /// points to Accounts.
-    pub(super) connection_missing: bool,
-    /// The provider and category dropdown opened from the search-field logo.
+    /// The provider the scope names when the runtime reported no stored connection or login
+    /// for it; the menu points to Accounts.
+    pub(super) connect_provider: Option<TerminalProvider>,
+    /// The scope dropdown opened from the search-field logo.
     pub(super) provider_menu_open: bool,
-    pub(super) markets_flyout_open: bool,
+    /// The provider whose exchange and category flyout is shown beside the dropdown.
+    pub(super) flyout_provider: Option<TerminalProvider>,
+    pub(super) learned_exchanges: Vec<(TerminalProvider, Vec<ExchangeCode>)>,
     pub(super) search_categories: aeris_contracts::InstrumentSearchCategories,
 }
 
@@ -125,7 +143,12 @@ pub(super) fn instrument_dialog_content(
                 .iter()
                 .enumerate()
                 .map(|(index, instrument)| {
-                    instrument_dialog_row(app, instrument, index, state, theme)
+                    if instrument.section {
+                        instrument_section_header(instrument, theme)
+                    } else {
+                        instrument_dialog_row(app, instrument, index, state, theme)
+                            .into_any_element()
+                    }
                 }),
         );
     }
@@ -134,11 +157,13 @@ pub(super) fn instrument_dialog_content(
             || div().into_any_element(),
             |input| instrument_search_header(input, theme, app, state).into_any_element(),
         ))
-        .when(
-            show_connect_prompt(state.menu_provider, state.connection_missing),
-            |menu| {
+        .when_some(
+            state
+                .connect_provider
+                .filter(|provider| show_connect_prompt(*provider, true)),
+            |menu, provider| {
                 let accounts = app.clone();
-                let provider_name = terminal_provider_display(state.menu_provider).to_string();
+                let provider_name = terminal_provider_display(provider).to_string();
                 menu.child(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_provider", theme)
@@ -188,9 +213,10 @@ fn symbol_menu_providers() -> Vec<TerminalProvider> {
         .collect()
 }
 
-/// Provider dropdown anchored under the search-field logo. Clicking a provider switches the
-/// listing and closes it. A provider that serves several instrument categories opens its
-/// category flyout when its own row is hovered, exactly like a timeframe group row.
+/// Scope dropdown anchored under the search-field logo: every provider, or one provider.
+/// Clicking a row switches the listing and closes it. A provider with learned exchanges or
+/// several instrument categories opens its flyout when its row is hovered, exactly like a
+/// timeframe group row.
 fn symbol_provider_menu(
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
@@ -198,18 +224,36 @@ fn symbol_provider_menu(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let providers = symbol_menu_providers();
-    let has_categories = |provider: TerminalProvider| {
-        super::provider_presentation(provider)
-            .is_some_and(|descriptor| descriptor.search_categories_available)
-    };
-    let flyout_row = providers
-        .iter()
-        .position(|provider| has_categories(*provider));
+    let flyout_row = state.flyout_provider.and_then(|flyout| {
+        providers
+            .iter()
+            .position(|provider| *provider == flyout)
+            .map(|index| index + 1)
+    });
+    let all_app = app.clone();
+    let all_hover_app = app.clone();
+    let all_row = MenuRow::compact(("symbol_provider_row", 0_usize), "All providers", theme)
+        .leading(generic_mark(px(18.0), false, &colors))
+        .checked(state.scope == SymbolSearchScope::All)
+        .disabled(state.availability.selection_pending)
+        .on_hover(move |hovered, _, cx| {
+            if *hovered {
+                all_hover_app.update(cx, |surface, surface_cx| {
+                    surface.set_symbol_scope_flyout(None, surface_cx);
+                });
+            }
+        })
+        .on_click(move |_, window, cx| {
+            all_app.update(cx, |surface, surface_cx| {
+                surface.choose_symbol_scope(SymbolSearchScope::All, window, surface_cx);
+            });
+        });
     let provider_rows = providers.into_iter().enumerate().map(|(index, provider)| {
         let row_app = app.clone();
         let hover_app = app.clone();
-        let active = provider == state.menu_provider;
-        let opens_flyout = has_categories(provider);
+        let id = terminal_provider_id(provider);
+        let active = state.scope.provider() == Some(id);
+        let opens_flyout = scope_flyout_available(state, provider);
         let mut trailing = div().flex().items_center().gap_1();
         if active {
             trailing = trailing.child(
@@ -225,33 +269,34 @@ fn symbol_provider_menu(
                     .color(gpui_color(colors.icon)),
             );
         }
-        // A provider row can both be the current provider and open the markets flyout, so it
-        // carries its own check-and-chevron trailing content instead of `MenuRow::checked`.
+        // A provider row can both be the current scope and open its flyout, so it carries
+        // its own check-and-chevron trailing content instead of `MenuRow::checked`.
         MenuRow::compact(
-            ("symbol_provider_row", index),
+            ("symbol_provider_row", index + 1),
             terminal_provider_display(provider),
             theme,
         )
         .leading(provider_exchange_mark(provider, px(18.0), false, &colors))
-        .highlighted(opens_flyout && state.markets_flyout_open)
+        .highlighted(state.flyout_provider == Some(provider))
         .disabled(state.availability.selection_pending)
         .trailing(trailing)
         .on_hover(move |hovered, _, cx| {
             if *hovered {
                 hover_app.update(cx, |surface, surface_cx| {
-                    surface.set_symbol_markets_flyout(opens_flyout, surface_cx);
+                    surface.set_symbol_scope_flyout(opens_flyout.then_some(provider), surface_cx);
                 });
             }
         })
         .on_click(move |_, window, cx| {
             row_app.update(cx, |surface, surface_cx| {
-                surface.choose_symbol_provider(provider, window, surface_cx);
+                surface.choose_symbol_scope(SymbolSearchScope::Provider(id), window, surface_cx);
             });
         })
     });
     let root = MenuPanel::new("symbol_provider_menu", MenuPlacement::InFlow, theme)
         .width(px(SYMBOL_PROVIDER_MENU_WIDTH))
         .animate_from(PopupAnimationOrigin::TOP_LEFT)
+        .child(all_row)
         .children(provider_rows);
     // Deferred so the menu paints over, and is never clipped by, the rounded symbol menu.
     gpui::deferred(
@@ -262,50 +307,150 @@ fn symbol_provider_menu(
             .left(px(12.0))
             .child(root)
             .when_some(
-                flyout_row.filter(|_| state.markets_flyout_open),
-                |host, row| host.child(symbol_markets_flyout(app, state, row, theme)),
+                state.flyout_provider.zip(flyout_row),
+                |host, (provider, row)| {
+                    host.child(symbol_scope_flyout(app, state, provider, row, theme))
+                },
             ),
     )
 }
 
-/// Category toggles beside the provider menu, aligned to the hovered provider's row and styled
-/// like the timeframe flyout. Rows toggle in place; the last included category cannot be cleared.
-fn symbol_markets_flyout(
+fn provider_search_categories_available(provider: TerminalProvider) -> bool {
+    super::provider_presentation(provider)
+        .is_some_and(|descriptor| descriptor.search_categories_available)
+}
+
+fn learned_provider_exchanges(
+    state: &InstrumentSelectorState,
+    provider: TerminalProvider,
+) -> &[ExchangeCode] {
+    state
+        .learned_exchanges
+        .iter()
+        .find(|(candidate, _)| *candidate == provider)
+        .map_or(&[], |(_, exchanges)| exchanges.as_slice())
+}
+
+fn scope_flyout_available(state: &InstrumentSelectorState, provider: TerminalProvider) -> bool {
+    provider_search_categories_available(provider)
+        || !learned_provider_exchanges(state, provider).is_empty()
+}
+
+/// A provider's exchanges and category toggles beside the scope menu, aligned to the hovered
+/// provider's row and styled like the timeframe flyout. Exchanges are the ones the
+/// provider's own results named. Category rows toggle in place; the last included category
+/// cannot be cleared.
+fn symbol_scope_flyout(
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
+    provider: TerminalProvider,
     provider_row_index: usize,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let rows = SymbolSearchCategory::ALL
-        .into_iter()
-        .enumerate()
-        .map(|(index, category)| {
-            let row_app = app.clone();
-            MenuRow::compact(("symbol_category_row", index), category.label(), theme)
-                .checked(category.included(state.search_categories))
-                .on_click(move |_, _, cx| {
-                    row_app.update(cx, |surface, surface_cx| {
-                        surface.toggle_symbol_search_category(category, surface_cx);
+    let id = terminal_provider_id(provider);
+    let exchanges = learned_provider_exchanges(state, provider);
+    let mut panel = MenuPanel::new("symbol_scope_flyout", MenuPlacement::InFlow, theme)
+        .width(px(TIMEFRAME_FLYOUT_WIDTH))
+        .animate_from(PopupAnimationOrigin::new(0.0, 0.25));
+    if !exchanges.is_empty() {
+        let all_app = app.clone();
+        panel = panel.child(
+            MenuRow::compact(("symbol_exchange_row", 0_usize), "All exchanges", theme)
+                .checked(state.scope == SymbolSearchScope::Provider(id))
+                .disabled(state.availability.selection_pending)
+                .on_click(move |_, window, cx| {
+                    all_app.update(cx, |surface, surface_cx| {
+                        surface.choose_symbol_scope(
+                            SymbolSearchScope::Provider(id),
+                            window,
+                            surface_cx,
+                        );
                     });
-                })
-        });
+                }),
+        );
+        panel = panel.children(exchanges.iter().enumerate().map(|(index, exchange)| {
+            let row_app = app.clone();
+            let scope = SymbolSearchScope::Exchange {
+                provider: id,
+                exchange: *exchange,
+            };
+            MenuRow::compact(
+                ("symbol_exchange_row", index + 1),
+                exchange.as_str().to_string(),
+                theme,
+            )
+            .checked(state.scope == scope)
+            .disabled(state.availability.selection_pending)
+            .on_click(move |_, window, cx| {
+                row_app.update(cx, |surface, surface_cx| {
+                    surface.choose_symbol_scope(scope, window, surface_cx);
+                });
+            })
+        }));
+    }
+    if provider_search_categories_available(provider) {
+        if !exchanges.is_empty() {
+            panel = panel.separator();
+        }
+        panel = panel.children(SymbolSearchCategory::ALL.into_iter().enumerate().map(
+            |(index, category)| {
+                let row_app = app.clone();
+                MenuRow::compact(("symbol_category_row", index), category.label(), theme)
+                    .checked(category.included(state.search_categories))
+                    .on_click(move |_, _, cx| {
+                        row_app.update(cx, |surface, surface_cx| {
+                            surface.toggle_symbol_search_category(category, surface_cx);
+                        });
+                    })
+            },
+        ));
+    }
     // Both panels share the same border and inset, so offsetting by whole rows lines the
     // flyout's first row up with the provider row that opened it.
     let top =
         CHART_CONTEXT_MENU_ROW_HEIGHT * f32::from(u16::try_from(provider_row_index).unwrap_or(0));
     div()
-        .id("symbol_markets_flyout_host")
+        .id("symbol_scope_flyout_host")
         .absolute()
         .left(px(SYMBOL_PROVIDER_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP))
         .top(px(top))
-        .child(
-            MenuPanel::new("symbol_markets_flyout", MenuPlacement::InFlow, theme)
-                .width(px(TIMEFRAME_FLYOUT_WIDTH))
-                .animate_from(PopupAnimationOrigin::new(0.0, 0.25))
-                .children(rows),
-        )
+        .child(panel)
 }
 
+/// The header of one provider's section when several providers are searched, with that
+/// provider's search status.
+fn instrument_section_header(entry: &InstrumentMenuEntry, theme: &AerisTheme) -> AnyElement {
+    let colors = theme.colors;
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .pt_2()
+        .pb_1()
+        .text_xs()
+        .child(provider_exchange_mark(
+            entry.provider,
+            px(14.0),
+            false,
+            &colors,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(gpui_color(colors.text_default))
+                .child(entry.label.clone()),
+        )
+        .when_some(entry.detail.clone(), |row, detail| {
+            row.child(
+                div()
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(detail),
+            )
+        })
+        .into_any_element()
+}
 pub(super) fn instrument_dialog_row(
     app: &Entity<WorkspaceSurface>,
     instrument: &InstrumentMenuEntry,
@@ -360,7 +505,7 @@ pub(super) fn instrument_dialog_row(
         row.leading(div().flex_none().w(px(CHROME_MENU_ROW_ICON_WELL)))
     } else {
         row.leading(provider_exchange_mark(
-            state.menu_provider,
+            instrument.provider,
             px(CHROME_MENU_ROW_ICON_WELL),
             true,
             &theme.colors,
@@ -429,11 +574,10 @@ pub(super) fn instrument_search_header(
                 .variant(ButtonVariant::Secondary)
                 .round()
                 .open(state.provider_menu_open)
-                .aria_label("Switch market provider")
-                .leading(provider_exchange_mark(
-                    state.menu_provider,
+                .aria_label("Choose which markets to search")
+                .leading(scope_mark(
+                    state.scope,
                     px(CHROME_MENU_SEARCH_ICON_SIZE),
-                    false,
                     &colors,
                 ))
                 .on_press(move |_, _, cx| {

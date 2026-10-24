@@ -603,7 +603,7 @@ mod tests {
     #[ignore = "drives the live Hyperliquid public info endpoint"]
     fn live_catalog_includes_volume_ranked_markets() {
         let catalog = fetch_meta_bundle(HyperliquidHttpConfig::default()).expect("live catalog");
-        let popular = catalog.search("", 10);
+        let popular = catalog.search("", None, 10);
         assert_eq!(popular.len(), 10);
         assert!(
             popular

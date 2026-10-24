@@ -242,19 +242,20 @@ pub(super) fn chrome_overlay_content(
                     enabled: true,
                 },
                 provider: app_state.provider,
-                menu_provider: app_state.symbol_provider,
+                scope: app_state.symbol_browser.scope(),
                 menu: InstrumentSelectorMenu {
                     keyboard_selection: app_state.chrome_selection,
                     keyboard_active: app_state.menu_state.chrome_list_keyboard,
                 },
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
-                connection_missing: connections.data.disconnected(app_state.symbol_provider),
+                connect_provider: app_state
+                    .symbol_browser
+                    .scoped_provider()
+                    .filter(|provider| connections.data.disconnected(*provider)),
                 provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
-                markets_flyout_open: app_state
-                    .menu_state
-                    .symbol_provider_menu
-                    .markets_flyout_open(),
+                flyout_provider: app_state.menu_state.symbol_provider_menu.flyout_provider(),
+                learned_exchanges: app_state.symbol_browser.learned_exchanges().to_vec(),
                 search_categories: app_state.chart_chrome.symbol_search_categories,
             },
             theme,

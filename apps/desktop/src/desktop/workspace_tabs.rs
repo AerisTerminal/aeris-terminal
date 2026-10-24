@@ -2383,13 +2383,15 @@ impl TerminalApp {
         self.save_chart_chrome_preferences(cx);
     }
 
-    /// Queues the durable chrome preferences off the UI thread. Chart type and symbol search
-    /// categories change inside a workspace, so they are taken from the active one first.
+    /// Queues the durable chrome preferences off the UI thread. Chart type and the symbol
+    /// search categories and scope change inside a workspace, so they are taken from the
+    /// active one first.
     pub(super) fn save_chart_chrome_preferences(&mut self, cx: &mut Context<Self>) {
         let active = self.active_surface();
         let active = active.read(cx);
         self.chart_chrome.chart_type = active.chart_type(cx);
         self.chart_chrome.symbol_search_categories = active.chart_chrome.symbol_search_categories;
+        self.chart_chrome.symbol_search_scope = active.chart_chrome.symbol_search_scope;
         let preferences = self.chart_chrome;
         let persistence = self.lifecycle.persistence().clone();
         match persistence.request_chart_chrome_preferences_save(preferences) {

@@ -250,6 +250,112 @@ impl SymbolSearchCategory {
     }
 }
 
+/// One provider exchange code, kept inline so the chrome preferences stay `Copy`.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ExchangeCode {
+    bytes: [u8; Self::MAXIMUM_BYTES],
+    len: u8,
+}
+
+impl ExchangeCode {
+    pub const MAXIMUM_BYTES: usize = 16;
+
+    /// A non-empty code of at most [`Self::MAXIMUM_BYTES`] visible ASCII characters; longer or
+    /// other codes are never offered as a search scope.
+    #[must_use]
+    pub fn new(code: &str) -> Option<Self> {
+        let source = code.as_bytes();
+        if source.is_empty()
+            || source.len() > Self::MAXIMUM_BYTES
+            || !source.iter().all(u8::is_ascii_graphic)
+        {
+            return None;
+        }
+        let mut bytes = [0; Self::MAXIMUM_BYTES];
+        bytes[..source.len()].copy_from_slice(source);
+        Some(Self {
+            bytes,
+            len: u8::try_from(source.len()).ok()?,
+        })
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for ExchangeCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Which markets the symbol menu searches. Providers are named by their registered id.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SymbolSearchScope {
+    /// Every available provider, each answering in its own section.
+    #[default]
+    All,
+    Provider(&'static str),
+    /// One exchange of one provider, as named by that provider's results.
+    Exchange {
+        provider: &'static str,
+        exchange: ExchangeCode,
+    },
+}
+
+impl SymbolSearchScope {
+    #[must_use]
+    pub const fn provider(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Provider(provider) | Self::Exchange { provider, .. } => Some(provider),
+        }
+    }
+
+    #[must_use]
+    pub const fn exchange(self) -> Option<ExchangeCode> {
+        match self {
+            Self::Exchange { exchange, .. } => Some(exchange),
+            Self::All | Self::Provider(_) => None,
+        }
+    }
+
+    fn encode(self) -> String {
+        match self {
+            Self::All => "all".to_string(),
+            Self::Provider(provider) => format!("provider:{provider}"),
+            Self::Exchange { provider, exchange } => {
+                format!("exchange:{provider}:{}", exchange.as_str())
+            }
+        }
+    }
+
+    /// A saved scope naming a provider this build does not register falls back to all.
+    fn parse(value: &str) -> Self {
+        let registered = |id: &str| {
+            aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .find(|descriptor| descriptor.id == id)
+                .map(|descriptor| descriptor.id)
+        };
+        let value = value.trim();
+        if let Some(provider) = value.strip_prefix("provider:") {
+            return registered(provider).map_or(Self::All, Self::Provider);
+        }
+        if let Some((provider, exchange)) = value
+            .strip_prefix("exchange:")
+            .and_then(|rest| rest.split_once(':'))
+            && let (Some(provider), Some(exchange)) =
+                (registered(provider), ExchangeCode::new(exchange))
+        {
+            return Self::Exchange { provider, exchange };
+        }
+        Self::All
+    }
+}
+
 /// Durable shell chrome that follows the user across charts and workspaces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChartChromePreferences {
@@ -259,6 +365,7 @@ pub struct ChartChromePreferences {
     pub chart_type: ChartType,
     /// Instrument categories the symbol menu searches; at least one is always included.
     pub symbol_search_categories: InstrumentSearchCategories,
+    pub symbol_search_scope: SymbolSearchScope,
     pub window_frame: WindowFrame,
     /// The drawing tools sidebar along the left edge of the charts.
     pub drawing_toolbar: ChromeVisibility,
@@ -471,6 +578,7 @@ impl Default for ChartChromePreferences {
             indicator_price_lines_visible: indicator_chrome.price_lines_visible,
             chart_type: ChartType::Candles,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            symbol_search_scope: SymbolSearchScope::All,
             window_frame: WindowFrame::Framed,
             drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
@@ -666,6 +774,8 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             preferences.symbol_search_categories.futures = parse_chrome_flag(value);
         } else if let Some(value) = line.strip_prefix("symbol_search_equities=") {
             preferences.symbol_search_categories.equities = parse_chrome_flag(value);
+        } else if let Some(value) = line.strip_prefix("symbol_search_scope=") {
+            preferences.symbol_search_scope = SymbolSearchScope::parse(value);
         } else if let Some(value) = line.strip_prefix("window_frame=")
             && let Some(window_frame) = WindowFrame::from_identifier(value)
         {
@@ -708,13 +818,14 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
         .map(|(x, y)| format!("drawing_context_toolbar_origin={x},{y}\n"))
         .unwrap_or_default();
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\ndrawing_toolbar={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\ntrading_shortcuts={}\nchart_trade_buttons={}\n{origin}{context_origin}",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nsymbol_search_scope={}\nwindow_frame={}\ndrawing_toolbar={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\ntrading_shortcuts={}\nchart_trade_buttons={}\n{origin}{context_origin}",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
         u8::from(preferences.indicator_price_lines_visible),
         preferences.chart_type.identifier(),
         u8::from(preferences.symbol_search_categories.futures),
         u8::from(preferences.symbol_search_categories.equities),
+        preferences.symbol_search_scope.encode(),
         preferences.window_frame.identifier(),
         u8::from(preferences.drawing_toolbar.shown()),
         favorites.encode_tools(),
@@ -830,9 +941,9 @@ fn save_chart_chrome_preferences_to(
 mod tests {
     use super::{
         ChartChromePreferences, ChartChromeSaveState, ChromeVisibility, DesktopPersistence,
-        DrawingFavorites, INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
-        InstrumentSearchCategories, TradingShortcutMode, WindowFrame,
-        encode_chart_chrome_preferences, filter_indicator_specs,
+        DrawingFavorites, ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation,
+        IndicatorParameters, InstrumentSearchCategories, SymbolSearchScope, TradingShortcutMode,
+        WindowFrame, encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
@@ -1025,6 +1136,38 @@ mod tests {
     }
 
     #[test]
+    fn symbol_search_scope_parses_only_registered_providers_and_valid_exchanges() {
+        let defaults = parse_chart_chrome_preferences("");
+        assert_eq!(defaults.symbol_search_scope, SymbolSearchScope::All);
+        for (saved, scope) in [
+            (
+                "symbol_search_scope=provider:hyperliquid\n",
+                SymbolSearchScope::Provider("hyperliquid"),
+            ),
+            (
+                "symbol_search_scope=provider:unknown\n",
+                SymbolSearchScope::All,
+            ),
+            (
+                "symbol_search_scope=exchange:rithmic:\n",
+                SymbolSearchScope::All,
+            ),
+            (
+                "symbol_search_scope=exchange:rithmic:CME GLOBEX\n",
+                SymbolSearchScope::All,
+            ),
+            ("symbol_search_scope=garbage\n", SymbolSearchScope::All),
+        ] {
+            assert_eq!(
+                parse_chart_chrome_preferences(saved).symbol_search_scope,
+                scope,
+                "{saved}"
+            );
+        }
+        assert!(ExchangeCode::new(&"X".repeat(ExchangeCode::MAXIMUM_BYTES + 1)).is_none());
+    }
+
+    #[test]
     fn chart_chrome_preferences_round_trip_through_durable_file() {
         let defaults = parse_chart_chrome_preferences("");
         assert!(defaults.indicator_name_labels_visible);
@@ -1055,6 +1198,10 @@ mod tests {
                 futures: true,
                 equities: false,
             },
+            symbol_search_scope: SymbolSearchScope::Exchange {
+                provider: "rithmic",
+                exchange: ExchangeCode::new("CBOT").expect("exchange code"),
+            },
             window_frame: WindowFrame::Frameless,
             drawing_toolbar: ChromeVisibility::Hidden,
             drawing_favorites: DrawingFavorites {
@@ -1068,7 +1215,7 @@ mod tests {
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nsymbol_search_scope=exchange:rithmic:CBOT\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
         );
         assert_eq!(defaults.drawing_context_toolbar_origin, None);
         assert_eq!(
@@ -1128,6 +1275,7 @@ mod tests {
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            symbol_search_scope: SymbolSearchScope::All,
             window_frame: WindowFrame::Framed,
             drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
@@ -1168,6 +1316,7 @@ mod tests {
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            symbol_search_scope: SymbolSearchScope::All,
             window_frame: WindowFrame::Framed,
             drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
@@ -1181,6 +1330,7 @@ mod tests {
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            symbol_search_scope: SymbolSearchScope::All,
             window_frame: WindowFrame::Framed,
             drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
@@ -1233,6 +1383,7 @@ mod tests {
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            symbol_search_scope: SymbolSearchScope::All,
             window_frame: WindowFrame::Framed,
             drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),
@@ -1246,6 +1397,7 @@ mod tests {
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            symbol_search_scope: SymbolSearchScope::All,
             window_frame: WindowFrame::Framed,
             drawing_toolbar: ChromeVisibility::Shown,
             drawing_favorites: DrawingFavorites::default(),

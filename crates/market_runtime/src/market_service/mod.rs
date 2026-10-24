@@ -730,7 +730,10 @@ struct ConsumerEvents {
     order_book: Option<MarketRuntimeEvent>,
     trade_tape: Option<crate::MarketTradeTapeSnapshot>,
     price_alerts: VecDeque<MarketRuntimeEvent>,
-    catalog_search: Option<MarketRuntimeEvent>,
+    /// Latest interactive search answer per provider, so a picker searching
+    /// several providers at once receives every provider's answer. Keys are
+    /// fenced provider identities, bounded by the registered providers.
+    catalog_search: BTreeMap<String, MarketRuntimeEvent>,
     catalog_selection: Option<MarketRuntimeEvent>,
     /// Startup re-resolution runs beside interactive picker commands on the same
     /// consumer; a shared slot let a picker result silently replace it.

@@ -405,8 +405,10 @@ impl TerminalApp {
                     && self.rithmic_login.form.take().is_some()
                 {
                     self.active_surface().update(cx, |surface, surface_cx| {
-                        surface.choose_symbol_provider(
-                            TerminalProvider::Rithmic,
+                        surface.choose_symbol_scope(
+                            SymbolSearchScope::Provider(terminal_provider_id(
+                                TerminalProvider::Rithmic,
+                            )),
                             window,
                             surface_cx,
                         );

@@ -1,6 +1,7 @@
 //! GPUI pane fixture exercising the real bounded market mailbox without a provider session.
 
 use super::*;
+use aeris_contracts::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use aeris_desktop::market_worker::{
     EngineWorkerStartup, LocalCommandOutcome, LocalSessionStatus, MarketProjectionSender,
     MarketWorkerCommand, market_projection_channel,
@@ -2036,9 +2037,10 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
 fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
-    harness.pane.update(cx, |pane, _| {
-        let search = pane.symbol_browser.begin_search("ETH").expect("search");
+    let provider = harness.pane.update(cx, |pane, _| {
+        let search = chart_provider_search(pane, "ETH");
         assert!(pane.symbol_browser.apply_results(
+            search.provider,
             search.request_id,
             vec![ProviderInstrumentSummary {
                 symbol: "ETH".into(),
@@ -2047,10 +2049,11 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
                 ..ProviderInstrumentSummary::default()
             }]
         ));
+        search.provider
     });
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_instrument(
-            InstrumentMenuSelection::SearchResult(0),
+            InstrumentMenuSelection::SearchResult { provider, index: 0 },
             SymbolSelectionTarget::Chart,
             cx,
         ));
@@ -3024,9 +3027,7 @@ fn pane_harness_secret_bearing_restore_failure_redacts_notice_and_diagnostic(
 }
 
 #[gpui::test]
-fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
-    cx: &mut TestAppContext,
-) {
+fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mut TestAppContext) {
     let (harness, cx) = PaneHarness::open(cx);
     let commands = harness.commands.as_ref().expect("command receiver");
     while commands.try_recv().is_ok() {}
@@ -3056,7 +3057,8 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
         let toaster = &harness.window.read(cx).toaster;
         assert_eq!(
             harness.pane.read(cx).symbol_selector_status(),
-            "Waiting to search the latest query"
+            "The market search failed · try again",
+            "a full command queue fails the search instead of queueing it"
         );
         assert_eq!(toaster.notices().len(), 1);
         assert_eq!(toaster.notices()[0].title, "Symbol search unavailable");
@@ -3082,9 +3084,18 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     while commands.try_recv().is_ok() {}
     harness.pane.update(cx, |pane, cx| {
         pane.poll_market_worker(cx);
+        assert!(
+            commands.try_recv().is_err(),
+            "a failed search is not resent behind the trader's back"
+        );
+        pane.symbol_browser
+            .set_scope(SymbolSearchScope::Provider(terminal_provider_id(
+                pane.provider,
+            )));
+        assert!(pane.search_symbol_input(cx), "retrying sends the search");
     });
     let MarketWorkerCommand::ProviderSearch(request) =
-        commands.try_recv().expect("retained search dispatched")
+        commands.try_recv().expect("retried search dispatched")
     else {
         panic!("expected provider search");
     };
@@ -3147,7 +3158,7 @@ fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query
     };
     cx.update(|window, cx| {
         harness.pane.update(cx, |pane, cx| {
-            pane.choose_symbol_provider(TerminalProvider::Rithmic, window, cx);
+            pane.choose_symbol_scope(SymbolSearchScope::Provider("rithmic"), window, cx);
         });
     });
     let listing = searches();
@@ -3223,6 +3234,102 @@ fn pane_harness_rithmic_lists_products_and_expands_contracts_with_an_empty_query
         );
     });
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+/// Scopes the pane's symbol search to its chart provider and starts one search there.
+fn chart_provider_search(pane: &mut WorkspaceSurface, query: &str) -> SymbolSearchRequest {
+    pane.symbol_browser
+        .set_scope(SymbolSearchScope::Provider(terminal_provider_id(
+            pane.provider,
+        )));
+    let mut requests = pane
+        .symbol_browser
+        .begin_search(query)
+        .expect("valid query");
+    assert_eq!(requests.len(), 1, "a provider scope searches one provider");
+    requests.remove(0)
+}
+
+#[gpui::test]
+fn pane_harness_all_providers_search_shows_each_answer_as_it_arrives(cx: &mut TestAppContext) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let commands = harness.commands.as_ref().expect("command receiver");
+    while commands.try_recv().is_ok() {}
+    let searches = || {
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                MarketWorkerCommand::ProviderSearch(request) => Some(request),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    cx.update(|window, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            pane.choose_symbol_scope(SymbolSearchScope::All, window, cx);
+            pane.search_symbol_query("BT", cx);
+        });
+    });
+    let sent = searches();
+    let latest: Vec<_> = sent.iter().filter(|search| search.query == "BT").collect();
+    assert_eq!(
+        latest
+            .iter()
+            .map(|search| search.provider.as_str())
+            .collect::<Vec<_>>(),
+        ["rithmic", "hyperliquid"],
+        "one query reaches every provider at once"
+    );
+    assert!(latest.iter().all(|search| search.exchange.is_none()));
+    complete_fixture_search(
+        &harness,
+        latest[1],
+        ProviderInstrumentSummary {
+            symbol: "BTC".into(),
+            display_symbol: "BTC-USDC".into(),
+            exchange: "Hyperliquid".into(),
+            ..ProviderInstrumentSummary::default()
+        },
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        let entries = pane.instrument_entries(cx);
+        assert!(entries[0].section);
+        assert_eq!(entries[0].detail.as_deref(), Some("Searching"));
+        assert!(entries[1].section);
+        assert_eq!(entries[2].label, "BTC-USDC");
+        assert_eq!(pane.symbol_selector_status(), "Searching provider markets");
+    });
+
+    let exchange = ExchangeCode::new("Hyperliquid").expect("exchange code");
+    cx.update(|window, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(
+                pane.symbol_browser.exchanges(TerminalProvider::Hyperliquid),
+                [exchange],
+                "the exchange is learned from the provider's results"
+            );
+            pane.choose_symbol_scope(
+                SymbolSearchScope::Exchange {
+                    provider: "hyperliquid",
+                    exchange,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                pane.chart_chrome.symbol_search_scope,
+                pane.symbol_browser.scope()
+            );
+        });
+    });
+    let scoped = searches();
+    assert_eq!(
+        scoped.len(),
+        1,
+        "an exchange scope searches its provider only"
+    );
+    assert_eq!(scoped[0].provider, "hyperliquid");
+    assert_eq!(scoped[0].exchange.as_deref(), Some("Hyperliquid"));
 }
 
 fn complete_fixture_search(
@@ -3305,12 +3412,10 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
         .instrument
         .clone()
         .expect("fixture product");
-    harness.pane.update(cx, |pane, _| {
-        let request = pane
-            .symbol_browser
-            .begin_search("BTC")
-            .expect("valid query");
+    let provider = harness.pane.update(cx, |pane, _| {
+        let request = chart_provider_search(pane, "BTC");
         assert!(pane.symbol_browser.apply_results(
+            request.provider,
             request.request_id,
             vec![ProviderInstrumentSummary {
                 symbol: "BTC".into(),
@@ -3323,11 +3428,12 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
             pane.symbol_selector_status(),
             "1 matching markets · search to find more"
         );
+        request.provider
     });
     for _ in 0..2 {
         harness.pane.update(cx, |pane, cx| {
             assert!(pane.select_instrument(
-                InstrumentMenuSelection::SearchResult(0),
+                InstrumentMenuSelection::SearchResult { provider, index: 0 },
                 SymbolSelectionTarget::Chart,
                 cx,
             ));
@@ -3372,7 +3478,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     );
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_instrument(
-            InstrumentMenuSelection::SearchResult(0),
+            InstrumentMenuSelection::SearchResult { provider, index: 0 },
             SymbolSelectionTarget::Chart,
             cx,
         ));

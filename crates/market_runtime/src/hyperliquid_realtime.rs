@@ -397,6 +397,7 @@ fn handle_catalog_search(
     let instruments = current
         .search(
             &search.query,
+            search.exchange.as_deref(),
             usize::try_from(search.maximum_results).unwrap_or(16).max(1),
         )
         .iter()
@@ -1871,6 +1872,71 @@ mod tests {
         assert_eq!(
             received.try_iter().count(),
             (MAXIMUM_DECODE_FAILURES_PER_CONNECTION - 1) as usize
+        );
+    }
+
+    #[test]
+    fn catalog_search_answers_only_the_requested_exchange() {
+        let mut catalog = CatalogState::default();
+        catalog.replace(
+            aeris_hyperliquid_market_adapter::decode_catalog(
+                &aeris_hyperliquid_market_adapter::RawMetaBundle {
+                    core_perp_meta: serde_json::json!({"universe": [
+                        {"name": "BTC", "szDecimals": 5},
+                    ]}),
+                    spot_meta: serde_json::json!({
+                        "universe": [],
+                        "tokens": [{"name": "USDC", "szDecimals": 8, "index": 0}],
+                    }),
+                    perp_dexs: serde_json::json!(["xyz", null]),
+                    builder_metas: vec![(
+                        "xyz".to_string(),
+                        serde_json::json!({"universe": [{"name": "BTC", "szDecimals": 5}]}),
+                    )],
+                },
+            )
+            .expect("catalog"),
+        );
+        let (sender, published) = std::sync::mpsc::sync_channel(2);
+        let events =
+            CatalogPublisher::new(sender, "hyperliquid", ProviderCoordinatorWake::for_tests());
+        let stop = Arc::new(AtomicBool::new(false));
+        let search = |exchange: Option<&str>| SearchProviderInstruments {
+            consumer_id: 41,
+            search_generation: 1,
+            startup_resolve: false,
+            provider: "hyperliquid".into(),
+            query: "BTC".into(),
+            maximum_results: 16,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            exchange: exchange.map(str::to_string),
+        };
+        let exchanges = |event| match event {
+            HyperliquidCatalogEvent::SearchCompleted(result) => result
+                .instruments
+                .into_iter()
+                .map(|instrument| instrument.exchange)
+                .collect::<Vec<_>>(),
+            _ => panic!("expected a search result"),
+        };
+
+        for exchange in [None, Some("xyz")] {
+            assert!(!handle_catalog_search(
+                search(exchange),
+                &mut catalog,
+                &events,
+                &Arc::new(AtomicU64::new(1)),
+                &stop,
+                HyperliquidHttpConfig::default(),
+            ));
+        }
+
+        let mut every = exchanges(published.recv().expect("unfiltered result"));
+        every.sort();
+        assert_eq!(every, ["Hyperliquid", "xyz"]);
+        assert_eq!(
+            exchanges(published.recv().expect("filtered result")),
+            ["xyz"]
         );
     }
 

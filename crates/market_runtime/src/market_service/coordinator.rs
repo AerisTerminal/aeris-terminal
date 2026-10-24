@@ -1545,6 +1545,7 @@ impl Coordinator<'_> {
                 maximum_results: u32::try_from(super::MAXIMUM_CATALOG_INSTRUMENTS)
                     .unwrap_or(u32::MAX),
                 categories: aeris_contracts::InstrumentSearchCategories::ALL,
+                exchange: None,
             };
             if let Err(error) = self.providers.dispatch_catalog(
                 &route.provider_id,
@@ -8859,7 +8860,7 @@ mod tests {
                 .get(&consumer)
                 .expect("consumer outbox")
                 .catalog_search
-                .is_none(),
+                .is_empty(),
             "a superseded provider callback never reaches presentation"
         );
         assert!(coordinator.command_fences.accepts(
@@ -8881,8 +8882,9 @@ mod tests {
                 .events
                 .get(&consumer)
                 .expect("consumer outbox")
-                .catalog_search,
-            Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(ref result))
+                .catalog_search
+                .get("rithmic"),
+            Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result))
                 if result.search_generation == 8
         ));
         assert_eq!(coordinator.command_fences.count_for(consumer), 1);
@@ -8892,6 +8894,55 @@ mod tests {
             super::super::CommandKind::Search,
             8
         ));
+    }
+
+    #[test]
+    fn each_providers_search_answer_reaches_one_consumer_without_replacing_another() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        for (provider, generation) in [("rithmic", 7), ("hyperliquid", 7), ("rithmic", 8)] {
+            coordinator.command_fences.record(
+                consumer,
+                provider.into(),
+                super::super::CommandKind::Search,
+                generation,
+                coordinator.clock.monotonic(),
+            );
+        }
+        let result = |provider: &str, search_generation| ProviderInstrumentSearchResult {
+            consumer_id: consumer.0.get(),
+            provider: provider.to_string(),
+            provider_generation: 1,
+            search_generation,
+            instruments: Vec::new(),
+        };
+
+        coordinator.handle_catalog_search(result("rithmic", 7));
+        coordinator.handle_catalog_search(result("hyperliquid", 7));
+        coordinator.handle_catalog_search(result("rithmic", 8));
+
+        let events = coordinator
+            .events
+            .get_mut(&consumer)
+            .expect("consumer outbox");
+        let mut delivered = std::iter::from_fn(|| events.pop())
+            .map(|event| match event {
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
+                    (result.provider, result.search_generation)
+                }
+                _ => panic!("expected only search results"),
+            })
+            .collect::<Vec<_>>();
+        delivered.sort();
+        assert_eq!(
+            delivered,
+            [("hyperliquid".to_string(), 7), ("rithmic".to_string(), 8)],
+            "both providers answer, and the superseded rithmic search is dropped"
+        );
     }
 
     #[test]
@@ -8933,9 +8984,10 @@ mod tests {
                 .events
                 .get(&consumer)
                 .expect("consumer outbox")
-                .catalog_search,
+                .catalog_search
+                .get("rithmic"),
             Some(MarketRuntimeEvent::ProviderCatalogRejected {
-                ref rejection,
+                rejection,
                 selection: false,
             }) if rejection.command_generation == 8
                 && rejection.reason
@@ -9156,6 +9208,7 @@ mod tests {
                 query: "EURUSD".into(),
                 maximum_results: 16,
                 categories: aeris_contracts::InstrumentSearchCategories::ALL,
+                exchange: None,
             };
             let (reply, accepted) = std::sync::mpsc::sync_channel(1);
             coordinator.handle_provider_search(client(1), search, &reply);

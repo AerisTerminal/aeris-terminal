@@ -27,15 +27,16 @@ use aeris_platform_runtime::{
 use aeris_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentContractMetadata, InstrumentDescriptor, InstrumentType,
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_RETAINED_SEARCHES,
-    MAXIMUM_RITHMIC_SEARCH_RESULTS, ProviderInvalidationReason, ProviderSessionEvent,
-    RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE,
+    MAXIMUM_RITHMIC_SEARCH_RESULTS, ProductCodeResult, ProviderInvalidationReason,
+    ProviderSessionEvent, RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE,
     RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
     RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProductListing,
     RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderDriver,
     RithmicProviderEvents, RithmicProviderInstrument, RithmicProviderRuntime,
     RithmicProviderRuntimeConfig, RithmicProviderRuntimeError, RithmicProviderRuntimeState,
     RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
-    SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
+    SearchPattern, SessionGeneration, SymbolSearchResult, apply_rithmic_environment_event,
+    try_recv_rithmic_event,
 };
 
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
@@ -329,6 +330,87 @@ impl CatalogSearchRequest {
             Self::Products(listing) => listing.generation(),
         }
     }
+
+    const fn lane(&self) -> SearchLane {
+        match self {
+            Self::Symbols(_) => SearchLane::Symbols,
+            Self::Products(_) => SearchLane::Listing,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchLane {
+    Symbols,
+    Listing,
+}
+
+impl SearchLane {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Symbols => "symbols",
+            Self::Listing => "listing",
+        }
+    }
+}
+
+/// The one consumer search the adapter session is answering.
+#[derive(Debug)]
+struct SentSearch {
+    issuer: CatalogIssuer,
+    wire: NonZeroUsize,
+    session: SessionGeneration,
+    lane: SearchLane,
+    /// The consumer's exchange and result bound. A listing is requested
+    /// unfiltered at the session limit so it can be cached, and these are
+    /// applied to its answer instead.
+    exchange: Option<String>,
+    maximum_results: usize,
+    sent: Instant,
+}
+
+impl SentSearch {
+    fn log_answered(&self, results: usize) {
+        diagnostic!(
+            "Aeris Rithmic catalog {} search answered in {} ms with {results} results",
+            self.lane.name(),
+            self.sent.elapsed().as_millis()
+        );
+    }
+
+    fn log_unanswered(&self) {
+        diagnostic!(
+            "Aeris Rithmic catalog {} search rejected after {} ms",
+            self.lane.name(),
+            self.sent.elapsed().as_millis()
+        );
+    }
+}
+
+/// The unfiltered product listing of one adapter session.
+struct CachedListing {
+    session: SessionGeneration,
+    products: Vec<ProviderInstrumentSummary>,
+}
+
+/// A rejected catalog command, by lane.
+enum RejectedCommand {
+    Search(SentSearch),
+    Selection(CatalogIssuer),
+}
+
+/// The listing products for one consumer: its exchange, then its bound.
+fn listing_answer(
+    products: &[ProviderInstrumentSummary],
+    exchange: Option<&str>,
+    maximum_results: usize,
+) -> Vec<ProviderInstrumentSummary> {
+    products
+        .iter()
+        .filter(|product| exchange.is_none_or(|exchange| product.exchange == exchange))
+        .take(maximum_results)
+        .cloned()
+        .collect()
 }
 
 /// Catalog commands sent on the one shared ticker login.
@@ -337,10 +419,19 @@ impl CatalogSearchRequest {
 /// consumers reuse the same generations. Each command sent to the adapter
 /// therefore carries a unique wire generation, and adapter callbacks are
 /// routed only by that wire generation.
+///
+/// The adapter session answers one catalog command at a time, so at most one
+/// search is sent to it. Searches arriving meanwhile wait here, at most one per
+/// consumer (bounded by the coordinator's consumer registry): a consumer's
+/// newer search replaces its waiting one, so typing never queues requests
+/// behind a slow answer. Selections are sent immediately.
 #[derive(Default)]
 struct CatalogCommands {
     last_wire: Option<NonZeroUsize>,
-    searches: BTreeMap<NonZeroUsize, CatalogIssuer>,
+    search: Option<SentSearch>,
+    queued_searches: VecDeque<SearchProviderInstruments>,
+    /// Answers empty queries without a session command until the session ends.
+    listing: Option<CachedListing>,
     selections: BTreeMap<NonZeroUsize, CatalogIssuer>,
     /// Completed searches a selection may still name, oldest first. The
     /// adapter session retains the same number of completed searches.
@@ -367,7 +458,7 @@ impl CatalogCommands {
             .ok_or(CatalogDispatchFailure::InvalidRequest)?;
         let wire = self.mint()?;
         if search.query.trim().is_empty() {
-            return RithmicProductListing::try_new(wire, maximum_results)
+            return RithmicProductListing::try_new(wire, nonzero(MAXIMUM_RITHMIC_SEARCH_RESULTS))
                 .map(CatalogSearchRequest::Products)
                 .map_err(|_| CatalogDispatchFailure::InvalidRequest);
         }
@@ -378,7 +469,7 @@ impl CatalogCommands {
         RithmicSymbolSearch::try_new(
             wire,
             search.query.to_ascii_uppercase(),
-            None,
+            search.exchange.clone(),
             None,
             Some(InstrumentType::Future),
             SearchPattern::Equals,
@@ -415,14 +506,99 @@ impl CatalogCommands {
         .map_err(|_| CatalogDispatchFailure::InvalidRequest)
     }
 
-    fn search_sent(&mut self, wire: NonZeroUsize, search: &SearchProviderInstruments) {
-        self.searches.insert(
+    fn search_sent(
+        &mut self,
+        wire: NonZeroUsize,
+        lane: SearchLane,
+        session: SessionGeneration,
+        search: &SearchProviderInstruments,
+        sent: Instant,
+    ) {
+        self.search = Some(SentSearch {
+            issuer: search_issuer(search),
             wire,
-            CatalogIssuer {
-                consumer_id: search.consumer_id,
-                generation: search.search_generation,
-            },
-        );
+            session,
+            lane,
+            exchange: search.exchange.clone(),
+            maximum_results: bounded_search_results(search.maximum_results)
+                .map_or(0, NonZeroUsize::get),
+            sent,
+        });
+    }
+
+    const fn search_in_flight(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Holds a search until the one in flight is answered, returning the
+    /// consumer's waiting search it replaces.
+    fn queue_search(
+        &mut self,
+        search: SearchProviderInstruments,
+    ) -> Option<SearchProviderInstruments> {
+        if let Some(queued) = self
+            .queued_searches
+            .iter_mut()
+            .find(|queued| queued.consumer_id == search.consumer_id)
+        {
+            return Some(mem::replace(queued, search));
+        }
+        self.queued_searches.push_back(search);
+        None
+    }
+
+    fn remove_queued_search(&mut self, consumer_id: u64) -> Option<SearchProviderInstruments> {
+        let index = self
+            .queued_searches
+            .iter()
+            .position(|queued| queued.consumer_id == consumer_id)?;
+        self.queued_searches.remove(index)
+    }
+
+    fn next_queued_search(&mut self) -> Option<SearchProviderInstruments> {
+        self.queued_searches.pop_front()
+    }
+
+    /// The cached listing's answer to an empty-query search on `session`.
+    fn cached_listing(
+        &self,
+        session: Option<SessionGeneration>,
+        search: &SearchProviderInstruments,
+    ) -> Option<Vec<ProviderInstrumentSummary>> {
+        let listing = self.listing.as_ref()?;
+        if !search.query.trim().is_empty() || session != Some(listing.session) {
+            return None;
+        }
+        let maximum_results = bounded_search_results(search.maximum_results)?;
+        Some(listing_answer(
+            &listing.products,
+            search.exchange.as_deref(),
+            maximum_results.get(),
+        ))
+    }
+
+    /// Releases the search in flight when its session is no longer active,
+    /// because no callback from that session can answer it.
+    fn take_lost_search(&mut self, active: Option<SessionGeneration>) -> Option<SentSearch> {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|search| Some(search.session) != active)
+        {
+            return self.search.take();
+        }
+        None
+    }
+
+    fn take_search(&mut self, wire: NonZeroUsize) -> Option<SentSearch> {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.wire == wire)
+        {
+            return self.search.take();
+        }
+        None
     }
 
     fn selection_sent(&mut self, wire: NonZeroUsize, selection: &SelectProviderInstrument) {
@@ -447,49 +623,69 @@ impl CatalogCommands {
             .map(|(_, wire)| *wire)
     }
 
-    fn search_completed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
-        let issuer = self.searches.remove(&wire)?;
+    fn search_completed(&mut self, wire: NonZeroUsize) -> Option<SentSearch> {
+        let search = self.take_search(wire)?;
         if self.completed_searches.len() >= MAXIMUM_RITHMIC_RETAINED_SEARCHES {
             self.completed_searches.pop_front();
         }
-        self.completed_searches.push_back((issuer, wire));
-        Some(issuer)
+        self.completed_searches.push_back((search.issuer, wire));
+        Some(search)
     }
 
-    /// A product listing holds no selectable instruments, so it is not
+    /// Caches the session's unfiltered listing and returns the consumer's
+    /// answer. A product listing holds no selectable instruments, so it is not
     /// retained and cannot evict a completed search a selection may name.
-    fn listing_completed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
-        self.searches.remove(&wire)
+    fn listing_completed(
+        &mut self,
+        wire: NonZeroUsize,
+        session: SessionGeneration,
+        products: Vec<ProviderInstrumentSummary>,
+    ) -> Option<(SentSearch, Vec<ProviderInstrumentSummary>)> {
+        let search = self.take_search(wire)?;
+        let answer = listing_answer(
+            &products,
+            search.exchange.as_deref(),
+            search.maximum_results,
+        );
+        self.listing = Some(CachedListing { session, products });
+        Some((search, answer))
     }
 
     fn selection_installed(&mut self, wire: NonZeroUsize) -> Option<CatalogIssuer> {
         self.selections.remove(&wire)
     }
 
-    /// Removes a rejected command, reporting whether it was a selection.
-    fn rejected(&mut self, wire: NonZeroUsize) -> Option<(CatalogIssuer, bool)> {
-        if let Some(issuer) = self.searches.remove(&wire) {
-            return Some((issuer, false));
+    fn rejected(&mut self, wire: NonZeroUsize) -> Option<RejectedCommand> {
+        if let Some(search) = self.take_search(wire) {
+            return Some(RejectedCommand::Search(search));
         }
-        self.selections.remove(&wire).map(|issuer| (issuer, true))
+        self.selections
+            .remove(&wire)
+            .map(RejectedCommand::Selection)
     }
 
     fn has_pending(&self) -> bool {
-        !self.searches.is_empty() || !self.selections.is_empty()
+        self.search.is_some() || !self.queued_searches.is_empty() || !self.selections.is_empty()
     }
 
     /// Ends the adapter session the commands were sent on. Returns every
     /// pending command, searches first, flagging selections, and forgets the
-    /// completed searches because a new session retains none.
+    /// completed searches and the cached listing because a new session
+    /// retains neither.
     fn retire(&mut self) -> Vec<(CatalogIssuer, bool)> {
         self.completed_searches.clear();
-        let searches = mem::take(&mut self.searches)
-            .into_values()
-            .map(|issuer| (issuer, false));
+        self.listing = None;
+        let sent = self.search.take().map(|search| {
+            search.log_unanswered();
+            (search.issuer, false)
+        });
+        let queued = mem::take(&mut self.queued_searches)
+            .into_iter()
+            .map(|search| (search_issuer(&search), false));
         let selections = mem::take(&mut self.selections)
             .into_values()
             .map(|issuer| (issuer, true));
-        searches.chain(selections).collect()
+        sent.into_iter().chain(queued).chain(selections).collect()
     }
 }
 
@@ -593,12 +789,14 @@ fn run_catalog_session(
                 .map_or_else(|| channels.catalog_controls.try_recv(), Ok);
             match control {
                 Ok(control) => dispatch_catalog_control(
-                    &runtime,
-                    &events,
+                    &AdapterSession {
+                        runtime: &runtime,
+                        events: &events,
+                    },
                     channels.catalog_publications,
                     generation,
                     &mut commands,
-                    &control,
+                    control,
                     false,
                 ),
                 Err(TryRecvError::Empty) => break,
@@ -624,6 +822,15 @@ fn run_catalog_session(
                 channels.publish_catalog(selection);
             }
         }
+        dispatch_queued_searches(
+            &AdapterSession {
+                runtime: &runtime,
+                events: &events,
+            },
+            channels.catalog_publications,
+            generation,
+            &mut commands,
+        );
         if catalog_session_failed(&mut runtime, &events, &mut retries) {
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
@@ -702,56 +909,239 @@ fn catalog_selection_subscription(realtime: bool) -> Option<RithmicReadOnlySubsc
     RithmicReadOnlySubscription::try_new(realtime, true, realtime).ok()
 }
 
-fn dispatch_catalog_control(
-    runtime: &Runtime,
-    events: &RithmicProviderEvents,
-    publications: &CatalogPublisher<RithmicCatalogEvent>,
-    provider_generation: u64,
-    commands: &mut CatalogCommands,
-    control: &RithmicCatalogControl,
-    realtime_selection: bool,
-) {
-    if let Err(failure) =
-        send_catalog_control(runtime, events, commands, control, realtime_selection)
-    {
-        reject_undispatched(publications, provider_generation, control, failure);
+/// The adapter session catalog commands are sent on.
+trait CatalogSession {
+    fn active_generation(&self) -> Option<SessionGeneration>;
+
+    fn search_symbols(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicSymbolSearch,
+    ) -> Result<(), RithmicProviderCommandError>;
+
+    fn list_products(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicProductListing,
+    ) -> Result<(), RithmicProviderCommandError>;
+
+    fn select_instrument(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicInstrumentSelection,
+    ) -> Result<(), RithmicProviderCommandError>;
+}
+
+struct AdapterSession<'a> {
+    runtime: &'a Runtime,
+    events: &'a RithmicProviderEvents,
+}
+
+impl CatalogSession for AdapterSession<'_> {
+    fn active_generation(&self) -> Option<SessionGeneration> {
+        active_generation(self.runtime)
+    }
+
+    fn search_symbols(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicSymbolSearch,
+    ) -> Result<(), RithmicProviderCommandError> {
+        self.events.search_symbols(generation, request)
+    }
+
+    fn list_products(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicProductListing,
+    ) -> Result<(), RithmicProviderCommandError> {
+        self.events.list_products(generation, request)
+    }
+
+    fn select_instrument(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicInstrumentSelection,
+    ) -> Result<(), RithmicProviderCommandError> {
+        self.events.select_instrument(generation, request)
     }
 }
 
-fn send_catalog_control(
-    runtime: &Runtime,
-    events: &RithmicProviderEvents,
+fn dispatch_catalog_control(
+    session: &impl CatalogSession,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
     commands: &mut CatalogCommands,
-    control: &RithmicCatalogControl,
+    control: RithmicCatalogControl,
     realtime_selection: bool,
-) -> Result<(), CatalogDispatchFailure> {
-    let session_generation =
-        active_generation(runtime).ok_or(CatalogDispatchFailure::NoActiveSession)?;
+) {
     match control {
         RithmicCatalogControl::Search(search) => {
-            let request = commands.search_request(search)?;
-            let wire = request.generation();
-            match request {
-                CatalogSearchRequest::Symbols(request) => {
-                    events.search_symbols(session_generation, request)
-                }
-                CatalogSearchRequest::Products(request) => {
-                    events.list_products(session_generation, request)
-                }
-            }
-            .map_err(CatalogDispatchFailure::Command)?;
-            commands.search_sent(wire, search);
+            submit_search(session, publications, provider_generation, commands, search);
         }
         RithmicCatalogControl::Select(selection) => {
-            let request = commands.selection_request(selection, realtime_selection)?;
-            let wire = request.generation();
-            events
-                .select_instrument(session_generation, request)
-                .map_err(CatalogDispatchFailure::Command)?;
-            commands.selection_sent(wire, selection);
+            if let Err(failure) = send_selection(session, commands, &selection, realtime_selection)
+            {
+                reject_undispatched(
+                    publications,
+                    provider_generation,
+                    &RithmicCatalogControl::Select(selection),
+                    failure,
+                );
+            }
         }
     }
+}
+
+/// Answers a search from the cached listing, holds it behind the search in
+/// flight, or sends it to the session.
+fn submit_search(
+    session: &impl CatalogSession,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
+    commands: &mut CatalogCommands,
+    search: SearchProviderInstruments,
+) {
+    release_lost_search(session, publications, provider_generation, commands);
+    if let Some(instruments) = commands.cached_listing(session.active_generation(), &search) {
+        if let Some(replaced) = commands.remove_queued_search(search.consumer_id) {
+            reject_superseded_search(publications, provider_generation, &replaced);
+        }
+        diagnostic!(
+            "Aeris Rithmic catalog listing search answered from cache with {} results",
+            instruments.len()
+        );
+        publish_search_result(
+            publications,
+            provider_generation,
+            search_issuer(&search),
+            instruments,
+        );
+        return;
+    }
+    if commands.search_in_flight() {
+        if let Some(replaced) = commands.queue_search(search) {
+            reject_superseded_search(publications, provider_generation, &replaced);
+        }
+        return;
+    }
+    if let Err(failure) = send_search(session, commands, &search) {
+        reject_undispatched(
+            publications,
+            provider_generation,
+            &RithmicCatalogControl::Search(search),
+            failure,
+        );
+    }
+}
+
+/// Sends waiting searches, oldest consumer first, until one is in flight.
+fn dispatch_queued_searches(
+    session: &impl CatalogSession,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
+    commands: &mut CatalogCommands,
+) {
+    if !commands.search_in_flight() && commands.queued_searches.is_empty() {
+        return;
+    }
+    release_lost_search(session, publications, provider_generation, commands);
+    while !commands.search_in_flight()
+        && let Some(search) = commands.next_queued_search()
+    {
+        submit_search(session, publications, provider_generation, commands, search);
+    }
+}
+
+fn release_lost_search(
+    session: &impl CatalogSession,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
+    commands: &mut CatalogCommands,
+) {
+    if let Some(lost) = commands.take_lost_search(session.active_generation()) {
+        lost.log_unanswered();
+        reject_catalog_generation(
+            publications,
+            lost.issuer,
+            Some(provider_generation),
+            false,
+            ProviderCatalogRejectionReason::DispatchUnavailable,
+        );
+    }
+}
+
+fn reject_superseded_search(
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
+    search: &SearchProviderInstruments,
+) {
+    reject_catalog_generation(
+        publications,
+        search_issuer(search),
+        Some(provider_generation),
+        false,
+        ProviderCatalogRejectionReason::SupersededSearch,
+    );
+}
+
+fn send_search(
+    session: &impl CatalogSession,
+    commands: &mut CatalogCommands,
+    search: &SearchProviderInstruments,
+) -> Result<(), CatalogDispatchFailure> {
+    let session_generation = session
+        .active_generation()
+        .ok_or(CatalogDispatchFailure::NoActiveSession)?;
+    let request = commands.search_request(search)?;
+    let (wire, lane) = (request.generation(), request.lane());
+    let sent = Instant::now();
+    match request {
+        CatalogSearchRequest::Symbols(request) => {
+            session.search_symbols(session_generation, request)
+        }
+        CatalogSearchRequest::Products(request) => {
+            session.list_products(session_generation, request)
+        }
+    }
+    .map_err(CatalogDispatchFailure::Command)?;
+    commands.search_sent(wire, lane, session_generation, search, sent);
     Ok(())
+}
+
+fn send_selection(
+    session: &impl CatalogSession,
+    commands: &mut CatalogCommands,
+    selection: &SelectProviderInstrument,
+    realtime_selection: bool,
+) -> Result<(), CatalogDispatchFailure> {
+    let session_generation = session
+        .active_generation()
+        .ok_or(CatalogDispatchFailure::NoActiveSession)?;
+    let request = commands.selection_request(selection, realtime_selection)?;
+    let wire = request.generation();
+    session
+        .select_instrument(session_generation, request)
+        .map_err(CatalogDispatchFailure::Command)?;
+    commands.selection_sent(wire, selection);
+    Ok(())
+}
+
+fn publish_search_result(
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
+    provider_generation: u64,
+    issuer: CatalogIssuer,
+    instruments: Vec<ProviderInstrumentSummary>,
+) {
+    let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
+        ProviderInstrumentSearchResult {
+            consumer_id: issuer.consumer_id,
+            provider: "rithmic".to_string(),
+            provider_generation,
+            search_generation: issuer.generation,
+            instruments,
+        },
+    ));
 }
 
 fn reject_undispatched(
@@ -772,6 +1162,34 @@ fn reject_undispatched(
     );
 }
 
+fn contract_summary(result: SymbolSearchResult) -> ProviderInstrumentSummary {
+    ProviderInstrumentSummary {
+        kind: ProviderInstrumentKind::Instrument,
+        display_symbol: result.symbol.clone(),
+        symbol: result.symbol,
+        exchange: result.exchange,
+        name: result.name,
+        product_code: result.product_code,
+        instrument_type: result.instrument_type,
+        expiration_date: result.expiration_date,
+        asset_class: None,
+    }
+}
+
+fn product_summary(product: ProductCodeResult) -> ProviderInstrumentSummary {
+    ProviderInstrumentSummary {
+        kind: ProviderInstrumentKind::Product,
+        symbol: product.product_code.clone(),
+        display_symbol: product.product_code.clone(),
+        exchange: product.exchange,
+        name: product.name,
+        product_code: Some(product.product_code),
+        instrument_type: None,
+        expiration_date: None,
+        asset_class: Some(LISTED_PRODUCT_ASSET_CLASS.to_string()),
+    }
+}
+
 fn publish_catalog_callback(
     publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
@@ -784,65 +1202,38 @@ fn publish_catalog_callback(
             symbols,
             ..
         } => {
-            let issuer = commands.search_completed(search_generation)?;
+            let search = commands.search_completed(search_generation)?;
             let mut instruments = symbols
                 .results
                 .into_iter()
-                .map(|result| ProviderInstrumentSummary {
-                    kind: ProviderInstrumentKind::Instrument,
-                    display_symbol: result.symbol.clone(),
-                    symbol: result.symbol,
-                    exchange: result.exchange,
-                    name: result.name,
-                    product_code: result.product_code,
-                    instrument_type: result.instrument_type,
-                    expiration_date: result.expiration_date,
-                    asset_class: None,
-                })
+                .map(contract_summary)
                 .collect::<Vec<_>>();
             instruments.sort_by(front_month_first);
-            let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
-                ProviderInstrumentSearchResult {
-                    consumer_id: issuer.consumer_id,
-                    provider: "rithmic".to_string(),
-                    provider_generation,
-                    search_generation: issuer.generation,
-                    instruments,
-                },
-            ));
+            search.log_answered(instruments.len());
+            publish_search_result(
+                publications,
+                provider_generation,
+                search.issuer,
+                instruments,
+            );
             None
         }
         AdapterCatalogEvent::ProductsListed {
+            session_generation,
             listing_generation,
             products,
-            ..
         } => {
-            let issuer = commands.listing_completed(listing_generation)?;
             // The adapter orders featured products first, then the rest by code.
-            let instruments = products
-                .products
-                .into_iter()
-                .map(|product| ProviderInstrumentSummary {
-                    kind: ProviderInstrumentKind::Product,
-                    symbol: product.product_code.clone(),
-                    display_symbol: product.product_code.clone(),
-                    exchange: product.exchange,
-                    name: product.name,
-                    product_code: Some(product.product_code),
-                    instrument_type: None,
-                    expiration_date: None,
-                    asset_class: Some(LISTED_PRODUCT_ASSET_CLASS.to_string()),
-                })
-                .collect();
-            let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
-                ProviderInstrumentSearchResult {
-                    consumer_id: issuer.consumer_id,
-                    provider: "rithmic".to_string(),
-                    provider_generation,
-                    search_generation: issuer.generation,
-                    instruments,
-                },
-            ));
+            let products = products.products.into_iter().map(product_summary).collect();
+            let (search, instruments) =
+                commands.listing_completed(listing_generation, session_generation, products)?;
+            search.log_answered(instruments.len());
+            publish_search_result(
+                publications,
+                provider_generation,
+                search.issuer,
+                instruments,
+            );
             None
         }
         AdapterCatalogEvent::SelectionInstalled {
@@ -868,7 +1259,13 @@ fn publish_catalog_callback(
             reason,
             ..
         } => {
-            let (issuer, selection) = commands.rejected(command_generation)?;
+            let (issuer, selection) = match commands.rejected(command_generation)? {
+                RejectedCommand::Search(search) => {
+                    search.log_unanswered();
+                    (search.issuer, false)
+                }
+                RejectedCommand::Selection(issuer) => (issuer, true),
+            };
             reject_catalog_generation(
                 publications,
                 issuer,
@@ -946,16 +1343,17 @@ fn protocol_instrument(
     }
 }
 
+const fn search_issuer(search: &SearchProviderInstruments) -> CatalogIssuer {
+    CatalogIssuer {
+        consumer_id: search.consumer_id,
+        generation: search.search_generation,
+    }
+}
+
 /// The issuer of a catalog control and whether it is a selection.
 const fn catalog_issuer(control: &RithmicCatalogControl) -> (CatalogIssuer, bool) {
     match control {
-        RithmicCatalogControl::Search(search) => (
-            CatalogIssuer {
-                consumer_id: search.consumer_id,
-                generation: search.search_generation,
-            },
-            false,
-        ),
+        RithmicCatalogControl::Search(search) => (search_issuer(search), false),
         RithmicCatalogControl::Select(selection) => (
             CatalogIssuer {
                 consumer_id: selection.consumer_id,
@@ -1367,12 +1765,11 @@ fn handle_live_catalog(
     loop {
         match channels.catalog_controls.try_recv() {
             Ok(control) => dispatch_catalog_control(
-                runtime,
-                events,
+                &AdapterSession { runtime, events },
                 channels.catalog_publications,
                 generation,
                 commands,
-                &control,
+                control,
                 true,
             ),
             Err(TryRecvError::Empty) => break,
@@ -1399,6 +1796,12 @@ fn handle_live_catalog(
             );
         }
     }
+    dispatch_queued_searches(
+        &AdapterSession { runtime, events },
+        channels.catalog_publications,
+        generation,
+        commands,
+    );
     None
 }
 
@@ -2080,17 +2483,22 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::{Cell, RefCell},
         num::{NonZeroU64, NonZeroUsize},
         sync::mpsc,
+        time::Instant,
     };
 
     use super::{
         CatalogCommands, CatalogDispatchFailure, CatalogIssuer, CatalogSearchRequest,
-        EnvironmentState, MAXIMUM_RITHMIC_RETAINED_SEARCHES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
-        RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, bounded_search_results,
-        catalog_selection_subscription, next_generation, publish_catalog_callback,
-        queue_depth_snapshot, reject_catalog_generation, reject_pending_catalog,
-        reject_undispatched, retire_pending_catalog_generation,
+        CatalogSession, EnvironmentState, MAXIMUM_RITHMIC_RETAINED_SEARCHES,
+        MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogControl, RithmicCatalogEvent,
+        RithmicInstrumentSelection, RithmicProductListing, RithmicProviderCommandError,
+        RithmicRealtimeControl, RithmicSymbolSearch, SearchLane, SentSearch, SessionGeneration,
+        bounded_search_results, catalog_selection_subscription, dispatch_catalog_control,
+        dispatch_queued_searches, next_generation, publish_catalog_callback, queue_depth_snapshot,
+        reject_catalog_generation, reject_pending_catalog, reject_undispatched,
+        retire_pending_catalog_generation,
     };
     use aeris_contracts::{
         InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentKind,
@@ -2230,6 +2638,7 @@ mod tests {
             query: query.into(),
             maximum_results: 32,
             categories: InstrumentSearchCategories::ALL,
+            exchange: None,
         }
     }
 
@@ -2251,14 +2660,195 @@ mod tests {
         }
     }
 
+    fn session_generation(value: u64) -> SessionGeneration {
+        SessionGeneration::new(NonZeroU64::new(value).expect("session generations are non-zero"))
+    }
+
+    fn sent_search(issuer: CatalogIssuer, wire: NonZeroUsize) -> SentSearch {
+        SentSearch {
+            issuer,
+            wire,
+            session: session_generation(1),
+            lane: SearchLane::Symbols,
+            exchange: None,
+            maximum_results: 32,
+            sent: Instant::now(),
+        }
+    }
+
     fn issue_search(
         commands: &mut CatalogCommands,
         search: &SearchProviderInstruments,
     ) -> NonZeroUsize {
         let request = commands.search_request(search).expect("search validates");
         let wire = request.generation();
-        commands.search_sent(wire, search);
+        commands.search_sent(
+            wire,
+            request.lane(),
+            session_generation(1),
+            search,
+            Instant::now(),
+        );
         wire
+    }
+
+    /// A command the adapter session received.
+    #[derive(Debug, Eq, PartialEq)]
+    enum SessionCommand {
+        Symbols {
+            query: String,
+            exchange: Option<String>,
+        },
+        Listing {
+            maximum_results: usize,
+        },
+        Selection,
+    }
+
+    /// An adapter session that records what reaches it.
+    struct RecordingSession {
+        generation: Cell<Option<SessionGeneration>>,
+        received: RefCell<Vec<(NonZeroUsize, SessionCommand)>>,
+    }
+
+    impl RecordingSession {
+        fn on(generation: u64) -> Self {
+            Self {
+                generation: Cell::new(Some(session_generation(generation))),
+                received: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn take(&self) -> Vec<(NonZeroUsize, SessionCommand)> {
+            self.received.take()
+        }
+    }
+
+    impl CatalogSession for RecordingSession {
+        fn active_generation(&self) -> Option<SessionGeneration> {
+            self.generation.get()
+        }
+
+        fn search_symbols(
+            &self,
+            _: SessionGeneration,
+            request: RithmicSymbolSearch,
+        ) -> Result<(), RithmicProviderCommandError> {
+            self.received.borrow_mut().push((
+                request.generation(),
+                SessionCommand::Symbols {
+                    query: request.query().to_string(),
+                    exchange: request.exchange().map(str::to_string),
+                },
+            ));
+            Ok(())
+        }
+
+        fn list_products(
+            &self,
+            _: SessionGeneration,
+            request: RithmicProductListing,
+        ) -> Result<(), RithmicProviderCommandError> {
+            self.received.borrow_mut().push((
+                request.generation(),
+                SessionCommand::Listing {
+                    maximum_results: request.maximum_results().get(),
+                },
+            ));
+            Ok(())
+        }
+
+        fn select_instrument(
+            &self,
+            _: SessionGeneration,
+            request: RithmicInstrumentSelection,
+        ) -> Result<(), RithmicProviderCommandError> {
+            self.received
+                .borrow_mut()
+                .push((request.generation(), SessionCommand::Selection));
+            Ok(())
+        }
+    }
+
+    fn submit(
+        session: &RecordingSession,
+        publications: &super::CatalogPublisher<RithmicCatalogEvent>,
+        commands: &mut CatalogCommands,
+        search: SearchProviderInstruments,
+    ) {
+        dispatch_catalog_control(
+            session,
+            publications,
+            7,
+            commands,
+            RithmicCatalogControl::Search(search),
+            false,
+        );
+    }
+
+    fn symbols(query: &str) -> SessionCommand {
+        SessionCommand::Symbols {
+            query: query.to_string(),
+            exchange: None,
+        }
+    }
+
+    fn listed(products: &[(&str, &str)]) -> CollectedProducts {
+        CollectedProducts {
+            products: products
+                .iter()
+                .map(|(product_code, exchange)| ProductCodeResult {
+                    product_code: (*product_code).to_string(),
+                    exchange: (*exchange).to_string(),
+                    name: None,
+                })
+                .collect(),
+            duplicate_count: 0,
+        }
+    }
+
+    fn complete_listing(
+        publications: &super::CatalogPublisher<RithmicCatalogEvent>,
+        commands: &mut CatalogCommands,
+        session_generation: u64,
+        wire: NonZeroUsize,
+        products: CollectedProducts,
+    ) {
+        let callback = AdapterCatalogEvent::products_listed(
+            NonZeroU64::new(session_generation).expect("non-zero session"),
+            wire,
+            products,
+        );
+        assert!(publish_catalog_callback(publications, 7, callback, commands).is_none());
+    }
+
+    /// Consumer, search generation and symbols of one published answer.
+    fn answer(event: RithmicCatalogEvent) -> (u64, u64, Vec<String>) {
+        let result = search_result(event);
+        (
+            result.consumer_id,
+            result.search_generation,
+            result
+                .instruments
+                .into_iter()
+                .map(|instrument| format!("{}@{}", instrument.symbol, instrument.exchange))
+                .collect(),
+        )
+    }
+
+    /// Consumer, command generation and reason of one published search rejection.
+    fn search_rejection(event: RithmicCatalogEvent) -> (u64, u64, ProviderCatalogRejectionReason) {
+        match event {
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: false,
+            } => (
+                rejection.consumer_id,
+                rejection.command_generation,
+                rejection.reason,
+            ),
+            _ => panic!("expected a search rejection"),
+        }
     }
 
     fn found(symbols: &[(&str, &str, &str, Option<&str>)]) -> CollectedSymbols {
@@ -2376,8 +2966,10 @@ mod tests {
     #[test]
     fn retired_generation_rejects_pending_searches_and_selections() {
         let (publications, published) = publications(4);
-        let mut commands = CatalogCommands::default();
-        commands.searches.insert(wire(2), issuer(41, 2));
+        let mut commands = CatalogCommands {
+            search: Some(sent_search(issuer(41, 2), wire(2))),
+            ..CatalogCommands::default()
+        };
         commands.selections.insert(wire(3), issuer(42, 3));
         commands
             .completed_searches
@@ -2411,8 +3003,10 @@ mod tests {
     #[test]
     fn retry_advances_generation_and_rejects_every_pending_catalog_command() {
         let (publications, published) = publications(2);
-        let mut commands = CatalogCommands::default();
-        commands.searches.insert(wire(2), issuer(41, 2));
+        let mut commands = CatalogCommands {
+            search: Some(sent_search(issuer(41, 2), wire(2))),
+            ..CatalogCommands::default()
+        };
         commands.selections.insert(wire(3), issuer(42, 3));
         commands
             .completed_searches
@@ -2437,8 +3031,10 @@ mod tests {
     #[test]
     fn rejection_lane_comes_from_the_command_that_holds_the_wire_generation() {
         let (publications, published) = publications(2);
-        let mut commands = CatalogCommands::default();
-        commands.searches.insert(wire(2), issuer(41, 2));
+        let mut commands = CatalogCommands {
+            search: Some(sent_search(issuer(41, 2), wire(2))),
+            ..CatalogCommands::default()
+        };
         commands.selections.insert(wire(3), issuer(42, 2));
         let rejected = |wire, reason| {
             AdapterCatalogEvent::command_rejected(Some(NonZeroU64::MIN), wire, reason)
@@ -2490,28 +3086,37 @@ mod tests {
         let (publications, published) = publications(2);
         let mut commands = CatalogCommands::default();
         let first = issue_search(&mut commands, &search_control(41, 1, "MNQ"));
-        let second = issue_search(&mut commands, &search_control(42, 1, "ES"));
-        assert_ne!(first, second);
-
-        complete_search(
-            &publications,
-            &mut commands,
-            second,
-            found(&[("ESZ6", "CME", "ES", Some("20261218"))]),
-        );
         complete_search(
             &publications,
             &mut commands,
             first,
             found(&[("MNQZ6", "CME", "MNQ", Some("20261218"))]),
         );
+        let second = issue_search(&mut commands, &search_control(42, 1, "ES"));
+        assert_ne!(first, second);
+        complete_search(
+            &publications,
+            &mut commands,
+            first,
+            found(&[("ESZ6", "CME", "ES", Some("20261218"))]),
+        );
+        complete_search(
+            &publications,
+            &mut commands,
+            second,
+            found(&[("ESZ6", "CME", "ES", Some("20261218"))]),
+        );
 
-        let es = search_result(published.recv().expect("second consumer's result"));
         let mnq = search_result(published.recv().expect("first consumer's result"));
-        assert_eq!((es.consumer_id, es.search_generation), (42, 1));
-        assert_eq!(es.instruments[0].symbol, "ESZ6");
+        let es = search_result(published.recv().expect("second consumer's result"));
+        assert!(
+            published.try_recv().is_err(),
+            "an answered wire generation answers nobody again"
+        );
         assert_eq!((mnq.consumer_id, mnq.search_generation), (41, 1));
         assert_eq!(mnq.instruments[0].symbol, "MNQZ6");
+        assert_eq!((es.consumer_id, es.search_generation), (42, 1));
+        assert_eq!(es.instruments[0].symbol, "ESZ6");
         assert!(!commands.has_pending());
     }
 
@@ -2835,6 +3440,7 @@ mod tests {
                 query: "MNQ".into(),
                 maximum_results: 32,
                 categories: InstrumentSearchCategories::ALL,
+                exchange: None,
             }))
             .expect("search queued");
         realtime_sender
@@ -2860,6 +3466,317 @@ mod tests {
                 && rejection.command_generation == 5
                 && rejection.provider_generation == Some(9)
         ));
+    }
+
+    fn commands_of(sent: &[(NonZeroUsize, SessionCommand)]) -> Vec<&SessionCommand> {
+        sent.iter().map(|(_, command)| command).collect()
+    }
+
+    #[test]
+    fn only_the_latest_waiting_search_follows_the_one_in_flight() {
+        let (publications, published) = publications(8);
+        let session = RecordingSession::on(1);
+        let mut commands = CatalogCommands::default();
+
+        for (generation, query) in [(1, "MNQ"), (2, "MN"), (3, "M2K")] {
+            submit(
+                &session,
+                &publications,
+                &mut commands,
+                search_control(41, generation, query),
+            );
+        }
+
+        let first = session.take();
+        assert_eq!(commands_of(&first), [&symbols("MNQ")]);
+        assert_eq!(
+            search_rejection(published.try_recv().expect("replaced search is rejected")),
+            (41, 2, ProviderCatalogRejectionReason::SupersededSearch)
+        );
+        assert!(published.try_recv().is_err());
+
+        complete_search(
+            &publications,
+            &mut commands,
+            first[0].0,
+            found(&[("MNQZ6", "CME", "MNQ", Some("20261218"))]),
+        );
+        dispatch_queued_searches(&session, &publications, 7, &mut commands);
+        assert_eq!(
+            answer(published.try_recv().expect("first search is answered")),
+            (41, 1, vec!["MNQZ6@CME".to_string()])
+        );
+        let last = session.take();
+        assert_eq!(commands_of(&last), [&symbols("M2K")]);
+
+        dispatch_catalog_control(
+            &session,
+            &publications,
+            7,
+            &mut commands,
+            RithmicCatalogControl::Select(selection_control(41, 9, 1, "MNQZ6")),
+            false,
+        );
+        assert_eq!(
+            commands_of(&session.take()),
+            [&SessionCommand::Selection],
+            "a selection never waits behind a search"
+        );
+
+        complete_search(&publications, &mut commands, last[0].0, found(&[]));
+        dispatch_queued_searches(&session, &publications, 7, &mut commands);
+        assert_eq!(
+            answer(published.try_recv().expect("latest search is answered")),
+            (41, 3, Vec::new())
+        );
+        assert_eq!(session.take(), [] as [(NonZeroUsize, SessionCommand); 0]);
+        assert!(commands.search.is_none() && commands.queued_searches.is_empty());
+    }
+
+    #[test]
+    fn waiting_searches_are_sent_in_consumer_order_after_a_rejection() {
+        let (publications, published) = publications(8);
+        let session = RecordingSession::on(1);
+        let mut commands = CatalogCommands::default();
+        for (consumer, query) in [(40, "ES"), (41, "MNQ"), (42, "NQ")] {
+            submit(
+                &session,
+                &publications,
+                &mut commands,
+                search_control(consumer, 1, query),
+            );
+        }
+        let in_flight = session.take();
+        assert_eq!(commands_of(&in_flight), [&symbols("ES")]);
+
+        let rejected = AdapterCatalogEvent::command_rejected(
+            Some(NonZeroU64::MIN),
+            in_flight[0].0,
+            RithmicCatalogRejection::SearchRejected,
+        );
+        assert!(publish_catalog_callback(&publications, 7, rejected, &mut commands).is_none());
+        dispatch_queued_searches(&session, &publications, 7, &mut commands);
+        assert_eq!(
+            search_rejection(published.try_recv().expect("rejection is published")),
+            (40, 1, ProviderCatalogRejectionReason::SearchRejected)
+        );
+        let second = session.take();
+        assert_eq!(commands_of(&second), [&symbols("MNQ")]);
+
+        complete_search(&publications, &mut commands, second[0].0, found(&[]));
+        dispatch_queued_searches(&session, &publications, 7, &mut commands);
+        assert_eq!(answer(published.try_recv().expect("answer")).0, 41);
+        assert_eq!(commands_of(&session.take()), [&symbols("NQ")]);
+    }
+
+    #[test]
+    fn listing_is_cached_unfiltered_and_answers_empty_queries_without_the_session() {
+        let (publications, published) = publications(8);
+        let session = RecordingSession::on(1);
+        let mut commands = CatalogCommands::default();
+        let mut truncated = search_control(41, 1, "");
+        truncated.maximum_results = 1;
+        submit(&session, &publications, &mut commands, truncated);
+        let listing = session.take();
+        assert_eq!(
+            commands_of(&listing),
+            [&SessionCommand::Listing {
+                maximum_results: MAXIMUM_RITHMIC_SEARCH_RESULTS
+            }],
+            "the listing is requested at the session limit, not the consumer bound"
+        );
+        complete_listing(
+            &publications,
+            &mut commands,
+            1,
+            listing[0].0,
+            listed(&[("MNQ", "CME"), ("NQ", "CME"), ("CL", "NYMEX")]),
+        );
+        assert_eq!(
+            answer(published.try_recv().expect("listing answer")),
+            (41, 1, vec!["MNQ@CME".to_string()])
+        );
+
+        let mut nymex = search_control(42, 1, "  ");
+        nymex.exchange = Some("NYMEX".into());
+        submit(&session, &publications, &mut commands, nymex);
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(43, 1, ""),
+        );
+        assert!(session.take().is_empty(), "cached listings send no command");
+        assert_eq!(
+            answer(published.try_recv().expect("filtered answer")),
+            (42, 1, vec!["CL@NYMEX".to_string()])
+        );
+        assert_eq!(
+            answer(published.try_recv().expect("unfiltered answer")).2,
+            ["MNQ@CME", "NQ@CME", "CL@NYMEX"]
+        );
+
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(44, 1, "ES"),
+        );
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(45, 1, "NQ"),
+        );
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(45, 2, ""),
+        );
+        assert_eq!(commands_of(&session.take()), [&symbols("ES")]);
+        assert_eq!(
+            search_rejection(published.try_recv().expect("waiting search is replaced")),
+            (45, 1, ProviderCatalogRejectionReason::SupersededSearch)
+        );
+        assert_eq!(
+            answer(
+                published
+                    .try_recv()
+                    .expect("cached answer while a search is in flight")
+            )
+            .1,
+            2
+        );
+        assert!(commands.queued_searches.is_empty());
+    }
+
+    #[test]
+    fn cached_listing_is_not_reused_by_another_session_generation() {
+        let (publications, published) = publications(8);
+        let session = RecordingSession::on(1);
+        let mut commands = CatalogCommands::default();
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(41, 1, ""),
+        );
+        let listing = session.take();
+        complete_listing(
+            &publications,
+            &mut commands,
+            1,
+            listing[0].0,
+            listed(&[("MNQ", "CME")]),
+        );
+        let _ = published.try_recv().expect("listing answer");
+
+        session.generation.set(Some(session_generation(2)));
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(41, 2, ""),
+        );
+        assert_eq!(
+            commands_of(&session.take()),
+            [&SessionCommand::Listing {
+                maximum_results: MAXIMUM_RITHMIC_SEARCH_RESULTS
+            }]
+        );
+        assert!(published.try_recv().is_err());
+
+        reject_pending_catalog(&publications, 7, &mut commands);
+        assert!(
+            commands.listing.is_none(),
+            "a retired session keeps no listing"
+        );
+    }
+
+    #[test]
+    fn search_in_flight_on_a_replaced_session_is_rejected_and_the_queue_continues() {
+        let (publications, published) = publications(8);
+        let session = RecordingSession::on(1);
+        let mut commands = CatalogCommands::default();
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(41, 1, "MNQ"),
+        );
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(42, 1, "ES"),
+        );
+        assert_eq!(commands_of(&session.take()), [&symbols("MNQ")]);
+
+        session.generation.set(Some(session_generation(2)));
+        dispatch_queued_searches(&session, &publications, 7, &mut commands);
+
+        assert_eq!(
+            search_rejection(published.try_recv().expect("lost search is rejected")),
+            (41, 1, ProviderCatalogRejectionReason::DispatchUnavailable)
+        );
+        assert_eq!(commands_of(&session.take()), [&symbols("ES")]);
+        assert_eq!(
+            commands.search.as_ref().map(|search| search.session),
+            Some(session_generation(2))
+        );
+    }
+
+    #[test]
+    fn waiting_searches_are_rejected_when_the_session_retires() {
+        let (publications, published) = publications(8);
+        let session = RecordingSession::on(1);
+        let mut commands = CatalogCommands::default();
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(41, 1, "MNQ"),
+        );
+        submit(
+            &session,
+            &publications,
+            &mut commands,
+            search_control(42, 1, "ES"),
+        );
+
+        reject_pending_catalog(&publications, 7, &mut commands);
+
+        let rejected = published
+            .try_iter()
+            .map(search_rejection)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rejected,
+            [
+                (41, 1, ProviderCatalogRejectionReason::DispatchUnavailable),
+                (42, 1, ProviderCatalogRejectionReason::DispatchUnavailable),
+            ]
+        );
+        assert!(!commands.has_pending());
+    }
+
+    #[test]
+    fn symbol_search_carries_the_exchange_filter_to_the_session() {
+        let session = RecordingSession::on(1);
+        let (publications, _published) = publications(1);
+        let mut commands = CatalogCommands::default();
+        let mut search = search_control(41, 1, "mnq");
+        search.exchange = Some("CME".into());
+        submit(&session, &publications, &mut commands, search);
+
+        assert_eq!(
+            commands_of(&session.take()),
+            [&SessionCommand::Symbols {
+                query: "MNQ".into(),
+                exchange: Some("CME".into()),
+            }]
+        );
     }
 
     #[test]

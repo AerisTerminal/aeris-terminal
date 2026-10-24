@@ -22,6 +22,7 @@ fn run(market: &MarketService, symbol: &str, seconds: u64) -> Result<(), String>
             query: symbol.into(),
             maximum_results: 10,
             categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            exchange: None,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(seconds);

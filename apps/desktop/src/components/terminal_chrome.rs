@@ -515,7 +515,7 @@ pub(super) fn header_controls(
                     enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 },
                 provider: state.provider,
-                menu_provider: state.symbol_provider,
+                scope: SymbolSearchScope::All,
                 menu: InstrumentSelectorMenu {
                     keyboard_selection: 0,
                     keyboard_active: false,
@@ -523,9 +523,10 @@ pub(super) fn header_controls(
                 scroll: state.instrument_scroll,
                 target: SymbolSelectionTarget::Chart,
                 // The header trigger never renders the menu body that uses these.
-                connection_missing: false,
+                connect_provider: None,
                 provider_menu_open: false,
-                markets_flyout_open: false,
+                flyout_provider: None,
+                learned_exchanges: Vec::new(),
                 search_categories: aeris_contracts::InstrumentSearchCategories::ALL,
             },
             &state.theme,

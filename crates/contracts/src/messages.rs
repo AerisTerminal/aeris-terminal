@@ -1004,6 +1004,8 @@ pub struct SearchProviderInstruments {
     pub query: String,
     pub maximum_results: u32,
     pub categories: InstrumentSearchCategories,
+    /// Restricts the search to one of the provider's exchanges, as named by its results.
+    pub exchange: Option<String>,
 }
 
 /// Selects one exact instrument from the latest completed provider search.

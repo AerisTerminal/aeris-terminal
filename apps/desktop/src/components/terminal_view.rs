@@ -12,7 +12,6 @@ fn active_header_state(
     HeaderState {
         theme: *theme,
         provider: workspace.provider,
-        symbol_provider: workspace.symbol_provider,
         instrument_label: terminal_instrument_label(workspace),
         series_label: series_selector_label(workspace.selected_interval()),
         chart_type: workspace.chart_type(cx),
@@ -43,7 +42,7 @@ fn active_header_state(
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(
-            workspace.symbol_input.is_some() || !workspace.symbol_browser.results().is_empty(),
+            workspace.symbol_input.is_some() || workspace.symbol_browser.has_results(),
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
