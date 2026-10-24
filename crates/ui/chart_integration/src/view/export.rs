@@ -13,7 +13,7 @@ use aeris_charts_native::{
     ImageExportOptions, PreparedChartImage, measure_text, prepare_engine_image, register_font_data,
 };
 use aeris_charts_render::color::Color;
-use aeris_charts_render::draw_list::{Prim, RasterImage, TextAlign};
+use aeris_charts_render::draw_list::{ImageSampling, Prim, RasterImage, TextAlign};
 use aeris_design_system::{
     BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, ThemeColor, TypographyRole, brand_font_family,
     platform_font_stack, platform_typography,
@@ -220,9 +220,11 @@ impl ChartCapture {
         let top = y + height - BRAND_INSET * scale - logo_size;
         let logo = brand_logo(logo_size.to_u32().unwrap_or(1).max(1))?;
         overlay.push(Prim::Image {
+            source: logo.full_source(),
             image: logo,
             rect: [left, top, logo_size, logo_size],
             opacity: 1.0,
+            sampling: ImageSampling::Linear,
         });
         overlay.push(Prim::Text {
             x: left + logo_size + BRAND_GAP * scale,

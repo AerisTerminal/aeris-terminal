@@ -52,6 +52,15 @@ const PAIRED_CHOICES: [(&str, &str, &str); 3] = [
 ];
 /// A checkbox and the color it turns on, shown on one row.
 const TOGGLED_COLORS: [(&str, &str); 1] = [("fill_enabled", "fill_color")];
+/// A checkbox and the stroke it turns on (color, width and style), shown on one row.
+const TOGGLED_LINES: [(&str, [&str; 3]); 1] = [(
+    "middle_line_visible",
+    [
+        "middle_line_color",
+        "middle_line_width",
+        "middle_line_style",
+    ],
+)];
 /// The Extend choices over `extend_left` and `extend_right`.
 const EXTEND_CHOICES: [(&str, bool, bool); 4] = [
     ("Don't extend", false, false),
@@ -181,6 +190,8 @@ enum Row<'a> {
     ),
     /// A checkbox and the color it turns on.
     ToggledColor(&'a ChartDrawingProperty, &'a ChartDrawingProperty),
+    /// A checkbox and the stroke color, width and style it turns on.
+    ToggledLine(&'a ChartDrawingProperty, Vec<&'a ChartDrawingProperty>),
     Property(&'a ChartDrawingProperty),
 }
 
@@ -214,6 +225,13 @@ fn dialog_rows(properties: &[ChartDrawingProperty], tab: Group) -> Vec<Row<'_>> 
             .iter()
             .find(|(flag, color)| name == *flag || name == *color)
             .and_then(|&(flag, color)| Some((find(flag)?, find(color)?)));
+        let toggled_line = TOGGLED_LINES
+            .iter()
+            .find(|(flag, parts)| name == *flag || parts.contains(&name))
+            .and_then(|(flag, parts)| {
+                let parts = members(parts);
+                (!parts.is_empty()).then_some((find(flag)?, parts))
+            });
         let (row, taken): (Row<'_>, Vec<&str>) =
             if LINE_PARTS.contains(&name) && members(&LINE_PARTS).len() > 1 {
                 (Row::Line(members(&LINE_PARTS)), LINE_PARTS.to_vec())
@@ -234,6 +252,11 @@ fn dialog_rows(properties: &[ChartDrawingProperty], tab: Group) -> Vec<Row<'_>> 
                     Row::ToggledColor(flag, color),
                     vec![flag.name.as_str(), color.name.as_str()],
                 )
+            } else if let Some((flag, parts)) = toggled_line {
+                let taken = std::iter::once(flag.name.as_str())
+                    .chain(parts.iter().map(|part| part.name.as_str()))
+                    .collect();
+                (Row::ToggledLine(flag, parts), taken)
             } else if name == "text" && property.property_type == Type::String {
                 (Row::TextBody, vec![name])
             } else {
@@ -1585,17 +1608,20 @@ fn row_element(ui: DialogUi<'_>, row: &Row<'_>) -> Option<AnyElement> {
     Some(match row {
         Row::Line(parts) => field_row(
             "Line",
-            controls().children(parts.iter().map(|part| {
-                match part.property_type {
-                    Type::Color => property_color(ui, part),
-                    Type::Enum => enum_select(ui, part, COMPACT_SELECT_WIDTH).into_any_element(),
-                    _ => number_select(ui, part, NumberMenu::Width, COMPACT_SELECT_WIDTH)
-                        .into_any_element(),
-                }
-            })),
+            controls().children(parts.iter().map(|part| stroke_control(ui, part))),
             theme,
         )
         .into_any_element(),
+        Row::ToggledLine(flag, parts) => controls()
+            .min_h(px(FIELD_HEIGHT + 4.0))
+            .child(
+                div()
+                    .w(px(LABEL_WIDTH))
+                    .flex_none()
+                    .child(checkbox(ui, flag)),
+            )
+            .children(parts.iter().map(|part| stroke_control(ui, part)))
+            .into_any_element(),
         Row::Extend => field_row("Extend", extend_select(ui), theme).into_any_element(),
         Row::Font(parts) => controls()
             .min_h(px(FIELD_HEIGHT + 4.0))
@@ -1630,6 +1656,15 @@ fn row_element(ui: DialogUi<'_>, row: &Row<'_>) -> Option<AnyElement> {
             .into_any_element(),
         Row::Property(property) => property_row(ui, property)?,
     })
+}
+
+/// One stroke part: its color swatch, width menu or style menu.
+fn stroke_control(ui: DialogUi<'_>, part: &ChartDrawingProperty) -> AnyElement {
+    match part.property_type {
+        Type::Color => property_color(ui, part),
+        Type::Enum => enum_select(ui, part, COMPACT_SELECT_WIDTH).into_any_element(),
+        _ => number_select(ui, part, NumberMenu::Width, COMPACT_SELECT_WIDTH).into_any_element(),
+    }
 }
 
 /// Fib-style levels: a two-column grid of a checkbox, the value and the color per level.
@@ -2056,6 +2091,23 @@ mod tests {
                 None,
                 None,
             ),
+            named("border_visible", Group::Style, Type::Boolean, None, None),
+            named(
+                "middle_line_visible",
+                Group::Style,
+                Type::Boolean,
+                None,
+                None,
+            ),
+            named("middle_line_color", Group::Style, Type::Color, None, None),
+            named(
+                "middle_line_width",
+                Group::Style,
+                Type::Number,
+                Some(1.0),
+                Some(4.0),
+            ),
+            named("middle_line_style", Group::Style, Type::Enum, None, None),
             named("fill_enabled", Group::Style, Type::Boolean, None, None),
             named("fill_color", Group::Style, Type::Color, None, None),
             named("text_color", Group::Text, Type::Color, None, None),
@@ -2076,6 +2128,9 @@ mod tests {
                     Row::TextBody => "text".to_string(),
                     Row::Pair(label, _, _) => format!("pair:{label}"),
                     Row::ToggledColor(flag, _) => format!("toggle:{}", flag.name),
+                    Row::ToggledLine(flag, parts) => {
+                        format!("toggled_line:{}:{}", flag.name, parts.len())
+                    }
                     Row::Property(property) => property.name.clone(),
                 })
                 .collect()
@@ -2087,6 +2142,8 @@ mod tests {
                 "pair:Line ends",
                 "extend",
                 "middle_point_visible",
+                "border_visible",
+                "toggled_line:middle_line_visible:3",
                 "toggle:fill_enabled"
             ]
         );

@@ -242,6 +242,8 @@ pub enum ChartIndicator {
     Stochastic,
     Atr,
     VolumeProfile,
+    /// An Aeris Charts built-in study beyond the legacy native catalog.
+    Builtin(BuiltinIndicator),
 }
 
 /// Host-portable state for one indicator instance on a chart surface.
@@ -271,6 +273,9 @@ impl ChartIndicator {
         Self::VolumeProfile,
     ];
 
+    /// Distinct indicator kinds a chart can hold: the legacy catalog plus every built-in.
+    pub const CATALOG_LEN: usize = Self::ALL.len() + BuiltinIndicator::ALL.len();
+
     /// Returns the durable workspace identifier for this indicator kind.
     #[must_use]
     pub const fn identifier(self) -> &'static str {
@@ -287,6 +292,7 @@ impl ChartIndicator {
             Self::Stochastic => "stochastic",
             Self::Atr => "atr",
             Self::VolumeProfile => "volume_profile",
+            Self::Builtin(indicator) => indicator.identifier(),
         }
     }
 
@@ -306,7 +312,7 @@ impl ChartIndicator {
             "stochastic" => Self::Stochastic,
             "atr" => Self::Atr,
             "volume_profile" => Self::VolumeProfile,
-            _ => return None,
+            _ => return BuiltinIndicator::from_identifier(value).map(Self::Builtin),
         })
     }
 
@@ -326,6 +332,7 @@ impl ChartIndicator {
             Self::Stochastic => "Stochastic",
             Self::Atr => "Average True Range",
             Self::VolumeProfile => "Volume Profile (Visible Range)",
+            Self::Builtin(indicator) => indicator.label(),
         }
     }
 
@@ -342,12 +349,13 @@ impl ChartIndicator {
             Self::Macd => "Fast 12 · Slow 26 · Signal 9",
             Self::Stochastic => "%K 14 · %D 3",
             Self::VolumeProfile => "Rows 48 · Value area 70%",
+            Self::Builtin(indicator) => indicator.parameters(),
         }
     }
 
     fn from_engine_kind(kind: &IndicatorKind) -> Option<Self> {
         Some(match kind {
-            IndicatorKind::Vwap | IndicatorKind::VwapBands { .. } => Self::Vwap,
+            IndicatorKind::Vwap => Self::Vwap,
             IndicatorKind::Sma { .. } => Self::Sma,
             IndicatorKind::Ema { .. } => Self::Ema,
             IndicatorKind::EmaRibbon { .. } => Self::EmaRibbon,
@@ -357,7 +365,7 @@ impl ChartIndicator {
             IndicatorKind::Macd { .. } => Self::Macd,
             IndicatorKind::Stochastic { .. } => Self::Stochastic,
             IndicatorKind::Atr { .. } => Self::Atr,
-            _ => return None,
+            _ => return BuiltinIndicator::from_engine_kind(kind).map(Self::Builtin),
         })
     }
 
@@ -386,6 +394,7 @@ impl ChartIndicator {
                 d_period: 3,
             },
             Self::Atr => IndicatorKind::Atr { period: 14 },
+            Self::Builtin(indicator) => return indicator.engine_kind(),
         })
     }
 }
@@ -462,6 +471,9 @@ pub struct OrderFlowSettings {
     /// Current-book bars at the price pane's right edge; `None` while the indicator is not
     /// added.
     pub order_book_depth: Option<OrderBookDepthSettings>,
+    /// Recorded resting-book history drawn as a price by time heatmap under the price series;
+    /// `None` while the indicator is not added.
+    pub depth_heatmap: Option<DepthHeatmapSettings>,
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
@@ -477,6 +489,7 @@ impl Default for OrderFlowSettings {
             delta_histogram: DeltaHistogramSettings::default(),
             big_trades: None,
             order_book_depth: None,
+            depth_heatmap: None,
             ticks_per_row: 0,
         }
     }
@@ -553,6 +566,19 @@ impl Default for OrderBookDepthSettings {
             bid_color: None,
             ask_color: None,
         }
+    }
+}
+
+/// Durable depth heatmap settings. Aeris Charts draws the recorded book in the chart's up (bid)
+/// and down (ask) colors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepthHeatmapSettings {
+    pub visible: bool,
+}
+
+impl Default for DepthHeatmapSettings {
+    fn default() -> Self {
+        Self { visible: true }
     }
 }
 
@@ -1037,6 +1063,7 @@ enum LegendItem {
     OrderFlow(OrderFlowStudy),
     BigTrades,
     OrderBookDepth,
+    DepthHeatmap,
 }
 
 /// The volume indicator on a chart: the outputs of the Aeris Charts binding drawing it and the
@@ -1086,6 +1113,7 @@ impl LegendItem {
             Self::VolumeProfile => 1_u64 << 61,
             Self::BigTrades => 1_u64 << 60,
             Self::OrderBookDepth => 1_u64 << 59,
+            Self::DepthHeatmap => 1_u64 << 58,
         }
     }
 }
@@ -1214,6 +1242,7 @@ pub struct AerisChartView {
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
     order_book_depth_state: Option<OrderBookDepthState>,
+    depth_heatmap_state: Option<DepthHeatmapState>,
     product_bars: ProductPriceBars,
     legend_options: ChartLegendOptions,
     /// Host content placed under the symbol legend row, such as the trading host's order
@@ -1321,6 +1350,7 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             order_book_depth_state: None,
+            depth_heatmap_state: None,
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
@@ -1432,6 +1462,7 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             order_book_depth_state: None,
+            depth_heatmap_state: None,
             product_bars,
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
@@ -3471,11 +3502,15 @@ mod drawings;
 pub use drawings::{
     ChartDrawingAnchorError, ChartDrawingAnchorText, ChartDrawingSettings, drawing_color_hex,
 };
+mod builtin_indicators;
+pub use builtin_indicators::BuiltinIndicator;
 mod export;
 mod indicators;
 mod input;
 mod order_book_depth;
 use order_book_depth::OrderBookDepthState;
+mod depth_heatmap;
+use depth_heatmap::DepthHeatmapState;
 mod order_flow;
 pub use order_flow::classify_order_flow_sweeps;
 mod palette;

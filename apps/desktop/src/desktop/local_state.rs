@@ -875,6 +875,7 @@ mod tests {
                 bid_color: String::new(),
                 ask_color: "#EF5350".to_string(),
             }),
+            depth_heatmap: Some(false),
         }
     }
 

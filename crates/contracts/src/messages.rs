@@ -441,6 +441,9 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// which drew the default bars.
     #[prost(message, optional, tag = "13")]
     pub order_book_depth_options: Option<WorkspaceOrderBookDepthState>,
+    /// The depth heatmap; absent when the indicator is not added, otherwise whether it is shown.
+    #[prost(bool, optional, tag = "14")]
+    pub depth_heatmap: Option<bool>,
 }
 
 /// An empty color follows the chart default.

@@ -46,11 +46,13 @@ impl AerisChartView {
             let Some(kind) = indicator.engine_kind() else {
                 return Err(ChartIndicatorError::CreationRejected(indicator));
             };
-            self.engine.add_indicator_kind(
-                0,
-                kind,
-                (indicator == ChartIndicator::Vwap).then_some(self.volume_series),
-            )
+            let reads_volume = match indicator {
+                ChartIndicator::Vwap => true,
+                ChartIndicator::Builtin(builtin) => builtin.reads_volume(),
+                _ => false,
+            };
+            self.engine
+                .add_indicator_kind(0, kind, reads_volume.then_some(self.volume_series))
         };
         if ids.is_empty() {
             return Err(ChartIndicatorError::CreationRejected(indicator));
@@ -132,6 +134,7 @@ impl AerisChartView {
                 .any(|study| self.has_order_flow_study(study))
             || self.order_flow_settings.big_trades.is_some()
             || self.order_flow_settings.order_book_depth.is_some()
+            || self.order_flow_settings.depth_heatmap.is_some()
     }
     /// Removes every indicator. The product-owned price and volume series stay in place.
     pub fn clear_indicators(&mut self) -> bool {
@@ -146,6 +149,7 @@ impl AerisChartView {
         }
         cleared |= self.remove_big_trades();
         cleared |= self.remove_order_book_depth();
+        cleared |= self.remove_depth_heatmap();
         if !cleared {
             return false;
         }
@@ -220,6 +224,11 @@ impl AerisChartView {
             let item = LegendItem::OrderBookDepth;
             insert_price_pane_legend_row(&mut rows, item, "Order Book", book.visible, true);
         }
+        if let Some(heatmap) = self.order_flow_settings.depth_heatmap {
+            let item = LegendItem::DepthHeatmap;
+            let title = "Depth Heatmap";
+            insert_price_pane_legend_row(&mut rows, item, title, heatmap.visible, false);
+        }
         apply_legend_options(&mut rows, self.legend_options);
         rows
     }
@@ -250,6 +259,9 @@ impl AerisChartView {
         }
         if item == LegendItem::OrderBookDepth {
             return self.set_order_book_depth_visible(visible);
+        }
+        if item == LegendItem::DepthHeatmap {
+            return self.set_depth_heatmap_visible(visible);
         }
         let ids: Vec<u32> = match item {
             // The footprint presents the same product price series, so they toggle together.
@@ -297,7 +309,8 @@ impl AerisChartView {
             LegendItem::Study { .. }
             | LegendItem::OrderFlow(_)
             | LegendItem::BigTrades
-            | LegendItem::OrderBookDepth => {
+            | LegendItem::OrderBookDepth
+            | LegendItem::DepthHeatmap => {
                 unreachable!("study and order-flow visibility handled above")
             }
         };
@@ -324,6 +337,7 @@ impl AerisChartView {
             LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
             LegendItem::BigTrades => return self.remove_big_trades(),
             LegendItem::OrderBookDepth => return self.remove_order_book_depth(),
+            LegendItem::DepthHeatmap => return self.remove_depth_heatmap(),
             LegendItem::VolumeProfile => self.remove_volume_profile(),
             LegendItem::Asset | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),
@@ -577,7 +591,9 @@ fn legend_row(
             })
             .collect(),
         visible: row.visible,
-        settings_available: row.settings_available || item == LegendItem::Volume,
+        // Native indicator bindings other than volume have no host settings dialog yet.
+        settings_available: item == LegendItem::Volume
+            || (row.settings_available && !matches!(item, LegendItem::Indicator(_))),
     })
 }
 

@@ -103,7 +103,7 @@ mod workspace_layout;
 use aeris_application::ReplayStreamUpdate;
 use aeris_chart_integration::{
     AerisChartTheme, AerisChartView, AerisChartWorkspace, BigTradesFilter, BigTradesIntensity,
-    BigTradesSettings, BigTradesSize, ChartAggressorSide, ChartAlertCondition,
+    BigTradesSettings, BigTradesSize, BuiltinIndicator, ChartAggressorSide, ChartAlertCondition,
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartAxisAppearance, ChartBridgeMetrics, ChartColor, ChartContextKind,
@@ -119,11 +119,11 @@ use aeris_chart_integration::{
     ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
     ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
     ChartWorkingOrder, ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings,
-    CumulativeDeltaStyle, DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, FootprintDisplayMode,
-    MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings, chart_color_hex,
-    classify_order_flow_sweeps,
+    CumulativeDeltaStyle, DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings,
+    FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction,
+    PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
+    chart_color_hex, classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{

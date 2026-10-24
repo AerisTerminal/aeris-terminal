@@ -88,6 +88,12 @@ impl AerisChartView {
         } else {
             self.clear_order_book_depth();
         }
+        if !settings
+            .depth_heatmap
+            .is_some_and(|heatmap| heatmap.visible)
+        {
+            self.clear_depth_heatmap();
+        }
         self.reconfigure_order_flow();
         self.mark_user_state_changed();
         Ok(true)

@@ -84,10 +84,7 @@ pub(super) fn indicator_dialog_content(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let entries = app.read(cx).indicator_menu_entries(cx);
-    let native_count = entries
-        .iter()
-        .filter(|entry| matches!(entry, IndicatorMenuEntry::Indicator(_)))
-        .count();
+    let native_count = entries.iter().filter(|entry| entry.is_indicator()).count();
     let hint = format!("{native_count} native");
     let highlighted = state.keyboard_active.then_some(state.keyboard_selection);
     let mut list = chrome_menu_scroll_body();
@@ -101,7 +98,7 @@ pub(super) fn indicator_dialog_content(
     for (index, &entry) in entries.iter().enumerate() {
         let starts_group = match entry {
             IndicatorMenuEntry::OrderFlow(_) => (index == 0).then_some("Order flow"),
-            IndicatorMenuEntry::Indicator(_) => {
+            IndicatorMenuEntry::Indicator(_) | IndicatorMenuEntry::Builtin(_) => {
                 (index + native_count == entries.len()).then_some("Indicators")
             }
         };

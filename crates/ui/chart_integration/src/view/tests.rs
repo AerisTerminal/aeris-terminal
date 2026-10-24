@@ -377,6 +377,14 @@ fn cumulative_delta_style_converts_the_drawn_cvd_in_place() {
             .and_then(|state| state.study_series(OrderFlowStudy::CumulativeDelta))
             .and_then(|series| chart.engine.series_kind(series))
     };
+    // Aeris Charts draws CVD as candles by default.
+    assert_eq!(
+        cvd(&chart),
+        Some(aeris_charts_engine::SeriesKind::Candlestick)
+    );
+
+    settings.cumulative_delta.style = CumulativeDeltaStyle::Line;
+    assert!(chart.set_order_flow_settings(settings).unwrap());
     assert_eq!(cvd(&chart), Some(aeris_charts_engine::SeriesKind::Line));
 
     settings.cumulative_delta.style = CumulativeDeltaStyle::Candles;
@@ -2067,6 +2075,109 @@ fn indicator_clusters_never_carry_the_candle_close_countdown() {
         }
     }
     assert!(series_entry(&chart, 0).countdown_visible);
+}
+
+#[test]
+fn every_builtin_indicator_is_created_restored_and_persisted_by_identifier() {
+    for builtin in BuiltinIndicator::ALL {
+        let indicator = ChartIndicator::Builtin(builtin);
+        assert_eq!(
+            ChartIndicator::from_identifier(indicator.identifier()),
+            Some(indicator),
+            "{builtin:?} identifier must round-trip"
+        );
+        let mut chart = interactive_chart();
+        let ids = chart
+            .add_indicator(indicator)
+            .unwrap_or_else(|error| panic!("{builtin:?} is rejected: {error}"));
+        assert!(!ids.is_empty(), "{builtin:?} creates no outputs");
+        let states = chart.indicator_states();
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.indicator)
+                .collect::<Vec<_>>(),
+            vec![indicator],
+            "{builtin:?} must be reported as itself"
+        );
+
+        let mut restored = interactive_chart();
+        let hidden = ChartIndicatorState {
+            visible: false,
+            ..states[0].clone()
+        };
+        restored
+            .restore_indicator_states(std::slice::from_ref(&hidden))
+            .unwrap_or_else(|error| panic!("{builtin:?} does not restore: {error}"));
+        assert_eq!(restored.indicator_states(), vec![hidden]);
+    }
+    assert_eq!(ChartIndicator::from_identifier("not_an_indicator"), None);
+}
+
+#[test]
+fn depth_heatmap_records_book_history_and_follows_the_touch() {
+    let mut chart = interactive_chart();
+    let book = |mid: f64, size: f64| {
+        (
+            vec![ChartDepthLevel {
+                price: mid - 0.5,
+                size,
+                order_count: None,
+            }],
+            vec![ChartDepthLevel {
+                price: mid + 0.5,
+                size: size + 2.0,
+                order_count: None,
+            }],
+        )
+    };
+    let (bids, asks) = book(100.0, 4.0);
+    chart
+        .apply_depth_heatmap("BTC", 0.5, 1_000_000, bids.clone(), asks.clone())
+        .expect("an absent heatmap ignores the book");
+    assert_eq!(chart.depth_heatmap_window(), None);
+
+    assert!(
+        chart
+            .set_order_flow_settings(OrderFlowSettings {
+                depth_heatmap: Some(DepthHeatmapSettings::default()),
+                ..chart.order_flow_settings()
+            })
+            .expect("valid settings")
+    );
+    chart
+        .apply_depth_heatmap("BTC", 0.5, 1_000_000, bids, asks)
+        .expect("book recorded");
+    assert_eq!(chart.depth_heatmap_window(), Some((200, 6.0)));
+    assert!(
+        chart
+            .legend_rows()
+            .iter()
+            .any(|row| row.item == LegendItem::DepthHeatmap && !row.settings_available)
+    );
+
+    // A small drift and a backwards clock keep the window; a size twice the scale rebuilds it.
+    let (bids, asks) = book(110.0, 4.0);
+    chart
+        .apply_depth_heatmap("BTC", 0.5, 500_000, bids, asks)
+        .expect("held timestamp");
+    assert_eq!(chart.depth_heatmap_window(), Some((200, 6.0)));
+    let (bids, asks) = book(110.0, 20.0);
+    chart
+        .apply_depth_heatmap("BTC", 0.5, 2_000_000, bids, asks)
+        .expect("larger book");
+    assert_eq!(chart.depth_heatmap_window(), Some((220, 22.0)));
+    let (bids, asks) = book(500.0, 20.0);
+    chart
+        .apply_depth_heatmap("BTC", 0.5, 3_000_000, bids, asks)
+        .expect("moved touch");
+    assert_eq!(chart.depth_heatmap_window(), Some((1_000, 22.0)));
+
+    assert!(chart.set_legend_item_visible(LegendItem::DepthHeatmap, false));
+    assert_eq!(chart.depth_heatmap_window(), None);
+    assert!(chart.remove_legend_indicator(LegendItem::DepthHeatmap));
+    assert_eq!(chart.order_flow_settings().depth_heatmap, None);
+    assert!(!chart.has_indicators());
 }
 
 #[test]

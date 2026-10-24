@@ -3242,6 +3242,32 @@ impl TerminalApp {
         }
     }
 
+    /// Handles the open command palette's navigation keys, returning whether the key was used.
+    fn command_palette_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match event.keystroke.key.as_str() {
+            "escape" => self.close_command_palette(window, cx),
+            "up" => {
+                self.command_palette_selection = self.command_palette_selection.saturating_sub(1);
+                cx.notify();
+            }
+            "down" => {
+                let query = self.command_palette_input.read(cx).value();
+                let count = aeris_desktop::command_registry::search(&query, 8).len();
+                self.command_palette_selection =
+                    (self.command_palette_selection + 1).min(count.saturating_sub(1));
+                cx.notify();
+            }
+            "enter" => self.execute_command_palette_query(window, cx),
+            _ => return false,
+        }
+        true
+    }
+
     pub(super) fn on_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -3249,25 +3275,10 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         if self.command_palette_open {
-            match event.keystroke.key.as_str() {
-                "escape" => self.close_command_palette(window, cx),
-                "up" => {
-                    self.command_palette_selection =
-                        self.command_palette_selection.saturating_sub(1);
-                    cx.notify();
-                }
-                "down" => {
-                    let query = self.command_palette_input.read(cx).value();
-                    let count = aeris_desktop::command_registry::search(&query, 8).len();
-                    self.command_palette_selection =
-                        (self.command_palette_selection + 1).min(count.saturating_sub(1));
-                    cx.notify();
-                }
-                "enter" => self.execute_command_palette_query(window, cx),
-                _ => return,
+            if self.command_palette_key_down(event, window, cx) {
+                window.prevent_default();
+                cx.stop_propagation();
             }
-            window.prevent_default();
-            cx.stop_propagation();
             return;
         }
         if self.keyboard_shortcuts_open {
@@ -3341,8 +3352,9 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
+        let workspace_focused = self.workspace_keyboard_focused(window, cx);
         let handled = self.active_surface().update(cx, |workspace, workspace_cx| {
-            workspace.on_terminal_key_down(event, window, workspace_cx)
+            workspace.on_terminal_key_down(event, workspace_focused, window, workspace_cx)
         });
         if handled {
             window.prevent_default();

@@ -614,14 +614,16 @@ pub(super) enum OrderFlowMenuStudy {
     Delta,
     BigTrades,
     OrderBookDepth,
+    DepthHeatmap,
 }
 
 impl OrderFlowMenuStudy {
-    pub(super) const ALL: [Self; 4] = [
+    pub(super) const ALL: [Self; 5] = [
         Self::CumulativeDelta,
         Self::Delta,
         Self::BigTrades,
         Self::OrderBookDepth,
+        Self::DepthHeatmap,
     ];
 
     pub(super) const fn label(self) -> &'static str {
@@ -630,6 +632,7 @@ impl OrderFlowMenuStudy {
             Self::Delta => "Delta histogram",
             Self::BigTrades => "Big trades",
             Self::OrderBookDepth => "Order book on chart (DOM)",
+            Self::DepthHeatmap => "Depth heatmap (book history)",
         }
     }
 
@@ -639,12 +642,13 @@ impl OrderFlowMenuStudy {
             Self::Delta => settings.show_delta_histogram,
             Self::BigTrades => settings.big_trades.is_some(),
             Self::OrderBookDepth => settings.order_book_depth.is_some(),
+            Self::DepthHeatmap => settings.depth_heatmap.is_some(),
         }
     }
 
     /// Whether the study is built from trade prints rather than the resting book.
     pub(super) const fn needs_trades(self) -> bool {
-        !matches!(self, Self::OrderBookDepth)
+        !matches!(self, Self::OrderBookDepth | Self::DepthHeatmap)
     }
 }
 
@@ -654,6 +658,7 @@ impl OrderFlowMenuStudy {
 pub(super) enum IndicatorMenuEntry {
     OrderFlow(OrderFlowMenuStudy),
     Indicator(&'static chart_chrome::IndicatorSpec),
+    Builtin(BuiltinIndicator),
 }
 
 impl IndicatorMenuEntry {
@@ -661,7 +666,13 @@ impl IndicatorMenuEntry {
         match self {
             Self::OrderFlow(study) => study.label(),
             Self::Indicator(spec) => spec.label,
+            Self::Builtin(indicator) => indicator.label(),
         }
+    }
+
+    /// Whether the row belongs to the "Indicators" group rather than "Order flow".
+    pub(super) const fn is_indicator(self) -> bool {
+        !matches!(self, Self::OrderFlow(_))
     }
 }
 
@@ -676,7 +687,7 @@ pub(super) fn indicator_menu_scroll_item(
             .first()
             .is_some_and(|first| matches!(first, IndicatorMenuEntry::OrderFlow(_))),
     );
-    let indicators_heading = usize::from(matches!(entry, IndicatorMenuEntry::Indicator(_)));
+    let indicators_heading = usize::from(entry.is_indicator());
     Some(selection + order_flow_heading + indicators_heading)
 }
 
@@ -846,6 +857,7 @@ fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderF
         study_visibility_revision: 1,
         big_trades: settings.big_trades.map(persisted_big_trades),
         order_book_depth: settings.order_book_depth.map(|book| book.visible),
+        depth_heatmap: settings.depth_heatmap.map(|heatmap| heatmap.visible),
         cumulative_delta_style: match settings.cumulative_delta.style {
             CumulativeDeltaStyle::Line => 0,
             CumulativeDeltaStyle::Candles => 1,
@@ -996,6 +1008,9 @@ fn restored_order_flow_settings(
         delta_histogram: restored_delta_histogram(settings.delta_histogram.as_ref())?,
         big_trades,
         order_book_depth,
+        depth_heatmap: settings
+            .depth_heatmap
+            .map(|visible| DepthHeatmapSettings { visible }),
         ticks_per_row: settings.ticks_per_row,
     })
 }
@@ -1670,7 +1685,9 @@ fn legacy_runtime_study_contract(
             )],
             vec![aeris_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Volume | ChartIndicator::VolumeProfile => return None,
+        ChartIndicator::Volume | ChartIndicator::VolumeProfile | ChartIndicator::Builtin(_) => {
+            return None;
+        }
     };
     Some(contract)
 }
@@ -2019,7 +2036,7 @@ impl PanePresentation {
                 })
             })
             .filter(|state| !runtime_managed_indicator(state.indicator))
-            .take(ChartIndicator::ALL.len())
+            .take(ChartIndicator::CATALOG_LEN)
             .collect::<Vec<_>>();
         let chart_type = ChartType::from_identifier(&state.chart_type);
         let price_axis = state.price_axis.as_ref().and_then(|axis| {
@@ -3258,9 +3275,12 @@ impl WorkspaceSurface {
         None
     }
 
+    /// `workspace_focused` says whether keyboard focus rests on the workspace itself rather
+    /// than on a text field; only then may a typed key open typeahead.
     pub(super) fn on_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
+        workspace_focused: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3273,7 +3293,7 @@ impl WorkspaceSurface {
             command.execute(window);
             return true;
         }
-        if self.consume_chrome_typeahead(event, window, cx) {
+        if self.consume_chrome_typeahead(event, workspace_focused, window, cx) {
             return true;
         }
         if self.chrome_overlay.is_none() || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
@@ -3396,6 +3416,7 @@ impl WorkspaceSurface {
     fn consume_chrome_typeahead(
         &mut self,
         event: &KeyDownEvent,
+        workspace_focused: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3418,7 +3439,9 @@ impl WorkspaceSurface {
         let Some(typed) = chrome_typeahead_char(event) else {
             return false;
         };
-        if event.is_held && self.chrome_overlay.is_none() {
+        // A key typed into a text field outside the workspace's own focus (order quantity,
+        // ticket ticks) belongs to that field and must never open typeahead.
+        if self.chrome_overlay.is_none() && (event.is_held || !workspace_focused) {
             return false;
         }
         match self.chrome_overlay {
@@ -4423,17 +4446,18 @@ impl WorkspaceSurface {
     }
 
     /// Projects the pane's current book, owned by its order-book view, into the chart's
-    /// right-edge depth bars while that indicator is shown.
+    /// right-edge depth bars and depth heatmap while either indicator is shown. The heatmap
+    /// records each book at the moment it reaches the pane.
     fn apply_order_book_to_chart(&self, cx: &mut Context<Self>) {
         let Some(chart) = &self.chart else {
             return;
         };
-        if !chart
-            .read(cx)
-            .order_flow_settings()
-            .order_book_depth
-            .is_some_and(|book| book.visible)
-        {
+        let settings = chart.read(cx).order_flow_settings();
+        let bars = settings.order_book_depth.is_some_and(|book| book.visible);
+        let heatmap = settings
+            .depth_heatmap
+            .is_some_and(|heatmap| heatmap.visible);
+        if !bars && !heatmap {
             return;
         }
         let Some((identity, depth)) = self
@@ -4444,11 +4468,23 @@ impl WorkspaceSurface {
         else {
             return;
         };
+        let timestamp_micros = self.lifecycle.clock().wall_unix_nanos().div_euclid(1_000);
         let drawn = chart.update(cx, |chart, chart_cx| {
             let drawn = if let Some((tick_size, bids, asks)) = depth {
-                chart.apply_order_book_depth(&identity, tick_size, bids, asks)
+                let bars = if bars {
+                    chart.apply_order_book_depth(&identity, tick_size, bids.clone(), asks.clone())
+                } else {
+                    Ok(())
+                };
+                let heatmap = if heatmap {
+                    chart.apply_depth_heatmap(&identity, tick_size, timestamp_micros, bids, asks)
+                } else {
+                    Ok(())
+                };
+                bars.and(heatmap)
             } else {
                 chart.clear_order_book_depth();
+                chart.clear_depth_heatmap();
                 Ok(())
             };
             chart_cx.notify();
@@ -4459,11 +4495,13 @@ impl WorkspaceSurface {
         }
     }
 
-    /// Removes the chart's drawn book when the pane's book stops or changes instrument.
+    /// Removes the chart's drawn book and recorded book history when the pane's book stops or
+    /// changes instrument.
     fn clear_chart_order_book_depth(&self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 chart.clear_order_book_depth();
+                chart.clear_depth_heatmap();
                 chart_cx.notify();
             });
         }
@@ -5742,7 +5780,19 @@ impl WorkspaceSurface {
         let indicators = chart_chrome::filter_indicator_specs(&query)
             .into_iter()
             .map(IndicatorMenuEntry::Indicator);
-        order_flow.chain(indicators).collect()
+        let builtins = BuiltinIndicator::ALL
+            .into_iter()
+            .filter(|indicator| {
+                [
+                    indicator.identifier(),
+                    indicator.label(),
+                    indicator.parameters(),
+                ]
+                .into_iter()
+                .any(|value| value.to_ascii_lowercase().contains(&normalized_query))
+            })
+            .map(IndicatorMenuEntry::Builtin);
+        order_flow.chain(indicators).chain(builtins).collect()
     }
 
     pub(super) fn add_indicator_menu_entry(
@@ -5754,6 +5804,9 @@ impl WorkspaceSurface {
             IndicatorMenuEntry::OrderFlow(study) => self.add_order_flow_study(study, cx),
             IndicatorMenuEntry::Indicator(spec) => {
                 self.add_indicator(super::native_indicator(spec.kind), cx)
+            }
+            IndicatorMenuEntry::Builtin(indicator) => {
+                self.add_indicator(ChartIndicator::Builtin(indicator), cx)
             }
         }
     }
@@ -5781,6 +5834,9 @@ impl WorkspaceSurface {
                     visible: true,
                     ..settings.order_book_depth.unwrap_or_default()
                 });
+            }
+            OrderFlowMenuStudy::DepthHeatmap => {
+                settings.depth_heatmap = Some(DepthHeatmapSettings { visible: true });
             }
         }
         self.set_chart_order_flow_settings(settings, cx);
@@ -6584,16 +6640,16 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Whether any consumer of this pane's live order-book frame is shown: a docked panel or
-    /// the chart's right-edge book.
+    /// Whether any consumer of this pane's live order-book frame is shown: a docked panel, the
+    /// chart's right-edge book or its depth heatmap.
     fn order_book_demanded(&self, cx: &App) -> bool {
         self.side_panels.needs_order_book()
             || self.chart.as_ref().is_some_and(|chart| {
-                chart
-                    .read(cx)
-                    .order_flow_settings()
-                    .order_book_depth
-                    .is_some_and(|book| book.visible)
+                let settings = chart.read(cx).order_flow_settings();
+                settings.order_book_depth.is_some_and(|book| book.visible)
+                    || settings
+                        .depth_heatmap
+                        .is_some_and(|heatmap| heatmap.visible)
             })
     }
 

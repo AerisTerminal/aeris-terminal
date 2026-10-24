@@ -479,6 +479,7 @@ mod timeframe_input {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let surface = self.0.read(cx);
             let input = surface.timeframe_input.clone();
+            let ticket = surface.order_quantity.ticket_input().clone();
             let quick = surface.chrome_overlay == Some(ChromeOverlay::QuickTimeframe);
             let symbol = (surface.chrome_overlay == Some(ChromeOverlay::Instrument)
                 && surface.chrome_overlay_phase != ChromeOverlayPhase::Closing)
@@ -520,12 +521,14 @@ mod timeframe_input {
                 .track_focus(&surface.chrome_focus)
                 .on_key_down(cx.listener(|this, event, window, cx| {
                     if this.0.update(cx, |surface, cx| {
-                        surface.on_terminal_key_down(event, window, cx)
+                        let workspace_focused = surface.holds_keyboard_focus(window, cx);
+                        surface.on_terminal_key_down(event, workspace_focused, window, cx)
                     }) {
                         window.prevent_default();
                         cx.stop_propagation();
                     }
                 }))
+                .child(Input::new(&ticket))
                 .when(quick, |root| root.child(Input::new(&input)))
                 .when_some(symbol, |root, input| root.child(Input::new(&input)))
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
@@ -1225,6 +1228,26 @@ mod timeframe_input {
             80.0,
         ));
         assert!(small.width < px(500.0) && small.height < px(400.0 - 80.0));
+    }
+
+    #[gpui::test]
+    fn digits_typed_in_the_order_quantity_field_stay_in_the_field(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let ticket = cx.read(|cx| surface.read(cx).order_quantity.ticket_input().clone());
+        cx.update(|window, cx| {
+            ticket.update(cx, |input, input_cx| input.focus(window, input_cx));
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("5");
+
+        cx.read(|cx| {
+            assert_eq!(surface.read(cx).chrome_overlay, None);
+            assert!(
+                ticket.read(cx).value().contains('5'),
+                "the digit lands in the quantity field"
+            );
+        });
     }
 
     #[gpui::test]

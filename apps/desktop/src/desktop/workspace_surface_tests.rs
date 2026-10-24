@@ -169,6 +169,7 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         cumulative_delta: None,
         delta_histogram: None,
         order_book_depth_options: None,
+        depth_heatmap: None,
     };
     let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
     assert!(!restored.show_cumulative_delta);
@@ -183,6 +184,18 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
     let restored = restored_order_flow_settings(&persisted).expect("current settings restore");
     assert!(restored.show_cumulative_delta);
     assert!(restored.show_delta_histogram);
+    assert_eq!(restored.depth_heatmap, None, "the depth heatmap is opt-in");
+
+    for visible in [true, false] {
+        let heatmap = Some(DepthHeatmapSettings { visible });
+        let persisted = persisted_order_flow_settings(OrderFlowSettings {
+            depth_heatmap: heatmap,
+            ..OrderFlowSettings::default()
+        });
+        assert_eq!(persisted.depth_heatmap, Some(visible));
+        let restored = restored_order_flow_settings(&persisted).expect("heatmap restores");
+        assert_eq!(restored.depth_heatmap, heatmap);
+    }
 }
 
 #[test]
@@ -200,6 +213,7 @@ fn retired_footprint_trade_bubbles_restore_without_big_trades() {
         cumulative_delta: None,
         delta_histogram: None,
         order_book_depth_options: None,
+        depth_heatmap: None,
     }
     .encode_to_vec();
     // Tag 4 (varint) enabled the footprint trade bubbles; tag 5 (fixed64) held their threshold.
