@@ -2095,6 +2095,14 @@ Status: pending
     the literal `default_product` source search now has no matches. Snapshot
     replay identity conversion, descriptor rendering, neutrality enforcement
     and guarded GUI evidence remain open; M6.7 is unchecked.
+  - Part 5 (2026-10-24): replay snapshots with a selected instrument now
+    reject any mismatch in provider, instrument or entitlement before
+    conversion, including recovery and market-summary snapshots. A focused
+    regression checks all three mismatches and the matching case. The
+    provisional parser and test-only `None` conversions remain until the
+    runtime selection descriptor is retained through pane and summary
+    projection; descriptor rendering, neutrality enforcement and guarded GUI
+    evidence remain open. M6.7 is unchecked.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed

@@ -1575,6 +1575,46 @@ mod tests {
     }
 
     #[test]
+    fn replay_snapshot_rejects_mismatched_selected_identity() {
+        let selected = fixture_public_crypto();
+        let series = series_key(&selected, ChartInterval::Minute1).expect("series");
+        let snapshot = runtime_snapshot(
+            1,
+            1,
+            series,
+            8,
+            8,
+            8,
+            vec![MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            1,
+            false,
+        );
+        assert!(replay_runtime_snapshot(&snapshot, Some(&selected), 1).is_ok());
+        for changed in ["provider", "instrument", "entitlement"] {
+            let mut other = selected.clone();
+            match changed {
+                "provider" => other.provider = "other-provider".into(),
+                "instrument" => other.instrument_id = "other-instrument".into(),
+                "entitlement" => other.entitlement_id = "other-entitlement".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                replay_runtime_snapshot(&snapshot, Some(&other), 1).is_err(),
+                "{changed} mismatch must reject the snapshot"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_live_update_preserves_one_tail_without_rebuilding_history() {
         let update = replay_runtime_tail_update(
             &runtime_update(

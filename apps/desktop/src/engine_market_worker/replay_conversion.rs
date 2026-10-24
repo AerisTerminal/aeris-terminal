@@ -16,6 +16,13 @@ pub(crate) fn replay_runtime_snapshot(
 ) -> Result<ReplaySnapshot, String> {
     let snapshot = publication.snapshot.as_ref();
     let series = &snapshot.series;
+    if let Some(installed) = installed
+        && (series.provider_id != installed.provider
+            || series.instrument_id != installed.instrument_id
+            || series.entitlement_id != installed.entitlement_id)
+    {
+        return Err("engine snapshot does not match the selected instrument".to_string());
+    }
     let (venue, symbol, asset_class, provider_currency) = snapshot_instrument(series)?;
     // Provider-reported contract terms are more precise than the id's default.
     let trading_currency = installed
