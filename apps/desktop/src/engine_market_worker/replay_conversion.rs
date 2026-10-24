@@ -246,39 +246,10 @@ pub(super) fn snapshot_instrument(
     }
 }
 
-fn validate_product_identity(product: &InstallProviderInstrument) -> Result<(), String> {
-    // The provider field must agree with the installed instrument identity:
-    // a Hyperliquid product can never demand a Rithmic series and vice
-    // versa, so a mismatch fails here instead of misrouting demand. The
-    // entitlement is the runtime's opaque grant for the installed selection
-    // and is carried into the series key unchanged.
-    if !matches!(product.provider.as_str(), "rithmic" | "hyperliquid")
-        || product.venue_id.trim().is_empty()
-        || product.entitlement_id.trim().is_empty()
-        || product.price_scale > 18
-        || product.quantity_scale > 18
-    {
-        return Err(format!(
-            "{} installed instrument identity is invalid",
-            provider_display_name(product.provider.as_str())
-        ));
-    }
-    if product.provider == "rithmic" && !product.instrument_id.starts_with("instrument:rithmic:")
-        || product.provider == "hyperliquid" && !product.instrument_id.starts_with("hyperliquid:")
-    {
-        return Err(format!(
-            "{} installed instrument identity is invalid",
-            provider_display_name(product.provider.as_str())
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn series_key(
     product: &InstallProviderInstrument,
     interval: ChartInterval,
 ) -> Result<BarSeriesKey, String> {
-    validate_product_identity(product)?;
     let presentation =
         super::provider_presentation(product.provider.as_str()).ok_or_else(|| {
             format!(
@@ -286,6 +257,20 @@ pub(crate) fn series_key(
                 provider_display_name(product.provider.as_str())
             )
         })?;
+    if product.entitlement_id.trim().is_empty() || product.venue_id.trim().is_empty() {
+        return Err(format!(
+            "{} installed instrument identity is invalid",
+            provider_display_name(product.provider.as_str())
+        ));
+    }
+    aeris_market_runtime::InstrumentDescriptor::from_install(product, presentation, true).map_err(
+        |_| {
+            format!(
+                "{} installed instrument identity is invalid",
+                provider_display_name(product.provider.as_str())
+            )
+        },
+    )?;
     aeris_market_runtime::resolve_series_key(product, interval, presentation)
         .map_err(|error| error.to_string())
 }

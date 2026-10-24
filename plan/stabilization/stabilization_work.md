@@ -2078,6 +2078,16 @@ Status: pending
     publication tests retain identity coverage. Instrument descriptor
     rendering, replay identity conversion, neutrality enforcement and GUI
     evidence remain open.
+  - Part 3 (2026-10-24): series-key construction now validates the
+    installed catalog identity through the runtime's InstrumentDescriptor
+    rather than parsing provider-specific ID prefixes or restricting the
+    provider to two literals. An opaque-ID/entitlement regression confirms
+    the runtime's selection fields are carried unchanged and invalid
+    entitlement fields fail closed. The former prefix-conflict test was
+    removed because opaque catalog IDs cannot prove their provider from
+    string syntax; the runtime-issued selection and demand fence own routing.
+    Snapshot replay identity parsing, fixture relocation, descriptor
+    rendering, neutrality rule and GUI evidence remain open; M6.7 is unchecked.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
@@ -2624,6 +2634,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 M6.6 Part 8b3e refactor(desktop): four local command-result mailbox variants share one bounded outcome entry; original request and study fences remain, and unused study-removal error text is not queued. FIFO and pane notice/fence regressions cover the route. Recovery/selection outcomes and final bridge deletion remain; M6.6 and VAL-DSK-021/022 stay open.
 - 2026-10-24 M6.6 Part 8b3f refactor(desktop): superseded and failed local recovery outcomes now share the bounded local command-result projection instead of a separate mailbox arm. The pane still applies the exact selection lifecycle and recovery request fences, including retired replies, while the covering snapshot stays in its coordinator envelope. Mixed local-outcome FIFO, backpressure and GPUI retired-recovery regressions cover the route. Selection outcomes, final bridge type/channel deletion and VAL-DSK-021/022 remain; M6.6 stays unchecked.
 - 2026-10-24 M6.6 Part 8b3g refactor(desktop): initial selection terms share the bounded local command outcome route; exact pending-generation acceptance, duplicate rejection, four-pane restored replies and the FIFO/control reserve are retained. Engine/catalog outcomes, metadata-bearing runtime entries and final message/channel deletion remain; M6.6 and VAL-DSK-021/022 stay open.
+- 2026-10-24 M6.7 Part 3 refactor(desktop): delegate series-key catalog identity validation to the runtime descriptor, preserving opaque instrument IDs and exact entitlements; replay snapshot conversion and the remaining M6.7 work stay open.
 
 ## 7. Known gaps / deferred
 

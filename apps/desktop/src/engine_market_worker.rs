@@ -2801,18 +2801,6 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_series_keys_reject_conflicting_provider_metadata() {
-        // A Hyperliquid provider claiming a Rithmic instrument identity (and
-        // vice versa) must fail here instead of misrouting demand.
-        let mut product = products().remove(0);
-        product.provider = "hyperliquid".to_string();
-        assert!(series_key(&product, ChartInterval::Minute1).is_err());
-        let mut product = products().remove(0);
-        product.instrument_id = "hyperliquid:perp:BTC".to_string();
-        assert!(series_key(&product, ChartInterval::Minute1).is_err());
-    }
-
-    #[test]
     fn rithmic_series_keys_accept_the_selected_market_entitlement() {
         // Catalog selections install the provider's registered selection
         // entitlement; studies and recovery key their series on it.
@@ -2823,6 +2811,20 @@ mod tests {
         product.entitlement_id = entitlement.to_string();
         let series = series_key(&product, ChartInterval::Minute1).expect("selected series");
         assert_eq!(series.entitlement_id, entitlement);
+        product.entitlement_id = " ".to_string();
+        assert!(series_key(&product, ChartInterval::Minute1).is_err());
+    }
+
+    #[test]
+    fn series_keys_treat_runtime_catalog_identity_as_opaque() {
+        let mut product = default_product("MNQ");
+        product.instrument_id = "catalog-contract-42".to_string();
+        product.entitlement_id = "selected-grant-42".to_string();
+        let series = series_key(&product, ChartInterval::Minute1)
+            .expect("validated catalog identity is opaque to the desktop");
+        assert_eq!(series.instrument_id, product.instrument_id);
+        assert_eq!(series.entitlement_id, product.entitlement_id);
+
         product.entitlement_id = " ".to_string();
         assert!(series_key(&product, ChartInterval::Minute1).is_err());
     }
