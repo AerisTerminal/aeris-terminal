@@ -361,7 +361,30 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
 
 ## Authentication and website coordination
 
-Authentication is disabled for the current development build because no Aeris account backend is deployed. Desktop startup must reach the workspace without opening a browser or creating an account session. Do not restore sign-in, sign-up, profile, billing, or lease traffic until an Aeris backend is provisioned and the full browser to callback to account runtime to vault to desktop path is verified.
+Desktop sign-in is mandatory and uses the Aeris Cognito user pool (`us-east-1_05pNG4EOF`, public
+native client `tlnlg2amke4k2v9v2k84vvg87`, hosted sign-in at `https://auth.aeristerminal.com`). These
+values are compile-time constants in `account_runtime` (`AccountServiceConfig::production()`); no
+environment variable selects an issuer. The runtime discovers endpoints from the exact issuer, uses
+PKCE with `scope=openid email profile` and a loopback redirect `http://localhost:<port>/callback` on
+the fixed ports 47210, 47211 or 47212 (bound on both `127.0.0.1` and `[::1]`), and verifies the
+RS256 ID token with `ring` against the issuer JWKS (issuer, audience, `token_use=id`, expiry, nonce).
+Only the refresh token and the cached profile (`sub`, email, name, picture) are stored, in the native
+vault; there is no lease, device key or entitlement, and every signed-in account shows the "Early
+access" plan. An unreachable provider keeps a saved session signed in (Offline) with bounded backoff;
+only a rejected refresh grant signs out. Sign-out revokes the refresh token, deletes the vault entries
+and returns to the sign-in gate. `apps/desktop/src/account.rs::sign_in_required` is the one policy:
+every process except a validation data root installs the account session. Before the first usable
+session (signed in or the cached Offline one) only the local trading store, the account session and
+persistence paths exist: the desktop entrypoint shows the sign-in window, and
+`start_signed_in_runtime` (market runtime and provider sessions, context sources, the
+market-demanding workspace, the trading market feed and the broker venue relay) runs only when the
+`services::SignedInStart` gate releases it, exactly once per process; a validation root runs it
+directly. After a later sign-out the workspace window renders `components/sign_in_gate.rs` (no
+workspace handlers or trading hotkeys attach behind it), but provider sessions and the venue stay up
+until exit because `MarketService::shutdown` is final and cannot restart in-process; the next sign-in
+starts nothing new. `tools/naming_check` keeps these owners out of the entrypoint. Tests must not call `start_restore` or touch
+the native vault; use injected vaults and `AccountService` test seams. Manage Profile opens
+`https://aeristerminal.com/account/`.
 
 The sibling website is at `C:\Users\devraj\Downloads\Softwares\aeris-website`. Inspect both repositories for future auth/profile/subscription changes, and preserve unrelated edits there. Keep tokens and credentials out of UI and logs.
 
@@ -419,10 +442,12 @@ tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check. T
 runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
 references and self-hosted runners are forbidden on the pull-request path, and any workflow that uses
 a self-hosted runner must stay `workflow_dispatch`-only in every trigger form; live, credentialed and
-performance lanes stay `workflow_dispatch`-only. The manual `macos_preview.yml` tester build is the
-one hosted lane that may receive the Rithmic kit: only when its `rithmic_kit` input is set does it
-unpack the kit's `proto` folder from the `AERIS_RITHMIC_KIT_TAR_XZ_B64` repository secret (its only
-secret), and it deletes the kit right after the build and fails if the kit was not compiled in.
+performance lanes stay `workflow_dispatch`-only. The manual `macos_preview.yml` and
+`windows_preview.yml` tester builds are the only hosted lanes that may receive the Rithmic kit: only
+when a lane's `rithmic_kit` input is set does it unpack the kit's `proto` folder from the
+`AERIS_RITHMIC_KIT_TAR_XZ_B64` repository secret (its only secret), and it deletes the kit right
+after the build and fails if the kit was not compiled in. Both preview lanes smoke-launch the release
+binary and keep it only as a 14-day workflow artifact.
 `tools/naming_check` enforces this shape across every workflow.
 
 ## Build output hygiene
@@ -442,17 +467,20 @@ new copy under `target/`, and GPUI debug builds have grown it past 70 GB in a fe
 
 ## Release workflow
 
-Production release publication is disabled while the Aeris domain and AWS backend are unconfigured. Do not publish, install, or point clients at the former Axiusflow endpoint. The retired publication workflow must not be restored. Design and verify a new AWS release path when the maintainer requests deployment.
+Do not publish, install, or point clients at the former Axiusflow endpoint, and the retired
+publication workflow must not be restored. Preview builds reach users through the website download
+page: after the fix is pushed to `main`, run both preview lanes with `-f rithmic_kit=true`, check
+that each smoke launch passed, download the `aeris-terminal-rithmic-macos-arm64-preview` DMG and the
+`aeris-terminal-rithmic-windows-x64-preview` executable, and publish them from the sibling website
+with `bun run publish:desktop -- <dmg> <exe>` (it uploads them under `/downloads/` and rewrites
+`/downloads/latest.json`, which `https://aeristerminal.com/download/` reads). CI never holds AWS
+credentials; publication runs on the maintainer's machine. Preview binaries are ad-hoc signed on
+macOS and unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch.
 
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 
-Mac tester builds are shared by link, not published. After the fix is pushed to `main`, run
-`gh workflow run macos_preview.yml --ref main -f rithmic_kit=true`, check that its smoke launch
-passed, and download the `aeris-terminal-rithmic-macos-arm64-preview` DMG artifact. Upload that
-DMG to WeTransfer in the Factory desktop browser pane, where the maintainer's account is signed in.
-Choose "Create link" instead of "Send email", then give the maintainer the `we.tl` link to forward.
-A free link expires after three days, so each new build gets a new link. If something fails, the
-tester sends back `~/Library/Application Support/Aeris/logs/aeris.log`.
+If something fails, the tester sends back `~/Library/Application Support/Aeris/logs/aeris.log` on
+macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
 
 ## Rust and documentation conventions
 

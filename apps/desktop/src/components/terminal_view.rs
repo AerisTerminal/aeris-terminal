@@ -557,6 +557,14 @@ impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_terminal_frame(window, cx);
         let terminal = cx.entity();
+        if let Some(account) = self.lifecycle.account()
+            && !account.authenticated()
+        {
+            // No workspace action, shortcut or trading hotkey handler is
+            // attached while the gate covers the window.
+            return sign_in_gate::sign_in_page(&terminal, account, window, &self.theme)
+                .into_any_element();
+        }
         let page = match self.pages.view {
             market_screener::AppView::Terminal => {
                 self.rendered_terminal_page(&terminal, window, cx)
@@ -604,6 +612,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::cancel_rithmic_login))
             .on_action(cx.listener(Self::disconnect_rithmic))
             .on_action(cx.listener(Self::refresh_broker_connections))
+            .into_any_element()
     }
 }
 

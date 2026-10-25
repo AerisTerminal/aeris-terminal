@@ -2303,6 +2303,7 @@ mod tests {
             ".github/workflows/ci.yml",
             ".github/workflows/live_market_gates.yml",
             ".github/workflows/macos_preview.yml",
+            ".github/workflows/windows_preview.yml",
         ] {
             let source = manifest(workflow);
             for line in source.lines().filter(|line| line.contains("cargo ")) {
@@ -2827,7 +2828,8 @@ mod tests {
             );
         }
         let account = manifest("crates/account_runtime/Cargo.toml");
-        for dependency in ["aeris_account", "aeris_platform_runtime"] {
+        // ID tokens are RS256 JWTs verified with ring against the user pool JWKS.
+        for dependency in ["aeris_account", "aeris_platform_runtime", "ring.workspace"] {
             assert!(
                 account.contains(dependency),
                 "account_runtime must compose {dependency}"
@@ -3186,10 +3188,10 @@ mod tests {
         );
 
         let refresh_start = account
-            .find("fn refresh_lease_round")
+            .find("fn refresh_session_round")
             .expect("scheduled/profile refresh path");
         let refresh_end = account[refresh_start..]
-            .find("fn cached_outcome")
+            .find("fn apply_session_outcome")
             .map(|offset| refresh_start + offset)
             .expect("refresh round boundary");
         let refresh = &account[refresh_start..refresh_end];
@@ -3203,7 +3205,7 @@ mod tests {
             .find("drop(grant_permit)")
             .expect("refresh grant lifecycle release");
         let profile = refresh
-            .find("link_subject")
+            .find("apply_verified_profile")
             .expect("post-rotation profile refresh");
         assert!(
             claim < durable && durable < release && release < profile,
@@ -3367,7 +3369,7 @@ mod tests {
     }
 
     #[test]
-    fn development_build_has_no_cloud_publisher_or_login_gate() {
+    fn development_build_has_no_cloud_publisher_and_gates_sign_in_by_data_root() {
         for path in [
             "tools/publish_release.ps1",
             ".github/workflows/release.yml",
@@ -3383,17 +3385,75 @@ mod tests {
             .find("pub(super) fn run(")
             .expect("desktop entrypoint");
         let run_end = desktop[run_start..]
-            .find("fn schedule_versioned_launcher_promotion")
+            .find("\nstruct SignedInStartup")
             .map(|offset| run_start + offset)
             .expect("entrypoint boundary");
         let run = &desktop[run_start..run_end];
         assert!(run.contains("run_desktop(configured, lifecycle)"));
-        assert!(!run.contains("DesktopAccount::install()"));
+        assert!(run.contains("aeris_desktop::services::install_account(&account_service)"));
+        assert!(run.contains("run_sign_in(sign_in_gate::SignInGate::new("));
         assert!(!run.contains("run_onboarding()"));
+        // Before sign-in only local owners exist: provider sessions, the broker
+        // venue, public context sources and the market-demanding workspace start
+        // in one signed-in startup that the sign-in gate releases exactly once.
+        for signed_in_only in [
+            "MarketService::start",
+            "attach_broker_venue(",
+            "attach_trading_market_feed(",
+            "start_context_service(",
+            "configured_market_workers(",
+        ] {
+            assert!(
+                !run.contains(signed_in_only),
+                "desktop entrypoint must not start {signed_in_only} before sign-in"
+            );
+        }
+        let signed_in_start = desktop
+            .find("fn start_signed_in_runtime(")
+            .expect("signed-in startup");
+        let signed_in_end = desktop[signed_in_start..]
+            .find("\nfn stop_signed_in_owners(")
+            .map(|offset| signed_in_start + offset)
+            .expect("signed-in startup boundary");
+        let signed_in = &desktop[signed_in_start..signed_in_end];
+        for owner in [
+            "MarketService::start()",
+            "attach_broker_venue(&trading, &services.market)",
+            "attach_trading_market_feed(&trading, &services.market)",
+            "start_context_service()",
+            "configured_market_workers(command_arguments, &services)",
+        ] {
+            assert!(
+                signed_in.contains(owner),
+                "signed-in startup must own {owner}"
+            );
+        }
+        assert_eq!(
+            desktop.matches("start_signed_in_runtime(").count(),
+            2,
+            "signed-in startup has one definition and one validation-root call"
+        );
+        let gate = manifest("apps/desktop/src/components/sign_in_gate.rs");
+        assert!(gate.contains("state.startup.release(self.account.authenticated())"));
+        assert!(gate.contains("start_signed_in_runtime(startup)"));
         let updater = manifest("apps/desktop/src/update.rs");
         assert!(updater.contains("const UPDATE_BACKEND_CONFIGURED: bool = false"));
+        // Sign-in is required except on a validation data root, which never
+        // reaches the identity provider or a saved session.
         let account = manifest("apps/desktop/src/account.rs");
-        assert!(account.contains("const AUTH_BACKEND_CONFIGURED: bool = cfg!(test)"));
+        assert!(!account.contains("AUTH_BACKEND_CONFIGURED"));
+        assert!(account.contains("pub fn sign_in_required() -> bool"));
+        assert!(account.contains("!root.is_validation()"));
+        assert!(
+            manifest("apps/desktop/src/services.rs")
+                .contains("if crate::account::sign_in_required() {"),
+            "only a sign-in-required process installs the account session"
+        );
+        assert!(
+            manifest("apps/desktop/src/components/terminal_view.rs")
+                .contains("sign_in_gate::sign_in_page("),
+            "an installed but unauthenticated account session must cover the workspace"
+        );
     }
 
     #[test]
@@ -3938,6 +3998,72 @@ jobs:
     }
 
     #[test]
+    fn windows_preview_build_stays_an_unpublished_manual_artifact() {
+        let workflow = manifest(".github/workflows/windows_preview.yml");
+        assert!(workflow.contains("workflow_dispatch:") && workflow.contains("contents: read"));
+        for trigger in ["push:", "schedule:", "workflow_run", "repository_dispatch"] {
+            assert!(
+                !workflow.contains(trigger),
+                "the Windows preview build must stay manual-dispatch only, found {trigger}"
+            );
+        }
+        assert_eq!(workflow.matches("runs-on:").count(), 1);
+        assert!(workflow.contains("runs-on: windows-latest"));
+        assert!(!workflow.contains("self-hosted"));
+        // The same opt-in kit contract as the macOS preview: one secret behind
+        // the input, a kitless build otherwise, and the kit deleted after the build.
+        assert!(
+            workflow.contains("rithmic_kit:")
+                && workflow.contains("type: boolean")
+                && workflow.contains("default: false"),
+            "the Rithmic kit must stay an opt-in input of the preview build"
+        );
+        assert!(
+            workflow.contains("if: ${{ !inputs.rithmic_kit }}")
+                && workflow.contains("echo \"AERIS_RITHMIC_KIT_DISABLED=1\" >> \"$GITHUB_ENV\""),
+            "a preview without the Rithmic input must build kitless"
+        );
+        assert_eq!(
+            workflow.matches("secrets.").count(),
+            1,
+            "the preview build may read only the Rithmic kit secret"
+        );
+        assert!(
+            workflow.contains("RITHMIC_KIT_ARCHIVE: ${{ secrets.AERIS_RITHMIC_KIT_TAR_XZ_B64 }}")
+                && workflow.contains("if: ${{ inputs.rithmic_kit }}")
+                && workflow.contains("if: ${{ always() && inputs.rithmic_kit }}")
+                && workflow.contains("rm -rf provider_kit")
+                && workflow.contains("rithmic.protobuf.rs"),
+            "the Rithmic kit must be unpacked only on request, deleted after the build, \
+             and proven compiled in"
+        );
+        assert!(!workflow.contains("RITHMIC_KIT_ROOT"));
+        for forbidden in [
+            "gh release",
+            "action-gh-release",
+            "signtool",
+            "release-pair",
+            "AERIS_RELEASE_IDENTITY",
+            "AERIS_INSTALL_GENERATION",
+            "AERIS_RELEASE_VERIFYING_KEY",
+            "continue-on-error",
+            "git config --global",
+        ] {
+            assert!(
+                !workflow.contains(forbidden),
+                "the Windows preview build must stay an unpublished artifact, found {forbidden}"
+            );
+        }
+        assert!(
+            workflow.contains("cargo build -p aeris_desktop --release --locked")
+                && workflow.contains("windows-x64-preview.exe")
+                && workflow.contains("sha256sum"),
+            "the Windows preview ships the release executable with its checksum"
+        );
+        assert!(workflow.contains("Smoke launch executable"));
+        assert!(workflow.contains("retention-days: 14"));
+    }
+    #[test]
     fn workflows_never_use_pull_request_target() {
         // Hosted lanes run untrusted fork code only as `pull_request`, where
         // the token is read-only and secrets are withheld. `pull_request_target`
@@ -4241,8 +4367,6 @@ jobs:
         const ACCOUNT_IDENTIFIERS: &[&str] = &[
             "AccountId",
             "PlanId",
-            "FeatureId",
-            "FeatureSet",
             "BeginLogin",
             "AccountView",
             "LoginAuthorization",

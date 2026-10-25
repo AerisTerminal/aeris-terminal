@@ -1,21 +1,36 @@
 //! Standard OIDC mechanics for the native public client.
 //!
-//! The engine depends only on discovery, authorization, token, JWKS, and
-//! `UserInfo` standards. Better Auth identifiers and schema types never enter
-//! this module: the control plane is addressed as a plain OIDC issuer that
-//! signs ID tokens with Ed25519, verified here with the workspace-pinned
-//! `ed25519-dalek`. No tokens are logged.
+//! The runtime depends only on discovery, authorization, token, revocation and
+//! JWKS standards as served by the Aeris Cognito user pool. ID tokens are
+//! RS256-signed and verified here against the issuer JWKS with the
+//! workspace-pinned `ring`. No tokens are logged.
 
 use std::{
     fmt::Write as _,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_account::{AccountId, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
 use zeroize::Zeroizing;
+
+/// Maximum discovery document size accepted from the issuer.
+const MAXIMUM_DISCOVERY_BYTES: u64 = 32_768;
+/// Maximum JWKS document size accepted from the issuer.
+const MAXIMUM_JWKS_BYTES: u64 = 32_768;
+/// Maximum number of signing keys considered in one JWKS document.
+const MAXIMUM_JWKS_KEYS: usize = 16;
+/// Maximum token-endpoint response size.
+const MAXIMUM_TOKEN_RESPONSE_BYTES: u64 = 65_536;
+/// Maximum compact ID-token length accepted for verification.
+const MAXIMUM_ID_TOKEN_BYTES: usize = 16_384;
+/// Maximum refresh-token length accepted for vault storage.
+const MAXIMUM_REFRESH_TOKEN_BYTES: usize = 8_192;
+/// Clock-skew allowance applied to ID-token expiry.
+const ID_TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 300;
+/// Scopes requested for the desktop session; no long-lived consent prompt.
+const AUTHORIZATION_SCOPE: &str = "openid email profile";
 
 /// Authorization URL parameters for one login transaction.
 pub struct AuthorizationRequest<'a> {
@@ -33,7 +48,7 @@ pub struct AuthorizationRequest<'a> {
     pub code_challenge: &'a str,
 }
 
-/// OIDC endpoints resolved from discovery plus the `Aeris` link route.
+/// OIDC endpoints resolved from discovery metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OidcEndpoints {
     /// Verified issuer identity.
@@ -46,58 +61,56 @@ pub struct OidcEndpoints {
     pub jwks_uri: String,
     /// Revocation endpoint from discovery metadata.
     pub revocation_endpoint: String,
-    /// Subject-link route on the control-plane origin.
-    pub link_endpoint: String,
-    /// Lease-issue route on the control-plane origin.
-    pub lease_endpoint: String,
 }
 
 /// Resolves OIDC endpoints from discovery metadata.
 ///
 /// Fetches `{issuer}/.well-known/openid-configuration`, requires the echoed
-/// issuer to match the configured value exactly, requires every endpoint to
-/// stay on the issuer origin, and derives the provisioned account routes from
-/// the control-plane origin.
+/// issuer to match the configured value exactly, and requires every endpoint
+/// to stay on the issuer origin or the configured hosted sign-in origin.
 ///
 /// # Errors
 ///
 /// Returns a redacted actionable error when discovery, issuer matching, or
 /// endpoint validation fails.
-pub fn discover(issuer: &str) -> Result<OidcEndpoints, String> {
-    if !issuer.starts_with("https://") || issuer.contains([' ', '?', '#']) {
-        return Err("account control plane issuer is invalid".to_string());
+pub fn discover(issuer: &str, hosted_origin: &str) -> Result<OidcEndpoints, String> {
+    if parse_https_uri(issuer).is_err() || issuer.contains([' ', '?', '#']) {
+        return Err("account service issuer is invalid".to_string());
     }
     let agent = oidc_agent();
     let mut response = agent
         .get(&format!("{issuer}/.well-known/openid-configuration"))
         .header("Accept", "application/json")
         .call()
-        .map_err(|_| "account service is unreachable; retry sign-in".to_string())?;
+        .map_err(|_| "account service is unreachable; check your connection".to_string())?;
     let metadata: DiscoveryMetadata = response
         .body_mut()
         .with_config()
-        .limit(32_768)
+        .limit(MAXIMUM_DISCOVERY_BYTES)
         .read_json()
-        .map_err(|_| "account service is unreachable; retry sign-in".to_string())?;
-    parse_discovery(issuer, &metadata)
+        .map_err(|_| "account service is unreachable; check your connection".to_string())?;
+    parse_discovery(issuer, hosted_origin, &metadata)
 }
 
-/// Validates discovery metadata against the configured issuer.
-fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEndpoints, String> {
+/// Validates discovery metadata against the configured issuer and origins.
+fn parse_discovery(
+    issuer: &str,
+    hosted_origin: &str,
+    metadata: &DiscoveryMetadata,
+) -> Result<OidcEndpoints, String> {
     if metadata.issuer != issuer {
-        return Err("sign-in verification failed; retry sign-in".to_string());
+        return Err(claim_failure());
     }
-    let issuer_uri = parse_https_uri(issuer)
-        .map_err(|_| "sign-in verification failed; retry sign-in".to_string())?;
-    let origin = control_plane_origin(issuer)?;
+    let issuer_uri = parse_https_uri(issuer).map_err(|_| claim_failure())?;
+    let hosted_uri = parse_https_uri(hosted_origin).map_err(|_| claim_failure())?;
     for endpoint in [
         &metadata.authorization_endpoint,
         &metadata.token_endpoint,
         &metadata.jwks_uri,
         &metadata.revocation_endpoint,
     ] {
-        if !same_https_origin(&issuer_uri, endpoint) {
-            return Err("sign-in verification failed; retry sign-in".to_string());
+        if !same_https_origin(&issuer_uri, endpoint) && !same_https_origin(&hosted_uri, endpoint) {
+            return Err(claim_failure());
         }
     }
     Ok(OidcEndpoints {
@@ -106,8 +119,6 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
         token_endpoint: metadata.token_endpoint.clone(),
         jwks_uri: metadata.jwks_uri.clone(),
         revocation_endpoint: metadata.revocation_endpoint.clone(),
-        link_endpoint: format!("{origin}/api/aeris/link"),
-        lease_endpoint: format!("{origin}/api/aeris/lease"),
     })
 }
 
@@ -119,17 +130,22 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
 /// # Errors
 ///
 /// Returns a redacted error when the revocation request fails.
-pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<(), String> {
+pub fn revoke_refresh(
+    endpoints: &OidcEndpoints,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<(), String> {
     let agent = oidc_agent();
-    let body = format!(
-        "token={}&token_type_hint=refresh_token",
-        url_encode(refresh_token)
-    );
+    let body = Zeroizing::new(format!(
+        "token={}&client_id={}",
+        url_encode(refresh_token),
+        url_encode(client_id)
+    ));
     let mut response = agent
         .post(&endpoints.revocation_endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
-        .send(body)
+        .send(body.as_str())
         .map_err(|_| "sign-out revocation failed".to_string())?;
     response
         .body_mut()
@@ -140,49 +156,30 @@ pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<
     Ok(())
 }
 
-/// Derives the control-plane origin from the OIDC issuer.
-///
-/// The `Aeris` issuer is the Better Auth mount (`{origin}/api/auth`); the
-/// `Aeris`-owned link route lives on the origin beside it.
-///
-/// # Errors
-///
-/// Returns an error when the issuer does not carry the expected mount.
-pub fn control_plane_origin(issuer: &str) -> Result<String, String> {
-    let uri = parse_https_uri(issuer)?;
-    if uri.path() != "/api/auth" || uri.query().is_some() {
-        return Err("account control plane issuer is invalid".to_string());
-    }
-    let authority = uri
-        .authority()
-        .ok_or_else(|| "account control plane issuer is invalid".to_string())?;
-    Ok(format!("https://{authority}"))
-}
-
-fn parse_https_uri(value: &str) -> Result<ureq::http::Uri, String> {
+pub(super) fn parse_https_uri(value: &str) -> Result<ureq::http::Uri, String> {
     let uri = value
         .parse::<ureq::http::Uri>()
-        .map_err(|_| "account control plane issuer is invalid".to_string())?;
+        .map_err(|_| "account service address is invalid".to_string())?;
     let Some(authority) = uri.authority() else {
-        return Err("account control plane issuer is invalid".to_string());
+        return Err("account service address is invalid".to_string());
     };
     if uri.scheme_str() != Some("https") || uri.host().is_none() || authority.as_str().contains('@')
     {
-        return Err("account control plane issuer is invalid".to_string());
+        return Err("account service address is invalid".to_string());
     }
     Ok(uri)
 }
 
-fn same_https_origin(issuer: &ureq::http::Uri, endpoint: &str) -> bool {
+fn same_https_origin(origin: &ureq::http::Uri, endpoint: &str) -> bool {
     let Ok(endpoint) = parse_https_uri(endpoint) else {
         return false;
     };
-    issuer
+    origin
         .host()
         .zip(endpoint.host())
-        .is_some_and(|(issuer_host, endpoint_host)| {
-            issuer_host.eq_ignore_ascii_case(endpoint_host)
-                && issuer.port_u16().unwrap_or(443) == endpoint.port_u16().unwrap_or(443)
+        .is_some_and(|(origin_host, endpoint_host)| {
+            origin_host.eq_ignore_ascii_case(endpoint_host)
+                && origin.port_u16().unwrap_or(443) == endpoint.port_u16().unwrap_or(443)
         })
 }
 
@@ -193,16 +190,14 @@ fn same_https_origin(issuer: &ureq::http::Uri, endpoint: &str) -> bool {
 /// Returns an error when the discovered authorization endpoint is invalid.
 pub fn authorization_url(request: &AuthorizationRequest<'_>) -> Result<String, String> {
     if parse_https_uri(&request.endpoints.authorization_endpoint).is_err() {
-        return Err("account control plane issuer is invalid".to_string());
+        return Err("account service address is invalid".to_string());
     }
-    // Every desktop sign-in requires an explicit browser confirmation even
-    // when the website already has a session. Without a website session the
-    // provider first redirects through the configured login page.
     Ok(format!(
-        "{endpoint}?response_type=code&client_id={client}&redirect_uri={redirect}&scope=openid%20offline_access&prompt=consent&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
+        "{endpoint}?response_type=code&client_id={client}&redirect_uri={redirect}&scope={scope}&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
         endpoint = request.endpoints.authorization_endpoint,
         client = url_encode(request.client_id),
         redirect = url_encode(request.redirect_uri),
+        scope = url_encode(AUTHORIZATION_SCOPE),
         state = url_encode(request.state),
         nonce = url_encode(request.nonce),
         challenge = url_encode(request.code_challenge),
@@ -246,31 +241,41 @@ impl std::fmt::Debug for SecretToken {
     }
 }
 
-/// Verified token outcome for one login transaction. Access material stays
-/// in engine memory and never leaves the account-runtime ownership boundary or enters logs.
+/// Profile carried by one verified ID token. Values come only from signed
+/// claims; the runtime never logs them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccountProfile {
+    /// Preferred display name (`nickname`, else `name`); empty when absent.
+    pub display_name: String,
+    /// Email; empty when absent.
+    pub email: String,
+    /// Photo URL (`picture`); empty when absent. The desktop renders only `https` URLs.
+    pub photo_url: String,
+}
+
+/// Verified token outcome for one grant. Only the refresh token is kept as
+/// secret material; the ID token is consumed by verification and the access
+/// token is not needed by the desktop.
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedTokens {
-    /// OIDC subject linked to the canonical account.
+    /// Verified OIDC subject: the canonical account identity.
     pub subject: String,
-    /// Bearer proof for the control-plane link call (memory only).
-    pub access: SecretToken,
-    /// Identity proof for control-plane calls (memory only).
-    pub id_token: SecretToken,
+    /// Profile from the verified ID token.
+    pub profile: AccountProfile,
     /// Refresh material for vault storage (opaque to logs).
     pub refresh: Option<SecretToken>,
 }
 
 /// Exchanges one authorization code and validates the ID token.
 ///
-/// Posts to the discovered token endpoint, verifies the Ed25519 ID-token
+/// Posts to the discovered token endpoint, verifies the RS256 ID-token
 /// signature against the discovered JWKS URI, and checks issuer, audience,
-/// expiry, and nonce before returning the subject.
+/// token use, expiry, and nonce before returning the subject and profile.
 ///
 /// # Errors
 ///
-/// Returns a redacted actionable error when the exchange, signature,
-/// claims, or link lookup fails. Raw provider payloads never enter the detail.
-#[allow(clippy::too_many_lines)]
+/// Returns a redacted actionable error when the exchange, signature, or
+/// claims fail. Raw provider payloads never enter the detail.
 pub fn exchange_code(
     endpoints: &OidcEndpoints,
     agent: &ureq::Agent,
@@ -280,32 +285,26 @@ pub fn exchange_code(
     code_verifier: &str,
     expected_nonce: &str,
 ) -> Result<VerifiedTokens, String> {
-    let body = format!(
+    let body = Zeroizing::new(format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
         url_encode(code),
         url_encode(redirect_uri),
         url_encode(client_id),
         url_encode(code_verifier),
-    );
+    ));
     let mut response = agent
         .post(&endpoints.token_endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
-        .send(body)
+        .send(body.as_str())
         .map_err(|_| "sign-in exchange failed; retry sign-in".to_string())?;
     let token: TokenResponse = response
         .body_mut()
         .with_config()
-        .limit(65_536)
+        .limit(MAXIMUM_TOKEN_RESPONSE_BYTES)
         .read_json()
         .map_err(|_| "sign-in exchange failed; retry sign-in".to_string())?;
-    if token.identity.is_empty() || token.identity.len() > 16_384 {
-        return Err("sign-in exchange failed; retry sign-in".to_string());
-    }
-    if token.bearer.is_empty() || token.bearer.len() > 16_384 {
-        return Err("sign-in exchange failed; retry sign-in".to_string());
-    }
-    let subject = verify_id_token(
+    let claims = verify_id_token(
         &endpoints.issuer,
         client_id,
         Some(expected_nonce),
@@ -313,15 +312,9 @@ pub fn exchange_code(
         &endpoints.jwks_uri,
         &token.identity,
     )?;
-    Ok(VerifiedTokens {
-        subject,
-        access: SecretToken::new(token.bearer),
-        id_token: SecretToken::new(token.identity),
-        refresh: token
-            .refresh
-            .filter(|token| !token.is_empty())
-            .map(SecretToken::new),
-    })
+    let refresh = bounded_refresh(token.refresh)
+        .ok_or_else(|| "sign-in did not return a saved session; retry sign-in".to_string())?;
+    Ok(verified_tokens(claims, Some(refresh)))
 }
 
 /// Sanitized refresh failure: only an explicit rejected grant proves expiry.
@@ -331,26 +324,27 @@ pub enum RefreshGrantError {
     Unavailable,
 }
 
-/// Refreshes one token set with a vault refresh token.
+/// Refreshes one session with a vault refresh token.
 ///
-/// The refreshed ID token carries no nonce (none was requested in this
-/// grant), so nonce checking is skipped while issuer, audience, signature,
-/// and expiry still verify.
+/// Refreshed ID tokens are not bound to a new nonce, so nonce checking is
+/// skipped while issuer, audience, token use, signature, and expiry still
+/// verify. A response without a rotated refresh token keeps the stored one.
 ///
 /// # Errors
 ///
-/// Returns a redacted actionable error when the grant or validation fails.
+/// Returns [`RefreshGrantError::Rejected`] only for an explicit
+/// `invalid_grant`; every other failure is [`RefreshGrantError::Unavailable`].
 pub fn refresh_grant(
     endpoints: &OidcEndpoints,
     agent: &ureq::Agent,
     client_id: &str,
     refresh_token: &str,
 ) -> Result<VerifiedTokens, RefreshGrantError> {
-    let body = format!(
+    let body = Zeroizing::new(format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",
         url_encode(refresh_token),
         url_encode(client_id),
-    );
+    ));
     let mut response = agent
         .post(&endpoints.token_endpoint)
         .config()
@@ -358,7 +352,7 @@ pub fn refresh_grant(
         .build()
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
-        .send(body)
+        .send(body.as_str())
         .map_err(|_| RefreshGrantError::Unavailable)?;
     if !response.status().is_success() {
         #[derive(Deserialize)]
@@ -381,13 +375,10 @@ pub fn refresh_grant(
     let token: TokenResponse = response
         .body_mut()
         .with_config()
-        .limit(65_536)
+        .limit(MAXIMUM_TOKEN_RESPONSE_BYTES)
         .read_json()
         .map_err(|_| RefreshGrantError::Unavailable)?;
-    if token.identity.is_empty() || token.identity.len() > 16_384 {
-        return Err(RefreshGrantError::Unavailable);
-    }
-    let subject = verify_id_token(
+    let claims = verify_id_token(
         &endpoints.issuer,
         client_id,
         None,
@@ -396,85 +387,44 @@ pub fn refresh_grant(
         &token.identity,
     )
     .map_err(|_| RefreshGrantError::Unavailable)?;
-    Ok(VerifiedTokens {
-        subject,
-        access: SecretToken::new(token.bearer),
-        id_token: SecretToken::new(token.identity),
-        refresh: token
-            .refresh
-            .filter(|token| !token.is_empty())
-            .map(SecretToken::new),
-    })
+    Ok(verified_tokens(claims, bounded_refresh(token.refresh)))
 }
 
-/// Server-verified profile attached to one linked session. Values come from
-/// the control-plane user record only; the desktop never supplies identity
-/// proof, and the engine never logs these values.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct AccountProfile {
-    /// Display name; empty when the user record has none.
-    pub display_name: String,
-    /// Email; empty when the user record has none.
-    pub email: String,
-    /// Photo URL; empty when absent. The desktop renders only `https` URLs.
-    pub photo_url: String,
+fn bounded_refresh(refresh: Option<String>) -> Option<SecretToken> {
+    refresh
+        .map(Zeroizing::new)
+        .filter(|token| !token.is_empty() && token.len() <= MAXIMUM_REFRESH_TOKEN_BYTES)
+        .map(|token| SecretToken::new(token.to_string()))
 }
 
-/// Links one verified OIDC subject to the canonical `Aeris` account.
-///
-/// The ID token travels as the proof: the control plane verifies it
-/// server-side and never trusts the client-claimed subject. The verified
-/// user record travels back as the session profile.
-///
-/// # Errors
-///
-/// Returns a redacted actionable error when the control plane cannot link
-/// the subject or returns an unknown plan.
-pub fn link_subject(
-    endpoints: &OidcEndpoints,
-    agent: &ureq::Agent,
-    id_token: &str,
-    subject: &str,
-) -> Result<(AccountId, PlanId, AccountProfile), String> {
-    let body = format!(
-        "{{\"subject\":\"{}\",\"id_token\":\"{}\"}}",
-        subject.replace('\\', "\\\\").replace('"', "\\\""),
-        id_token.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    let mut response = agent
-        .post(&endpoints.link_endpoint)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .send(body)
-        .map_err(|_| "account linking failed; retry sign-in".to_string())?;
-    let link: LinkResponse = response
-        .body_mut()
-        .with_config()
-        .limit(16_384)
-        .read_json()
-        .map_err(|_| "account linking failed; retry sign-in".to_string())?;
-    let account_id =
-        AccountId::try_new(link.account_id).map_err(|_| "account linking failed".to_string())?;
-    let plan = PlanId::try_parse(&link.plan).map_err(|_| "account linking failed".to_string())?;
-    Ok((
-        account_id,
-        plan,
-        AccountProfile {
+fn verified_tokens(claims: IdClaims, refresh: Option<SecretToken>) -> VerifiedTokens {
+    let display_name = if claims.nickname.trim().is_empty() {
+        claims.name
+    } else {
+        claims.nickname
+    };
+    VerifiedTokens {
+        subject: claims.sub,
+        profile: AccountProfile {
             display_name: clip_profile(
-                &link.display_name,
+                display_name.trim(),
                 aeris_account::MAXIMUM_PROFILE_NAME_BYTES,
             ),
-            email: clip_profile(&link.email, aeris_account::MAXIMUM_PROFILE_EMAIL_BYTES),
+            email: clip_profile(
+                claims.email.trim(),
+                aeris_account::MAXIMUM_PROFILE_EMAIL_BYTES,
+            ),
             photo_url: clip_profile(
-                &link.photo_url,
+                claims.picture.trim(),
                 aeris_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
             ),
         },
-    ))
+        refresh,
+    }
 }
 
-/// Clips server profile text to the native contract bound on a character boundary.
-/// Overlong values truncate; they never fail the link.
+/// Clips profile text to the native contract bound on a character boundary.
+/// Overlong values truncate; they never fail the sign-in.
 fn clip_profile(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {
         return value.to_string();
@@ -497,24 +447,8 @@ pub(crate) fn oidc_agent() -> ureq::Agent {
 struct TokenResponse {
     #[serde(default, rename = "id_token")]
     identity: String,
-    #[serde(default, rename = "access_token")]
-    bearer: String,
     #[serde(default, rename = "refresh_token")]
     refresh: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LinkResponse {
-    #[serde(default)]
-    account_id: String,
-    #[serde(default)]
-    plan: String,
-    #[serde(default)]
-    display_name: String,
-    #[serde(default)]
-    email: String,
-    #[serde(default)]
-    photo_url: String,
 }
 
 #[derive(Deserialize)]
@@ -538,32 +472,50 @@ fn verify_id_token(
     agent: &ureq::Agent,
     jwks_uri: &str,
     id_token: &str,
-) -> Result<String, String> {
+) -> Result<IdClaims, String> {
+    if id_token.is_empty() || id_token.len() > MAXIMUM_ID_TOKEN_BYTES {
+        return Err(claim_failure());
+    }
     let (header, payload, signature) = split_jwt(id_token)?;
     let header_json: JwtHeader =
         serde_json::from_slice(&decode_part(header)?).map_err(|_| claim_failure())?;
-    if header_json.alg != "EdDSA" {
+    if header_json.alg != "RS256" || header_json.kid.is_empty() {
         return Err(claim_failure());
     }
-    let key = fetch_verifying_key(agent, jwks_uri, header_json.kid.as_deref())?;
-    let signature = Signature::from_slice(&decode_part(signature)?).map_err(|_| claim_failure())?;
-    key.verify(format!("{header}.{payload}").as_bytes(), &signature)
-        .map_err(|_| claim_failure())?;
+    let jwks = fetch_jwks(agent, jwks_uri)?;
+    let key = select_signing_key(&jwks, &header_json.kid)?;
+    verify_rs256(
+        key,
+        format!("{header}.{payload}").as_bytes(),
+        &decode_part(signature)?,
+    )?;
     let claims: IdClaims =
         serde_json::from_slice(&decode_part(payload)?).map_err(|_| claim_failure())?;
-    if claims.iss != issuer || !audience_matches(&claims.aud, client_id) {
+    validate_claims(&claims, issuer, client_id, expected_nonce, unix_now())?;
+    Ok(claims)
+}
+
+fn validate_claims(
+    claims: &IdClaims,
+    issuer: &str,
+    client_id: &str,
+    expected_nonce: Option<&str>,
+    now_unix_seconds: u64,
+) -> Result<(), String> {
+    if claims.iss != issuer || !audience_matches(&claims.aud, client_id) || claims.token_use != "id"
+    {
         return Err(claim_failure());
     }
-    if claims.exp <= unix_now() {
+    if claims.exp.saturating_add(ID_TOKEN_EXPIRY_LEEWAY_SECONDS) <= now_unix_seconds {
         return Err("sign-in session expired; retry sign-in".to_string());
     }
-    if !nonce_matches(&claims.nonce, expected_nonce) {
+    if expected_nonce.is_some_and(|expected| claims.nonce != expected) {
         return Err(claim_failure());
     }
-    if claims.sub.trim().is_empty() {
+    if claims.sub.trim().is_empty() || claims.sub.len() > aeris_account::MAXIMUM_ACCOUNT_ID_BYTES {
         return Err(claim_failure());
     }
-    Ok(claims.sub)
+    Ok(())
 }
 
 fn claim_failure() -> String {
@@ -590,18 +542,7 @@ fn audience_matches(audience: &serde_json::Value, client_id: &str) -> bool {
     }
 }
 
-fn nonce_matches(claim_nonce: &str, expected_nonce: Option<&str>) -> bool {
-    match expected_nonce {
-        Some(expected) => claim_nonce == expected,
-        None => claim_nonce.is_empty(),
-    }
-}
-
-fn fetch_verifying_key(
-    agent: &ureq::Agent,
-    jwks_uri: &str,
-    kid: Option<&str>,
-) -> Result<VerifyingKey, String> {
+fn fetch_jwks(agent: &ureq::Agent, jwks_uri: &str) -> Result<Jwks, String> {
     let mut response = agent
         .get(jwks_uri)
         .header("Accept", "application/json")
@@ -610,20 +551,40 @@ fn fetch_verifying_key(
     let jwks: Jwks = response
         .body_mut()
         .with_config()
-        .limit(32_768)
+        .limit(MAXIMUM_JWKS_BYTES)
         .read_json()
         .map_err(|_| claim_failure())?;
-    for key in &jwks.keys {
-        if key.kty == "OKP"
-            && key.crv.as_deref() == Some("Ed25519")
-            && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
-        {
-            let raw = decode_part(&key.x)?;
-            let bytes: [u8; 32] = raw.try_into().map_err(|_| claim_failure())?;
-            return VerifyingKey::from_bytes(&bytes).map_err(|_| claim_failure());
-        }
+    if jwks.keys.len() > MAXIMUM_JWKS_KEYS {
+        return Err(claim_failure());
     }
-    Err(claim_failure())
+    Ok(jwks)
+}
+
+/// Selects the RSA signing key named by the token `kid`. Keys declaring
+/// another algorithm or a non-signature use are never eligible.
+fn select_signing_key<'a>(jwks: &'a Jwks, kid: &str) -> Result<&'a Jwk, String> {
+    jwks.keys
+        .iter()
+        .find(|key| {
+            key.kid == kid
+                && key.kty == "RSA"
+                && key.alg.as_deref().is_none_or(|alg| alg == "RS256")
+                && key
+                    .key_use
+                    .as_deref()
+                    .is_none_or(|key_use| key_use == "sig")
+        })
+        .ok_or_else(claim_failure)
+}
+
+fn verify_rs256(key: &Jwk, signing_input: &[u8], signature: &[u8]) -> Result<(), String> {
+    let components = RsaPublicKeyComponents {
+        n: decode_part(&key.n)?,
+        e: decode_part(&key.e)?,
+    };
+    components
+        .verify(&RSA_PKCS1_2048_8192_SHA256, signing_input, signature)
+        .map_err(|_| claim_failure())
 }
 
 #[derive(Deserialize)]
@@ -631,7 +592,7 @@ struct JwtHeader {
     #[serde(default)]
     alg: String,
     #[serde(default)]
-    kid: Option<String>,
+    kid: String,
 }
 
 #[derive(Deserialize)]
@@ -646,6 +607,16 @@ struct IdClaims {
     nonce: String,
     #[serde(default)]
     sub: String,
+    #[serde(default)]
+    token_use: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    nickname: String,
+    #[serde(default)]
+    picture: String,
 }
 
 #[derive(Deserialize)]
@@ -659,11 +630,15 @@ struct Jwk {
     #[serde(default)]
     kty: String,
     #[serde(default)]
-    crv: Option<String>,
+    kid: String,
     #[serde(default)]
-    kid: Option<String>,
+    alg: Option<String>,
+    #[serde(default, rename = "use")]
+    key_use: Option<String>,
     #[serde(default)]
-    x: String,
+    n: String,
+    #[serde(default)]
+    e: String,
 }
 
 fn unix_now() -> u64 {
@@ -675,20 +650,52 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorizationRequest, OidcEndpoints, SecretToken, VerifiedTokens, audience_matches,
-        authorization_url, control_plane_origin, nonce_matches, split_jwt, url_encode,
+        AccountProfile, AuthorizationRequest, IdClaims, Jwk, Jwks, OidcEndpoints, SecretToken,
+        VerifiedTokens, audience_matches, authorization_url, select_signing_key, split_jwt,
+        url_encode, validate_claims, verified_tokens, verify_rs256,
     };
+
+    const ISSUER: &str = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_fixture";
+    const HOSTED: &str = "https://auth.example.test";
+
+    // RFC 7515 Appendix A.2: the published RS256 example key and signature.
+    const RFC_7515_N: &str = "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddxHmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMsD1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSHSXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdVMTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ";
+    const RFC_7515_SIGNING_INPUT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ";
+    const RFC_7515_SIGNATURE: &str = "cC4hiUPoj9Eetdgtv3hF80EGrhuB__dzERat0XF9g2VtQgr9PJbu3XOiZj5RZmh7AAuHIm4Bh-0Qc_lF5YKt_O8W2Fp5jujGbds9uJdbF9CUAr7t1dnZcAcQjbKBYNX4BAynRFdiuB--f_nZLgrnbyTyWzO75vRK5h6xBArLIARNPvkSjtQBMHlb1L07Qe7K0GarZRmB_eSN9383LcOLn6_dO--xi12jzDwusC-eOkHWEsqtFZESc6BfI7noOPqvhJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWywlVmtVrBp0igcN_IoypGlUPQGe77Rw";
+
+    fn rfc_key(kid: &str) -> Jwk {
+        Jwk {
+            kty: "RSA".to_string(),
+            kid: kid.to_string(),
+            alg: Some("RS256".to_string()),
+            key_use: Some("sig".to_string()),
+            n: RFC_7515_N.to_string(),
+            e: "AQAB".to_string(),
+        }
+    }
 
     fn endpoints() -> OidcEndpoints {
         OidcEndpoints {
-            issuer: "https://auth.example.test/api/auth".to_string(),
-            authorization_endpoint: "https://auth.example.test/api/auth/oauth2/authorize"
-                .to_string(),
-            token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
-            jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
-            revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
-            link_endpoint: "https://auth.example.test/api/aeris/link".to_string(),
-            lease_endpoint: "https://auth.example.test/api/aeris/lease".to_string(),
+            issuer: ISSUER.to_string(),
+            authorization_endpoint: format!("{HOSTED}/oauth2/authorize"),
+            token_endpoint: format!("{HOSTED}/oauth2/token"),
+            jwks_uri: format!("{ISSUER}/.well-known/jwks.json"),
+            revocation_endpoint: format!("{HOSTED}/oauth2/revoke"),
+        }
+    }
+
+    fn claims() -> IdClaims {
+        IdClaims {
+            iss: ISSUER.to_string(),
+            aud: serde_json::Value::String("fixture-client".to_string()),
+            exp: 2_000_000_000,
+            nonce: "nonce-value".to_string(),
+            sub: "8f0c2b2e-0000-4000-8000-000000000001".to_string(),
+            token_use: "id".to_string(),
+            email: "ada@example.test".to_string(),
+            name: "Ada Lovelace".to_string(),
+            nickname: String::new(),
+            picture: "https://example.test/ada.png".to_string(),
         }
     }
 
@@ -696,17 +703,121 @@ mod tests {
     fn verified_token_debug_output_redacts_every_secret() {
         let tokens = VerifiedTokens {
             subject: "subject-1".to_string(),
-            access: SecretToken::new("access-secret".to_string()),
-            id_token: SecretToken::new("identity-secret".to_string()),
+            profile: AccountProfile::default(),
             refresh: Some(SecretToken::new("refresh-secret".to_string())),
         };
 
         let debug = format!("{tokens:?}");
         assert!(debug.contains("subject-1"));
-        assert_eq!(debug.matches("[REDACTED]").count(), 3);
-        for secret in ["access-secret", "identity-secret", "refresh-secret"] {
-            assert!(!debug.contains(secret));
+        assert_eq!(debug.matches("[REDACTED]").count(), 1);
+        assert!(!debug.contains("refresh-secret"));
+    }
+
+    #[test]
+    fn rs256_signatures_verify_against_jwks_rsa_components() {
+        let key = rfc_key("rfc");
+        let signature = super::decode_part(RFC_7515_SIGNATURE).expect("signature decodes");
+        verify_rs256(&key, RFC_7515_SIGNING_INPUT.as_bytes(), &signature)
+            .expect("RFC 7515 example signature verifies");
+        let mut tampered = RFC_7515_SIGNING_INPUT.as_bytes().to_vec();
+        tampered[0] ^= 1;
+        assert!(verify_rs256(&key, &tampered, &signature).is_err());
+        let mut wrong_key = rfc_key("rfc");
+        wrong_key.e = "AQAA".to_string();
+        assert!(verify_rs256(&wrong_key, RFC_7515_SIGNING_INPUT.as_bytes(), &signature).is_err());
+    }
+
+    #[test]
+    fn signing_key_selection_requires_kid_rsa_and_rs256() {
+        let mut other_alg = rfc_key("kid-a");
+        other_alg.alg = Some("RS512".to_string());
+        let mut encryption = rfc_key("kid-b");
+        encryption.key_use = Some("enc".to_string());
+        let mut not_rsa = rfc_key("kid-c");
+        not_rsa.kty = "EC".to_string();
+        let jwks = Jwks {
+            keys: vec![other_alg, encryption, not_rsa, rfc_key("kid-d")],
+        };
+        for kid in ["kid-a", "kid-b", "kid-c", "missing"] {
+            assert!(
+                select_signing_key(&jwks, kid).is_err(),
+                "{kid} must not verify"
+            );
         }
+        assert_eq!(
+            select_signing_key(&jwks, "kid-d").expect("RS256 key").kid,
+            "kid-d"
+        );
+    }
+
+    #[test]
+    fn id_claims_require_issuer_audience_token_use_expiry_and_nonce() {
+        let now = 1_900_000_000;
+        validate_claims(
+            &claims(),
+            ISSUER,
+            "fixture-client",
+            Some("nonce-value"),
+            now,
+        )
+        .expect("valid claims pass");
+        validate_claims(&claims(), ISSUER, "fixture-client", None, now)
+            .expect("refresh claims skip the authorization nonce");
+        let reject = |claims: IdClaims| {
+            validate_claims(&claims, ISSUER, "fixture-client", Some("nonce-value"), now).is_err()
+        };
+        assert!(reject(IdClaims {
+            iss: "https://evil.example.test".to_string(),
+            ..claims()
+        }));
+        assert!(reject(IdClaims {
+            aud: serde_json::Value::String("other-client".to_string()),
+            ..claims()
+        }));
+        assert!(reject(IdClaims {
+            token_use: "access".to_string(),
+            ..claims()
+        }));
+        assert!(reject(IdClaims {
+            exp: now - 301,
+            ..claims()
+        }));
+        assert!(reject(IdClaims {
+            nonce: "replayed".to_string(),
+            ..claims()
+        }));
+        assert!(reject(IdClaims {
+            sub: " ".to_string(),
+            ..claims()
+        }));
+        validate_claims(
+            &IdClaims {
+                exp: now - 10,
+                ..claims()
+            },
+            ISSUER,
+            "fixture-client",
+            None,
+            now,
+        )
+        .expect("small clock skew stays inside the expiry leeway");
+    }
+
+    #[test]
+    fn profile_prefers_nickname_and_reads_verified_claims() {
+        let tokens = verified_tokens(claims(), None);
+        assert_eq!(tokens.subject, "8f0c2b2e-0000-4000-8000-000000000001");
+        assert_eq!(tokens.profile.display_name, "Ada Lovelace");
+        assert_eq!(tokens.profile.email, "ada@example.test");
+        assert_eq!(tokens.profile.photo_url, "https://example.test/ada.png");
+        let nicknamed = verified_tokens(
+            IdClaims {
+                nickname: "Ada".to_string(),
+                ..claims()
+            },
+            None,
+        );
+        assert_eq!(nicknamed.profile.display_name, "Ada");
     }
 
     #[test]
@@ -726,6 +837,7 @@ mod tests {
                 format!("http://{}/token", listener.local_addr().expect("address"));
             let server = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("request");
+                stream.set_nonblocking(false).expect("blocking stream");
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .expect("timeout");
@@ -755,95 +867,88 @@ mod tests {
 
     fn discovery_fixture() -> super::DiscoveryMetadata {
         super::DiscoveryMetadata {
-            issuer: "https://auth.example.test/api/auth".to_string(),
-            authorization_endpoint: "https://auth.example.test/api/auth/oauth2/authorize"
-                .to_string(),
-            token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
-            jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
-            revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
+            issuer: ISSUER.to_string(),
+            authorization_endpoint: format!("{HOSTED}/oauth2/authorize"),
+            token_endpoint: format!("{HOSTED}/oauth2/token"),
+            jwks_uri: format!("{ISSUER}/.well-known/jwks.json"),
+            revocation_endpoint: format!("{HOSTED}/oauth2/revoke"),
         }
     }
 
     #[test]
-    fn discovery_fixture_matches_the_live_worker_layout() {
+    fn discovery_accepts_the_issuer_and_hosted_sign_in_origins() {
         let endpoints =
-            super::parse_discovery("https://auth.example.test/api/auth", &discovery_fixture())
-                .expect("fixture parses");
+            super::parse_discovery(ISSUER, HOSTED, &discovery_fixture()).expect("fixture parses");
         assert_eq!(endpoints, self::endpoints());
     }
 
     #[test]
-    fn discovery_rejects_mismatched_issuer_and_off_origin_endpoints() {
+    fn discovery_rejects_mismatched_issuer_and_foreign_endpoints() {
         assert!(
             super::parse_discovery(
-                "https://auth.example.test/api/auth",
+                ISSUER,
+                HOSTED,
                 &super::DiscoveryMetadata {
-                    issuer: "https://evil.example.com/api/auth".to_string(),
+                    issuer: format!("{ISSUER}/"),
                     ..discovery_fixture()
                 }
             )
             .is_err()
         );
-        for jwks_uri in [
-            "https://auth.example.test.evil.example/jwks",
-            "https://auth.example.test@evil.example/jwks",
-            "https://auth.example.test:444/jwks",
-            "http://auth.example.test/jwks",
+        for token_endpoint in [
+            "https://auth.example.test.evil.example/oauth2/token",
+            "https://auth.example.test@evil.example/oauth2/token",
+            "https://auth.example.test:444/oauth2/token",
+            "http://auth.example.test/oauth2/token",
+            "https://evil.example.com/oauth2/token",
         ] {
             assert!(
                 super::parse_discovery(
-                    "https://auth.example.test/api/auth",
+                    ISSUER,
+                    HOSTED,
                     &super::DiscoveryMetadata {
-                        jwks_uri: jwks_uri.to_string(),
+                        token_endpoint: token_endpoint.to_string(),
                         ..discovery_fixture()
                     }
                 )
                 .is_err(),
-                "off-origin endpoint must be rejected: {jwks_uri}"
+                "foreign endpoint must be rejected: {token_endpoint}"
             );
         }
-
         let endpoints = super::parse_discovery(
-            "https://auth.example.test/api/auth",
+            ISSUER,
+            HOSTED,
             &super::DiscoveryMetadata {
-                jwks_uri: "https://AUTH.EXAMPLE.TEST:443/api/auth/jwks".to_string(),
+                token_endpoint: "https://AUTH.EXAMPLE.TEST:443/oauth2/token".to_string(),
                 ..discovery_fixture()
             },
         )
         .expect("host case and the explicit default HTTPS port preserve the same origin");
         assert_eq!(
-            endpoints.jwks_uri,
-            "https://AUTH.EXAMPLE.TEST:443/api/auth/jwks"
-        );
-        assert!(
-            super::parse_discovery(
-                "https://auth.example.test/api/auth",
-                &super::DiscoveryMetadata {
-                    jwks_uri: "https://evil.example.com/jwks".to_string(),
-                    ..discovery_fixture()
-                }
-            )
-            .is_err()
+            endpoints.token_endpoint,
+            "https://AUTH.EXAMPLE.TEST:443/oauth2/token"
         );
     }
 
     #[test]
-    fn authorization_url_carries_pkce_and_loopback() {
+    fn authorization_url_carries_pkce_scope_and_localhost_redirect() {
         let endpoints = endpoints();
         let request = AuthorizationRequest {
             endpoints: &endpoints,
-            client_id: "aeris-desktop",
-            redirect_uri: "http://127.0.0.1:43129/callback",
+            client_id: "fixture-client",
+            redirect_uri: "http://localhost:47210/callback",
             state: "state-value",
             nonce: "nonce-value",
             code_challenge: "challenge-value",
         };
         let url = authorization_url(&request).expect("URL builds");
-        assert!(url.starts_with("https://auth.example.test/api/auth/oauth2/authorize?"));
-        assert!(url.contains("scope=openid%20offline_access"));
-        assert!(url.contains("prompt=consent"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback"));
+        assert!(url.starts_with("https://auth.example.test/oauth2/authorize?response_type=code&"));
+        assert!(url.contains("client_id=fixture-client"));
+        assert!(url.contains("scope=openid%20email%20profile&"));
+        assert!(!url.contains("offline_access"));
+        assert!(!url.contains("prompt="));
+        assert!(url.contains("code_challenge=challenge-value&code_challenge_method=S256"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A47210%2Fcallback"));
         let mut plain = endpoints.clone();
         plain.authorization_endpoint = "http://auth.example.test/oauth2/authorize".to_string();
         assert!(
@@ -856,34 +961,15 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_origin_requires_the_expected_mount() {
-        assert_eq!(
-            control_plane_origin("https://auth.example.test/api/auth"),
-            Ok("https://auth.example.test".to_string())
-        );
-        assert!(control_plane_origin("https://auth.example.test").is_err());
-        assert!(control_plane_origin("http://auth.example.test/api/auth").is_err());
-        assert!(control_plane_origin("https://auth.example.test.evil/api/auth").is_ok());
-        assert!(control_plane_origin("https://auth.example.test/api/auth?next=evil").is_err());
-        assert!(control_plane_origin("https://user@auth.example.test/api/auth").is_err());
-    }
-
-    #[test]
     fn profile_text_clips_on_character_boundaries() {
         assert_eq!(super::clip_profile("Ada", 128), "Ada");
         let long = "a".repeat(200);
         assert_eq!(super::clip_profile(&long, 128).len(), 128);
-        // Multibyte names never split a character: the bound is bytes, the
-        // cut is a boundary.
         let emoji = "😀".repeat(40);
         let clipped = super::clip_profile(&emoji, 128);
         assert!(clipped.len() <= 128);
         assert_eq!(clipped.chars().count(), 32);
-        assert_eq!(
-            super::clip_profile("", 128),
-            String::new(),
-            "missing profile stays empty, never fails"
-        );
+        assert_eq!(super::clip_profile("", 128), String::new());
     }
 
     #[test]
@@ -895,19 +981,10 @@ mod tests {
 
     #[test]
     fn audience_matching_covers_string_and_array() {
-        let single = serde_json::Value::String("aeris-desktop".to_string());
-        assert!(audience_matches(&single, "aeris-desktop"));
+        let single = serde_json::Value::String("fixture-client".to_string());
+        assert!(audience_matches(&single, "fixture-client"));
         assert!(!audience_matches(&single, "other"));
         let many = serde_json::Value::Array(vec![serde_json::Value::String("other".to_string())]);
-        assert!(!audience_matches(&many, "aeris-desktop"));
-    }
-
-    #[test]
-    fn authorization_nonce_is_exact_and_refresh_nonce_is_absent() {
-        assert!(nonce_matches("nonce-value", Some("nonce-value")));
-        assert!(!nonce_matches("", Some("nonce-value")));
-        assert!(!nonce_matches("other", Some("nonce-value")));
-        assert!(nonce_matches("", None));
-        assert!(!nonce_matches("unexpected", None));
+        assert!(!audience_matches(&many, "fixture-client"));
     }
 }

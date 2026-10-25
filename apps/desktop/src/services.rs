@@ -42,15 +42,58 @@ impl DesktopServices {
         }
     }
 
-    /// Starts the optional session on this instance's account owner.
-    ///
-    /// # Errors
-    /// Returns an error if the account client thread cannot start.
-    pub fn start_account(&mut self) -> Result<(), String> {
-        if crate::account::AUTH_BACKEND_CONFIGURED {
-            self.account = Some(DesktopAccount::install(self.account_service.clone())?);
+    /// Attaches the sign-in session installed before these services were
+    /// composed; a validation run passes none.
+    #[must_use]
+    pub fn with_account(mut self, account: Option<DesktopAccount>) -> Self {
+        self.account = account;
+        self
+    }
+}
+
+/// Installs the sign-in session when this process requires one. A validation
+/// run gets none and reaches the workspace without sign-in.
+///
+/// # Errors
+/// Returns an error if the account client thread cannot start.
+pub fn install_account(account_service: &AccountService) -> Result<Option<DesktopAccount>, String> {
+    if crate::account::sign_in_required() {
+        return DesktopAccount::install(account_service.clone()).map(Some);
+    }
+    Ok(None)
+}
+
+/// Holds the signed-in startup (provider sessions, the broker venue and the
+/// workspace that demands market data) until the account owner first reports
+/// a usable session, signed in or the cached offline one, then releases it
+/// exactly once. Later offline, refresh and re-sign-in transitions find it
+/// spent, so a session flip never starts a second provider session or venue.
+pub struct SignedInStart<T> {
+    pending: Option<T>,
+}
+
+impl<T> SignedInStart<T> {
+    #[must_use]
+    pub const fn new(start: T) -> Self {
+        Self {
+            pending: Some(start),
         }
-        Ok(())
+    }
+
+    /// Returns the held startup on the first call that observes an
+    /// authenticated session, and `None` before it and ever after.
+    pub fn release(&mut self, authenticated: bool) -> Option<T> {
+        if authenticated {
+            self.pending.take()
+        } else {
+            None
+        }
+    }
+
+    /// Whether the startup has been released.
+    #[must_use]
+    pub const fn released(&self) -> bool {
+        self.pending.is_none()
     }
 }
 
@@ -73,7 +116,7 @@ mod tests {
         DesktopServices::new(
             MarketService::start().expect("independent market owner"),
             trading(),
-            AccountService::new(aeris_account_runtime::AccountServiceConfig::from_environment()),
+            AccountService::new(aeris_account_runtime::AccountServiceConfig::production()),
             DesktopPersistence::new(
                 std::env::temp_dir().join(format!("aeris-desktop-services-{}", std::process::id())),
             ),
@@ -167,14 +210,14 @@ mod tests {
         let first = DesktopServices::new(
             MarketService::start().expect("first market"),
             trading(),
-            AccountService::new(aeris_account_runtime::AccountServiceConfig::from_environment()),
+            AccountService::new(aeris_account_runtime::AccountServiceConfig::production()),
             DesktopPersistence::new(std::env::temp_dir().join("aeris-clock-first")),
             first_clock.clone(),
         );
         let second = DesktopServices::new(
             MarketService::start().expect("second market"),
             trading(),
-            AccountService::new(aeris_account_runtime::AccountServiceConfig::from_environment()),
+            AccountService::new(aeris_account_runtime::AccountServiceConfig::production()),
             DesktopPersistence::new(std::env::temp_dir().join("aeris-clock-second")),
             second_clock,
         );
@@ -184,6 +227,28 @@ mod tests {
         first_clock.set_wall_unix_nanos(3_000_000_000);
         assert_eq!(pane_feedback.now(), 3_000_000_000);
         assert_eq!(second.trading_feedback.now(), 2_000_000_000);
+    }
+
+    #[test]
+    fn signed_in_start_releases_once_only_after_sign_in() {
+        let started = std::cell::Cell::new(0_u32);
+        let mut gate = SignedInStart::new(());
+        // Restore pending, signed out, then browser sign-in in progress.
+        for authenticated in [false, false, false] {
+            if gate.release(authenticated).is_some() {
+                started.set(started.get() + 1);
+            }
+        }
+        assert_eq!(started.get(), 0, "nothing may start before sign-in");
+        assert!(!gate.released());
+        // Signed in, then offline, refresh, sign-out and a second sign-in.
+        for authenticated in [true, true, true, false, true, true] {
+            if gate.release(authenticated).is_some() {
+                started.set(started.get() + 1);
+            }
+        }
+        assert_eq!(started.get(), 1, "the signed-in startup runs exactly once");
+        assert!(gate.released());
     }
 
     #[test]

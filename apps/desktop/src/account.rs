@@ -3,8 +3,6 @@
 //! Network and credential work stays off the GPUI thread, but there is no
 //! secondary process, local transport, or reconnect/replay layer.
 
-pub const AUTH_BACKEND_CONFIGURED: bool = cfg!(test);
-
 use aeris_observability::diagnostic;
 use std::{
     sync::{
@@ -19,7 +17,15 @@ use aeris_account_runtime::AccountService;
 use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
-pub const MANAGE_PROFILE_URL: &str = "";
+pub const MANAGE_PROFILE_URL: &str = "https://aeristerminal.com/account/";
+
+/// Whether this process gates the workspace behind sign-in. A validation data
+/// root never reaches the identity provider or a saved session, so it runs
+/// without an account session; an unresolved data root fails closed.
+#[must_use]
+pub fn sign_in_required() -> bool {
+    aeris_platform_runtime::active_data_root().map_or(true, |root| !root.is_validation())
+}
 
 /// Opens the production account hub on a background thread. The GPUI thread
 /// never performs browser/process work.
@@ -109,9 +115,8 @@ pub const fn account_state_label(state: AccountSessionState) -> &'static str {
         AccountSessionState::SignedOut => "Signed out",
         AccountSessionState::Authorizing => "Waiting for browser sign-in",
         AccountSessionState::Active => "Signed in",
-        AccountSessionState::OfflineLease => "Signed in (offline)",
+        AccountSessionState::Offline => "Signed in (offline)",
         AccountSessionState::ReauthenticationRequired => "Sign-in required",
-        AccountSessionState::LeaseExpired => "Sign-in expired",
         AccountSessionState::TerminalError => "Sign-in unavailable",
     }
 }
@@ -120,7 +125,7 @@ pub const fn account_state_label(state: AccountSessionState) -> &'static str {
 #[must_use]
 pub fn account_action_label(view: &AccountView) -> &'static str {
     match view.state {
-        AccountSessionState::Active | AccountSessionState::OfflineLease => "Account",
+        AccountSessionState::Active | AccountSessionState::Offline => "Account",
         AccountSessionState::Authorizing => "Waiting for browser",
         _ => "Sign in",
     }
@@ -130,8 +135,8 @@ pub fn account_action_label(view: &AccountView) -> &'static str {
 #[must_use]
 pub fn unavailable_presentation() -> AccountPresentation {
     AccountPresentation {
-        action: "Development",
-        state: "Development mode",
+        action: "Validation",
+        state: "Validation (sign-in disabled)",
         plan: "No plan",
         detail: String::new(),
         display_name: String::new(),
@@ -187,6 +192,8 @@ pub struct AccountMenuState {
     pub error: Option<String>,
     /// Whether durable sign-out cleanup is still unresolved and can be retried.
     pub retry_sign_out: bool,
+    /// Whether an account session is installed. Validation runs have none.
+    pub sign_in_enabled: bool,
 }
 
 impl AccountMenuState {
@@ -202,11 +209,11 @@ impl AccountMenuState {
         self.presentation.action == "Waiting for browser"
     }
 
-    /// Returns whether the session is signed in on a cached lease.
+    /// Returns whether the session is signed in but the identity provider is unreachable.
     #[must_use]
     pub fn offline(&self) -> bool {
         self.signed_in()
-            && self.presentation.state == account_state_label(AccountSessionState::OfflineLease)
+            && self.presentation.state == account_state_label(AccountSessionState::Offline)
     }
 
     /// Returns whether the panel hides identity metadata. A plain signed-out
@@ -228,6 +235,7 @@ pub fn unavailable_menu_state() -> AccountMenuState {
         presentation: unavailable_presentation(),
         error: None,
         retry_sign_out: false,
+        sign_in_enabled: false,
     }
 }
 
@@ -237,10 +245,7 @@ pub fn unavailable_menu_state() -> AccountMenuState {
 pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
     match plan_id {
         "" => "No plan",
-        "starter" => "Early access",
-        "pro" => "Pro",
-        "elite" => "Elite",
-        "enterprise" => "Enterprise",
+        "early_access" => "Early access",
         _ => "Unknown plan",
     }
 }
@@ -543,6 +548,7 @@ impl DesktopAccount {
             presentation: self.presentation(),
             error,
             retry_sign_out,
+            sign_in_enabled: true,
         }
     }
 
@@ -566,24 +572,6 @@ impl DesktopAccount {
         }
     }
 
-    /// Returns the current verified internal plan identity.
-    #[must_use]
-    pub fn plan_id(&self) -> String {
-        self.shared.view.lock().map_or_else(
-            |_| "starter".to_string(),
-            |view| {
-                match view.state {
-                    AccountSessionState::Active | AccountSessionState::OfflineLease => {}
-                    _ => return "starter".to_string(),
-                }
-                match view.plan_id.as_str() {
-                    "pro" | "elite" | "enterprise" => view.plan_id.clone(),
-                    _ => "starter".to_string(),
-                }
-            },
-        )
-    }
-
     /// Returns the latest redacted account error, if any.
     #[must_use]
     pub fn error(&self) -> Option<String> {
@@ -601,9 +589,6 @@ impl DesktopAccount {
     /// Returns an error when the worker cannot be reached. The browser
     /// opens on the worker thread.
     pub fn request_sign_in(&self) -> Result<(), String> {
-        if !AUTH_BACKEND_CONFIGURED {
-            return Err("sign-in is disabled in development mode".to_string());
-        }
         if self.shared.pending.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -721,7 +706,7 @@ impl DesktopAccount {
         let refreshable = self.shared.view.lock().is_ok_and(|view| {
             matches!(
                 view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
+                AccountSessionState::Active | AccountSessionState::Offline
             )
         });
         if !refreshable {
@@ -757,7 +742,7 @@ impl DesktopAccount {
             .state;
         if !matches!(
             refreshable,
-            AccountSessionState::Active | AccountSessionState::OfflineLease
+            AccountSessionState::Active | AccountSessionState::Offline
         ) {
             return Ok(false);
         }
@@ -843,7 +828,7 @@ fn resolve_authoritative_authentication(probe: Option<bool>, presentation: &Acco
 fn account_view_authenticated(view: &AccountView) -> bool {
     matches!(
         view.state,
-        AccountSessionState::Active | AccountSessionState::OfflineLease
+        AccountSessionState::Active | AccountSessionState::Offline
     )
 }
 
@@ -1226,7 +1211,7 @@ mod tests {
         fn complete_active(&mut self, name: &str, email: &str) {
             let mut view = view(AccountSessionState::Active);
             view.account_id = "acct_01".to_string();
-            view.plan_id = "pro".to_string();
+            view.plan_id = "early_access".to_string();
             view.display_name = name.to_string();
             view.email = email.to_string();
             view.photo_url = "https://auth.example.test/photo/ada.png".to_string();
@@ -1366,16 +1351,12 @@ mod tests {
             "Signed in"
         );
         assert_eq!(
-            account_state_label(AccountSessionState::OfflineLease),
+            account_state_label(AccountSessionState::Offline),
             "Signed in (offline)"
         );
         assert_eq!(
             account_state_label(AccountSessionState::ReauthenticationRequired),
             "Sign-in required"
-        );
-        assert_eq!(
-            account_state_label(AccountSessionState::LeaseExpired),
-            "Sign-in expired"
         );
         assert_eq!(
             account_state_label(AccountSessionState::TerminalError),
@@ -1398,7 +1379,11 @@ mod tests {
             "Account"
         );
         assert_eq!(
-            account_action_label(&view(AccountSessionState::LeaseExpired)),
+            account_action_label(&view(AccountSessionState::Offline)),
+            "Account"
+        );
+        assert_eq!(
+            account_action_label(&view(AccountSessionState::ReauthenticationRequired)),
             "Sign in"
         );
     }
@@ -1406,15 +1391,17 @@ mod tests {
     #[test]
     fn plan_labels_stay_sanitized() {
         assert_eq!(sanitized_plan_label(""), "No plan");
-        assert_eq!(sanitized_plan_label("pro"), "Pro");
+        assert_eq!(sanitized_plan_label("early_access"), "Early access");
+        assert_eq!(sanitized_plan_label("pro"), "Unknown plan");
         assert_eq!(sanitized_plan_label("price_123"), "Unknown plan");
     }
 
     #[test]
-    fn unavailable_menu_state_explains_development_mode() {
+    fn unavailable_menu_state_explains_validation_mode() {
         let menu = unavailable_menu_state();
-        assert_eq!(menu.presentation.action, "Development");
-        assert_eq!(menu.presentation.state, "Development mode");
+        assert_eq!(menu.presentation.action, "Validation");
+        assert_eq!(menu.presentation.state, "Validation (sign-in disabled)");
+        assert!(!menu.sign_in_enabled);
         assert!(menu.error.is_none());
     }
 
@@ -1437,6 +1424,7 @@ mod tests {
             presentation: presentation("Sign in", "Signed out"),
             error: None,
             retry_sign_out: false,
+            sign_in_enabled: true,
         };
         assert!(signed_out.hides_identity());
         assert!(!signed_out.signed_in());
@@ -1447,6 +1435,7 @@ mod tests {
             presentation: presentation("Sign in", "Signed out"),
             error: Some("account request timed out; try again".to_string()),
             retry_sign_out: false,
+            sign_in_enabled: true,
         };
         assert!(failed.hides_identity());
         // Every other state names itself: unavailable engine, browser wait,
@@ -1464,6 +1453,7 @@ mod tests {
                 presentation: presentation(action, state),
                 error: None,
                 retry_sign_out: false,
+                sign_in_enabled: true,
             };
             assert!(!menu.hides_identity(), "state must stay visible: {state}");
         }
@@ -1512,8 +1502,8 @@ mod tests {
     }
 
     #[test]
-    fn manage_profile_has_no_unconfigured_endpoint() {
-        assert_eq!(MANAGE_PROFILE_URL, "");
+    fn manage_profile_opens_the_website_account_hub() {
+        assert_eq!(MANAGE_PROFILE_URL, "https://aeristerminal.com/account/");
     }
 
     #[test]
@@ -1538,7 +1528,7 @@ mod tests {
         assert_eq!(session.shared.status_seq.load(Ordering::Acquire), 1);
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_01".to_string();
-        active.plan_id = "pro".to_string();
+        active.plan_id = "early_access".to_string();
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
         active.photo_url = "https://auth.example.test/photo/ada.png".to_string();
@@ -1576,7 +1566,7 @@ mod tests {
         let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_01".to_string();
-        active.plan_id = "pro".to_string();
+        active.plan_id = "early_access".to_string();
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
         apply_account_response(
@@ -1689,7 +1679,7 @@ mod tests {
         );
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_02".to_string();
-        active.plan_id = "pro".to_string();
+        active.plan_id = "early_access".to_string();
         apply_account_response(
             &session.shared,
             AccountResponse::Status {
@@ -1707,8 +1697,12 @@ mod tests {
     #[test]
     fn authoritative_runtime_authentication_overrides_stale_desktop_view() {
         let runtime = AccountService::new(
-            AccountServiceConfig::try_new("https://auth.aeris.test/api/auth", "desktop-test")
-                .expect("test account config builds"),
+            AccountServiceConfig::try_new(
+                "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_fixture",
+                "https://auth.aeris.test",
+                "desktop-test",
+            )
+            .expect("test account config builds"),
         );
         let session = DesktopAccount::spawn_with_runtime(inert_engine, Some(runtime))
             .expect("isolated session spawns");
@@ -1747,14 +1741,23 @@ mod tests {
         ));
     }
 
+    /// A session over the production request handler without startup
+    /// restore, which would read the native vault.
+    fn unrestored_runtime_session() -> DesktopAccount {
+        let service = AccountService::new(AccountServiceConfig::production());
+        let handler = service.clone();
+        DesktopAccount::spawn_with_runtime(
+            move |request| super::handle_account_request(&handler, request),
+            Some(service),
+        )
+        .expect("account session spawns")
+    }
+
     #[test]
-    fn installed_session_starts_signed_out() {
-        // Install uses the production worker, so only synchronous local
-        // state is asserted here: worker replies race the test thread and
-        // are covered by the scripted sessions below.
-        let session =
-            DesktopAccount::install(AccountService::new(AccountServiceConfig::from_environment()))
-                .expect("account session installs");
+    fn runtime_session_starts_signed_out() {
+        // Only synchronous local state is asserted here: worker replies race
+        // the test thread and are covered by the scripted sessions below.
+        let session = unrestored_runtime_session();
         let presentation = session.presentation();
         assert_eq!(presentation.action, "Sign in");
         assert!(!presentation.pending);
@@ -1764,12 +1767,8 @@ mod tests {
 
     #[test]
     fn account_sessions_are_isolated_by_injected_service() {
-        let first =
-            DesktopAccount::install(AccountService::new(AccountServiceConfig::from_environment()))
-                .expect("first account client");
-        let second =
-            DesktopAccount::install(AccountService::new(AccountServiceConfig::from_environment()))
-                .expect("second account client");
+        let first = unrestored_runtime_session();
+        let second = unrestored_runtime_session();
         assert!(!Arc::ptr_eq(&first.shared, &second.shared));
         assert!(Arc::ptr_eq(&first.shared, &first.clone().shared));
     }
@@ -2164,10 +2163,10 @@ mod tests {
     }
 
     #[test]
-    fn verified_cached_offline_lease_keeps_the_platform_open() {
-        let mut offline = view(AccountSessionState::OfflineLease);
+    fn offline_session_keeps_the_platform_open() {
+        let mut offline = view(AccountSessionState::Offline);
         offline.account_id = "acct_01".to_string();
-        offline.plan_id = "pro".to_string();
+        offline.plan_id = "early_access".to_string();
         // Install the cached view before the startup status request. Rewinding
         // the clock after spawn races that request and the idle polling interval.
         let engine = Arc::new(Mutex::new(FakeEngine {
@@ -2180,8 +2179,8 @@ mod tests {
             worker.lock().expect("engine locks").handle(request)
         })
         .expect("isolated session spawns");
-        wait_for(&session, "offline lease", || {
-            session.presentation().state == account_state_label(AccountSessionState::OfflineLease)
+        wait_for(&session, "offline session", || {
+            session.presentation().state == account_state_label(AccountSessionState::Offline)
         });
 
         assert!(session.authenticated());

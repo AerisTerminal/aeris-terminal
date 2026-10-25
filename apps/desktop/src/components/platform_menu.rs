@@ -1,8 +1,8 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
-//! application-level section in a single panel: account (only while sign-in exists), Theme
+//! application-level section in a single panel: account (profile, plan and sign-in actions), Theme
 //! with a preview card per mode and a chip per palette preset, Window with frameless mode and the drawing toolbar switch, the
 //! keyboard shortcuts list, and
-//! About with version, system, build mode, Rithmic's notices while a Rithmic session is held, and
+//! About with version, system, validation mode, Rithmic's notices while a Rithmic session is held, and
 //! updates.
 
 use aeris_observability::diagnostic;
@@ -375,14 +375,14 @@ fn about_section_height(details: usize, rithmic_notices: bool) -> f32 {
         + SECTION_BOTTOM_PADDING
 }
 
-/// Identity header. Signed-in sessions show the verified name and avatar;
-/// other visible states name themselves with their detail. Signed-out and
-/// development sessions show none; development mode is reported under About.
+/// Identity header. Signed-in sessions show the verified avatar, name, email
+/// and plan; other visible states name themselves with their detail. Signed-out
+/// and validation sessions show none; validation mode is reported under About.
 fn identity_header(
     account: &aeris_desktop::account::AccountMenuState,
     theme: &AerisTheme,
 ) -> Option<AnyElement> {
-    if !aeris_desktop::account::AUTH_BACKEND_CONFIGURED || account.hides_identity() {
+    if !account.sign_in_enabled || account.hides_identity() {
         return None;
     }
     let colors = theme.colors;
@@ -394,12 +394,17 @@ fn identity_header(
         } else {
             presentation.display_name.clone()
         };
+        let detail = if account.offline() {
+            presentation.state.to_string()
+        } else {
+            presentation.email.clone()
+        };
         return Some(
             header
                 .gap_3()
                 .child(
                     div()
-                        .size(px(28.0))
+                        .size(px(32.0))
                         .flex_none()
                         .rounded_full()
                         .overflow_hidden()
@@ -408,10 +413,35 @@ fn identity_header(
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .text_color(gpui_color(colors.text_default))
-                        .child(name),
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .text_color(gpui_color(colors.text_default))
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(gpui_color(colors.text_muted))
+                                .child(detail),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py(px(2.0))
+                        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                        .border(platform_border_width(theme))
+                        .border_color(gpui_color(colors.border_secondary))
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_secondary))
+                        .child(presentation.plan),
                 )
                 .into_any_element(),
         );
@@ -493,7 +523,7 @@ impl AccountAction {
 }
 
 fn account_actions(account: &aeris_desktop::account::AccountMenuState) -> Vec<AccountAction> {
-    if !aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
+    if !account.sign_in_enabled {
         Vec::new()
     } else if account.authorizing() {
         // While the browser holds the transaction there are two recovery exits.
@@ -885,8 +915,8 @@ fn keyboard_shortcuts_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) ->
     .into_any_element()
 }
 
-/// Label and value rows under About. The build mode appears only while no
-/// sign-in backend exists, in place of a separate account panel.
+/// Label and value rows under About. The mode appears only for a validation
+/// run, which has no account session.
 fn about_details(
     account: &aeris_desktop::account::AccountMenuState,
     update: Option<&UpdatePresentation>,
@@ -896,7 +926,7 @@ fn about_details(
         |value| value.system_version.clone(),
     );
     let mut details = vec![("System", system)];
-    if !aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
+    if !account.sign_in_enabled {
         details.push(("Mode", account.presentation.state.to_string()));
     }
     details
@@ -1225,14 +1255,17 @@ mod tests {
     }
 
     #[test]
-    fn development_menu_reports_mode_under_about_without_account_rows() {
+    fn validation_menu_reports_mode_under_about_without_account_rows() {
         let account = aeris_desktop::account::unavailable_menu_state();
         assert_eq!(account_actions(&account), [] as [AccountAction; 0]);
         assert!(identity_header(&account, &AerisTheme::dark()).is_none());
         let details = about_details(&account, None);
         assert_eq!(details.len(), 2);
         assert_eq!(details[0].0, "System");
-        assert_eq!(details[1], ("Mode", "Development mode".to_string()));
+        assert_eq!(
+            details[1],
+            ("Mode", "Validation (sign-in disabled)".to_string())
+        );
     }
 
     #[test]

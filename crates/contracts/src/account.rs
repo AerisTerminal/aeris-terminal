@@ -12,10 +12,11 @@ pub enum AccountSessionState {
     SignedOut = 0,
     Authorizing = 1,
     Active = 2,
-    OfflineLease = 3,
+    /// Signed in from the cached verified profile while the identity
+    /// provider has not confirmed the session or is unreachable.
+    Offline = 3,
     ReauthenticationRequired = 4,
-    LeaseExpired = 5,
-    TerminalError = 6,
+    TerminalError = 5,
 }
 
 /// Starts one generation-fenced native login transaction.

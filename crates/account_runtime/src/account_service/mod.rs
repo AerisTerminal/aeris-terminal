@@ -1,12 +1,14 @@
-//! Engine-owned native account session for phase 5 authentication.
+//! Runtime-owned native account session.
 //!
-//! One [`AccountService`] is shared by all desktop windows. It owns the
-//! PKCE transaction, the ephemeral loopback listener, the OIDC exchange,
-//! vault material, and the generation-fenced session state. It owns no
-//! market-coordinator, provider, or chart state, and account refresh never
-//! recreates a provider session.
+//! One [`AccountService`] is shared by all desktop windows. It owns the PKCE
+//! transaction, the loopback listener, the OIDC exchange with the Aeris
+//! Cognito user pool, vault material, and the generation-fenced session
+//! state. It owns no market-coordinator, provider, or chart state, and
+//! account refresh never recreates a provider session.
+//!
+//! Every signed-in account has the same unlimited early-access plan, so the
+//! session carries identity and profile only; there is no entitlement lease.
 
-pub mod lease;
 pub mod loopback;
 pub mod oidc;
 pub mod pkce;
@@ -31,34 +33,39 @@ use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
-use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, device_id_for_key};
-use loopback::{LoopbackListener, validate_callback_query};
+use loopback::{CALLBACK_PORTS, LoopbackListener, validate_callback_query};
 use oidc::{
-    AccountProfile, AuthorizationRequest, OidcEndpoints, authorization_url, control_plane_origin,
-    discover, exchange_code, link_subject, oidc_agent, refresh_grant,
+    AccountProfile, AuthorizationRequest, OidcEndpoints, authorization_url, discover,
+    exchange_code, oidc_agent, refresh_grant,
 };
 use pkce::{PkceVerifier, generate_oauth_random};
 
 /// How long one login transaction waits for the browser callback.
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
-/// Native public client identifier currently registered with the control plane.
-///
-/// This is an external deployment contract and remains stable across the
-/// `Aeris` product-name migration until the control plane provisions a new
-/// client identifier.
-pub const NATIVE_CLIENT_ID: &str = "aeris-desktop";
-/// Currently provisioned control-plane OIDC issuer (the Better Auth mount).
-pub const DEFAULT_AUTH_ISSUER: &str = "";
+/// Public native app client registered with the Aeris user pool (no secret).
+const NATIVE_CLIENT_ID: &str = "tlnlg2amke4k2v9v2k84vvg87";
+/// Aeris Cognito user-pool issuer; discovery and JWKS are served here.
+const AUTH_ISSUER: &str = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_05pNG4EOF";
+/// Hosted sign-in origin serving the authorize, token and revoke endpoints.
+const HOSTED_SIGN_IN_ORIGIN: &str = "https://auth.aeristerminal.com";
 
 const ACCOUNT_VAULT_SERVICE: &str = "com.aeris.account";
 const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
-const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
-const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
-const DEVICE_VAULT_KEY: &str = "account-device-key-v1";
 const PROFILE_VAULT_KEY: &str = "account-profile-v1";
 const REJECTED_RESTORE_MARKER_FILE: &str = "account-restore-rejected-v1";
 const PROFILE_VAULT_SCHEMA_VERSION: u32 = 1;
 const MAXIMUM_PROFILE_VAULT_BYTES: usize = 4096;
+
+/// Interval between verified session refreshes while online.
+const SESSION_REFRESH_INTERVAL: Duration = Duration::from_hours(1);
+/// Upper bound of the random delay added to each scheduled refresh.
+const SESSION_REFRESH_JITTER_SECONDS: u64 = 300;
+/// First retry delay after the identity provider was unreachable.
+const OFFLINE_RETRY_INITIAL: Duration = Duration::from_secs(15);
+/// Longest retry delay while the identity provider stays unreachable.
+const OFFLINE_RETRY_MAXIMUM: Duration = Duration::from_mins(10);
+/// Retry delay while a process-lifecycle quiesce holds refresh grants.
+const QUIESCED_RETRY: Duration = Duration::from_secs(60);
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -73,8 +80,8 @@ struct CachedAccountProfile {
 /// Local startup readiness of the production saved-session restore path.
 ///
 /// This covers native-vault access and cached-session classification only.
-/// Remote OIDC refresh/link work remains asynchronous and is intentionally not
-/// part of candidate activation health.
+/// Remote refresh work remains asynchronous and is intentionally not part of
+/// candidate activation health.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum AccountRestoreReadiness {
@@ -86,51 +93,49 @@ pub enum AccountRestoreReadiness {
     Failed = 2,
 }
 
-/// Control-plane configuration for one account service.
+/// Identity-provider configuration for one account service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountServiceConfig {
     issuer: String,
+    hosted_origin: String,
     client_id: String,
 }
 
 impl AccountServiceConfig {
-    /// Creates a validated control-plane configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the issuer is not an `https` origin or the
-    /// client identifier is empty.
-    pub fn try_new(
-        issuer: impl Into<String>,
-        client_id: impl Into<String>,
-    ) -> Result<Self, String> {
-        let issuer = issuer.into();
-        let client_id = client_id.into();
-        if !issuer.starts_with("https://") || client_id.trim().is_empty() {
-            return Err("account control plane configuration is invalid".to_string());
-        }
-        Ok(Self { issuer, client_id })
-    }
-
-    /// Reads deployment configuration from the environment.
+    /// The provisioned Aeris user pool and native app client.
     #[must_use]
-    pub fn from_environment() -> Self {
-        let issuer = configured_auth_issuer(|name| std::env::var(name).ok());
+    pub fn production() -> Self {
         Self {
-            issuer,
+            issuer: AUTH_ISSUER.to_string(),
+            hosted_origin: HOSTED_SIGN_IN_ORIGIN.to_string(),
             client_id: NATIVE_CLIENT_ID.to_string(),
         }
     }
 
-    /// Returns whether this configuration can start a login transaction.
-    #[must_use]
-    pub fn is_configured(&self) -> bool {
-        self.issuer.starts_with("https://") && !self.client_id.trim().is_empty()
+    /// Creates a validated configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the issuer or hosted origin is not an `https`
+    /// address or the client identifier is empty.
+    pub fn try_new(
+        issuer: impl Into<String>,
+        hosted_origin: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Result<Self, String> {
+        let config = Self {
+            issuer: issuer.into(),
+            hosted_origin: hosted_origin.into(),
+            client_id: client_id.into(),
+        };
+        if oidc::parse_https_uri(&config.issuer).is_err()
+            || oidc::parse_https_uri(&config.hosted_origin).is_err()
+            || config.client_id.trim().is_empty()
+        {
+            return Err("account service configuration is invalid".to_string());
+        }
+        Ok(config)
     }
-}
-
-fn configured_auth_issuer(mut read: impl FnMut(&str) -> Option<String>) -> String {
-    read("AERIS_AUTH_ISSUER").unwrap_or_else(|| DEFAULT_AUTH_ISSUER.to_string())
 }
 
 struct PendingLogin {
@@ -148,10 +153,7 @@ struct ServiceState {
     pending: Option<PendingLogin>,
     last_generation: u64,
     restore_allowed: bool,
-    lease_expires_at: Option<u64>,
 }
-
-type LeaseKey = (String, [u8; 32]);
 
 #[derive(Clone)]
 enum RejectedRestoreMarker {
@@ -161,14 +163,14 @@ enum RejectedRestoreMarker {
     Path(PathBuf),
 }
 
-/// Engine-owned account session shared by all desktop windows.
+/// Runtime-owned account session shared by all desktop windows.
 #[derive(Clone)]
 pub struct AccountService {
     config: AccountServiceConfig,
+    callback_ports: &'static [u16],
     rejected_restore_marker: RejectedRestoreMarker,
     state: Arc<Mutex<ServiceState>>,
     endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
-    lease_keys: Arc<Mutex<Vec<LeaseKey>>>,
     refresh_gate: Arc<Mutex<()>>,
     refresh_lifecycle: Arc<Mutex<RefreshLifecycleState>>,
     profile_refresh_in_flight: Arc<AtomicBool>,
@@ -266,7 +268,39 @@ impl Drop for RefreshGrantPermit {
 
 enum LocalRestore {
     Settled,
-    ContinueOnline { cached_expiry: Option<u64> },
+    ContinueOnline,
+}
+
+/// Outcome of one refresh round against the identity provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionRefresh {
+    /// The session verified online and its profile was refreshed.
+    Verified,
+    /// A process-lifecycle quiesce postponed the grant.
+    Deferred,
+    /// The identity provider was unreachable; the session stays signed in.
+    Unavailable,
+    /// The generation retired or the session was signed out or failed closed.
+    Retired,
+}
+
+/// Bounded exponential retry delay while the identity provider is unreachable.
+struct OfflineBackoff {
+    next: Duration,
+}
+
+impl OfflineBackoff {
+    const fn new() -> Self {
+        Self {
+            next: OFFLINE_RETRY_INITIAL,
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = (self.next * 2).min(OFFLINE_RETRY_MAXIMUM);
+        delay
+    }
 }
 
 impl AccountService {
@@ -286,16 +320,15 @@ impl AccountService {
     ) -> Self {
         Self {
             config,
+            callback_ports: &CALLBACK_PORTS,
             rejected_restore_marker,
             state: Arc::new(Mutex::new(ServiceState {
                 view: cleared_view(AccountSessionState::SignedOut, 0, "signed out"),
                 pending: None,
                 last_generation: 0,
                 restore_allowed: true,
-                lease_expires_at: None,
             })),
             endpoints: Arc::new(Mutex::new(None)),
-            lease_keys: Arc::new(Mutex::new(Vec::new())),
             refresh_gate: Arc::new(Mutex::new(())),
             refresh_lifecycle: Arc::new(Mutex::new(RefreshLifecycleState::default())),
             profile_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -367,22 +400,12 @@ impl AccountService {
         Ok(())
     }
 
-    /// Creates the production account service and attempts a server-verified
-    /// restore from native-vault refresh material on a bounded worker.
-    ///
-    /// A previously verified, still-valid offline lease may cover startup while
-    /// the online refresh/link path runs. Cached access is revalidated against
-    /// the last verified signing directory and native device binding first.
-    #[must_use]
-    pub fn new_restoring(config: AccountServiceConfig) -> Self {
-        let service = Self::new(config);
-        service.start_restore();
-        service
-    }
-
     /// Starts production saved-session restoration once for this shared
     /// service. This can be called after process-lifecycle guards are installed
     /// so no refresh grant exists before native shutdown fencing is ready.
+    ///
+    /// A saved session with a cached verified profile signs in immediately as
+    /// [`AccountSessionState::Offline`] while the refresh grant verifies it.
     pub fn start_restore(&self) {
         if self.restore_started.swap(true, Ordering::AcqRel) {
             return;
@@ -395,14 +418,6 @@ impl AccountService {
                 "restoring saved sign-in",
             );
         }
-        if !self.config.is_configured() {
-            self.set_restore_readiness(AccountRestoreReadiness::Failed);
-            self.complete_restore_without_session(
-                AccountSessionState::TerminalError,
-                "sign-in is unavailable; the account service is not configured",
-            );
-            return;
-        }
         let restoring = self.clone();
         if std::thread::Builder::new()
             .name("aeris-account-restore".to_string())
@@ -412,7 +427,7 @@ impl AccountService {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "saved sign-in restore could not start; retry sign-in",
+                "saved sign-in restore could not start; sign in again",
             );
         }
     }
@@ -433,8 +448,8 @@ impl AccountService {
     }
 
     /// Prevents new refresh grants from starting and returns a bounded waiter
-    /// for any grant that already reached the control plane. The waiter covers
-    /// the grant through its mandatory rotated-refresh-token vault commit.
+    /// for any grant that already reached the identity provider. The waiter
+    /// covers the grant through its mandatory rotated-refresh-token vault commit.
     ///
     /// # Errors
     ///
@@ -497,19 +512,18 @@ impl AccountService {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "credential storage is unavailable; retry sign-in",
+                "credential storage is unavailable; sign in again",
             );
             return;
         };
-        let LocalRestore::ContinueOnline { cached_expiry, .. } = self.restore_local_session(&vault)
-        else {
+        let LocalRestore::ContinueOnline = self.restore_local_session(&vault) else {
             return;
         };
         // Candidate readiness ends at the local-vault boundary above. Everything
-        // below may perform bounded remote work and must not make activation
-        // depend on current control-plane reachability.
+        // below performs bounded remote work and must not make activation
+        // depend on current identity-provider reachability.
         let agent = oidc_agent();
-        let endpoints = self.retry_restore_lookup(|| self.oidc_endpoints());
+        let endpoints = self.oidc_endpoints();
         let tokens = loop {
             let Ok(refresh_guard) = self.refresh_gate.lock() else {
                 break None;
@@ -521,6 +535,10 @@ impl AccountService {
                     if self.wait_for_refresh_resume(AccountRefreshQuiesce::WAIT_TIMEOUT) {
                         continue;
                     }
+                    self.accept_online_restore_refresh(
+                        &vault,
+                        Err(oidc::RefreshGrantError::Unavailable),
+                    );
                     break None;
                 }
                 Err(_) => break None,
@@ -529,14 +547,10 @@ impl AccountService {
                 Ok(Some(refresh_token)) => refresh_token,
                 Ok(None) => break None,
                 Err(()) => {
-                    self.set_restore_readiness(AccountRestoreReadiness::Failed);
                     self.complete_restore_without_session(
                         AccountSessionState::TerminalError,
-                        "credential storage is unavailable; retry sign-in",
+                        "credential storage is unavailable; sign in again",
                     );
-                    if let Some(expires_at) = cached_expiry {
-                        self.spawn_cached_lease_expiry_worker(expires_at);
-                    }
                     break None;
                 }
             };
@@ -548,45 +562,18 @@ impl AccountService {
                 });
             // Serialize startup restoration with scheduled/profile refreshes,
             // and keep the lifecycle permit through the mandatory rotated-token
-            // vault commit. Both guards release before unrelated profile/lease
-            // network work continues. A cancelled update quiesce lets this
-            // generation-zero restore resume instead of abandoning its cadence.
+            // vault commit. A cancelled update quiesce lets this
+            // generation-zero restore resume instead of abandoning it.
             let tokens = self.accept_online_restore_refresh(&vault, outcome);
             drop(permit);
             break tokens;
         };
-        let Some(tokens) = tokens else {
-            if self
-                .state
-                .lock()
-                .is_ok_and(|state| state.view.state == AccountSessionState::OfflineLease)
-                && let Some(expires_at) = cached_expiry
-            {
-                self.spawn_cached_lease_expiry_worker(expires_at);
-            }
-            return;
-        };
-        let Some((account_id, tokens)) =
-            self.apply_online_restore_tokens(&vault, tokens, |tokens| {
-                let endpoints = endpoints.as_ref().map_err(Clone::clone)?;
-                self.retry_restore_lookup(|| {
-                    link_subject(endpoints, &agent, tokens.id_token.expose(), &tokens.subject)
-                })
-            })
-        else {
-            if self
-                .state
-                .lock()
-                .is_ok_and(|state| state.view.state == AccountSessionState::OfflineLease)
-                && let Some(expires_at) = cached_expiry
-            {
-                self.spawn_cached_lease_expiry_worker(expires_at);
-            }
-            return;
-        };
-        self.refresh_lease_once(0, &tokens, &account_id, &agent, &vault);
-        if !self.spawn_lease_worker(0) {
-            self.fail_lease_worker_start(0);
+        if let Some(tokens) = tokens
+            && self.apply_online_restore_tokens(&vault, &tokens)
+        {
+            self.spawn_session_worker(0, SESSION_REFRESH_INTERVAL);
+        } else if self.hand_off_offline_restore() {
+            self.spawn_session_worker(0, OFFLINE_RETRY_INITIAL);
         }
     }
 
@@ -599,42 +586,22 @@ impl AccountService {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in",
+                "saved sign-in could not be retired; credential storage is unavailable; sign in again",
             );
             return LocalRestore::Settled;
         }
-        let refresh_material = vault.load(REFRESH_VAULT_KEY);
-        let (cached_expiry, cached_lease_read_failed) =
-            if let Ok(expiry) = self.restore_cached_lease(vault) {
-                (expiry, false)
-            } else {
-                // Candidate activation must fail closed when native cached-session
-                // storage is not fully readable. Normal production restore keeps
-                // the pre-existing behavior: a separately readable refresh token
-                // may still recover the session online.
-                self.set_restore_readiness(AccountRestoreReadiness::Failed);
-                (None, true)
-            };
-        let cached_session = cached_expiry.is_some();
-        let refresh_token = match refresh_material {
+        let refresh_token = match vault.load(REFRESH_VAULT_KEY) {
             Ok(Some(bytes)) => String::from_utf8(bytes)
                 .ok()
                 .filter(|token| !token.is_empty())
                 .map(Zeroizing::new),
             Ok(None) => {
-                if !cached_session {
-                    if !self.complete_restore_without_session(
-                        AccountSessionState::SignedOut,
-                        "signed out",
-                    ) {
-                        self.set_restore_readiness(AccountRestoreReadiness::Failed);
-                        return LocalRestore::Settled;
-                    }
-                } else if let Some(expires_at) = cached_expiry {
-                    self.spawn_cached_lease_expiry_worker(expires_at);
-                }
-                if !cached_lease_read_failed {
+                if self
+                    .complete_restore_without_session(AccountSessionState::SignedOut, "signed out")
+                {
                     self.set_restore_readiness(AccountRestoreReadiness::Ready);
+                } else {
+                    self.set_restore_readiness(AccountRestoreReadiness::Failed);
                 }
                 return LocalRestore::Settled;
             }
@@ -642,31 +609,52 @@ impl AccountService {
                 self.set_restore_readiness(AccountRestoreReadiness::Failed);
                 self.complete_restore_without_session(
                     AccountSessionState::TerminalError,
-                    "credential storage is unavailable; retry sign-in",
+                    "credential storage is unavailable; sign in again",
                 );
-                if let Some(expires_at) = cached_expiry {
-                    self.spawn_cached_lease_expiry_worker(expires_at);
-                }
                 return LocalRestore::Settled;
             }
         };
-        let Some(_refresh_token) = refresh_token else {
-            if !self.complete_restore_without_session(
+        if refresh_token.is_none() {
+            if self.complete_restore_without_session(
                 AccountSessionState::ReauthenticationRequired,
                 "saved sign-in expired; sign in again",
             ) {
-                self.set_restore_readiness(AccountRestoreReadiness::Failed);
-                return LocalRestore::Settled;
-            }
-            if !cached_lease_read_failed {
                 self.set_restore_readiness(AccountRestoreReadiness::Ready);
+            } else {
+                self.set_restore_readiness(AccountRestoreReadiness::Failed);
             }
             return LocalRestore::Settled;
-        };
-        if !cached_lease_read_failed {
-            self.set_restore_readiness(AccountRestoreReadiness::Ready);
         }
-        LocalRestore::ContinueOnline { cached_expiry }
+        match load_profile_material(vault) {
+            Ok(Some((account_id, profile))) => self.install_cached_session(&account_id, profile),
+            Ok(None) => {}
+            // Candidate activation fails closed when the cached profile is
+            // unreadable; a readable refresh token still restores online.
+            Err(()) => {
+                self.set_restore_readiness(AccountRestoreReadiness::Failed);
+                return LocalRestore::ContinueOnline;
+            }
+        }
+        self.set_restore_readiness(AccountRestoreReadiness::Ready);
+        LocalRestore::ContinueOnline
+    }
+
+    /// Signs the saved session in from its cached verified profile before the
+    /// refresh grant confirms it, so a restart reaches the workspace offline.
+    fn install_cached_session(&self, account_id: &AccountId, profile: AccountProfile) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return;
+        }
+        state.view = signed_in_view(
+            AccountSessionState::Offline,
+            account_id,
+            profile,
+            0,
+            "signed in; verifying saved session",
+        );
     }
 
     fn current_restore_refresh_token<V>(&self, vault: &V) -> Result<Option<Zeroizing<String>>, ()>
@@ -678,134 +666,7 @@ impl AccountService {
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
             return Ok(None);
         }
-        vault
-            .load(REFRESH_VAULT_KEY)
-            .map_err(|_| ())
-            .map(|material| {
-                material
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .filter(|token| !token.is_empty())
-                    .map(Zeroizing::new)
-            })
-    }
-
-    fn restore_cached_lease<V>(&self, vault: &V) -> Result<Option<u64>, ()>
-    where
-        V: CredentialVault,
-        V::Error: std::fmt::Display,
-    {
-        let compact = match vault.load(LEASE_VAULT_KEY).map_err(|_| ())? {
-            Some(bytes) => String::from_utf8(bytes)
-                .ok()
-                .filter(|lease| !lease.is_empty() && lease.len() <= lease::MAXIMUM_LEASE_BYTES),
-            None => None,
-        };
-        let Some(compact) = compact else {
-            return Ok(None);
-        };
-        let directory = vault
-            .load(LEASE_DIRECTORY_VAULT_KEY)
-            .map_err(|_| ())?
-            .and_then(|encoded| serde_json::from_slice::<Vec<LeaseKey>>(&encoded).ok())
-            .filter(|keys| !keys.is_empty());
-        let Some(directory) = directory else {
-            return Ok(None);
-        };
-        let device_id = vault
-            .load(DEVICE_VAULT_KEY)
-            .map_err(|_| ())?
-            .filter(|key| !key.is_empty())
-            .map(|key| device_id_for_key(&key));
-        let Some(device_id) = device_id else {
-            return Ok(None);
-        };
-        let Ok(account_id) = lease::untrusted_account_id(&compact) else {
-            return Ok(None);
-        };
-        let now = unix_now();
-        let Ok(claims) =
-            lease::validate_compact(&compact, &directory, &account_id, &device_id, now)
-        else {
-            return Ok(None);
-        };
-        if claims.expires_at().saturating_sub(now) > LEASE_OFFLINE_VALIDITY_SECONDS {
-            return Ok(None);
-        }
-        let Some(profile) = load_profile_material(vault, &account_id)? else {
-            // A cached lease is entitlement authority, not a complete desktop
-            // identity. Older/incomplete saved sessions must finish verified
-            // online restore before they can skip onboarding.
-            return Ok(None);
-        };
-        let Ok(mut state) = self.state.lock() else {
-            return Err(());
-        };
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
-            return Ok(None);
-        }
-        let Ok(mut cached_keys) = self.lease_keys.lock() else {
-            return Err(());
-        };
-        cached_keys.clone_from(&directory);
-        drop(cached_keys);
-        state.view = AccountView {
-            state: AccountSessionState::OfflineLease,
-            account_id: account_id.as_str().to_string(),
-            plan_id: claims.plan().as_str().to_string(),
-            detail: "signed in with cached access; reconnecting to refresh".to_string(),
-            request_generation: 0,
-            display_name: profile.display_name,
-            email: profile.email,
-            photo_url: profile.photo_url,
-        };
-        state.lease_expires_at = Some(claims.expires_at());
-        Ok(Some(claims.expires_at()))
-    }
-
-    fn spawn_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
-        let service = self.clone();
-        std::thread::Builder::new()
-            .name("aeris-account-cached-expiry".to_string())
-            .spawn(move || service.run_cached_lease_expiry_worker(expires_at_unix_seconds))
-            .ok();
-    }
-
-    fn run_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
-        while unix_now() < expires_at_unix_seconds {
-            if !self.state.lock().is_ok_and(|state| {
-                state.last_generation == 0
-                    && state.pending.is_none()
-                    && state.view.state == AccountSessionState::OfflineLease
-            }) {
-                return;
-            }
-            let remaining = expires_at_unix_seconds.saturating_sub(unix_now());
-            std::thread::sleep(Duration::from_secs(remaining.clamp(1, 60)));
-        }
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if state.last_generation == 0
-            && state.pending.is_none()
-            && state.view.state == AccountSessionState::OfflineLease
-        {
-            expire_lease_if_needed(&mut state, unix_now());
-        }
-    }
-
-    #[cfg(test)]
-    fn apply_online_restore<V>(
-        &self,
-        vault: &V,
-        outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
-        link: impl FnOnce(&oidc::VerifiedTokens) -> Result<(AccountId, PlanId, AccountProfile), String>,
-    ) -> Option<(AccountId, oidc::VerifiedTokens)>
-    where
-        V: CredentialVault,
-        V::Error: std::fmt::Display,
-    {
-        let tokens = self.accept_online_restore_refresh(vault, outcome)?;
-        self.apply_online_restore_tokens(vault, tokens, link)
+        load_refresh_token(vault)
     }
 
     fn accept_online_restore_refresh<V>(
@@ -819,49 +680,36 @@ impl AccountService {
     {
         let tokens = match outcome {
             Ok(tokens) => tokens,
-            Err(error) => {
-                match error {
-                    oidc::RefreshGrantError::Rejected => {
-                        self.retire_rejected_restore(vault);
-                    }
-                    oidc::RefreshGrantError::Unavailable => {
-                        self.complete_restore_without_session(
-                            AccountSessionState::TerminalError,
-                            "saved sign-in could not be verified; check your connection and retry sign-in",
-                        );
-                    }
-                }
+            Err(oidc::RefreshGrantError::Rejected) => {
+                self.retire_rejected_restore(vault);
+                return None;
+            }
+            Err(oidc::RefreshGrantError::Unavailable) => {
+                self.complete_restore_without_session(
+                    AccountSessionState::TerminalError,
+                    "saved sign-in could not be verified; check your connection and sign in again",
+                );
                 return None;
             }
         };
-        // A refresh grant may invalidate the previous token immediately. Persist
-        // its verified replacement before another fallible network operation.
-        // Hold the lifecycle fence while writing so sign-out cannot be undone.
+        // A rotating grant may invalidate the previous token immediately.
+        // Persist its verified replacement before anything else, holding the
+        // lifecycle fence so sign-out cannot be undone.
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
             return None;
         }
-        if let Some(rotated) = tokens
-            .refresh
-            .as_ref()
-            .map(oidc::SecretToken::expose)
-            .filter(|token| !token.is_empty())
-        {
-            let secret = Zeroizing::new(rotated.as_bytes().to_vec());
+        if let Some(rotated) = tokens.refresh.as_ref() {
+            let secret = Zeroizing::new(rotated.expose().as_bytes().to_vec());
             if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
-                // The successful grant may already have invalidated the old
-                // durable refresh token. Retire every artifact that could
-                // restore that stale session, using the same durable marker
-                // fallback as active-session rotation failures.
                 let _ = self.retire_unusable_vault_material(vault);
                 state.restore_allowed = false;
-                state.lease_expires_at = None;
                 state.view = cleared_view(
                     AccountSessionState::TerminalError,
                     0,
-                    "credential storage is unavailable; retry sign-in",
+                    "credential storage is unavailable; sign in again",
                 );
                 return None;
             }
@@ -869,53 +717,56 @@ impl AccountService {
         Some(tokens)
     }
 
-    fn apply_online_restore_tokens<V>(
-        &self,
-        vault: &V,
-        tokens: oidc::VerifiedTokens,
-        link: impl FnOnce(&oidc::VerifiedTokens) -> Result<(AccountId, PlanId, AccountProfile), String>,
-    ) -> Option<(AccountId, oidc::VerifiedTokens)>
+    /// Publishes the verified restored session. Returns whether it became
+    /// the generation-zero Active session.
+    fn apply_online_restore_tokens<V>(&self, vault: &V, tokens: &oidc::VerifiedTokens) -> bool
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let Ok((account_id, plan, profile)) = link(&tokens) else {
+        let Ok(account_id) = AccountId::try_new(tokens.subject.as_str()) else {
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "saved sign-in account lookup failed; check your connection and retry sign-in",
+                "saved sign-in could not be verified; sign in again",
             );
-            return None;
+            return false;
         };
         let Ok(mut state) = self.state.lock() else {
-            return None;
+            return false;
         };
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
-            return None;
+            return false;
         }
-        if store_profile_material(vault, &account_id, &profile).is_err() {
-            let _ = self.retire_unusable_vault_material(vault);
-            state.restore_allowed = false;
-            state.lease_expires_at = None;
-            state.view = cleared_view(
-                AccountSessionState::TerminalError,
-                0,
-                "credential storage is unavailable; retry sign-in",
-            );
-            return None;
+        if store_profile_material(vault, &account_id, &tokens.profile).is_err() {
+            diagnostic!("Aeris account profile cache write degraded");
         }
         state.restore_allowed = false;
-        state.lease_expires_at = None;
-        state.view = AccountView {
-            state: AccountSessionState::Active,
-            account_id: account_id.as_str().to_string(),
-            plan_id: plan.as_str().to_string(),
-            detail: "signed in".to_string(),
-            request_generation: 0,
-            display_name: profile.display_name,
-            email: profile.email,
-            photo_url: profile.photo_url,
+        state.view = signed_in_view(
+            AccountSessionState::Active,
+            &account_id,
+            tokens.profile.clone(),
+            0,
+            "signed in",
+        );
+        true
+    }
+
+    /// Hands a cached offline restore to the session worker after the
+    /// identity provider was unreachable. Returns whether a signed-in
+    /// generation-zero session remains to be retried.
+    fn hand_off_offline_restore(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
         };
-        Some((account_id, tokens))
+        if state.last_generation != 0
+            || state.pending.is_some()
+            || state.view.state != AccountSessionState::Offline
+        {
+            return false;
+        }
+        state.restore_allowed = false;
+        state.view.detail = "signed in offline; reconnecting".to_string();
+        true
     }
 
     /// Retires an authoritatively rejected saved grant and every durable
@@ -936,28 +787,25 @@ impl AccountService {
         }
         let cleanup_complete = self.retire_unusable_vault_material(vault);
         state.restore_allowed = false;
-        let (target, detail) = if cleanup_complete {
-            (
+        state.view = if cleanup_complete {
+            cleared_view(
                 AccountSessionState::ReauthenticationRequired,
+                0,
                 "saved sign-in expired; sign in again",
             )
         } else {
-            (
+            cleared_view(
                 AccountSessionState::TerminalError,
-                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in",
+                0,
+                "saved sign-in could not be retired; credential storage is unavailable; sign in again",
             )
         };
-        // Unlike transient restore failures, an authoritative rejected grant
-        // must never retain cached offline access in memory.
-        state.lease_expires_at = None;
-        state.view = cleared_view(target, 0, detail);
     }
 
     /// Retires an authoritatively rejected active session under the current
-    /// generation fence. A successful cleanup leaves no restorable refresh or
-    /// lease material; a partial cleanup keeps the durable rejection marker and
-    /// fails the in-memory session closed instead of treating rejection like an
-    /// offline network outage.
+    /// generation fence. A partial cleanup keeps the durable rejection marker
+    /// and fails the in-memory session closed instead of treating rejection
+    /// like an offline network outage.
     fn retire_rejected_session<V>(&self, generation: u64, vault: &V)
     where
         V: CredentialVault,
@@ -966,29 +814,23 @@ impl AccountService {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state.last_generation != generation
-            || !matches!(
-                state.view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            )
-        {
+        if state.last_generation != generation || !is_signed_in(state.view.state) {
             return;
         }
         let cleanup_complete = self.retire_unusable_vault_material(vault);
-        state.lease_expires_at = None;
-        state.view = cleared_view(
-            if cleanup_complete {
-                AccountSessionState::ReauthenticationRequired
-            } else {
-                AccountSessionState::TerminalError
-            },
-            generation,
-            if cleanup_complete {
-                "sign-in expired; sign in again"
-            } else {
-                "sign-in expired but saved credentials could not be retired; retry sign-in"
-            },
-        );
+        state.view = if cleanup_complete {
+            cleared_view(
+                AccountSessionState::ReauthenticationRequired,
+                generation,
+                "sign-in expired; sign in again",
+            )
+        } else {
+            cleared_view(
+                AccountSessionState::TerminalError,
+                generation,
+                "sign-in expired but saved credentials could not be retired; sign in again",
+            )
+        };
     }
 
     /// Removes every durable credential capable of restoring a session that
@@ -1001,90 +843,35 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        self.lease_keys
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        // Persist the independent rejection fence before mutating vault state.
-        // A crash during cleanup therefore cannot make the previously rejected
-        // cached lease look authoritative again on the next process start.
+        // Persist the independent rejection fence before mutating vault state
+        // so a crash during cleanup cannot make the saved session restorable.
         let marker_persisted = self.persist_rejected_restore_marker().is_ok();
-        let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
+        let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
         let profile_deleted = vault.delete(PROFILE_VAULT_KEY).is_ok();
-        let lease_retired = if lease_deleted {
-            true
-        } else {
-            // The cached lease cannot authenticate without both its verified
-            // key directory and device binding. If the lease entry itself
-            // cannot be removed, retire either validation artifact instead.
-            // Replacement fallbacks cover vault backends where update is
-            // available even when deletion is not.
-            let directory_retired = vault.delete(LEASE_DIRECTORY_VAULT_KEY).is_ok()
-                || vault.store(LEASE_DIRECTORY_VAULT_KEY, b"[]").is_ok();
-            if directory_retired || vault.delete(DEVICE_VAULT_KEY).is_ok() {
-                true
-            } else {
-                let mut replacement = Zeroizing::new(vec![0_u8; 32]);
-                getrandom::fill(replacement.as_mut_slice()).is_ok()
-                    && vault
-                        .store(DEVICE_VAULT_KEY, replacement.as_slice())
-                        .is_ok()
-            }
-        };
-        // When the independent marker could not be persisted, keep the rejected
-        // refresh token unless the cached lease is already non-restorable. That
-        // preserves the authoritative rejection evidence for a later retry.
-        let refresh_deleted =
-            (lease_retired || marker_persisted) && vault.delete(REFRESH_VAULT_KEY).is_ok();
-        let authentication_cleanup = lease_deleted && refresh_deleted;
-        let marker_cleared = if authentication_cleanup && marker_persisted {
-            self.clear_rejected_restore_marker().is_ok()
-        } else {
-            !marker_persisted
-        };
-        authentication_cleanup && profile_deleted && marker_cleared
+        let cleaned = refresh_deleted && profile_deleted;
+        let marker_settled =
+            !marker_persisted || (cleaned && self.clear_rejected_restore_marker().is_ok());
+        cleaned && marker_settled
     }
 
     fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if state.last_generation == 0 && state.pending.is_none() && state.restore_allowed {
-            if state.view.state == AccountSessionState::OfflineLease
-                && target == AccountSessionState::TerminalError
-            {
-                state.restore_allowed = false;
-                state.view.detail = detail.to_string();
-                return true;
-            }
-            state.restore_allowed = false;
-            state.lease_expires_at = None;
-            state.view = cleared_view(target, 0, detail);
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return false;
+        }
+        // A transient failure never discards a cached verified session; only
+        // an authoritative rejection retires it.
+        if state.view.state == AccountSessionState::Offline
+            && target == AccountSessionState::TerminalError
+        {
+            state.view.detail = "signed in offline; reconnecting".to_string();
             return true;
         }
-        false
-    }
-
-    // Retry only repeatable discovery/link lookups. Replaying an ambiguous
-    // refresh POST can revoke the rotating grant, so it must not use this path.
-    fn retry_restore_lookup<T>(
-        &self,
-        mut lookup: impl FnMut() -> Result<T, String>,
-    ) -> Result<T, String> {
-        let mut attempt = 0;
-        loop {
-            if !self.state.lock().is_ok_and(|state| {
-                state.last_generation == 0 && state.pending.is_none() && state.restore_allowed
-            }) {
-                return Err("saved sign-in restore was retired".to_string());
-            }
-            let result = lookup();
-            if result.is_ok() || attempt == 2 {
-                return result;
-            }
-            std::thread::sleep(Duration::from_millis(250 << attempt));
-            attempt += 1;
-        }
+        state.restore_allowed = false;
+        state.view = cleared_view(target, 0, detail);
+        true
     }
 
     /// Returns whether a verified online or cached-offline session is installed.
@@ -1095,16 +882,11 @@ impl AccountService {
     /// Poisoned state remains an authoritative failure and returns `Some(false)`.
     #[must_use]
     pub fn try_is_authenticated(&self) -> Option<bool> {
-        let mut state = match self.state.try_lock() {
-            Ok(state) => state,
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-            Err(std::sync::TryLockError::Poisoned(_)) => return Some(false),
-        };
-        expire_lease_if_needed(&mut state, unix_now());
-        Some(matches!(
-            state.view.state,
-            AccountSessionState::Active | AccountSessionState::OfflineLease
-        ))
+        match self.state.try_lock() {
+            Ok(state) => Some(is_signed_in(state.view.state)),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(_)) => Some(false),
+        }
     }
 
     /// Returns whether a verified online or cached-offline session is installed.
@@ -1122,13 +904,13 @@ impl AccountService {
     /// # Errors
     ///
     /// Returns a redacted actionable error when discovery fails.
-    pub fn oidc_endpoints(&self) -> Result<OidcEndpoints, String> {
+    fn oidc_endpoints(&self) -> Result<OidcEndpoints, String> {
         if let Ok(cached) = self.endpoints.lock()
             && let Some(endpoints) = cached.clone()
         {
             return Ok(endpoints);
         }
-        let discovered = discover(&self.config.issuer)?;
+        let discovered = discover(&self.config.issuer, &self.config.hosted_origin)?;
         if let Ok(mut cached) = self.endpoints.lock() {
             *cached = Some(discovered.clone());
         }
@@ -1138,23 +920,25 @@ impl AccountService {
     /// Starts one generation-fenced login transaction and returns the
     /// browser authorization address for the desktop to open.
     ///
+    /// Discovery may perform bounded network work, so callers run this off
+    /// the UI thread.
+    ///
     /// # Errors
     ///
     /// Returns a redacted actionable error when a transaction is already
-    /// pending, the generation is retired, the control plane is
-    /// unconfigured, or the loopback listener cannot bind.
+    /// pending, the generation is retired, discovery fails, or no callback
+    /// port can be bound.
     pub fn begin_login(&self, request_generation: u64) -> Result<LoginAuthorization, String> {
-        if !self.config.is_configured() {
-            self.transition_to(
-                AccountSessionState::TerminalError,
-                None,
-                None,
-                "sign-in is unavailable; the account service is not configured",
-            );
-            return Err(
-                "sign-in is unavailable; the account service is not configured".to_string(),
-            );
+        {
+            let state = lock_state(&self.state)?;
+            if request_generation <= state.last_generation {
+                return Err("retired sign-in request; start a new sign-in".to_string());
+            }
+            if state.pending.is_some() {
+                return Err("sign-in is already in progress".to_string());
+            }
         }
+        let endpoints = self.oidc_endpoints()?;
         let mut state = lock_state(&self.state)?;
         if request_generation <= state.last_generation {
             return Err("retired sign-in request; start a new sign-in".to_string());
@@ -1165,9 +949,8 @@ impl AccountService {
         let verifier = PkceVerifier::generate()?;
         let oauth_state = generate_oauth_random()?;
         let nonce = generate_oauth_random()?;
-        let listener = LoopbackListener::bind()?;
+        let listener = LoopbackListener::bind(self.callback_ports)?;
         let redirect_uri = listener.redirect_uri();
-        let endpoints = self.oidc_endpoints()?;
         let url = authorization_url(&AuthorizationRequest {
             endpoints: &endpoints,
             client_id: &self.config.client_id,
@@ -1179,7 +962,6 @@ impl AccountService {
         let expires_at = Instant::now() + LOGIN_TIMEOUT;
         state.last_generation = request_generation;
         state.restore_allowed = false;
-        state.lease_expires_at = None;
         state.pending = Some(PendingLogin {
             generation: request_generation,
             oauth_state,
@@ -1201,7 +983,6 @@ impl AccountService {
             .is_err()
         {
             state.pending = None;
-            state.lease_expires_at = None;
             state.view = cleared_view(
                 AccountSessionState::SignedOut,
                 request_generation,
@@ -1228,7 +1009,6 @@ impl AccountService {
             Some(pending) if pending.generation == request_generation => {
                 let generation = state.last_generation;
                 state.pending = None;
-                state.lease_expires_at = None;
                 state.view = cleared_view(
                     AccountSessionState::SignedOut,
                     generation,
@@ -1250,7 +1030,6 @@ impl AccountService {
                 "account state is unavailable",
             );
         };
-        expire_lease_if_needed(&mut state, unix_now());
         if state
             .pending
             .as_ref()
@@ -1294,11 +1073,12 @@ impl AccountService {
         view
     }
 
-    /// Signs out the shared session, deleting vault refresh and lease material.
+    /// Signs out the shared session, deleting vault refresh and profile material.
     ///
     /// Local deletion happens synchronously so a concurrent login cannot
     /// observe stale material; server-side revocation follows on a bounded
-    /// worker with the in-memory refresh copy and never blocks the coordinator.
+    /// worker with the in-memory refresh copy and never blocks the caller.
+    ///
     /// # Errors
     ///
     /// Returns an actionable redacted error when saved session credentials
@@ -1317,31 +1097,26 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let token = vault
-            .load(REFRESH_VAULT_KEY)
-            .unwrap_or_default()
-            .filter(|token| !token.is_empty());
+        let token = load_refresh_token(vault).unwrap_or_default();
         // Retire every background completion before deleting credentials.
         // Workers take the same state lock while committing vault writes.
         if let Ok(mut state) = self.state.lock() {
             let generation = state.last_generation;
             state.restore_allowed = false;
             state.pending = None;
-            state.lease_expires_at = None;
             state.view = cleared_view(AccountSessionState::SignedOut, generation, "signed out");
         }
-        let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
         let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
         let profile_deleted = vault.delete(PROFILE_VAULT_KEY).is_ok();
         // Revocation reuses already-cached endpoints only: sign-out never
-        // performs discovery on the coordinator path.
+        // performs discovery on the caller's path.
         let cached = self
             .endpoints
             .lock()
             .map(|cached| cached.clone())
             .unwrap_or_default();
-        let revocation = cached.zip(token.and_then(|token| String::from_utf8(token).ok()));
-        let deleted = lease_deleted && refresh_deleted && profile_deleted;
+        let revocation = cached.zip(token);
+        let deleted = refresh_deleted && profile_deleted;
         let view = {
             let Ok(mut state) = self.state.lock() else {
                 return Err("account state is unavailable".to_string());
@@ -1357,14 +1132,14 @@ impl AccountService {
                     "signed out; credential cleanup needs attention"
                 },
             );
-            state.lease_expires_at = None;
             state.view.clone()
         };
         if let Some((endpoints, token)) = revocation {
+            let client_id = self.config.client_id.clone();
             std::thread::Builder::new()
                 .name("aeris-account-revoke".to_string())
                 .spawn(move || {
-                    if oidc::revoke_refresh(&endpoints, &token).is_err() {
+                    if oidc::revoke_refresh(&endpoints, &client_id, &token).is_err() {
                         diagnostic!("Aeris sign-out revocation degraded");
                     }
                 })
@@ -1378,10 +1153,10 @@ impl AccountService {
     }
 
     /// Runs one login transaction to a truthful browser page. The loopback
-    /// connection stays open while the engine exchanges, links, and stores;
-    /// the browser then reads the completed outcome, never mere receipt.
-    /// Processing is bounded by the endpoint timeouts plus local vault
-    /// work, and every path answers the waiting browser exactly once.
+    /// connection stays open while the runtime exchanges, verifies, and
+    /// stores; the browser then reads the completed outcome, never mere
+    /// receipt. Processing is bounded by the endpoint timeouts plus local
+    /// vault work, and every path answers the waiting browser exactly once.
     fn run_login_transaction(&self, generation: u64, listener: &LoopbackListener) {
         let remaining = self.pending_remaining(generation);
         if remaining.is_zero() {
@@ -1405,7 +1180,7 @@ impl AccountService {
                 return;
             }
         };
-        match self.exchange_and_link(generation, &code) {
+        match self.exchange_and_store(generation, &code) {
             Ok(true) => callback.respond_outcome(Ok(())),
             Ok(false) => {
                 // Vault failure or a retired generation: the view already
@@ -1455,16 +1230,16 @@ impl AccountService {
         }
         let validated = validate_callback_query(query, &pending.oauth_state)?;
         pending.code_received = true;
-        state.view.detail = "exchanging authorization code".to_string();
+        state.view.detail = "completing sign-in".to_string();
         Ok(validated.code)
     }
 
-    /// Exchanges, links, and stores one transaction. Returns whether the
+    /// Exchanges, verifies, and stores one transaction. Returns whether the
     /// Active session published: `Ok(true)` completes the sign-in,
     /// `Ok(false)` leaves an already-recorded terminal failure (vault
     /// failure) or a retired generation untouched, and `Err` carries the
     /// redacted detail for the browser page and the desktop account view.
-    fn exchange_and_link(&self, generation: u64, code: &str) -> Result<bool, String> {
+    fn exchange_and_store(&self, generation: u64, code: &str) -> Result<bool, String> {
         let (redirect_uri, verifier, nonce) = {
             let Ok(state) = self.state.lock() else {
                 return Ok(false);
@@ -1478,90 +1253,55 @@ impl AccountService {
             };
             (
                 pending.redirect_uri.clone(),
-                pending.verifier.encoded().to_string(),
+                Zeroizing::new(pending.verifier.encoded().to_string()),
                 pending.nonce.clone(),
             )
         };
-        let outcome = self.oidc_endpoints().and_then(|endpoints| {
-            // One connection pool for the whole transaction: exchange, JWKS
-            // verification, and linking all reuse it instead of paying a
-            // fresh TLS handshake per stage.
-            let agent = oidc_agent();
-            exchange_code(
-                &endpoints,
-                &agent,
-                &self.config.client_id,
-                &redirect_uri,
-                code,
-                &verifier,
-                &nonce,
-            )
-            .and_then(|tokens| {
-                link_subject(
-                    &endpoints,
-                    &agent,
-                    tokens.id_token.expose(),
-                    &tokens.subject,
-                )
-                .map(|(account, plan, profile)| (account, plan, profile, tokens, agent))
-            })
-        });
-        match outcome {
-            Ok((account_id, plan, profile, tokens, agent)) => {
-                let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
-                    self.fail_generation(
-                        generation,
-                        "credential storage is unavailable; retry sign-in",
-                    );
-                    return Ok(false);
-                };
-                let completed = self.complete_with_tokens(
-                    generation,
-                    &account_id,
-                    plan,
-                    &profile,
-                    tokens.refresh.as_ref().map(oidc::SecretToken::expose),
-                    &vault,
-                );
-                if completed {
-                    // Lease warmup leaves the browser-response path: Active
-                    // is already published, and generation-fenced
-                    // apply_lease_outcome keeps a late warmup from touching
-                    // retired state or weakening enforcement.
-                    let service = self.clone();
-                    std::thread::Builder::new()
-                        .name("aeris-account-lease-warmup".to_string())
-                        .spawn(move || {
-                            if let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) {
-                                service.refresh_lease_once(
-                                    generation,
-                                    &tokens,
-                                    &account_id,
-                                    &agent,
-                                    &vault,
-                                );
-                            }
-                        })
-                        .ok();
-                }
-                Ok(completed)
-            }
-            Err(detail) => Err(detail),
-        }
+        let endpoints = self.oidc_endpoints()?;
+        // One connection pool for the whole transaction: the exchange and JWKS
+        // verification reuse it instead of paying a fresh TLS handshake.
+        let agent = oidc_agent();
+        let tokens = exchange_code(
+            &endpoints,
+            &agent,
+            &self.config.client_id,
+            &redirect_uri,
+            code,
+            &verifier,
+            &nonce,
+        )?;
+        let account_id = AccountId::try_new(tokens.subject.as_str())
+            .map_err(|_| "sign-in verification failed; retry sign-in".to_string())?;
+        let Some(refresh) = tokens.refresh.as_ref() else {
+            return Err("sign-in did not return a saved session; retry sign-in".to_string());
+        };
+        let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+            self.fail_generation(
+                generation,
+                "credential storage is unavailable; retry sign-in",
+            );
+            return Ok(false);
+        };
+        Ok(self.complete_with_tokens(
+            generation,
+            &account_id,
+            &tokens.profile,
+            refresh.expose(),
+            &vault,
+        ))
     }
 
-    /// Publishes the Active session only after the refresh material is
-    /// stored: exchange, link, and vault all precede any success the
-    /// desktop can render. A retired generation assigns nothing, so a late
-    /// callback can never restore another user's profile. Returns whether
-    /// the Active session published.
+    /// Publishes the Active session only after the refresh and profile
+    /// material are stored: exchange, verification, and vault all precede any
+    /// success the desktop can render. A retired generation assigns nothing,
+    /// so a late callback can never restore another user's profile. Returns
+    /// whether the Active session published.
     fn complete_with_tokens<V>(
         &self,
         generation: u64,
         account_id: &AccountId,
-        plan: PlanId,
         profile: &AccountProfile,
-        refresh_token: Option<&str>,
+        refresh_token: &str,
         vault: &V,
     ) -> bool
     where
@@ -1578,16 +1318,16 @@ impl AccountService {
         {
             return false;
         }
-        let stored = store_refresh_material(vault, refresh_token).is_ok()
+        let secret = Zeroizing::new(refresh_token.as_bytes().to_vec());
+        let stored = !secret.is_empty()
+            && vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_ok()
             && store_profile_material(vault, account_id, profile).is_ok();
         if !stored {
             let _ = self.retire_unusable_vault_material(vault);
         }
         let marker_cleared = stored && self.clear_rejected_restore_marker().is_ok();
+        state.pending = None;
         if !marker_cleared {
-            let generation = state.last_generation;
-            state.pending = None;
-            state.lease_expires_at = None;
             state.view = cleared_view(
                 AccountSessionState::TerminalError,
                 generation,
@@ -1599,115 +1339,85 @@ impl AccountService {
             );
             return false;
         }
-        let generation = state.last_generation;
-        state.pending = None;
-        state.lease_expires_at = None;
-        state.view = AccountView {
-            state: AccountSessionState::Active,
-            account_id: account_id.as_str().to_string(),
-            plan_id: plan.as_str().to_string(),
-            detail: "signed in".to_string(),
-            request_generation: generation,
-            display_name: profile.display_name.clone(),
-            email: profile.email.clone(),
-            photo_url: profile.photo_url.clone(),
-        };
-        let service = self.clone();
-        if std::thread::Builder::new()
-            .name("aeris-account-lease".to_string())
-            .spawn(move || service.run_lease_worker(generation))
-            .is_err()
-        {
-            state.lease_expires_at = None;
-            state.view = cleared_view(
-                AccountSessionState::TerminalError,
-                generation,
-                "account entitlement worker could not start; retry sign-in",
-            );
-            return false;
-        }
+        state.view = signed_in_view(
+            AccountSessionState::Active,
+            account_id,
+            profile.clone(),
+            generation,
+            "signed in",
+        );
+        drop(state);
+        self.spawn_session_worker(generation, SESSION_REFRESH_INTERVAL);
         true
     }
 
-    /// Returns whether one generation still owns the shared session.
+    /// Returns whether one generation still owns a signed-in shared session.
     fn is_current(&self, generation: u64) -> bool {
         self.state.lock().is_ok_and(|state| {
-            state.last_generation == generation
-                && (state.view.state == AccountSessionState::Active
-                    || state.view.state == AccountSessionState::OfflineLease)
+            state.last_generation == generation && is_signed_in(state.view.state)
         })
     }
 
-    fn run_lease_worker(&self, generation: u64) {
-        loop {
-            if !sleep_until_lease_round(self, generation) {
-                return;
-            }
-            if !self.is_current(generation) {
-                return;
-            }
-            self.lease_round(generation);
-        }
-    }
-
-    fn spawn_lease_worker(&self, generation: u64) -> bool {
+    fn spawn_session_worker(&self, generation: u64, first_delay: Duration) {
         let service = self.clone();
-        std::thread::Builder::new()
-            .name("aeris-account-lease".to_string())
-            .spawn(move || service.run_lease_worker(generation))
-            .is_ok()
-    }
-
-    fn fail_lease_worker_start(&self, generation: u64) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if state.last_generation != generation
-            || !matches!(
-                state.view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            )
+        if std::thread::Builder::new()
+            .name("aeris-account-session".to_string())
+            .spawn(move || service.run_session_worker(generation, first_delay))
+            .is_err()
         {
-            return;
+            // The session stays signed in from verified state; only periodic
+            // reverification is lost until the next start.
+            diagnostic!("Aeris account session worker could not start");
         }
-        state.lease_expires_at = None;
-        state.view = cleared_view(
-            AccountSessionState::TerminalError,
-            generation,
-            "account entitlement worker could not start; retry sign-in",
-        );
     }
 
-    fn lease_round(&self, generation: u64) {
+    /// Reverifies the session on a jittered interval and retries with bounded
+    /// backoff while the identity provider is unreachable. Exits when its
+    /// generation retires.
+    fn run_session_worker(&self, generation: u64, first_delay: Duration) {
+        let mut delay = first_delay;
+        let mut backoff = OfflineBackoff::new();
+        loop {
+            if !self.sleep_while_current(generation, delay) {
+                return;
+            }
+            delay = match self.session_round(generation) {
+                SessionRefresh::Verified => {
+                    backoff = OfflineBackoff::new();
+                    session_refresh_wait(random_jitter())
+                }
+                SessionRefresh::Deferred => QUIESCED_RETRY,
+                SessionRefresh::Unavailable => backoff.next_delay(),
+                SessionRefresh::Retired => return,
+            };
+        }
+    }
+
+    /// Sleeps in short slices so a retired generation stops promptly.
+    fn sleep_while_current(&self, generation: u64, duration: Duration) -> bool {
+        let deadline = Instant::now() + duration;
+        loop {
+            if !self.is_current(generation) {
+                return false;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            std::thread::sleep(Duration::from_secs(1).min(deadline - now));
+        }
+    }
+
+    fn session_round(&self, generation: u64) -> SessionRefresh {
         let Ok(_refresh_guard) = self.refresh_gate.lock() else {
-            note_lease("refresh-gate-unavailable");
-            return;
+            return SessionRefresh::Retired;
         };
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
-            note_lease("vault-unavailable");
-            return;
+            return SessionRefresh::Unavailable;
         };
-        let outcome = refresh_lease_round(self, generation, &vault);
-        self.apply_lease_outcome(generation, outcome);
-    }
-
-    /// Best-effort initial lease right after sign-in.
-    fn refresh_lease_once<V>(
-        &self,
-        generation: u64,
-        tokens: &oidc::VerifiedTokens,
-        account_id: &AccountId,
-        agent: &ureq::Agent,
-        vault: &V,
-    ) where
-        V: CredentialVault,
-        V::Error: std::fmt::Display,
-    {
-        let Ok(_refresh_guard) = self.refresh_gate.lock() else {
-            return;
-        };
-        let outcome = initial_lease_round(self, generation, tokens, account_id, agent, vault);
-        self.apply_lease_outcome(generation, outcome);
+        let outcome = refresh_session_round(self, generation, &vault);
+        apply_session_outcome(self, generation, outcome);
+        outcome
     }
 
     fn run_profile_refresh(&self, generation: u64) {
@@ -1720,29 +1430,30 @@ impl AccountService {
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
             return;
         };
-        // Reuse the same verified refresh/link path as the scheduled lease
-        // worker. Profile fields are generation/account fenced, while plan
-        // changes remain lease-authoritative. Apply only verified online lease
-        // outcomes here: a cosmetic refresh must not downgrade a healthy
-        // session because of transient control-plane unavailability. Terminal
-        // rejection/storage failures retire state inside the shared path.
-        let outcome = refresh_lease_round(self, generation, &vault);
-        self.apply_profile_refresh_outcome(generation, outcome);
+        // A cosmetic refresh applies only verified outcomes: transient
+        // unavailability belongs to the session worker's retry cadence, while
+        // rejection and storage failures retire state inside the shared round.
+        let outcome = refresh_session_round(self, generation, &vault);
+        if outcome == SessionRefresh::Verified {
+            apply_session_outcome(self, generation, outcome);
+        }
     }
 
-    fn apply_linked_profile<V>(
+    /// Replaces the session profile with one from a freshly verified ID token
+    /// for the same account and generation.
+    fn apply_verified_profile<V>(
         &self,
         vault: &V,
         generation: u64,
         expected_account: &AccountId,
-        linked_account: &AccountId,
-        profile: AccountProfile,
+        tokens: &oidc::VerifiedTokens,
     ) -> bool
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        if linked_account != expected_account {
+        if tokens.subject != expected_account.as_str() {
+            diagnostic!("Aeris account refresh returned another subject");
             return false;
         }
         let Ok(mut state) = self.state.lock() else {
@@ -1750,86 +1461,19 @@ impl AccountService {
         };
         if state.last_generation != generation
             || state.view.account_id != expected_account.as_str()
-            || !matches!(
-                state.view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            )
+            || !is_signed_in(state.view.state)
         {
             return false;
         }
-        if store_profile_material(vault, expected_account, &profile).is_err() {
-            return false;
+        if store_profile_material(vault, expected_account, &tokens.profile).is_err() {
+            diagnostic!("Aeris account profile cache write degraded");
         }
-        state.view.display_name = profile.display_name;
-        state.view.email = profile.email;
-        state.view.photo_url = profile.photo_url;
-        true
-    }
-
-    fn apply_lease_outcome(&self, generation: u64, outcome: lease::RefreshOutcome) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if state.last_generation != generation {
-            return;
-        }
-        let current = state.view.state;
-        let active = AccountSessionState::Active;
-        let offline = AccountSessionState::OfflineLease;
-        if current != active && current != offline {
-            return;
-        }
-        match outcome {
-            lease::RefreshOutcome::Refreshed(plan) | lease::RefreshOutcome::Current(Some(plan)) => {
-                state.view.plan_id = plan.as_str().to_string();
-                if current != active {
-                    state.view.state = active;
-                    state.view.detail = "signed in".to_string();
-                }
-                note_lease("valid");
-            }
-            lease::RefreshOutcome::Current(None) => note_lease("valid"),
-            lease::RefreshOutcome::Deferred => note_lease("deferred"),
-            lease::RefreshOutcome::OfflineCovered(plan) => {
-                state.view.plan_id = plan.as_str().to_string();
-                if current != offline {
-                    state.view.state = offline;
-                    state.view.detail =
-                        "signed in with a cached subscription; reconnect to refresh".to_string();
-                }
-                note_lease("offline-covered");
-            }
-            lease::RefreshOutcome::Unavailable => {
-                state.lease_expires_at = None;
-                state.view.state = AccountSessionState::ReauthenticationRequired;
-                state.view.detail = "sign-in expired; sign in again".to_string();
-                note_lease("unavailable");
-            }
-        }
-    }
-
-    fn apply_profile_refresh_outcome(&self, generation: u64, outcome: lease::RefreshOutcome) {
-        if matches!(
-            outcome,
-            lease::RefreshOutcome::Refreshed(_) | lease::RefreshOutcome::Current(Some(_))
-        ) {
-            self.apply_lease_outcome(generation, outcome);
-        }
-    }
-
-    fn record_lease_expiry(&self, generation: u64, expires_at: u64) -> bool {
-        let Ok(mut state) = self.state.lock() else {
-            return false;
-        };
-        if state.last_generation != generation
-            || !matches!(
-                state.view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            )
-        {
-            return false;
-        }
-        state.lease_expires_at = Some(expires_at);
+        state
+            .view
+            .display_name
+            .clone_from(&tokens.profile.display_name);
+        state.view.email.clone_from(&tokens.profile.email);
+        state.view.photo_url.clone_from(&tokens.profile.photo_url);
         true
     }
 
@@ -1846,40 +1490,23 @@ impl AccountService {
         }
         state.pending = None;
         let generation = state.last_generation;
-        state.lease_expires_at = None;
-        if detail.contains("timed out") || detail.contains("cancelled") {
-            state.view = cleared_view(AccountSessionState::SignedOut, generation, detail);
+        state.view = if detail.contains("timed out") || detail.contains("cancelled") {
+            cleared_view(AccountSessionState::SignedOut, generation, detail)
         } else {
-            state.view = cleared_view(AccountSessionState::TerminalError, generation, detail);
-        }
-    }
-
-    fn transition_to(
-        &self,
-        state_value: AccountSessionState,
-        account_id: Option<&AccountId>,
-        plan: Option<PlanId>,
-        detail: &str,
-    ) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
+            cleared_view(AccountSessionState::TerminalError, generation, detail)
         };
-        let mut view = cleared_view(state_value, state.last_generation, detail);
-        view.account_id = account_id
-            .map(AccountId::as_str)
-            .unwrap_or_default()
-            .to_string();
-        view.plan_id = plan.map(PlanId::as_str).unwrap_or_default().to_string();
-        state.lease_expires_at = None;
-        state.view = view;
     }
 }
 
+const fn is_signed_in(state: AccountSessionState) -> bool {
+    matches!(
+        state,
+        AccountSessionState::Active | AccountSessionState::Offline
+    )
+}
+
 fn claim_profile_refresh(view: &AccountView, in_flight: &AtomicBool) -> Option<u64> {
-    if !matches!(
-        view.state,
-        AccountSessionState::Active | AccountSessionState::OfflineLease
-    ) {
+    if !is_signed_in(view.state) {
         return None;
     }
     in_flight
@@ -1889,7 +1516,7 @@ fn claim_profile_refresh(view: &AccountView, in_flight: &AtomicBool) -> Option<u
 }
 
 /// One sanitized view with identity, plan, and profile cleared. Every
-/// non-Active assignment flows through here so sign-out, cancel, expiry,
+/// signed-out assignment flows through here so sign-out, cancel, expiry,
 /// and failure can never leak a previous user's profile.
 fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> AccountView {
     AccountView {
@@ -1904,26 +1531,22 @@ fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> Ac
     }
 }
 
-fn expire_lease_if_needed(state: &mut ServiceState, now_unix_seconds: u64) {
-    let missing_offline_deadline =
-        state.view.state == AccountSessionState::OfflineLease && state.lease_expires_at.is_none();
-    let expired_deadline = state
-        .lease_expires_at
-        .is_some_and(|expires_at| now_unix_seconds >= expires_at);
-    if missing_offline_deadline
-        || (expired_deadline
-            && matches!(
-                state.view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            ))
-    {
-        let generation = state.last_generation;
-        state.lease_expires_at = None;
-        state.view = cleared_view(
-            AccountSessionState::ReauthenticationRequired,
-            generation,
-            "sign-in expired; sign in again",
-        );
+fn signed_in_view(
+    state: AccountSessionState,
+    account_id: &AccountId,
+    profile: AccountProfile,
+    generation: u64,
+    detail: &str,
+) -> AccountView {
+    AccountView {
+        state,
+        account_id: account_id.as_str().to_string(),
+        plan_id: PlanId::EarlyAccess.as_str().to_string(),
+        detail: detail.to_string(),
+        request_generation: generation,
+        display_name: profile.display_name,
+        email: profile.email,
+        photo_url: profile.photo_url,
     }
 }
 
@@ -1935,103 +1558,54 @@ fn lock_state(
         .map_err(|_| "account state is unavailable".to_string())
 }
 
-/// Redacted lease observation: outcome class only, never identities.
-fn note_lease(outcome: &str) {
-    diagnostic!("Aeris lease: {outcome}");
-}
-
-/// Sleeps until the next lease round in interruptible slices. Returns false
-/// when the generation retired while waiting.
-fn sleep_until_lease_round(service: &AccountService, generation: u64) -> bool {
+fn random_jitter() -> Option<[u8; 8]> {
     let mut jitter = [0_u8; 8];
-    let jitter = if getrandom::fill(&mut jitter).is_ok() {
-        Some(jitter)
-    } else {
-        None
-    };
-    let wait = Duration::from_secs(lease_refresh_wait_seconds(jitter));
-    let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
-        if !service.is_current(generation) {
-            return false;
-        }
-        std::thread::sleep(Duration::from_secs(60).min(deadline - Instant::now()));
-    }
-    service.is_current(generation)
+    getrandom::fill(&mut jitter).is_ok().then_some(jitter)
 }
 
-fn lease_refresh_wait_seconds(jitter: Option<[u8; 8]>) -> u64 {
-    LEASE_REFRESH_INTERVAL_SECONDS + jitter.map_or(0, |bytes| u64::from_le_bytes(bytes) % 1800)
+fn session_refresh_wait(jitter: Option<[u8; 8]>) -> Duration {
+    SESSION_REFRESH_INTERVAL
+        + Duration::from_secs(jitter.map_or(0, |bytes| {
+            u64::from_le_bytes(bytes) % SESSION_REFRESH_JITTER_SECONDS
+        }))
 }
 
-struct LeaseSession {
+struct SessionCredentials {
     account_id: AccountId,
-    device_id: String,
-    refresh_token: String,
+    refresh_token: Zeroizing<String>,
     endpoints: OidcEndpoints,
-    origin: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LeaseSessionError {
-    Unavailable,
-    Storage,
-}
-
-fn lease_session<V>(
+fn session_credentials<V>(
     service: &AccountService,
     generation: u64,
     vault: &V,
-) -> Result<LeaseSession, LeaseSessionError>
+) -> Result<SessionCredentials, SessionRefresh>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
     // Resolve network-owned endpoint metadata before taking the lifecycle lock.
     // Credential selection below must then remain under one generation fence:
-    // otherwise a stale worker can pass the generation check, a newer login can
-    // replace the durable refresh token, and the stale worker can consume that
-    // newer rotating token before any later fence observes the replacement.
+    // otherwise a stale worker could consume a newer login's rotating token.
     let endpoints = service
         .oidc_endpoints()
-        .map_err(|_| LeaseSessionError::Unavailable)?;
-    let origin =
-        control_plane_origin(&endpoints.issuer).map_err(|_| LeaseSessionError::Unavailable)?;
-    let state = service
-        .state
-        .lock()
-        .map_err(|_| LeaseSessionError::Unavailable)?;
-    if state.last_generation != generation {
-        return Err(LeaseSessionError::Unavailable);
+        .map_err(|_| SessionRefresh::Unavailable)?;
+    let state = service.state.lock().map_err(|_| SessionRefresh::Retired)?;
+    if state.last_generation != generation || !is_signed_in(state.view.state) {
+        return Err(SessionRefresh::Retired);
     }
     let account_id =
-        AccountId::try_new(&state.view.account_id).map_err(|_| LeaseSessionError::Unavailable)?;
-    let refresh_token = vault
-        .load(REFRESH_VAULT_KEY)
-        .map_err(|_| LeaseSessionError::Storage)?
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|token| !token.is_empty())
-        .ok_or(LeaseSessionError::Storage)?;
-    let mut device_key = vault
-        .load(DEVICE_VAULT_KEY)
-        .map_err(|_| LeaseSessionError::Storage)?
-        .filter(|key| !key.is_empty());
-    if device_key.is_none() {
-        ensure_device_key(vault).map_err(|_| LeaseSessionError::Storage)?;
-        device_key = vault
-            .load(DEVICE_VAULT_KEY)
-            .map_err(|_| LeaseSessionError::Storage)?
-            .filter(|key| !key.is_empty());
-    }
-    let device_id = device_key
-        .map(|key| device_id_for_key(&key))
-        .ok_or(LeaseSessionError::Storage)?;
-    Ok(LeaseSession {
+        AccountId::try_new(&state.view.account_id).map_err(|_| SessionRefresh::Retired)?;
+    let Ok(Some(refresh_token)) = load_refresh_token(vault) else {
+        drop(state);
+        fail_current_storage(service, generation);
+        return Err(SessionRefresh::Retired);
+    };
+    Ok(SessionCredentials {
         account_id,
-        device_id,
         refresh_token,
         endpoints,
-        origin,
     })
 }
 
@@ -2039,40 +1613,32 @@ fn persist_rotated_refresh<V>(
     service: &AccountService,
     generation: u64,
     vault: &V,
-    refresh_token: Option<&str>,
+    refresh_token: Option<&oidc::SecretToken>,
 ) -> bool
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let Some(refresh_token) = refresh_token.filter(|token| !token.is_empty()) else {
+    let Some(refresh_token) = refresh_token else {
         return service.is_current(generation);
     };
-    let secret = Zeroizing::new(refresh_token.as_bytes().to_vec());
+    let secret = Zeroizing::new(refresh_token.expose().as_bytes().to_vec());
     let Ok(mut state) = service.state.lock() else {
         return false;
     };
-    if state.last_generation != generation
-        || !matches!(
-            state.view.state,
-            AccountSessionState::Active | AccountSessionState::OfflineLease
-        )
-    {
+    if state.last_generation != generation || !is_signed_in(state.view.state) {
         return false;
     }
     if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
         // A successful rotating grant may have invalidated the durable token
-        // we still hold. Retire every restorable artifact under this same
-        // generation fence so a restart cannot resurrect the now-unusable
-        // saved session. Partial cleanup is fenced by the existing durable
-        // rejection marker.
+        // still stored. Retire every restorable artifact under this same
+        // generation fence so a restart cannot resurrect the unusable session.
         let _ = service.retire_unusable_vault_material(vault);
         state.restore_allowed = false;
-        state.lease_expires_at = None;
         state.view = cleared_view(
             AccountSessionState::TerminalError,
             generation,
-            "credential storage is unavailable; retry sign-in",
+            "credential storage is unavailable; sign in again",
         );
         return false;
     }
@@ -2082,440 +1648,61 @@ where
 fn accept_refresh_grant<V>(
     service: &AccountService,
     generation: u64,
-    session: &LeaseSession,
     vault: &V,
     outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
-    now_unix_seconds: u64,
-) -> Result<oidc::VerifiedTokens, lease::RefreshOutcome>
+) -> Result<oidc::VerifiedTokens, SessionRefresh>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
     match outcome {
         Ok(tokens) => {
-            if persist_rotated_refresh(
-                service,
-                generation,
-                vault,
-                tokens.refresh.as_ref().map(oidc::SecretToken::expose),
-            ) {
+            if persist_rotated_refresh(service, generation, vault, tokens.refresh.as_ref()) {
                 Ok(tokens)
             } else {
-                Err(lease::RefreshOutcome::Unavailable)
+                Err(SessionRefresh::Retired)
             }
         }
         Err(oidc::RefreshGrantError::Rejected) => {
-            note_lease("refresh-rejected");
+            note_session("refresh-rejected");
             service.retire_rejected_session(generation, vault);
-            Err(lease::RefreshOutcome::Unavailable)
+            Err(SessionRefresh::Retired)
         }
-        Err(oidc::RefreshGrantError::Unavailable) => Err(cached_outcome(
-            service,
-            generation,
-            session,
-            vault,
-            now_unix_seconds,
-        )),
+        Err(oidc::RefreshGrantError::Unavailable) => Err(SessionRefresh::Unavailable),
     }
-}
-
-fn persist_lease_directory<V>(
-    service: &AccountService,
-    generation: u64,
-    vault: &V,
-    fetched_keys: &[LeaseKey],
-) -> bool
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    let Ok(encoded) = serde_json::to_vec(fetched_keys) else {
-        fail_current_storage(service, generation);
-        return false;
-    };
-    let Ok(mut state) = service.state.lock() else {
-        return false;
-    };
-    if state.last_generation != generation
-        || !matches!(
-            state.view.state,
-            AccountSessionState::Active | AccountSessionState::OfflineLease
-        )
-    {
-        return false;
-    }
-    // The fetched directory is the authority that validated this online
-    // lease. Commit it under the session-generation fence before any lease
-    // validated by it can become durable. Re-store even when the in-memory
-    // cache matches: memory equality does not prove the durable copy exists.
-    if vault.store(LEASE_DIRECTORY_VAULT_KEY, &encoded).is_err() {
-        note_lease("directory-storage-unavailable");
-        fail_locked_durable_storage(service, &mut state, generation, vault);
-        return false;
-    }
-    let Ok(mut cached) = service.lease_keys.lock() else {
-        fail_locked_durable_storage(service, &mut state, generation, vault);
-        return false;
-    };
-    // Keep the generation fence through the in-memory authority update. A new
-    // login cannot advance ownership between the durable directory commit and
-    // this cache replacement.
-    cached.clear();
-    cached.extend_from_slice(fetched_keys);
-    true
 }
 
 fn fail_current_storage(service: &AccountService, generation: u64) {
     let Ok(mut state) = service.state.lock() else {
         return;
     };
-    if state.last_generation != generation
-        || !matches!(
-            state.view.state,
-            AccountSessionState::Active | AccountSessionState::OfflineLease
-        )
-    {
+    if state.last_generation != generation || !is_signed_in(state.view.state) {
         return;
     }
     state.restore_allowed = false;
-    state.lease_expires_at = None;
     state.view = cleared_view(
         AccountSessionState::TerminalError,
         generation,
-        "credential storage is unavailable; retry sign-in",
+        "credential storage is unavailable; sign in again",
     );
 }
 
-fn fail_locked_durable_storage<V>(
-    service: &AccountService,
-    state: &mut ServiceState,
-    generation: u64,
-    vault: &V,
-) where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    if state.last_generation != generation
-        || !matches!(
-            state.view.state,
-            AccountSessionState::Active | AccountSessionState::OfflineLease
-        )
-    {
-        return;
-    }
-    // A verified online entitlement could encode a downgrade or revocation.
-    // If its durable commit fails, the previous cached entitlement must not be
-    // able to reappear after restart. Retire every restorable artifact while
-    // the session-generation fence is still held; the independent marker
-    // covers partial vault cleanup.
-    let _ = service.retire_unusable_vault_material(vault);
-    state.restore_allowed = false;
-    state.lease_expires_at = None;
-    state.view = cleared_view(
-        AccountSessionState::TerminalError,
-        generation,
-        "credential storage is unavailable; retry sign-in",
-    );
-}
-
-fn validate_and_cache<V>(
-    service: &AccountService,
-    generation: u64,
-    session: &LeaseSession,
-    agent: &ureq::Agent,
-    compact: &str,
-    vault: &V,
-    now_unix_seconds: u64,
-) -> lease::RefreshOutcome
+/// One background refresh round: refresh grant, durable rotation, verified
+/// profile replacement.
+fn refresh_session_round<V>(service: &AccountService, generation: u64, vault: &V) -> SessionRefresh
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let fetched_keys = lease::fetch_directory(agent, &session.origin);
-    match fetched_keys.as_deref() {
-        Ok(keys) => validate_and_cache_after_directory_fetch(
-            service,
-            generation,
-            session,
-            compact,
-            vault,
-            now_unix_seconds,
-            Ok(keys),
-        ),
-        Err(_) => validate_and_cache_after_directory_fetch(
-            service,
-            generation,
-            session,
-            compact,
-            vault,
-            now_unix_seconds,
-            Err(()),
-        ),
-    }
-}
-
-fn validate_and_cache_after_directory_fetch<V>(
-    service: &AccountService,
-    generation: u64,
-    session: &LeaseSession,
-    compact: &str,
-    vault: &V,
-    now_unix_seconds: u64,
-    directory: Result<&[LeaseKey], ()>,
-) -> lease::RefreshOutcome
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    let (fetched_keys, directory_unavailable) = match directory {
-        Ok(keys) => (keys, false),
-        Err(()) => (&[][..], true),
-    };
-    let outcome = validate_and_cache_with_directory(
-        service,
-        generation,
-        session,
-        compact,
-        vault,
-        now_unix_seconds,
-        fetched_keys,
-    );
-    if directory_unavailable
-        && outcome == lease::RefreshOutcome::Unavailable
-        && service.is_current(generation)
-    {
-        // Directory reachability is control-plane availability, not an
-        // authoritative entitlement rejection. If a freshly returned lease
-        // needs an unknown rotated key while the directory is unavailable,
-        // keep a still-valid cached lease as the bounded offline authority.
-        return cached_outcome(service, generation, session, vault, now_unix_seconds);
-    }
-    outcome
-}
-
-fn transition_lease_keys(
-    session: &LeaseSession,
-    cached_compact: Option<&str>,
-    cached_keys: &[LeaseKey],
-    fetched_keys: &[LeaseKey],
-    cached_is_authoritative: bool,
-    now_unix_seconds: u64,
-) -> Option<Vec<LeaseKey>> {
-    let mut transition_keys = fetched_keys.to_owned();
-    if fetched_keys.is_empty() || !cached_is_authoritative {
-        return Some(transition_keys);
-    }
-    let cached = cached_compact?;
-    if lease::validate_compact(
-        cached,
-        fetched_keys,
-        &session.account_id,
-        &session.device_id,
-        now_unix_seconds,
-    )
-    .is_ok()
-    {
-        return Some(transition_keys);
-    }
-    let old_key = cached_keys.iter().find(|key| {
-        lease::validate_compact(
-            cached,
-            std::slice::from_ref(*key),
-            &session.account_id,
-            &session.device_id,
-            now_unix_seconds,
-        )
-        .is_ok()
-    })?;
-    if let Some(replacement) = transition_keys.iter().find(|key| key.0 == old_key.0) {
-        // Compact leases resolve keys by `kid`, so different public keys with
-        // one identifier cannot coexist during the two-write transition.
-        if replacement.1 != old_key.1 {
-            note_lease("directory-key-id-conflict");
-            return None;
-        }
-    } else {
-        transition_keys.push(old_key.clone());
-    }
-    Some(transition_keys)
-}
-
-fn validate_and_cache_with_directory<V>(
-    service: &AccountService,
-    generation: u64,
-    session: &LeaseSession,
-    compact: &str,
-    vault: &V,
-    now_unix_seconds: u64,
-    fetched_keys: &[LeaseKey],
-) -> lease::RefreshOutcome
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    let Ok(cached_compact) = lease::load_cached(vault, LEASE_VAULT_KEY) else {
-        fail_current_storage(service, generation);
-        return lease::RefreshOutcome::Unavailable;
-    };
-    let (claims, cached_claims, transition_keys) = {
-        let cached_keys = service
-            .lease_keys
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let validation_keys = if fetched_keys.is_empty() {
-            cached_keys.as_slice()
-        } else {
-            fetched_keys
-        };
-        let Ok(claims) = lease::validate_compact(
-            compact,
-            validation_keys,
-            &session.account_id,
-            &session.device_id,
-            now_unix_seconds,
-        ) else {
-            return lease::RefreshOutcome::Unavailable;
-        };
-        // Compare revisions against the durable lease using the authority that
-        // made that lease restorable before this refresh. A signing-key
-        // rotation must not let a lower-revision lease bypass monotonic cache
-        // protection merely because the newly fetched directory no longer
-        // contains the old signing key.
-        let cached_claims = cached_compact.as_deref().and_then(|cached| {
-            lease::validate_compact(
-                cached,
-                cached_keys.as_slice(),
-                &session.account_id,
-                &session.device_id,
-                now_unix_seconds,
-            )
-            .ok()
-        });
-        // Make the directory write compatible with both sides of the durable
-        // lease replacement. If rotation removed the key for the still-valid
-        // cached lease, retain only the old key that verifies that lease. A
-        // crash before the following lease write then leaves a valid old pair;
-        // a crash after it leaves a directory that also contains every fetched
-        // key needed by the new lease. The next successful refresh naturally
-        // drops this compatibility key once the durable lease uses a fetched
-        // key.
-        let Some(transition_keys) = transition_lease_keys(
-            session,
-            cached_compact.as_deref(),
-            cached_keys.as_slice(),
-            fetched_keys,
-            cached_claims.is_some(),
-            now_unix_seconds,
-        ) else {
-            return lease::RefreshOutcome::Unavailable;
-        };
-        (claims, cached_claims, transition_keys)
-    };
-    // Persist a rotated directory only after it validates a lease from the
-    // same response path. A malformed lease cannot poison offline restart.
-    if !fetched_keys.is_empty()
-        && !persist_lease_directory(service, generation, vault, &transition_keys)
-    {
-        return lease::RefreshOutcome::Unavailable;
-    }
-    match cached_claims {
-        Some(cached) if cached.revision() >= claims.revision() => {
-            let _ = service.record_lease_expiry(generation, cached.expires_at());
-            lease::RefreshOutcome::Current(Some(cached.plan()))
-        }
-        _ => {
-            let secret = Zeroizing::new(compact.as_bytes().to_vec());
-            let Ok(mut state) = service.state.lock() else {
-                return lease::RefreshOutcome::Unavailable;
-            };
-            if state.last_generation != generation
-                || !matches!(
-                    state.view.state,
-                    AccountSessionState::Active | AccountSessionState::OfflineLease
-                )
-            {
-                return lease::RefreshOutcome::Unavailable;
-            }
-            if vault.store(LEASE_VAULT_KEY, secret.as_slice()).is_err() {
-                note_lease("lease-storage-unavailable");
-                fail_locked_durable_storage(service, &mut state, generation, vault);
-                return lease::RefreshOutcome::Unavailable;
-            }
-            state.lease_expires_at = Some(claims.expires_at());
-            lease::RefreshOutcome::Refreshed(claims.plan())
-        }
-    }
-}
-
-fn cached_lease_covers<V>(
-    service: &AccountService,
-    generation: u64,
-    session: &LeaseSession,
-    vault: &V,
-    now_unix_seconds: u64,
-) -> Option<PlanId>
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    // Offline coverage re-validates the cached lease against the last-known
-    // directory without touching the network, and additionally requires the
-    // remaining validity to sit inside the approved offline window.
-    let cached = match lease::load_cached(vault, LEASE_VAULT_KEY) {
-        Ok(Some(cached)) => cached,
-        Ok(None) => return None,
-        Err(_) => {
-            fail_current_storage(service, generation);
-            return None;
-        }
-    };
-    let claims = {
-        let keys = service
-            .lease_keys
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        lease::validate_compact(
-            &cached,
-            &keys,
-            &session.account_id,
-            &session.device_id,
-            now_unix_seconds,
-        )
-        .ok()
-        .filter(|claims| {
-            claims.expires_at().saturating_sub(now_unix_seconds) <= LEASE_OFFLINE_VALIDITY_SECONDS
-        })?
-    };
-    let _ = service.record_lease_expiry(generation, claims.expires_at());
-    Some(claims.plan())
-}
-
-/// One background lease round: refresh grant, lease fetch, monotonic cache.
-fn refresh_lease_round<V>(
-    service: &AccountService,
-    generation: u64,
-    vault: &V,
-) -> lease::RefreshOutcome
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    let session = match lease_session(service, generation, vault) {
+    let session = match session_credentials(service, generation, vault) {
         Ok(session) => session,
-        Err(LeaseSessionError::Storage) => {
-            fail_current_storage(service, generation);
-            return lease::RefreshOutcome::Unavailable;
-        }
-        Err(LeaseSessionError::Unavailable) => return lease::RefreshOutcome::Unavailable,
+        Err(outcome) => return outcome,
     };
-    let now = unix_now();
-    // One connection pool per background round: grant, link, lease, and
-    // directory reuse it instead of paying a fresh handshake per stage.
     let agent = oidc_agent();
     let grant_permit = match service.claim_refresh_grant() {
         Ok(Some(permit)) => permit,
-        Ok(None) => return lease::RefreshOutcome::Deferred,
-        Err(_) => return lease::RefreshOutcome::Unavailable,
+        Ok(None) => return SessionRefresh::Deferred,
+        Err(_) => return SessionRefresh::Unavailable,
     };
     let refresh = refresh_grant(
         &session.endpoints,
@@ -2523,105 +1710,49 @@ where
         &service.config.client_id,
         &session.refresh_token,
     );
-    let tokens = match accept_refresh_grant(service, generation, &session, vault, refresh, now) {
+    let tokens = match accept_refresh_grant(service, generation, vault, refresh) {
         Ok(tokens) => tokens,
         Err(outcome) => return outcome,
     };
     drop(grant_permit);
-    if let Ok((account_id, _plan, profile)) = link_subject(
-        &session.endpoints,
-        &agent,
-        tokens.id_token.expose(),
-        &tokens.subject,
-    ) {
-        let _ = service.apply_linked_profile(
-            vault,
-            generation,
-            &session.account_id,
-            &account_id,
-            profile,
-        );
-    }
-    let Ok(compact) = lease::fetch_compact(
-        &session.endpoints,
-        &agent,
-        tokens.id_token.expose(),
-        &tokens.subject,
-        &session.device_id,
-    ) else {
-        return cached_outcome(service, generation, &session, vault, now);
-    };
-    validate_and_cache(service, generation, &session, &agent, &compact, vault, now)
-}
-
-fn cached_outcome<V>(
-    service: &AccountService,
-    generation: u64,
-    session: &LeaseSession,
-    vault: &V,
-    now_unix_seconds: u64,
-) -> lease::RefreshOutcome
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    if let Some(plan) = cached_lease_covers(service, generation, session, vault, now_unix_seconds) {
-        lease::RefreshOutcome::OfflineCovered(plan)
+    if service.apply_verified_profile(vault, generation, &session.account_id, &tokens) {
+        SessionRefresh::Verified
     } else {
-        lease::RefreshOutcome::Unavailable
+        SessionRefresh::Unavailable
     }
 }
 
-/// Best-effort initial lease with login-time tokens (no grant needed).
-fn initial_lease_round<V>(
-    service: &AccountService,
-    generation: u64,
-    tokens: &oidc::VerifiedTokens,
-    account_id: &AccountId,
-    agent: &ureq::Agent,
-    vault: &V,
-) -> lease::RefreshOutcome
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    let session = match lease_session(service, generation, vault) {
-        Ok(session) => session,
-        Err(LeaseSessionError::Storage) => {
-            fail_current_storage(service, generation);
-            return lease::RefreshOutcome::Unavailable;
+/// Moves a current session between verified-online and offline presentation.
+fn apply_session_outcome(service: &AccountService, generation: u64, outcome: SessionRefresh) {
+    let Ok(mut state) = service.state.lock() else {
+        return;
+    };
+    if state.last_generation != generation || !is_signed_in(state.view.state) {
+        return;
+    }
+    match outcome {
+        SessionRefresh::Verified => {
+            state.view.state = AccountSessionState::Active;
+            state.view.detail = "signed in".to_string();
+            note_session("verified");
         }
-        Err(LeaseSessionError::Unavailable) => return lease::RefreshOutcome::Unavailable,
-    };
-    if &session.account_id != account_id {
-        return lease::RefreshOutcome::Unavailable;
+        SessionRefresh::Unavailable => {
+            state.view.state = AccountSessionState::Offline;
+            state.view.detail = "signed in offline; reconnecting".to_string();
+            note_session("offline");
+        }
+        SessionRefresh::Deferred => note_session("deferred"),
+        SessionRefresh::Retired => {}
     }
-    let Ok(compact) = lease::fetch_compact(
-        &session.endpoints,
-        agent,
-        tokens.id_token.expose(),
-        &tokens.subject,
-        &session.device_id,
-    ) else {
-        return lease::RefreshOutcome::Current(None);
-    };
-    // A failed initial fetch leaves the fresh Active session untouched.
-    match validate_and_cache(
-        service,
-        generation,
-        &session,
-        agent,
-        &compact,
-        vault,
-        unix_now(),
-    ) {
-        lease::RefreshOutcome::Unavailable => lease::RefreshOutcome::Current(None),
-        outcome => outcome,
-    }
+}
+
+/// Redacted session observation: outcome class only, never identities.
+fn note_session(outcome: &str) {
+    diagnostic!("Aeris account session: {outcome}");
 }
 
 /// Credential vault that is always unavailable, used when native storage
-/// cannot be constructed so sign-out still clears engine state.
+/// cannot be constructed so sign-out still clears runtime state.
 struct UnavailableVault;
 
 impl CredentialVault for UnavailableVault {
@@ -2640,19 +1771,18 @@ impl CredentialVault for UnavailableVault {
     }
 }
 
-fn store_refresh_material<V>(vault: &V, refresh_token: Option<&str>) -> Result<(), String>
+fn load_refresh_token<V>(vault: &V) -> Result<Option<Zeroizing<String>>, ()>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    ensure_device_key(vault)?;
-    if let Some(refresh) = refresh_token.filter(|token| !token.is_empty()) {
-        let secret = Zeroizing::new(refresh.as_bytes().to_vec());
-        vault
-            .store(REFRESH_VAULT_KEY, secret.as_slice())
-            .map_err(|_| "credential storage is unavailable".to_string())?;
-    }
-    Ok(())
+    let Some(bytes) = vault.load(REFRESH_VAULT_KEY).map_err(|_| ())? else {
+        return Ok(None);
+    };
+    Ok(String::from_utf8(bytes)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .map(Zeroizing::new))
 }
 
 fn store_profile_material<V>(
@@ -2681,10 +1811,9 @@ where
         .map_err(|_| "credential storage is unavailable".to_string())
 }
 
-fn load_profile_material<V>(
-    vault: &V,
-    expected_account: &AccountId,
-) -> Result<Option<AccountProfile>, ()>
+/// Loads the cached verified profile. Malformed or out-of-bound entries read
+/// as absent; only a vault read failure is an error.
+fn load_profile_material<V>(vault: &V) -> Result<Option<(AccountId, AccountProfile)>, ()>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
@@ -2692,6 +1821,7 @@ where
     let Some(encoded) = vault.load(PROFILE_VAULT_KEY).map_err(|_| ())? else {
         return Ok(None);
     };
+    let encoded = Zeroizing::new(encoded);
     if encoded.is_empty() || encoded.len() > MAXIMUM_PROFILE_VAULT_BYTES {
         return Ok(None);
     }
@@ -2699,37 +1829,23 @@ where
         return Ok(None);
     };
     if cached.schema_version != PROFILE_VAULT_SCHEMA_VERSION
-        || cached.account_id != expected_account.as_str()
         || cached.display_name.len() > MAXIMUM_PROFILE_NAME_BYTES
         || cached.email.len() > MAXIMUM_PROFILE_EMAIL_BYTES
         || cached.photo_url.len() > MAXIMUM_PROFILE_PHOTO_URL_BYTES
     {
         return Ok(None);
     }
-    Ok(Some(AccountProfile {
-        display_name: cached.display_name,
-        email: cached.email,
-        photo_url: cached.photo_url,
-    }))
-}
-
-fn ensure_device_key<V>(vault: &V) -> Result<(), String>
-where
-    V: CredentialVault,
-    V::Error: std::fmt::Display,
-{
-    if vault
-        .load(DEVICE_VAULT_KEY)
-        .map_err(|_| "credential storage is unavailable".to_string())?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let mut key = Zeroizing::new(vec![0_u8; 32]);
-    getrandom::fill(key.as_mut_slice()).map_err(|_| "system CSPRNG unavailable".to_string())?;
-    vault
-        .store(DEVICE_VAULT_KEY, key.as_slice())
-        .map_err(|_| "credential storage is unavailable".to_string())
+    let Ok(account_id) = AccountId::try_new(cached.account_id) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        account_id,
+        AccountProfile {
+            display_name: cached.display_name,
+            email: cached.email,
+            photo_url: cached.photo_url,
+        },
+    )))
 }
 
 #[cfg(unix)]

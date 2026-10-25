@@ -1067,7 +1067,13 @@ mod timeframe_input {
         let input = cx.read(|cx| surface.read(cx).symbol_input.clone().expect("symbol input"));
         cx.read(|cx| assert_eq!(input.read(cx).value(), "eth"));
 
-        cx.simulate_keystrokes("ctrl-a b t c");
+        // Select-all is cmd-a on macOS, where ctrl-a moves to the line start.
+        let select_all = if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        };
+        cx.simulate_keystrokes(&format!("{select_all} b t c"));
         cx.read(|cx| assert_eq!(input.read(cx).value(), "btc"));
 
         cx.update(|window, cx| {

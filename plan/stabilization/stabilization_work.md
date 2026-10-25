@@ -142,7 +142,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | UI-09 | Medium | Persistence lacks versioning, duplicates atomic-write logic, and silently resets on corruption | M7.7 (duplication/backup), M7.8 | open |
 | UI-10 | Medium | Control flow depends on matching display strings | M5.1 (runtime part), M6.8, M6.11 | open |
 | UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | exit park closed in 3c42981b; remainder open |
-| UI-12 | Medium (bloat; not a runtime risk) | Dormant account and placeholder code compiled into production | M7.2 | open |
+| UI-12 | Medium (bloat; not a runtime risk) | Dormant account and placeholder code compiled into production | M7.2 | closed 2026-10-25: the account code is live Cognito sign-in, not dormant |
 | UI-13 | Low | Hardcoded colours outside the design system | M7.1 | open |
 | UI-14 | Medium | Chart analytics and transforms in the integration glue | M7.3 (requests), M7.9 (hollow), M7.10 (sweeps), M7.11 (tape) | open |
 | UI-15 | Medium | Tests are coupled to implementation details | M7.12 | open |
@@ -153,7 +153,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | PL-04 | High | No single-instance lock | M1.8 | closed in 3c42981b |
 | PL-05 | Medium-High | Trading SQLite store lacks busy timeout, integrity check, and corruption recovery | M1.9 | closed in 3c42981b |
 | PL-06 | Medium | Five atomic-write implementations; trading `write_atomic` is not atomic | M1.5 (primitive), M1.6 | closed in 3c42981b |
-| PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | token safety closed in 3c42981b; remainder open |
+| PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | token safety closed in 3c42981b; the account runtime is live since 2026-10-25 (lease and Ed25519 stack removed); AC-02/AC-03/AC-06 remain |
 | PL-08 | Medium | `naming_check` pins source text and is co-edited with the code it checks | M8.12 | open |
 | PL-09 | High | CI is manual-only | M1.2 | closed in 63a71463 |
 | PL-10 | Medium | Stale physical-pacing tooling and display_timing module | M8.3 (display_timing), M8.11 | open |
@@ -190,11 +190,11 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | AC-01 | High | Tokens derive `Clone + Debug`; any `{:?}` leaks them | M1.4 | closed in 3c42981b |
 | AC-02 | Medium | Profile vault limit (4096) exceeds the Windows 2560-byte cap; no size precheck | M8.4 | open |
 | AC-03 | Medium | Vault I/O runs under the account state mutex | M8.4 | open |
-| AC-04 | High (when enabled) | OIDC issuer comes from a runtime environment variable | M8.4 | open |
+| AC-04 | High (when enabled) | OIDC issuer comes from a runtime environment variable | M8.4 | closed 2026-10-25: issuer, client id and hosted origin are compile-time constants |
 | AC-05 | High | Exit path can park the thread forever, leaving a zombie process | M1.4 | closed in 3c42981b |
 | AC-06 | Medium | Poisoned credential-access mutex fails permanently | M8.4 | open |
 | AC-07 | Medium | GPUI reqwest client installed only to fetch the avatar image | M8.10 | open |
-| AC-08 | Info | Unverified that an empty issuer spawns no network work | M8.4 | open |
+| AC-08 | Info | Unverified that an empty issuer spawns no network work | M8.4 | closed 2026-10-25: no empty-issuer path remains; validation roots never start the account runtime |
 
 Findings intentionally not closed by any single item (from `reports/work_items.md`):
 
@@ -2160,6 +2160,8 @@ Status: pending
 
 - [ ] M7.1 design-tokens-for-chart-colors - Remaining chart and picker colors become design tokens
 - [ ] M7.2 account-gate-isolation - Dormant account integration isolated behind `AccountGate`
+  - Status (2026-10-25): superseded in part; sign-in is now mandatory on the production data root
+    (`account::sign_in_required`), so the account integration is no longer dormant.
 - [ ] M7.3 chart-host-events - `AerisChartView` emits host events; split its host state
 - [ ] M7.4 pane-controllers-split - `WorkspaceSurface` becomes composition and render over pane controllers
   - Status (2026-10-23 audit): `PanePersistence` and `PanePresentation` already exist (M6.4).
@@ -2180,6 +2182,9 @@ Status: pending
 - [ ] M8.2 launcher-hygiene-and-trust - Launcher command dispatch, process handling, release config and Authenticode
 - [ ] M8.3 ffi-consolidation - Remaining FFI moves to `platform_sys`; `platform_runtime` forbids unsafe
 - [ ] M8.4 account-runtime-safety - Account runtime vault, lock and issuer fixes
+  - Status (2026-10-25): AC-04 and AC-08 closed by the Cognito sign-in work; AC-02 (profile vault
+    size against the Windows 2560-byte cap), AC-03 (vault I/O under the state mutex) and AC-06
+    (poisoned credential mutex) remain open.
 - [ ] M8.5 readiness-contract - Shared readiness report; readiness never touches the real database
   - Status (2026-10-23 audit): the trading store already takes a preflight copy at open
     (`store/schema.rs`), but readiness still opens the real store through `start_trading_service()`.
@@ -2698,6 +2703,9 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-24 feat(desktop): no stabilization item. Symbol-menu refactor. The menu's scope (All providers, one provider, or one exchange) is saved with the chart chrome. All providers searches every connected provider at once and shows one section per provider in a fixed order, each filling in as its answer arrives with its own loading or error line; disconnected providers are skipped. A provider scope searches only that provider and an exchange scope only that exchange; the exchange list is learned from each provider's results (bounded). The provider-neutral `symbol_browser` module owns the per-provider lanes, and `rithmic_shell.rs` keeps only the connection state. Runtime: `SearchProviderInstruments.exchange`, a per-provider coordinator search slot, Rithmic single in-flight search with latest-wins per consumer, a per-session listing cache and search timing logs, and a Hyperliquid venue filter. A superseded search is ignored, a dispatch-unavailable one marks that section unavailable, and any other rejection shows a failed line. Regressions: symbol_browser tests (sections, unavailable/failed lanes, exact-symbol order, exchange learning bounds, exchange scope), `pane_harness_all_providers_search_shows_each_answer_as_it_arrives`, the Rithmic catalog queue tests and the Hyperliquid venue filter tests. Restriction recorded in section 5 and AGENTS.md. Known gaps in section 7.
 - 2026-10-24 fix(desktop): no stabilization item. Maintainer feedback on the symbol menu: the provider section headers ("Rithmic · 66 products") and the product groups with expand chevrons are gone. The menu is one flat list in the fixed provider order; each row carries its provider's logo, contracts read "product name (month)" with their exchange on the right so a CME-Delayed copy reads apart from its CME one, and a provider that fails or is unavailable simply lists nothing (the footer says "No markets found"; the existing notice still reports a real failure). Clicking a listed product opens its nearest-expiry contract on that product's exchange instead of expanding it. The Rithmic runtime now orders each exchange's contracts together front month first and marks its front-month alias row ("Front Month for MNQ - MNQZ6.CME") with the new `ProviderInstrumentKind::FrontMonthAlias`; menus drop it, while saved trading routes on an alias still resolve through the same search. Typing a product code such as "NQ" and pressing Enter selects its nearest-expiry contract. Regressions: `opening_a_product_selects_its_nearest_expiry_contract_once`, `typed_contracts_list_flat_with_their_month_and_exchange`, `a_product_code_resolves_to_its_nearest_expiry_contract`, `pane_harness_rithmic_product_opens_its_front_month_from_the_empty_query_listing` and the updated runtime ordering test.
 - 2026-10-25 fix(chart): no stabilization item. Aeris Charts is pinned to 4050882 (the latest `main`), and the `aeris_naming_check` pin assertion moves with it; the lockfile changes only the Aeris Charts sources. The engine now keeps the crosshair visible while a drawing tool is armed, a multi-point drawing is pending or a brush stroke is in progress (hovering or dragging finished drawings and trading controls still hides it). The pin also brings Deepcharts-style fixed range and anchored volume profile drawings: the fixed range profile is a resizable box fitted to the traded range, with a dual-sided delta/volume histogram, value area and POC. Regression: `aeris_charts_upgrade_keeps_crosshair_visible_during_creation_and_after_cancel` replaces the old hide-during-creation test. Known gap: Terminal does not call the engine's new `set_series_volume_source`, so profile drawings on a chart without an order-flow tape have no candle-volume source yet.
+
+- 2026-10-25 feat(account): M8.4 (part), closes UI-12, AC-04 and AC-08. Desktop sign-in is mandatory on the production data root and uses the Aeris Cognito user pool (us-east-1_05pNG4EOF, hosted sign-in at auth.aeristerminal.com, public client with PKCE, scope `openid email profile`). The browser returns to a loopback callback on `http://localhost:<port>/callback` for ports 47210, 47211 or 47212 (bound on 127.0.0.1 and [::1]); ID tokens are RS256-verified with `ring` against the issuer JWKS. The issuer, client id and hosted origin are compile-time constants. The startup gate shows a sign-in page until the session is authenticated; validation data roots bypass sign-in and never start the account runtime. A network failure keeps the cached session as Offline; only an `invalid_grant` refresh rejection signs out. Sign-out revokes the refresh token, deletes the vault refresh and profile entries and returns to the gate. The header profile menu shows the avatar (photo or initials), name, email, the Early access plan, Manage profile (aeristerminal.com/account/) and Sign out. Removed: the lease module, device-key Ed25519 signing (`ed25519-dalek` edge), entitlements and feature sets, `link_subject`, `AUTH_BACKEND_CONFIGURED`, and the environment-variable issuer. Restriction recorded in AGENTS.md (Authentication) and `tools/naming_check`. AC-02, AC-03 and AC-06 stay open; a real browser sign-in was not exercised by an automated run.
+- 2026-10-25 feat(account): no stabilization item. Signed-out means no provider traffic: before the first usable session (signed in or cached Offline) the desktop runs only the local trading store, the account session and persistence, in a separate sign-in window. `start_signed_in_runtime` (context sources, `MarketService::start`, the market-demanding workspace, the trading market feed and `attach_broker_venue`) runs on a background worker when `services::SignedInStart` releases it, exactly once per process, then the workspace window opens and the sign-in window closes; a validation root runs it directly. Closing the sign-in window, even mid-start, stops what was started, waits on the account refresh fence and stops the trading owner. Known gap: after a later sign-out the gate covers the workspace but provider sessions and the venue stay up until exit, because `MarketService::shutdown` is final and the runtime has no in-process restart; the next sign-in starts nothing new. Regression: `signed_in_start_releases_once_only_after_sign_in`; naming_check keeps the signed-in owners out of the desktop entrypoint. Restriction recorded in AGENTS.md.
 
 ## 7. Known gaps / deferred
 

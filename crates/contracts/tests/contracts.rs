@@ -129,7 +129,7 @@ fn account_view_is_a_strongly_typed_in_process_contract() {
     let view = AccountView {
         state: AccountSessionState::Active,
         account_id: "acct_01".into(),
-        plan_id: "pro".into(),
+        plan_id: "early_access".into(),
         detail: "active".into(),
         request_generation: 3,
         display_name: "Ada Trader".into(),
@@ -145,10 +145,9 @@ fn account_session_states_have_stable_values() {
     assert_eq!(AccountSessionState::SignedOut as i32, 0);
     assert_eq!(AccountSessionState::Authorizing as i32, 1);
     assert_eq!(AccountSessionState::Active as i32, 2);
-    assert_eq!(AccountSessionState::OfflineLease as i32, 3);
+    assert_eq!(AccountSessionState::Offline as i32, 3);
     assert_eq!(AccountSessionState::ReauthenticationRequired as i32, 4);
-    assert_eq!(AccountSessionState::LeaseExpired as i32, 5);
-    assert_eq!(AccountSessionState::TerminalError as i32, 6);
+    assert_eq!(AccountSessionState::TerminalError as i32, 5);
 }
 
 #[test]

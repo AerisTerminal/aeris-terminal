@@ -36,7 +36,7 @@ impl DesktopLifecycle {
     pub(super) fn new(
         services: aeris_desktop::services::DesktopServices,
         context: aeris_context_runtime::ContextService,
-        instance_lock: aeris_platform_runtime::InstanceLock,
+        instance_lock: Arc<aeris_platform_runtime::InstanceLock>,
     ) -> Self {
         Self {
             retirements: Rc::new(RefCell::new(Vec::new())),
@@ -45,7 +45,7 @@ impl DesktopLifecycle {
             shutdown_started: Rc::new(Cell::new(false)),
             services,
             context: Some(context),
-            instance_lock: Some(Arc::new(instance_lock)),
+            instance_lock: Some(instance_lock),
         }
     }
 
@@ -60,7 +60,7 @@ impl DesktopLifecycle {
                 aeris_market_runtime::MarketService::start().expect("test market owner"),
                 super::tests::test_trading_service(),
                 aeris_account_runtime::AccountService::new(
-                    aeris_account_runtime::AccountServiceConfig::from_environment(),
+                    aeris_account_runtime::AccountServiceConfig::production(),
                 ),
                 aeris_desktop::chart_chrome::DesktopPersistence::new(
                     std::env::temp_dir()

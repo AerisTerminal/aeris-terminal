@@ -1,24 +1,33 @@
-//! Ephemeral loopback callback listener for one native login transaction.
+//! Loopback callback listener for one native login transaction.
 //!
-//! The listener binds literal `127.0.0.1` on an OS-assigned port, accepts
-//! exactly one authorization callback, validates it against the pending
-//! transaction, and then closes. It never binds all interfaces, never serves
-//! more than one transaction, and every read is bounded.
+//! The listener binds the registered fixed callback ports in order on both
+//! loopback families (`127.0.0.1` and `[::1]`), so the `localhost` redirect
+//! reaches it however the browser resolves that name. It accepts one
+//! authorization callback, validates it against the pending transaction, and
+//! closes with the transaction. It never binds all interfaces, ignores a
+//! bounded number of stray connections, and every read is bounded.
 
 use std::{
-    io::{Read, Write},
-    net::TcpListener,
-    time::Duration,
+    io::{ErrorKind, Read, Write},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream},
+    time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+/// Callback ports registered with the identity provider, tried in order.
+pub const CALLBACK_PORTS: [u16; 3] = [47210, 47211, 47212];
 /// Maximum HTTP callback request bytes read from the loopback socket.
 pub const MAXIMUM_CALLBACK_BYTES: usize = 8192;
 /// Maximum authorization code length accepted from the callback query.
 pub const MAXIMUM_CODE_BYTES: usize = 2048;
 /// Maximum OAuth state length accepted from the callback query.
 pub const MAXIMUM_STATE_BYTES: usize = 256;
+/// Connections that are not the callback (speculative preconnects, favicon
+/// requests) answered before the transaction gives up on this listener.
+const MAXIMUM_STRAY_CONNECTIONS: usize = 16;
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
 /// Inter faces at the weights `platform.css` uses for normal, emphasis and strong text.
@@ -42,30 +51,60 @@ const BRAND_FONT: &[u8] = include_bytes!(
 const BRAND_MARK: &str = include_str!("../../../../apps/desktop/assets/aeris_assets/logo.svg");
 const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var d=q.matches;document.documentElement.classList.toggle('dark',d);document.documentElement.dataset.theme=d?'dark':'light';document.documentElement.style.colorScheme=d?'dark':'light'}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
 
-/// One bound loopback listener awaiting a single callback.
+/// One bound loopback listener pair awaiting a single callback.
 pub struct LoopbackListener {
-    listener: TcpListener,
+    listeners: Vec<TcpListener>,
     port: u16,
 }
 
 impl LoopbackListener {
-    /// Binds literal `127.0.0.1` on an OS-assigned port.
+    /// Binds the first port in `ports` (normally [`CALLBACK_PORTS`]) that is
+    /// free on IPv4 loopback and, when the host has IPv6 loopback, on `[::1]`
+    /// as well. Port `0` asks the OS for any free port so parallel tests never
+    /// contend for the registered ports.
     ///
     /// # Errors
     ///
-    /// Returns an error when the loopback bind fails (port collision or
-    /// restricted loopback), with an actionable detail.
-    pub fn bind() -> Result<Self, String> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|_| "loopback callback port is unavailable; retry sign-in".to_string())?;
-        let port = listener
-            .local_addr()
-            .map_err(|_| "loopback callback port is unavailable; retry sign-in".to_string())?
-            .port();
-        Ok(Self { listener, port })
+    /// Returns an actionable error when every listed port is in use.
+    pub fn bind(ports: &[u16]) -> Result<Self, String> {
+        for &port in ports {
+            let Ok(ipv4) = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))) else {
+                continue;
+            };
+            let Ok(bound) = ipv4.local_addr().map(|address| address.port()) else {
+                continue;
+            };
+            let mut listeners = vec![ipv4];
+            match TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, bound))) {
+                Ok(ipv6) => listeners.push(ipv6),
+                // Another process owns the IPv6 side: a `localhost` redirect
+                // could reach it instead of this transaction.
+                Err(error) if error.kind() == ErrorKind::AddrInUse => continue,
+                // Hosts without IPv6 loopback resolve `localhost` to IPv4 only.
+                Err(_) => {}
+            }
+            if listeners
+                .iter()
+                .any(|listener| listener.set_nonblocking(true).is_err())
+            {
+                return Err("loopback callback listener failed; retry sign-in".to_string());
+            }
+            return Ok(Self {
+                listeners,
+                port: bound,
+            });
+        }
+        Err(format!(
+            "sign-in callback ports {} are in use; close the app using them and retry sign-in",
+            ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     }
 
-    /// Returns the OS-assigned loopback port for test assertions.
+    /// Returns the bound loopback port.
     #[cfg(test)]
     #[must_use]
     pub const fn port(&self) -> u16 {
@@ -75,22 +114,13 @@ impl LoopbackListener {
     /// Returns the redirect URI registered for this transaction.
     #[must_use]
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port)
+        format!("http://localhost:{}/callback", self.port)
     }
 
     /// Accepts one callback and returns its raw query with the connection
     /// held open. The caller validates, completes the exchange, and then
     /// answers on the same connection, so the browser page reflects the
-    /// engine outcome instead of mere receipt.
-    ///
-    /// Times out instead of blocking forever when the browser is closed
-    /// without completing authorization.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on timeout, oversized requests, or transport
-    /// failure. Transport failures answer the browser immediately; a
-    /// timeout means no browser ever connected, so nothing is answered.
+    /// runtime outcome instead of mere receipt.
     #[cfg(test)]
     pub fn accept_one(&self, timeout: Duration) -> Result<PendingCallback, String> {
         self.accept_one_while(timeout, || true)
@@ -99,37 +129,54 @@ impl LoopbackListener {
     /// Accepts one callback while the owning login transaction remains
     /// current. The predicate is checked between nonblocking accept attempts,
     /// so cancellation retires the listener promptly instead of retaining a
-    /// socket and worker until the full login timeout.
+    /// socket and worker until the full login timeout. Times out instead of
+    /// blocking forever when the browser is closed without completing
+    /// authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on timeout, cancellation, too many stray connections,
+    /// or listener failure.
     pub fn accept_one_while(
         &self,
         timeout: Duration,
         mut keep_waiting: impl FnMut() -> bool,
     ) -> Result<PendingCallback, String> {
-        self.listener
-            .set_nonblocking(false)
-            .map_err(|_| "loopback callback listener failed".to_string())?;
-        // `set_timeout` is best-effort: the read loop below also enforces the
-        // bound, so an unsupported platform timeout still fails closed.
-        let _ = self.listener.set_nonblocking(true);
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
+        let mut stray_connections = 0;
         loop {
             if !keep_waiting() {
                 return Err("sign-in transaction is no longer active; retry sign-in".to_string());
             }
-            match self.listener.accept() {
-                Ok((stream, _)) => return read_callback_query(stream),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= deadline {
+            let mut accepted = None;
+            for listener in &self.listeners {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        accepted = Some(stream);
+                        break;
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => {
                         return Err(
-                            "sign-in timed out waiting for the browser; retry sign-in".to_string()
+                            "loopback callback connection failed; retry sign-in".to_string()
                         );
                     }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(_) => {
-                    return Err("loopback callback connection failed; retry sign-in".to_string());
                 }
             }
+            if let Some(stream) = accepted {
+                if let Some(callback) = read_callback_query(stream) {
+                    return Ok(callback);
+                }
+                stray_connections += 1;
+                if stray_connections >= MAXIMUM_STRAY_CONNECTIONS {
+                    return Err("authorization callback is invalid; retry sign-in".to_string());
+                }
+                continue;
+            }
+            if Instant::now() >= deadline {
+                return Err("sign-in timed out waiting for the browser; retry sign-in".to_string());
+            }
+            std::thread::sleep(ACCEPT_POLL_INTERVAL);
         }
     }
 }
@@ -137,7 +184,7 @@ impl LoopbackListener {
 /// One authorization callback with its browser connection held open for
 /// the outcome response.
 pub struct PendingCallback {
-    stream: std::net::TcpStream,
+    stream: TcpStream,
     query: String,
 }
 
@@ -148,9 +195,9 @@ impl PendingCallback {
         &self.query
     }
 
-    /// Answers the waiting browser with the completed engine outcome.
-    /// Success reports only after exchange, link, and vault storage all
-    /// finished; failure carries the redacted engine detail so the page
+    /// Answers the waiting browser with the completed runtime outcome.
+    /// Success reports only after exchange, verification, and vault storage
+    /// all finished; failure carries the redacted runtime detail so the page
     /// never claims an unfinished sign-in succeeded.
     pub fn respond_outcome(mut self, result: Result<(), &str>) {
         match result {
@@ -161,18 +208,29 @@ impl PendingCallback {
 
     /// Answers the waiting browser with a validation failure and releases
     /// the connection.
-    pub fn respond_invalid(self, detail: &str) {
-        let mut this = self;
-        respond(&mut this.stream, 400, &outcome_page(false, detail));
+    pub fn respond_invalid(mut self, detail: &str) {
+        respond(&mut self.stream, 400, &outcome_page(false, detail));
     }
 }
 
-fn read_callback_query(mut stream: std::net::TcpStream) -> Result<PendingCallback, String> {
+/// Reads one request head. Returns `None` after answering any connection
+/// that is not a bounded `GET /callback?…` request.
+fn read_callback_query(mut stream: TcpStream) -> Option<PendingCallback> {
+    // BSD-derived systems hand out accepted sockets that inherit the
+    // listener's nonblocking mode; reads and the large outcome write must
+    // block within their timeouts on every platform.
+    if stream.set_nonblocking(false).is_err()
+        || stream
+            .set_read_timeout(Some(CALLBACK_READ_TIMEOUT))
+            .is_err()
+        || stream
+            .set_write_timeout(Some(CALLBACK_READ_TIMEOUT))
+            .is_err()
+    {
+        return None;
+    }
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|_| "loopback callback read failed".to_string())?;
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
@@ -180,30 +238,32 @@ fn read_callback_query(mut stream: std::net::TcpStream) -> Result<PendingCallbac
                 request.extend_from_slice(&chunk[..read]);
                 if request.len() > MAXIMUM_CALLBACK_BYTES {
                     respond(&mut stream, 413, "payload too large");
-                    return Err("authorization callback is too large".to_string());
+                    return None;
                 }
                 if request.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
             }
-            Err(_) => {
-                respond(&mut stream, 400, "unreadable request");
-                return Err("loopback callback read failed".to_string());
-            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return None,
         }
     }
     let request = String::from_utf8_lossy(&request);
     let Some(query) = callback_query_from_request(&request) else {
-        respond(&mut stream, 400, "invalid callback");
-        return Err("authorization callback is invalid".to_string());
+        if !request.is_empty() {
+            respond(&mut stream, 404, "not found");
+        }
+        return None;
     };
-    Ok(PendingCallback { stream, query })
+    Some(PendingCallback { stream, query })
 }
 
-fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) {
+fn respond(stream: &mut TcpStream, status: u16, body: &str) {
     let reason = match status {
         200 => "OK",
-        400 | 413 => "Bad Request",
+        400 => "Bad Request",
+        404 => "Not Found",
+        413 => "Payload Too Large",
         _ => "Internal Server Error",
     };
     let response = format!(
@@ -295,7 +355,7 @@ fn callback_query_from_request(request: &str) -> Option<String> {
 pub struct ValidatedCallback {
     /// Authorization code for the token exchange.
     pub code: String,
-    /// OAuth state echoed by the control plane.
+    /// OAuth state echoed by the identity provider.
     pub state: String,
 }
 
@@ -314,7 +374,7 @@ pub fn validate_callback_query(
     }
     let mut code = None;
     let mut state = None;
-    let mut error = None;
+    let mut declined = false;
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         match key {
@@ -330,14 +390,11 @@ pub fn validate_callback_query(
                 }
                 state = Some(value);
             }
-            "error" => {
-                error = Some(value);
-            }
+            "error" => declined = true,
             _ => {}
         }
     }
-    if let Some(provider_error) = error {
-        let _ = provider_error;
+    if declined {
         return Err("sign-in was declined or cancelled in the browser".to_string());
     }
     let (Some(code), Some(state)) = (code, state) else {
@@ -362,13 +419,21 @@ mod tests {
     };
     use std::{
         io::{Read, Write},
-        net::TcpStream,
+        net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream},
         time::Duration,
     };
 
+    const CALLBACK: &[u8] = b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+    /// OS-assigned ports keep parallel tests from contending for the
+    /// registered production ports.
+    fn listener() -> LoopbackListener {
+        LoopbackListener::bind(&[0]).expect("loopback binds")
+    }
+
     #[test]
     fn callback_path_parses_its_query() {
-        let request = "GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let request = "GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n";
         assert_eq!(
             callback_query_from_request(request),
             Some("code=abc&state=xyz".to_string())
@@ -399,11 +464,34 @@ mod tests {
         assert_eq!(validated.code, "abc123");
     }
 
-    /// Drives one browser callback and returns the page it read.
-    fn browser_callback(port: u16, request: &[u8]) -> String {
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("loopback connects");
-        stream.write_all(request).expect("callback writes");
+    #[test]
+    fn redirect_uses_localhost_on_the_bound_port() {
+        let listener = listener();
+        assert_eq!(
+            listener.redirect_uri(),
+            format!("http://localhost:{}/callback", listener.port())
+        );
+    }
+
+    #[test]
+    fn busy_registered_ports_fall_through_and_then_fail_actionably() {
+        let held = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("hold");
+        let busy = held.local_addr().expect("held address").port();
+        let error = LoopbackListener::bind(&[busy])
+            .err()
+            .expect("a busy port cannot be bound");
+        assert!(error.contains(&busy.to_string()) && error.contains("in use"));
+        let fallback = LoopbackListener::bind(&[busy, 0]).expect("next port binds");
+        assert_ne!(fallback.port(), busy);
+    }
+
+    /// Drives one browser request and returns the page it read.
+    fn browser_request(address: SocketAddr, request: &[u8]) -> String {
+        let mut stream = TcpStream::connect(address).expect("loopback connects");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("client timeout");
+        stream.write_all(request).expect("request writes");
         let mut response = Vec::new();
         stream
             .read_to_end(&mut response)
@@ -411,21 +499,19 @@ mod tests {
         String::from_utf8_lossy(&response).into_owned()
     }
 
+    fn ipv4(port: u16) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
     #[test]
     fn bound_listener_holds_the_connection_for_the_outcome() {
-        let listener = LoopbackListener::bind().expect("loopback binds");
+        let listener = listener();
         let port = listener.port();
-        assert!(listener.redirect_uri().contains(&port.to_string()));
-        let sender = std::thread::spawn(move || {
-            browser_callback(
-                port,
-                b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-            )
-        });
-        // Receipt alone answers nothing: the browser waits while the engine
-        // exchanges, links, and stores.
+        let sender = std::thread::spawn(move || browser_request(ipv4(port), CALLBACK));
+        // Receipt alone answers nothing: the browser waits while the runtime
+        // exchanges, verifies, and stores.
         let callback = listener
-            .accept_one(Duration::from_secs(5))
+            .accept_one(Duration::from_secs(10))
             .expect("callback arrives");
         let validated =
             validate_callback_query(callback.query(), "live-state").expect("callback validates");
@@ -435,7 +521,7 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(
             response.contains("You’re signed in") && response.contains("@keyframes draw"),
-            "success page must reflect completion: {response}"
+            "success page must reflect completion"
         );
         assert!(response.contains("--surface: #ffffff"));
         assert!(response.contains("--surface: #171717"));
@@ -456,44 +542,90 @@ mod tests {
     }
 
     #[test]
-    fn engine_failure_reaches_the_browser_truthfully() {
-        let listener = LoopbackListener::bind().expect("loopback binds");
-        let port = listener.port();
-        let sender = std::thread::spawn(move || {
-            browser_callback(
-                port,
-                b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-            )
-        });
+    fn ipv6_loopback_callbacks_reach_the_same_transaction() {
+        let listener = listener();
+        if listener.listeners.len() < 2 {
+            // This host has no IPv6 loopback, so `localhost` resolves to IPv4.
+            return;
+        }
+        let address = SocketAddr::from((Ipv6Addr::LOCALHOST, listener.port()));
+        let sender = std::thread::spawn(move || browser_request(address, CALLBACK));
         let callback = listener
-            .accept_one(Duration::from_secs(5))
+            .accept_one(Duration::from_secs(10))
+            .expect("IPv6 callback arrives");
+        callback.respond_outcome(Ok(()));
+        assert!(
+            sender
+                .join()
+                .expect("sender joins")
+                .starts_with("HTTP/1.1 200 OK")
+        );
+    }
+
+    #[test]
+    fn engine_failure_reaches_the_browser_truthfully() {
+        let listener = listener();
+        let port = listener.port();
+        let sender = std::thread::spawn(move || browser_request(ipv4(port), CALLBACK));
+        let callback = listener
+            .accept_one(Duration::from_secs(10))
             .expect("callback arrives");
-        callback.respond_outcome(Err("account linking failed; retry sign-in"));
+        callback.respond_outcome(Err("sign-in verification failed; retry sign-in"));
         let response = sender.join().expect("sender joins");
         // A received callback alone must never produce "fully
-        // authenticated": failures carry the redacted engine detail.
+        // authenticated": failures carry the redacted runtime detail.
         assert!(response.starts_with("HTTP/1.1 500"));
-        assert!(response.contains("account linking failed; retry sign-in"));
+        assert!(response.contains("sign-in verification failed; retry sign-in"));
         assert!(!response.contains("You’re signed in"));
     }
 
     #[test]
-    fn invalid_callbacks_answer_immediately() {
-        let listener = LoopbackListener::bind().expect("loopback binds");
+    fn stray_requests_are_answered_and_the_callback_still_arrives() {
+        let listener = listener();
         let port = listener.port();
         let sender = std::thread::spawn(move || {
-            browser_callback(
-                port,
-                b"GET /callback?code=live-code&state=wrong-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            let stray = browser_request(
+                ipv4(port),
+                b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+            (stray, browser_request(ipv4(port), CALLBACK))
+        });
+        let callback = listener
+            .accept_one(Duration::from_secs(10))
+            .expect("callback arrives after a stray request");
+        callback.respond_outcome(Ok(()));
+        let (stray, response) = sender.join().expect("sender joins");
+        assert!(stray.starts_with("HTTP/1.1 404"));
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+
+    #[test]
+    fn invalid_callbacks_answer_immediately() {
+        let listener = listener();
+        let port = listener.port();
+        let sender = std::thread::spawn(move || {
+            browser_request(
+                ipv4(port),
+                b"GET /callback?code=live-code&state=wrong-state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             )
         });
         let callback = listener
-            .accept_one(Duration::from_secs(5))
+            .accept_one(Duration::from_secs(10))
             .expect("callback arrives");
         assert!(validate_callback_query(callback.query(), "live-state").is_err());
         callback.respond_invalid("authorization state mismatch; retry sign-in");
         let response = sender.join().expect("sender joins");
         assert!(response.starts_with("HTTP/1.1 400"));
+    }
+
+    #[test]
+    fn cancelled_transactions_stop_waiting() {
+        let listener = listener();
+        let error = listener
+            .accept_one_while(Duration::from_secs(10), || false)
+            .err()
+            .expect("cancelled transaction stops");
+        assert!(error.contains("no longer active"));
     }
 
     #[test]

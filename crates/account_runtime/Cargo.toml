@@ -12,8 +12,8 @@ aeris_contracts = { path = "../contracts" }
 aeris_observability = { path = "../observability" }
 aeris_platform_runtime = { path = "../platform_runtime" }
 base64.workspace = true
-ed25519-dalek.workspace = true
 getrandom.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

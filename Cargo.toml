@@ -48,6 +48,8 @@ getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false }
 keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 notify-rust = "=4.18.1"
+# Pinned to the version rustls already resolves; account ID tokens are verified with its RSA API.
+ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.45"
 socket2 = "=0.6.5"

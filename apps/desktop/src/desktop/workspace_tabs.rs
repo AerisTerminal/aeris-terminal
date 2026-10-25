@@ -3529,7 +3529,10 @@ impl TerminalApp {
                         .and_then(WorkspaceLayoutPersistence::error);
                     cx.notify();
                 }
-                let authenticated = true;
+                let authenticated = terminal
+                    .lifecycle
+                    .account()
+                    .is_none_or(aeris_desktop::account::DesktopAccount::authenticated);
                 let mut diagnostics = Vec::new();
                 let mut summaries_changed = false;
                 if authenticated {

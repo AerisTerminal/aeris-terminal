@@ -77,6 +77,8 @@ mod rithmic_login;
 mod rithmic_shell;
 #[path = "components/side_panel_dock.rs"]
 mod side_panel_dock;
+#[path = "components/sign_in_gate.rs"]
+mod sign_in_gate;
 #[path = "study_packages.rs"]
 mod study_packages;
 #[path = "components/study_settings_dialog.rs"]
@@ -4088,7 +4090,7 @@ fn run_desktop_readiness_command(
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
     validate_workspace_boot_for_readiness(&workspace)?;
     let account_service = aeris_account_runtime::AccountService::new(
-        aeris_account_runtime::AccountServiceConfig::from_environment(),
+        aeris_account_runtime::AccountServiceConfig::production(),
     );
     #[cfg(target_os = "windows")]
     let _session_shutdown_guard = {
@@ -4105,11 +4107,12 @@ fn run_desktop_readiness_command(
             }
         }
     };
-    if aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
+    let sign_in_required = aeris_desktop::account::sign_in_required();
+    if sign_in_required {
         account_service.start_restore();
     }
     let result = (|| {
-        if aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
+        if sign_in_required {
             wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
                 account_service.restore_readiness()
             })?;
@@ -5801,7 +5804,7 @@ pub(super) fn run(
         diagnostic!("Aeris legacy local state migration deferred: {error}");
     }
     let account_service = aeris_account_runtime::AccountService::new(
-        aeris_account_runtime::AccountServiceConfig::from_environment(),
+        aeris_account_runtime::AccountServiceConfig::production(),
     );
     let launcher_promotion = command_arguments.is_empty().then(|| {
         aeris_platform_runtime::active_data_root()
@@ -5828,63 +5831,137 @@ pub(super) fn run(
             fatal_startup(&account_service, "The trading service could not start.");
         }
     };
-    let context = match start_context_service() {
-        Ok(context) => context,
-        Err(error) => {
-            diagnostic!("Aeris context owner could not start: {error}");
-            stop_partial_startup(&trading, None);
-            fatal_startup(&account_service, "The context service could not start.");
-        }
-    };
-    let market = match aeris_market_runtime::MarketService::start() {
-        Ok(market) => market,
-        Err(error) => {
-            diagnostic!("Aeris market owner could not start: {error}");
-            stop_partial_startup(&trading, Some(&context));
-            fatal_startup(&account_service, "The market service could not start.");
-        }
-    };
     let persistence = start_desktop_persistence(&account_service);
-    let mut services =
-        compose_desktop_services(market, trading.clone(), account_service, persistence);
-    if let Err(error) = services.start_account() {
-        diagnostic!("Aeris account session could not start: {error}");
-        fatal_startup(
-            &services.account_service,
-            "The account session could not start.",
-        );
-    }
-    let configured = match configured_market_workers(command_arguments, &services) {
-        Ok(Some(configured)) => configured,
-        Ok(None) => {
-            stop_partial_startup(&trading, Some(&context));
-            exit_after_account_refresh_quiesce(&services.account_service, 0);
-        }
+    let account = match aeris_desktop::services::install_account(&account_service) {
+        Ok(account) => account,
         Err(error) => {
-            diagnostic!("Aeris market worker could not start: {error}");
-            stop_partial_startup(&trading, Some(&context));
-            fatal_startup(
-                &services.account_service,
-                "The market service could not start.",
-            );
+            diagnostic!("Aeris account session could not start: {error}");
+            stop_partial_startup(&trading, None);
+            fatal_startup(&account_service, "The account session could not start.");
         }
     };
-    if let Err(error) = attach_trading_market_feed(&trading, &services.market) {
-        diagnostic!("Aeris trading market feed could not attach: {error}");
-        fatal_startup(
-            &services.account_service,
-            "The trading market feed could not start.",
-        );
-    }
-    if let Err(error) = attach_broker_venue(&trading, &services.market) {
-        diagnostic!("Aeris broker venue could not attach: {error}");
-    }
-    let lifecycle = DesktopLifecycle::new(services, context, instance_lock);
     #[cfg(debug_assertions)]
     if force_diagnostics_panic {
         panic_after_stores_open();
     }
+    let instance_lock = Arc::new(instance_lock);
+    let startup = SignedInStartup {
+        command_arguments,
+        trading: trading.clone(),
+        account_service: account_service.clone(),
+        account: account.clone(),
+        persistence,
+    };
+    if let Some(account) = account {
+        run_sign_in(sign_in_gate::SignInGate::new(
+            account,
+            startup,
+            trading,
+            account_service,
+            instance_lock,
+        ));
+        return;
+    }
+    let SignedInRuntime {
+        configured,
+        services,
+        context,
+    } = match start_signed_in_runtime(startup) {
+        Ok(runtime) => runtime,
+        Err(message) => {
+            stop_partial_startup(&trading, None);
+            fatal_startup(&account_service, message);
+        }
+    };
+    let lifecycle = DesktopLifecycle::new(services, context, instance_lock);
     run_desktop(configured, lifecycle);
+}
+
+/// Owners opened before sign-in: only the local trading store, the account
+/// session and the persistence paths. Provider sessions, the broker venue,
+/// public context sources and the workspace that demands market data start
+/// only in [`start_signed_in_runtime`].
+struct SignedInStartup {
+    command_arguments: Vec<std::ffi::OsString>,
+    trading: aeris_trading_runtime::TradingService,
+    account_service: aeris_account_runtime::AccountService,
+    account: Option<aeris_desktop::account::DesktopAccount>,
+    persistence: chart_chrome::DesktopPersistence,
+}
+
+struct SignedInRuntime {
+    configured: ConfiguredDesktop,
+    services: aeris_desktop::services::DesktopServices,
+    context: aeris_context_runtime::ContextService,
+}
+
+/// Starts everything that reaches a provider or public source. It runs once
+/// per process: directly on a validation root, otherwise when the sign-in
+/// gate releases it. Blocking startup work, so never on the UI thread.
+/// A failure stops what this call started and returns the user-facing message;
+/// the trading owner stays with the caller.
+fn start_signed_in_runtime(startup: SignedInStartup) -> Result<SignedInRuntime, &'static str> {
+    let SignedInStartup {
+        command_arguments,
+        trading,
+        account_service,
+        account,
+        persistence,
+    } = startup;
+    let context = start_context_service().map_err(|error| {
+        diagnostic!("Aeris context owner could not start: {error}");
+        "The context service could not start."
+    })?;
+    let market = match aeris_market_runtime::MarketService::start() {
+        Ok(market) => market,
+        Err(error) => {
+            diagnostic!("Aeris market owner could not start: {error}");
+            stop_signed_in_owners(None, &context);
+            return Err("The market service could not start.");
+        }
+    };
+    let services = compose_desktop_services(market, trading.clone(), account_service, persistence)
+        .with_account(account);
+    let configured = match configured_market_workers(command_arguments, &services) {
+        Ok(Some(configured)) => configured,
+        Ok(None) => {
+            stop_signed_in_owners(Some(&services.market), &context);
+            stop_partial_startup(&trading, None);
+            exit_after_account_refresh_quiesce(&services.account_service, 0);
+        }
+        Err(error) => {
+            diagnostic!("Aeris market worker could not start: {error}");
+            stop_signed_in_owners(Some(&services.market), &context);
+            return Err("The market service could not start.");
+        }
+    };
+    if let Err(error) = attach_trading_market_feed(&trading, &services.market) {
+        diagnostic!("Aeris trading market feed could not attach: {error}");
+        stop_signed_in_owners(Some(&services.market), &context);
+        return Err("The trading market feed could not start.");
+    }
+    if let Err(error) = attach_broker_venue(&trading, &services.market) {
+        diagnostic!("Aeris broker venue could not attach: {error}");
+    }
+    Ok(SignedInRuntime {
+        configured,
+        services,
+        context,
+    })
+}
+
+fn stop_signed_in_owners(
+    market: Option<&aeris_market_runtime::MarketService>,
+    context: &aeris_context_runtime::ContextService,
+) {
+    if let Some(market) = market
+        && let Err(error) = market.shutdown(Duration::from_secs(2))
+    {
+        diagnostic!("Aeris market owner could not stop: {error}");
+    }
+    if let Err(error) = context.shutdown(Duration::from_secs(2)) {
+        diagnostic!("Aeris context owner could not stop: {error}");
+    }
 }
 
 fn attach_trading_market_feed(
@@ -5974,30 +6051,46 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
         .with_assets(assets::AerisAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
-            gpui_base::init(cx);
-            cx.set_global(base_theme(&AerisTheme::dark()));
-            install_platform_http_client(cx);
-            if aeris_platform_runtime::active_data_root().is_ok_and(|root| {
-                root.allows_installed_app_side_effect(
-                    aeris_platform_runtime::InstalledAppSideEffect::NotificationIdentityRegistration,
-                )
-            }) {
-                cx.set_app_identity(
-                    aeris_platform_runtime::APPLICATION_IDENTIFIER,
-                    aeris_platform_runtime::APPLICATION_NAME,
-                );
-            }
-            if let Err(error) = cx.text_system().add_fonts(
-                PLATFORM_FONT_BYTES
-                    .iter()
-                    .map(|font| Cow::Borrowed(*font))
-                    .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
-                    .collect(),
-            ) {
-                diagnostic!("Aeris bundled fonts unavailable, using system fallback: {error}");
-            }
+            prepare_application(cx);
             mount_desktop(configured, lifecycle, None, cx);
         });
+}
+
+/// Runs the sign-in window first; it mounts the workspace once the account
+/// owner reports a usable session.
+fn run_sign_in(gate: sign_in_gate::SignInGate) {
+    application()
+        .with_assets(assets::AerisAssets)
+        .with_quit_mode(QuitMode::Explicit)
+        .run(move |cx: &mut App| {
+            prepare_application(cx);
+            sign_in_gate::open_sign_in_window(gate, cx);
+        });
+}
+
+fn prepare_application(cx: &mut App) {
+    gpui_base::init(cx);
+    cx.set_global(base_theme(&AerisTheme::dark()));
+    install_platform_http_client(cx);
+    if aeris_platform_runtime::active_data_root().is_ok_and(|root| {
+        root.allows_installed_app_side_effect(
+            aeris_platform_runtime::InstalledAppSideEffect::NotificationIdentityRegistration,
+        )
+    }) {
+        cx.set_app_identity(
+            aeris_platform_runtime::APPLICATION_IDENTIFIER,
+            aeris_platform_runtime::APPLICATION_NAME,
+        );
+    }
+    if let Err(error) = cx.text_system().add_fonts(
+        PLATFORM_FONT_BYTES
+            .iter()
+            .map(|font| Cow::Borrowed(*font))
+            .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
+            .collect(),
+    ) {
+        diagnostic!("Aeris bundled fonts unavailable, using system fallback: {error}");
+    }
 }
 
 /// Mounts the authenticated workspace in the existing onboarding window.
