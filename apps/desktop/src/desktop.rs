@@ -498,7 +498,7 @@ struct PlanLimits {
 
 fn current_plan_limits() -> PlanLimits {
     // Authentication is mandatory, but billing is intentionally not a
-    // product-access boundary during early access. Keep one capability shape
+    // product-access boundary yet. Keep one capability shape
     // until paid-plan enforcement is deliberately enabled.
     PlanLimits {
         workspaces: MAXIMUM_OPEN_WORKSPACES,

@@ -1,10 +1,11 @@
 name: Windows preview build
 
-# Builds a release `aeris_desktop.exe` for x64 Windows for manual testing and
-# keeps it only as a short-lived workflow artifact. It is not a release: it is
-# not code signed and nothing is offered to the updater. Manual dispatch only,
-# and only while the repository is public, because the account carries no paid
-# Actions quota.
+# Builds a release `aeris_desktop.exe` for x64 Windows, packages it as the
+# per-user `Aeris-Terminal-Setup-<version>.exe` installer and keeps it only as
+# a short-lived workflow artifact; publication to the website download page
+# happens on the maintainer's machine. It is not code signed and nothing is
+# offered to the updater. Manual dispatch only, and only while the repository
+# is public, because the account carries no paid Actions quota.
 #
 # A tester build with Rithmic sets `rithmic_kit`: only then does the runner
 # unpack the licensed kit from the AERIS_RITHMIC_KIT_TAR_XZ_B64 repository
@@ -68,21 +69,45 @@ jobs:
           rm -rf provider_kit
           # A missing kit falls back to a kitless build silently; fail instead.
           ls target/release/build/aeris_rithmic_protocol_adapter-*/out/rithmic.protobuf.rs
-      - name: Stage executable
-        run: |
-          set -euo pipefail
-          version="$(cargo pkgid -p aeris_desktop | cut -d@ -f2)"
-          rm -rf "$PREVIEW_ROOT"
-          mkdir -p "$PREVIEW_ROOT"
-          image="$PREVIEW_ROOT/Aeris-Terminal-$version$PREVIEW_FLAVOR-windows-x64-preview.exe"
-          cp target/release/aeris_desktop.exe "$image"
-          sha256sum "$image" | tee "$image.sha256"
-          echo "PREVIEW_IMAGE=$image" >> "$GITHUB_ENV"
-      - name: Smoke launch executable
+      - name: Build installer
         shell: pwsh
         run: |
+          $pkgid = cargo pkgid -p aeris_desktop
+          $version = $pkgid.Split('@')[-1]
+          if (Test-Path $env:PREVIEW_ROOT) { Remove-Item -Recurse -Force $env:PREVIEW_ROOT }
+          New-Item -ItemType Directory -Force $env:PREVIEW_ROOT | Out-Null
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is not installed on this runner" }
+          & $iscc /Q "/DAppVersion=$version" `
+            "/DDesktopPath=$PWD\target\release\aeris_desktop.exe" `
+            "/DIconPath=$PWD\apps\desktop\assets\aeris_assets\icons\desktop\windows\aeris.ico" `
+            "/DOutputDir=$PWD\$env:PREVIEW_ROOT" `
+            apps\desktop\packaging\windows\aeris_terminal.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          $installer = "$env:PREVIEW_ROOT/Aeris-Terminal-Setup-$version.exe"
+          if (-not (Test-Path $installer)) { throw "ISCC did not produce $installer" }
+          "PREVIEW_INSTALLER=$installer" >> $env:GITHUB_ENV
+      - name: Checksum installer
+        run: |
+          set -euo pipefail
+          sha256sum "$PREVIEW_INSTALLER" | tee "$PREVIEW_INSTALLER.sha256"
+      # The smoke test exercises what a user gets: a silent per-user install,
+      # the installed Start-menu target, then a clean uninstall.
+      - name: Smoke install, launch and uninstall
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA 'Programs\Aeris'
+          $installed = Join-Path $installDir 'aeris_desktop.exe'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Aeris Terminal.lnk'
+          $setupLog = Join-Path $env:PREVIEW_ROOT 'smoke-install.log'
+          $setup = Start-Process -FilePath $env:PREVIEW_INSTALLER -Wait -PassThru `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$setupLog"
+          if ($setup.ExitCode -ne 0) { Get-Content $setupLog; throw "Setup exited with code $($setup.ExitCode)" }
+          foreach ($path in $installed, $shortcut) {
+            if (-not (Test-Path $path)) { Get-Content $setupLog; throw "Setup did not create $path" }
+          }
           $log = Join-Path $env:PREVIEW_ROOT 'smoke-launch.log'
-          $process = Start-Process -FilePath $env:PREVIEW_IMAGE -PassThru `
+          $process = Start-Process -FilePath $installed -PassThru `
             -RedirectStandardOutput $log -RedirectStandardError "$log.err"
           Start-Sleep -Seconds 30
           if ($process.HasExited) {
@@ -96,14 +121,24 @@ jobs:
           [System.Drawing.Graphics]::FromImage($bitmap).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
           $bitmap.Save((Join-Path $env:PREVIEW_ROOT 'smoke-launch.png'))
           Stop-Process -Id $process.Id -Force
+          $process.WaitForExit()
           Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
-      - name: Upload executable
+          # The uninstaller hands off to a temporary copy and returns at once,
+          # so wait for the program to disappear rather than for the process.
+          Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -Wait `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          $deadline = (Get-Date).AddSeconds(60)
+          while (((Test-Path $installed) -or (Test-Path $shortcut)) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 1
+          }
+          if ((Test-Path $installed) -or (Test-Path $shortcut)) { throw "Uninstall left Aeris Terminal behind" }
+      - name: Upload installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: aeris-terminal${{ env.PREVIEW_FLAVOR }}-windows-x64-preview
           path: |
-            target/windows-preview/Aeris-Terminal-*-windows-x64-preview.exe
-            target/windows-preview/Aeris-Terminal-*-windows-x64-preview.exe.sha256
+            target/windows-preview/Aeris-Terminal-Setup-*.exe
+            target/windows-preview/Aeris-Terminal-Setup-*.exe.sha256
           if-no-files-found: error
           retention-days: 14
       - name: Upload smoke launch evidence
@@ -112,6 +147,7 @@ jobs:
         with:
           name: aeris-terminal-windows-smoke-launch
           path: |
+            target/windows-preview/smoke-install.log
             target/windows-preview/smoke-launch.png
             target/windows-preview/smoke-launch.log
             target/windows-preview/smoke-launch.log.err

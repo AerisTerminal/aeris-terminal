@@ -48,11 +48,10 @@ impl AccountId {
     }
 }
 
-/// Subscription plan. Every signed-in account currently has the unlimited
-/// early-access plan.
+/// Subscription plan. Every signed-in account currently has the unlimited plan.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PlanId {
-    EarlyAccess,
+    Unlimited,
 }
 
 impl PlanId {
@@ -63,7 +62,7 @@ impl PlanId {
     /// Returns [`AccountValidationError::UnknownPlan`] for anything else.
     pub fn try_parse(value: &str) -> Result<Self, AccountValidationError> {
         match value {
-            "early_access" => Ok(Self::EarlyAccess),
+            "unlimited" => Ok(Self::Unlimited),
             _ => Err(AccountValidationError::UnknownPlan),
         }
     }
@@ -72,7 +71,7 @@ impl PlanId {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::EarlyAccess => "early_access",
+            Self::Unlimited => "unlimited",
         }
     }
 }
@@ -244,8 +243,8 @@ mod tests {
     #[test]
     fn plan_and_state_wire_values_round_trip() {
         assert_eq!(
-            PlanId::try_parse(PlanId::EarlyAccess.as_str()),
-            Ok(PlanId::EarlyAccess)
+            PlanId::try_parse(PlanId::Unlimited.as_str()),
+            Ok(PlanId::Unlimited)
         );
         assert_eq!(
             PlanId::try_parse("price_123").expect_err("vendor price id fails"),
@@ -277,11 +276,11 @@ mod tests {
         let view = AccountView::try_new(
             AccountState::Active,
             Some(AccountId::try_new("acct_01").expect("identity builds")),
-            Some(PlanId::EarlyAccess),
+            Some(PlanId::Unlimited),
             "active",
         )
         .expect("active view builds");
         assert_eq!(view.state(), AccountState::Active);
-        assert_eq!(view.plan(), Some(PlanId::EarlyAccess));
+        assert_eq!(view.plan(), Some(PlanId::Unlimited));
     }
 }

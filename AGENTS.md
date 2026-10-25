@@ -369,8 +369,8 @@ PKCE with `scope=openid email profile` and a loopback redirect `http://localhost
 the fixed ports 47210, 47211 or 47212 (bound on both `127.0.0.1` and `[::1]`), and verifies the
 RS256 ID token with `ring` against the issuer JWKS (issuer, audience, `token_use=id`, expiry, nonce).
 Only the refresh token and the cached profile (`sub`, email, name, picture) are stored, in the native
-vault; there is no lease, device key or entitlement, and every signed-in account shows the "Early
-access" plan. An unreachable provider keeps a saved session signed in (Offline) with bounded backoff;
+vault; there is no lease, device key or entitlement, and every signed-in account shows the
+"Unlimited" plan. An unreachable provider keeps a saved session signed in (Offline) with bounded backoff;
 only a rejected refresh grant signs out. Sign-out revokes the refresh token, deletes the vault entries
 and returns to the sign-in gate. `apps/desktop/src/account.rs::sign_in_required` is the one policy:
 every process except a validation data root installs the account session. Before the first usable
@@ -446,8 +446,12 @@ performance lanes stay `workflow_dispatch`-only. The manual `macos_preview.yml` 
 `windows_preview.yml` tester builds are the only hosted lanes that may receive the Rithmic kit: only
 when a lane's `rithmic_kit` input is set does it unpack the kit's `proto` folder from the
 `AERIS_RITHMIC_KIT_TAR_XZ_B64` repository secret (its only secret), and it deletes the kit right
-after the build and fails if the kit was not compiled in. Both preview lanes smoke-launch the release
-binary and keep it only as a 14-day workflow artifact.
+after the build and fails if the kit was not compiled in. The Windows lane packages the release binary
+with Inno Setup from `apps/desktop/packaging/windows/aeris_terminal.iss` (a per-user installer that
+installs the desktop directly, shares the lifecycle installer's AppId and folder, and never deletes
+user data on uninstall) and smoke-tests a silent install, launch and uninstall; the macOS lane
+smoke-launches the app bundle and ships a disk image with an Applications link. Both keep their
+output only as a 14-day workflow artifact.
 `tools/naming_check` enforces this shape across every workflow.
 
 ## Build output hygiene
@@ -468,14 +472,17 @@ new copy under `target/`, and GPUI debug builds have grown it past 70 GB in a fe
 ## Release workflow
 
 Do not publish, install, or point clients at the former Axiusflow endpoint, and the retired
-publication workflow must not be restored. Preview builds reach users through the website download
-page: after the fix is pushed to `main`, run both preview lanes with `-f rithmic_kit=true`, check
-that each smoke launch passed, download the `aeris-terminal-rithmic-macos-arm64-preview` DMG and the
-`aeris-terminal-rithmic-windows-x64-preview` executable, and publish them from the sibling website
-with `bun run publish:desktop -- <dmg> <exe>` (it uploads them under `/downloads/` and rewrites
-`/downloads/latest.json`, which `https://aeristerminal.com/download/` reads). CI never holds AWS
-credentials; publication runs on the maintainer's machine. Preview binaries are ad-hoc signed on
-macOS and unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch.
+publication workflow must not be restored. Releases reach users through the website download page:
+after the fix is pushed to `main`, run both preview lanes with `-f rithmic_kit=true`, check that
+each smoke test passed, download `Aeris-Terminal-<version>.dmg` from the
+`aeris-terminal-rithmic-macos-arm64-preview` artifact and `Aeris-Terminal-Setup-<version>.exe` from
+the `aeris-terminal-rithmic-windows-x64-preview` artifact, and publish them from the sibling website
+with `bun run publish:desktop -- <dmg> <setup exe>` (it uploads them under `/downloads/` and
+rewrites `/downloads/latest.json`, which `https://aeristerminal.com/download/` reads). Public file
+names carry only the product and the workspace version (`[workspace.package] version`, semantic
+versioning from 1.0.0); never put a provider name or "preview" in them. CI never holds AWS
+credentials; publication runs on the maintainer's machine. Builds are ad-hoc signed on macOS and
+unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch.
 
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 

@@ -3963,9 +3963,10 @@ jobs:
         assert!(workflow.contains("codesign --verify --strict"));
         assert!(
             workflow.contains("hdiutil verify")
-                && workflow.contains("macos-arm64-preview.dmg")
+                && workflow.contains("Aeris-Terminal-$PREVIEW_VERSION.dmg")
+                && workflow.contains("ln -s /Applications")
                 && !workflow.contains(".zip"),
-            "the macOS preview ships as one verified disk image"
+            "the macOS preview ships as one verified disk image with an Applications link"
         );
         assert!(workflow.contains("retention-days: 14"));
         for bundled in [
@@ -4056,12 +4057,54 @@ jobs:
         }
         assert!(
             workflow.contains("cargo build -p aeris_desktop --release --locked")
-                && workflow.contains("windows-x64-preview.exe")
+                && workflow.contains("apps\\desktop\\packaging\\windows\\aeris_terminal.iss")
+                && workflow.contains("Aeris-Terminal-Setup-$version.exe")
                 && workflow.contains("sha256sum"),
-            "the Windows preview ships the release executable with its checksum"
+            "the Windows preview ships the per-user installer with its checksum"
         );
-        assert!(workflow.contains("Smoke launch executable"));
+        // The smoke test runs what a user gets: a silent install, the
+        // installed executable, then an uninstall that leaves nothing behind.
+        assert!(
+            workflow.contains("Smoke install, launch and uninstall")
+                && workflow.contains("'/VERYSILENT'")
+                && workflow.contains("unins000.exe")
+                && workflow.contains("Uninstall left Aeris Terminal behind"),
+            "the Windows preview must install, launch and uninstall its installer"
+        );
         assert!(workflow.contains("retention-days: 14"));
+
+        let setup = manifest("apps/desktop/packaging/windows/aeris_terminal.iss");
+        let lifecycle = manifest("tools/windows/aeris_setup.iss");
+        let app_id = "AppId={{08131BC4-8BBC-48B4-A67A-A032EE62FBD4}";
+        assert!(
+            setup.contains(app_id) && lifecycle.contains(app_id),
+            "the direct installer shares the lifecycle installer's AppId so it upgrades in place"
+        );
+        for contract in [
+            "PrivilegesRequired=lowest",
+            "DefaultDirName={localappdata}\\Programs\\Aeris",
+            "OutputBaseFilename=Aeris-Terminal-Setup-{#AppVersion}",
+            "DestName: \"aeris_desktop.exe\"",
+            "UninstallDisplayIcon={app}\\aeris_desktop.exe",
+            "AppUserModelID: \"com.aeris.desktop\"",
+            "Subkey: \"Software\\Classes\\AppUserModelId\\com.aeris.desktop\"; Flags: uninsdeletekey",
+        ] {
+            assert!(
+                setup.contains(contract),
+                "Windows preview installer lost {contract}"
+            );
+        }
+        // Uninstalling the program never deletes the user's local data.
+        for forbidden in [
+            "--remove-all-local-data",
+            "[UninstallDelete]",
+            "aeris_launcher",
+        ] {
+            assert!(
+                !setup.contains(forbidden),
+                "Windows preview installer must not contain {forbidden}"
+            );
+        }
     }
     #[test]
     fn workflows_never_use_pull_request_target() {

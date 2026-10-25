@@ -6,7 +6,7 @@
 //! state. It owns no market-coordinator, provider, or chart state, and
 //! account refresh never recreates a provider session.
 //!
-//! Every signed-in account has the same unlimited early-access plan, so the
+//! Every signed-in account has the same unlimited plan, so the
 //! session carries identity and profile only; there is no entitlement lease.
 
 pub mod loopback;
@@ -1541,7 +1541,7 @@ fn signed_in_view(
     AccountView {
         state,
         account_id: account_id.as_str().to_string(),
-        plan_id: PlanId::EarlyAccess.as_str().to_string(),
+        plan_id: PlanId::Unlimited.as_str().to_string(),
         detail: detail.to_string(),
         request_generation: generation,
         display_name: profile.display_name,

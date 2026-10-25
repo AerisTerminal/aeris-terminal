@@ -129,7 +129,7 @@ fn account_view_is_a_strongly_typed_in_process_contract() {
     let view = AccountView {
         state: AccountSessionState::Active,
         account_id: "acct_01".into(),
-        plan_id: "early_access".into(),
+        plan_id: "unlimited".into(),
         detail: "active".into(),
         request_generation: 3,
         display_name: "Ada Trader".into(),

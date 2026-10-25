@@ -245,7 +245,7 @@ pub fn unavailable_menu_state() -> AccountMenuState {
 pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
     match plan_id {
         "" => "No plan",
-        "early_access" => "Early access",
+        "unlimited" => "Unlimited",
         _ => "Unknown plan",
     }
 }
@@ -1211,7 +1211,7 @@ mod tests {
         fn complete_active(&mut self, name: &str, email: &str) {
             let mut view = view(AccountSessionState::Active);
             view.account_id = "acct_01".to_string();
-            view.plan_id = "early_access".to_string();
+            view.plan_id = "unlimited".to_string();
             view.display_name = name.to_string();
             view.email = email.to_string();
             view.photo_url = "https://auth.example.test/photo/ada.png".to_string();
@@ -1391,7 +1391,7 @@ mod tests {
     #[test]
     fn plan_labels_stay_sanitized() {
         assert_eq!(sanitized_plan_label(""), "No plan");
-        assert_eq!(sanitized_plan_label("early_access"), "Early access");
+        assert_eq!(sanitized_plan_label("unlimited"), "Unlimited");
         assert_eq!(sanitized_plan_label("pro"), "Unknown plan");
         assert_eq!(sanitized_plan_label("price_123"), "Unknown plan");
     }
@@ -1528,7 +1528,7 @@ mod tests {
         assert_eq!(session.shared.status_seq.load(Ordering::Acquire), 1);
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_01".to_string();
-        active.plan_id = "early_access".to_string();
+        active.plan_id = "unlimited".to_string();
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
         active.photo_url = "https://auth.example.test/photo/ada.png".to_string();
@@ -1566,7 +1566,7 @@ mod tests {
         let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_01".to_string();
-        active.plan_id = "early_access".to_string();
+        active.plan_id = "unlimited".to_string();
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
         apply_account_response(
@@ -1679,7 +1679,7 @@ mod tests {
         );
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_02".to_string();
-        active.plan_id = "early_access".to_string();
+        active.plan_id = "unlimited".to_string();
         apply_account_response(
             &session.shared,
             AccountResponse::Status {
@@ -2166,7 +2166,7 @@ mod tests {
     fn offline_session_keeps_the_platform_open() {
         let mut offline = view(AccountSessionState::Offline);
         offline.account_id = "acct_01".to_string();
-        offline.plan_id = "early_access".to_string();
+        offline.plan_id = "unlimited".to_string();
         // Install the cached view before the startup status request. Rewinding
         // the clock after spawn races that request and the idle polling interval.
         let engine = Arc::new(Mutex::new(FakeEngine {

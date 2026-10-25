@@ -9,7 +9,11 @@ use serde_json::Value;
 use std::{io::Read, time::Duration};
 
 const MAXIMUM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const USER_AGENT: &str = "Aeris/0.2.3 (+https://github.com/AerisTerminal/aeris-terminal)";
+const USER_AGENT: &str = concat!(
+    "Aeris/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/AerisTerminal/aeris-terminal)"
+);
 const BLS_CALENDAR_URL: &str = "https://www.bls.gov/schedule/news_release/bls.ics";
 const BEA_CALENDAR_URL: &str = "https://www.bea.gov/news/schedule";
 const FED_CALENDAR_URL: &str = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm";

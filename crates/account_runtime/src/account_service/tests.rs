@@ -346,7 +346,7 @@ fn saved_session_with_cached_profile_signs_in_offline_before_verification() {
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::Offline);
     assert_eq!(view.account_id, "acct_cached");
-    assert_eq!(view.plan_id, "early_access");
+    assert_eq!(view.plan_id, "unlimited");
     assert_eq!(view.display_name, "ada");
     assert!(service.is_authenticated());
 }
@@ -1127,7 +1127,7 @@ fn active_completion_stores_refresh_and_profile_material() {
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::Active);
     assert_eq!(view.account_id, "acct_01");
-    assert_eq!(view.plan_id, "early_access");
+    assert_eq!(view.plan_id, "unlimited");
     assert_eq!(view.display_name, "ada");
     assert_eq!(view.email, "ada@example.com");
     assert_eq!(view.photo_url, "https://auth.example.test/photo/ada.png");
@@ -1284,7 +1284,7 @@ fn sign_out_refresh_delete_failure_is_actionable_and_survives_restart() {
 }
 
 #[test]
-fn signed_in_views_carry_the_early_access_plan_and_cleared_views_carry_nothing() {
+fn signed_in_views_carry_the_unlimited_plan_and_cleared_views_carry_nothing() {
     let signed_in = super::signed_in_view(
         AccountSessionState::Active,
         &account("acct_01"),
@@ -1292,7 +1292,7 @@ fn signed_in_views_carry_the_early_access_plan_and_cleared_views_carry_nothing()
         4,
         "signed in",
     );
-    assert_eq!(signed_in.plan_id, "early_access");
+    assert_eq!(signed_in.plan_id, "unlimited");
     let cleared: AccountView = super::cleared_view(AccountSessionState::SignedOut, 4, "signed out");
     assert_eq!(cleared.plan_id, "");
     assert_eq!(cleared.account_id, "");
