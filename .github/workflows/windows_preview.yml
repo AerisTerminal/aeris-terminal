@@ -1,0 +1,118 @@
+name: Windows preview build
+
+# Builds a release `aeris_desktop.exe` for x64 Windows for manual testing and
+# keeps it only as a short-lived workflow artifact. It is not a release: it is
+# not code signed and nothing is offered to the updater. Manual dispatch only,
+# and only while the repository is public, because the account carries no paid
+# Actions quota.
+#
+# A tester build with Rithmic sets `rithmic_kit`: only then does the runner
+# unpack the licensed kit from the AERIS_RITHMIC_KIT_TAR_XZ_B64 repository
+# secret (a base64 tar.xz of the kit's `proto` folder), and it deletes the kit
+# right after the build. The kit itself is never committed or uploaded.
+on:
+  workflow_dispatch:
+    inputs:
+      rithmic_kit:
+        description: Build with the licensed Rithmic kit (tester builds)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aeris-windows-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-windows-preview:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      PREVIEW_ROOT: target/windows-preview
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build without the Rithmic kit
+        if: ${{ !inputs.rithmic_kit }}
+        run: |
+          echo "AERIS_RITHMIC_KIT_DISABLED=1" >> "$GITHUB_ENV"
+          echo "PREVIEW_FLAVOR=" >> "$GITHUB_ENV"
+      - name: Unpack licensed Rithmic kit
+        if: ${{ inputs.rithmic_kit }}
+        env:
+          RITHMIC_KIT_ARCHIVE: ${{ secrets.AERIS_RITHMIC_KIT_TAR_XZ_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RITHMIC_KIT_ARCHIVE" ]; then
+            echo "::error::AERIS_RITHMIC_KIT_TAR_XZ_B64 is not set; a Rithmic tester build needs the kit"
+            exit 1
+          fi
+          mkdir -p provider_kit/current
+          printf '%s' "$RITHMIC_KIT_ARCHIVE" | base64 --decode | tar -xJf - -C provider_kit/current
+          test -f provider_kit/current/proto/change_log
+          ls provider_kit/current/proto/*.proto > /dev/null
+          echo "PREVIEW_FLAVOR=-rithmic" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Build release desktop
+        run: cargo build -p aeris_desktop --release --locked
+      - name: Delete Rithmic kit and confirm it was compiled in
+        if: ${{ always() && inputs.rithmic_kit }}
+        run: |
+          set -euo pipefail
+          rm -rf provider_kit
+          # A missing kit falls back to a kitless build silently; fail instead.
+          ls target/release/build/aeris_rithmic_protocol_adapter-*/out/rithmic.protobuf.rs
+      - name: Stage executable
+        run: |
+          set -euo pipefail
+          version="$(cargo pkgid -p aeris_desktop | cut -d@ -f2)"
+          rm -rf "$PREVIEW_ROOT"
+          mkdir -p "$PREVIEW_ROOT"
+          image="$PREVIEW_ROOT/Aeris-Terminal-$version$PREVIEW_FLAVOR-windows-x64-preview.exe"
+          cp target/release/aeris_desktop.exe "$image"
+          sha256sum "$image" | tee "$image.sha256"
+          echo "PREVIEW_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Smoke launch executable
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:PREVIEW_ROOT 'smoke-launch.log'
+          $process = Start-Process -FilePath $env:PREVIEW_IMAGE -PassThru `
+            -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+          Start-Sleep -Seconds 30
+          if ($process.HasExited) {
+            Write-Output "Aeris Terminal exited during startup with code $($process.ExitCode)"
+            Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          [System.Drawing.Graphics]::FromImage($bitmap).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bitmap.Save((Join-Path $env:PREVIEW_ROOT 'smoke-launch.png'))
+          Stop-Process -Id $process.Id -Force
+          Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
+      - name: Upload executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aeris-terminal${{ env.PREVIEW_FLAVOR }}-windows-x64-preview
+          path: |
+            target/windows-preview/Aeris-Terminal-*-windows-x64-preview.exe
+            target/windows-preview/Aeris-Terminal-*-windows-x64-preview.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload smoke launch evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aeris-terminal-windows-smoke-launch
+          path: |
+            target/windows-preview/smoke-launch.png
+            target/windows-preview/smoke-launch.log
+            target/windows-preview/smoke-launch.log.err
+          retention-days: 14
