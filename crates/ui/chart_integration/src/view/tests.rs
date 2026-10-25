@@ -4797,7 +4797,7 @@ fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
 }
 
 #[test]
-fn aeris_charts_upgrade_hides_crosshair_during_creation_and_restores_it_on_cancel() {
+fn aeris_charts_upgrade_keeps_crosshair_visible_during_creation_and_after_cancel() {
     let mut chart = interactive_chart();
     let color = Color::parse_css(&chart.engine.options.get().crosshair.horz_line.color)
         .expect("crosshair color");
@@ -4809,13 +4809,21 @@ fn aeris_charts_upgrade_hides_crosshair_during_creation_and_restores_it_on_cance
     hover(&mut chart, 300.0, 200.0);
     assert!(visible(&chart.engine.build_frame()));
     chart.set_drawing_tool(Some(DrawingKind::TrendLine));
+    hover(&mut chart, 300.0, 200.0);
+    assert!(
+        visible(&chart.engine.build_frame()),
+        "an armed tool keeps the crosshair"
+    );
     click(&mut chart, 300.0, 200.0);
     hover(&mut chart, 320.0, 220.0);
     assert!(
         chart.engine.crosshair.is_some(),
         "host pointer coordinates remain available"
     );
-    assert!(!visible(&chart.engine.build_frame()));
+    assert!(
+        visible(&chart.engine.build_frame()),
+        "a pending creation keeps the crosshair"
+    );
     chart.cancel_drawing();
     hover(&mut chart, 300.0, 200.0);
     assert!(visible(&chart.engine.build_frame()));
