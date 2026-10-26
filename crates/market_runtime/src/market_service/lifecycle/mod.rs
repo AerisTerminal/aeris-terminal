@@ -1128,6 +1128,41 @@ mod tests {
         );
     }
 
+    /// A provider stamping history on its own clock also reports an exchange
+    /// clock that can fall in an earlier period; live bars follow history's.
+    #[test]
+    fn trade_built_bars_bucket_on_the_history_clock() {
+        let case = LifecycleCase::Sequence;
+        let (mut live, clock, epoch, ticket) = case_fixture(case);
+        for input in [
+            SeriesInput::Online(epoch),
+            SeriesInput::HistoryRequested(&ticket),
+            SeriesInput::Seeded(Some(&ticket)),
+        ] {
+            step(&mut live, clock.as_ref(), SessionPhase::AlwaysOpen, input);
+        }
+        seed_case(case, &mut live, &[bar_at(0, 1), bar_at(1, 2)], bar_at(2, 3));
+        live.connected = true;
+        live.mark_trade_online();
+        let next_period = bar_at(3, 4).exchange_timestamp_unix_nanos;
+        let mut trade = next_trade(&live);
+        trade.metadata.timestamps.exchange_unix_nanos = Some(next_period - 1);
+        trade.metadata.timestamps.provider_unix_nanos = Some(next_period + 1);
+        live.accept_trade(&trade).expect("live trade applies");
+        let model = live.trade_model().expect("trade model");
+        assert_eq!(
+            model
+                .bars
+                .iter()
+                .map(|bar| bar.exchange_timestamp_unix_nanos)
+                .collect::<Vec<_>>(),
+            (0..4)
+                .map(|minute| bar_at(minute, 1).exchange_timestamp_unix_nanos)
+                .collect::<Vec<_>>(),
+            "the trade opens the history-clock period, not the exchange-clock one"
+        );
+    }
+
     #[test]
     fn contract_is_shared_by_candle_and_sequence_models() {
         for case in [LifecycleCase::CandleOverlay, LifecycleCase::Sequence] {

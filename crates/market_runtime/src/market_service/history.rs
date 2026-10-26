@@ -1448,7 +1448,7 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         instrument_id: &str,
         entitlement_id: &str,
-        exchange_unix_nanos: i64,
+        history_unix_nanos: i64,
     ) {
         let Some(epoch) = self.provider_epochs.current(provider, generation.0.get()) else {
             return;
@@ -1458,7 +1458,7 @@ impl Coordinator<'_> {
             epoch,
             instrument_id,
             entitlement_id,
-            exchange_unix_nanos,
+            history_unix_nanos,
         );
         for series in due {
             if let Some(coverage) = self.history.coverage_mut(&series, epoch) {

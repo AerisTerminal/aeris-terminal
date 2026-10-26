@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 use super::{
     AggressorSide, BTreeMap, BookSide, DecodedDepthByOrderEndEvent, DecodedMarketMessage,
     DepthByOrderMutation, DepthByOrderMutationKind, DepthByOrderSide, DepthByOrderSnapshotLevel,
-    DepthByOrderSnapshotMessage, DepthLevel, DepthSnapshot, EventMetadata, MAXIMUM_INSTRUMENTS,
-    MarketEvent, MarketIdentity, MarketTrade, PROVIDER_ID, ProviderInvalidationReason,
-    ProviderTimestamp, QualifiedTimestamp, QuoteLevel, QuoteSideUpdate, RetryDisposition,
-    RithmicProviderConfig, RithmicProviderInstrument, SessionGeneration, SystemTime,
-    TopOfBookQuote, TradeAggressor, UNIX_EPOCH, VecDeque,
+    DepthByOrderSnapshotMessage, DepthByOrderSnapshotOutcome, DepthByOrderSnapshotRejection,
+    DepthLevel, DepthSnapshot, EventMetadata, MAXIMUM_INSTRUMENTS, MarketEvent, MarketIdentity,
+    MarketTrade, PROVIDER_ID, ProviderInvalidationReason, ProviderTimestamp, QualifiedTimestamp,
+    QuoteLevel, QuoteSideUpdate, RetryDisposition, RithmicProviderConfig,
+    RithmicProviderInstrument, SessionGeneration, SourceTimestamp, SystemTime, TopOfBookQuote,
+    TradeAggressor, UNIX_EPOCH, VecDeque,
 };
 
 pub(super) struct CanonicalSessionState {
@@ -24,6 +25,31 @@ pub(super) struct CanonicalSessionState {
     /// Instrument and condition pairs already reported as withheld, so each
     /// is logged once per session.
     withheld: BTreeSet<(String, WithheldFrame)>,
+    /// Set once a snapshot completion without an identity arrived while more
+    /// than one book was owed a response. Which response it ended is unknown,
+    /// so no later anonymous completion is attributed in this session.
+    anonymous_completions_ambiguous: bool,
+}
+
+/// Clocks carried by one provider frame, published together so an event never
+/// pairs one frame's gateway time with another frame's exchange time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FrameClocks {
+    gateway: Option<ProviderTimestamp>,
+    source: Option<SourceTimestamp>,
+}
+
+impl FrameClocks {
+    const fn of_update(update: &crate::DepthByOrderUpdate) -> Self {
+        Self {
+            gateway: update.timestamp,
+            source: update.source_timestamp,
+        }
+    }
+
+    const fn is_empty(self) -> bool {
+        self.gateway.is_none() && self.source.is_none()
+    }
 }
 
 /// Provider frames the canonical market model cannot represent.
@@ -79,6 +105,45 @@ struct MboBookAssembler {
     /// for the rest of this session and a new session retries it.
     disabled: bool,
     resnapshot_times: VecDeque<Instant>,
+    snapshot_request: SnapshotRequest,
+}
+
+/// The covering snapshot response a book is owed. The session requests one
+/// snapshot per book at a time and responses arrive in request order, so a
+/// book owes at most one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotRequest {
+    Idle,
+    /// The owed response builds the next image.
+    Owed,
+    /// The provider refused a level of the owed response; it completes as a
+    /// rejection whatever its terminal code says.
+    Rejected(DepthByOrderSnapshotRejection),
+    /// The owed response predates a recovery. It drains without touching the
+    /// image, and the fresh snapshot is requested once it completes, so a
+    /// response cut short by a reset can never complete a new image.
+    Abandoned,
+}
+
+/// Why an order-level image was discarded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderLevelFault {
+    /// The provider stream contradicted the image (gap, duplicate, overflow).
+    Inconsistent(ProviderInvalidationReason),
+    /// The provider refused the covering snapshot request.
+    SnapshotRejected(DepthByOrderSnapshotRejection),
+}
+
+impl From<(ProviderInvalidationReason, RetryDisposition)> for OrderLevelFault {
+    fn from((reason, _): (ProviderInvalidationReason, RetryDisposition)) -> Self {
+        Self::Inconsistent(reason)
+    }
+}
+
+enum Recovery {
+    RequestSnapshot,
+    AfterAbandonedResponse,
+    Disabled,
 }
 
 const MAXIMUM_DEPTH_RESNAPSHOTS: usize = 3;
@@ -87,8 +152,10 @@ const DEPTH_RESNAPSHOT_WINDOW: Duration = Duration::from_secs(60);
 enum MboBookOutcome {
     Pending,
     IgnoredStale,
+    /// An abandoned response completed; the deferred snapshot is now due.
+    AbandonedResponseDrained,
     Snapshot {
-        timestamp: Option<ProviderTimestamp>,
+        clocks: FrameClocks,
         bids: Vec<DepthLevel>,
         asks: Vec<DepthLevel>,
     },
@@ -112,6 +179,8 @@ impl MboBookAssembler {
             ready: false,
             disabled: false,
             resnapshot_times: VecDeque::new(),
+            // The session requests a covering snapshot for every book it installs.
+            snapshot_request: SnapshotRequest::Owed,
         }
     }
 
@@ -120,14 +189,21 @@ impl MboBookAssembler {
         self.ready && !self.disabled
     }
 
+    #[cfg(test)]
     const fn awaiting_snapshot(&self) -> bool {
         !self.ready && !self.disabled
     }
 
-    /// Discards the order-level image after an inconsistency. Returns true when
-    /// a fresh snapshot should be requested, false once the recovery budget for
-    /// the rolling window is spent and order-level depth is disabled instead.
-    fn recover(&mut self, now: Instant) -> bool {
+    fn owes_snapshot_response(&self) -> bool {
+        self.snapshot_request != SnapshotRequest::Idle
+    }
+
+    /// Discards the order-level image after a fault. A response still owed is
+    /// abandoned and the fresh snapshot waits for it to drain; once the
+    /// recovery budget for the rolling window is spent, order-level depth is
+    /// disabled instead.
+    fn recover(&mut self, now: Instant) -> Recovery {
+        let owed = self.owes_snapshot_response();
         let mut resnapshot_times = std::mem::take(&mut self.resnapshot_times);
         while resnapshot_times
             .front()
@@ -136,13 +212,73 @@ impl MboBookAssembler {
             resnapshot_times.pop_front();
         }
         *self = Self::new(self.identity.clone());
+        self.snapshot_request = if owed {
+            SnapshotRequest::Abandoned
+        } else {
+            SnapshotRequest::Owed
+        };
         if resnapshot_times.len() >= MAXIMUM_DEPTH_RESNAPSHOTS {
             self.disabled = true;
-            return false;
+            if !owed {
+                self.snapshot_request = SnapshotRequest::Idle;
+            }
+            return Recovery::Disabled;
         }
         resnapshot_times.push_back(now);
         self.resnapshot_times = resnapshot_times;
+        if owed {
+            Recovery::AfterAbandonedResponse
+        } else {
+            Recovery::RequestSnapshot
+        }
+    }
+
+    /// Requests the snapshot deferred behind a drained response. Returns
+    /// false when the book was disabled meanwhile.
+    fn resume_after_drained_response(&mut self) -> bool {
+        if self.disabled {
+            return false;
+        }
+        self.snapshot_request = SnapshotRequest::Owed;
         true
+    }
+
+    /// Turns order-level depth off for the rest of the session.
+    fn disable(&mut self) {
+        *self = Self::new(self.identity.clone());
+        self.disabled = true;
+        self.snapshot_request = SnapshotRequest::Idle;
+    }
+
+    fn reject_snapshot_level(&mut self, rejection: DepthByOrderSnapshotRejection) {
+        if self.snapshot_request == SnapshotRequest::Owed {
+            self.snapshot_request = SnapshotRequest::Rejected(rejection);
+        }
+    }
+
+    /// Settles the covering snapshot response this book is owed.
+    fn complete_snapshot(
+        &mut self,
+        outcome: DepthByOrderSnapshotOutcome,
+        completion_sequence: Option<u64>,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<MboBookOutcome, OrderLevelFault> {
+        match std::mem::replace(&mut self.snapshot_request, SnapshotRequest::Idle) {
+            SnapshotRequest::Idle => Ok(MboBookOutcome::IgnoredStale),
+            SnapshotRequest::Abandoned => Ok(MboBookOutcome::AbandonedResponseDrained),
+            SnapshotRequest::Rejected(rejection) => {
+                Err(OrderLevelFault::SnapshotRejected(rejection))
+            }
+            SnapshotRequest::Owed => match outcome {
+                DepthByOrderSnapshotOutcome::Rejected(rejection) => {
+                    Err(OrderLevelFault::SnapshotRejected(rejection))
+                }
+                DepthByOrderSnapshotOutcome::Accepted => self
+                    .finish_snapshot(completion_sequence, price_scale, quantity_scale)
+                    .map_err(OrderLevelFault::from),
+            },
+        }
     }
 
     fn accept_update(
@@ -175,9 +311,9 @@ impl MboBookAssembler {
             self.pending_updates.push_back(update);
             return Ok(MboBookOutcome::Pending);
         }
-        let timestamp = update.timestamp;
+        let clocks = FrameClocks::of_update(&update);
         if self.apply_live_update(update, price_scale, quantity_scale)? {
-            Ok(self.snapshot(timestamp))
+            Ok(self.snapshot(clocks))
         } else {
             Ok(MboBookOutcome::IgnoredStale)
         }
@@ -225,7 +361,12 @@ impl MboBookAssembler {
         if level.identity != self.identity {
             return Err(malformed());
         }
-        if self.disabled {
+        if self.disabled
+            || matches!(
+                self.snapshot_request,
+                SnapshotRequest::Abandoned | SnapshotRequest::Rejected(_)
+            )
+        {
             return Ok(MboBookOutcome::IgnoredStale);
         }
         if self.ready {
@@ -327,7 +468,7 @@ impl MboBookAssembler {
                 quantity_scale,
             );
         }
-        let mut timestamp = None;
+        let mut clocks = FrameClocks::default();
         // An unsequenced buffered update is placeable only after a sequenced
         // update beyond the baseline; before that it may predate the image.
         let mut past_baseline = false;
@@ -358,12 +499,15 @@ impl MboBookAssembler {
                 }
                 None => {}
             }
+            let frame = FrameClocks::of_update(&update);
             for mutation in update.mutations {
                 self.apply_mutation(mutation, price_scale, quantity_scale)?;
             }
-            timestamp = update.timestamp.or(timestamp);
+            if !frame.is_empty() {
+                clocks = frame;
+            }
         }
-        Ok(self.snapshot(timestamp))
+        Ok(self.snapshot(clocks))
     }
 
     /// Rithmic Test sends order-level snapshots with no sequence on any level
@@ -378,17 +522,17 @@ impl MboBookAssembler {
         price_scale: u8,
         quantity_scale: u8,
     ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
-        let mut timestamp = None;
+        let mut clocks = FrameClocks::default();
         for update in pending_updates.into_iter().skip(updates_before_snapshot) {
             if update.identity != self.identity {
                 return Err(malformed());
             }
-            let update_timestamp = update.timestamp;
-            if self.apply_live_update(update, price_scale, quantity_scale)? {
-                timestamp = update_timestamp.or(timestamp);
+            let frame = FrameClocks::of_update(&update);
+            if self.apply_live_update(update, price_scale, quantity_scale)? && !frame.is_empty() {
+                clocks = frame;
             }
         }
-        Ok(self.snapshot(timestamp))
+        Ok(self.snapshot(clocks))
     }
 
     fn finish_initial_image(
@@ -519,7 +663,7 @@ impl MboBookAssembler {
         remove_mbo_aggregate(&mut self.bids, &mut self.asks, order)
     }
 
-    fn snapshot(&self, timestamp: Option<ProviderTimestamp>) -> MboBookOutcome {
+    fn snapshot(&self, clocks: FrameClocks) -> MboBookOutcome {
         let bids = self
             .bids
             .iter()
@@ -541,11 +685,7 @@ impl MboBookAssembler {
                 order_count: Some(level.order_count),
             })
             .collect();
-        MboBookOutcome::Snapshot {
-            timestamp,
-            bids,
-            asks,
-        }
+        MboBookOutcome::Snapshot { clocks, bids, asks }
     }
 }
 
@@ -595,32 +735,47 @@ fn remove_mbo_aggregate(
     Ok(())
 }
 
-/// Order-level inconsistencies recover the book with a fresh snapshot on the
-/// live connection instead of invalidating the session and its chart streams.
-fn order_level_outcome(
+/// Order-level inconsistencies and refused snapshots recover the book with a
+/// fresh snapshot on the live connection instead of invalidating the session
+/// and its chart streams. No image becomes authoritative until a covering
+/// snapshot completes.
+fn order_level_outcome<E: Into<OrderLevelFault>>(
     assembler: &mut MboBookAssembler,
-    outcome: Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)>,
+    outcome: Result<MboBookOutcome, E>,
     instrument_id: &str,
     depth_resnapshots: &mut VecDeque<String>,
 ) -> Option<MboBookOutcome> {
-    match outcome {
-        Ok(outcome) => Some(outcome),
-        Err((reason, _)) => {
-            if assembler.recover(Instant::now()) {
-                diagnostic!("Aeris Rithmic order-level depth resnapshot requested: {reason:?}");
-                if !depth_resnapshots
-                    .iter()
-                    .any(|pending| pending == instrument_id)
-                {
-                    depth_resnapshots.push_back(instrument_id.to_string());
-                }
-            } else {
-                diagnostic!(
-                    "Aeris Rithmic order-level depth disabled for this session after repeated {reason:?}"
-                );
+    let fault = match outcome {
+        Ok(MboBookOutcome::AbandonedResponseDrained) => {
+            if assembler.resume_after_drained_response() {
+                queue_depth_resnapshot(depth_resnapshots, instrument_id);
             }
-            None
+            return None;
         }
+        Ok(outcome) => return Some(outcome),
+        Err(fault) => fault.into(),
+    };
+    match assembler.recover(Instant::now()) {
+        Recovery::RequestSnapshot => {
+            diagnostic!("Aeris Rithmic order-level depth resnapshot requested: {fault:?}");
+            queue_depth_resnapshot(depth_resnapshots, instrument_id);
+        }
+        Recovery::AfterAbandonedResponse => diagnostic!(
+            "Aeris Rithmic order-level depth resnapshot requested after the in-flight response drains: {fault:?}"
+        ),
+        Recovery::Disabled => diagnostic!(
+            "Aeris Rithmic order-level depth disabled for this session after repeated {fault:?}"
+        ),
+    }
+    None
+}
+
+fn queue_depth_resnapshot(depth_resnapshots: &mut VecDeque<String>, instrument_id: &str) {
+    if !depth_resnapshots
+        .iter()
+        .any(|pending| pending == instrument_id)
+    {
+        depth_resnapshots.push_back(instrument_id.to_string());
     }
 }
 
@@ -649,6 +804,7 @@ impl CanonicalSessionState {
             mbo_books,
             depth_resnapshots: VecDeque::new(),
             withheld: BTreeSet::new(),
+            anonymous_completions_ambiguous: false,
         }
     }
 
@@ -672,7 +828,10 @@ impl CanonicalSessionState {
                         instrument,
                         self.generation,
                         source_ordinal,
-                        Some(trade.timestamp),
+                        FrameClocks {
+                            gateway: Some(trade.timestamp),
+                            source: trade.source_timestamp,
+                        },
                         received_unix_nanos,
                     )?,
                     trade_id: format!("rithmic-local-{}-{source_ordinal}", self.generation.get()),
@@ -697,12 +856,16 @@ impl CanonicalSessionState {
                 }
                 apply_quote_side(&mut state.bid, quote.bid);
                 apply_quote_side(&mut state.ask, quote.ask);
+                // Best bid/offer frames carry only the gateway clock.
                 let event = MarketEvent::Quote(TopOfBookQuote {
                     metadata: metadata(
                         &instrument,
                         self.generation,
                         source_ordinal,
-                        Some(quote.timestamp),
+                        FrameClocks {
+                            gateway: Some(quote.timestamp),
+                            source: None,
+                        },
                         received_unix_nanos,
                     )?,
                     bid: state
@@ -744,90 +907,76 @@ impl CanonicalSessionState {
                     &instrument.descriptor.instrument_id,
                     &mut self.depth_resnapshots,
                 ) {
-                    None | Some(MboBookOutcome::Pending | MboBookOutcome::IgnoredStale) => Ok(None),
+                    None
+                    | Some(
+                        MboBookOutcome::Pending
+                        | MboBookOutcome::IgnoredStale
+                        | MboBookOutcome::AbandonedResponseDrained,
+                    ) => Ok(None),
                     Some(MboBookOutcome::Snapshot { .. }) => Err(malformed()),
                 }
             }
+            DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::LevelRejected {
+                    identity,
+                    rejection,
+                },
+            ) => {
+                if let Some(identity) = identity.as_ref() {
+                    let instrument_id = self.instrument(identity)?.descriptor.instrument_id.clone();
+                    self.mbo_books
+                        .get_mut(&instrument_id)
+                        .ok_or_else(malformed)?
+                        .reject_snapshot_level(rejection);
+                } else {
+                    // Unattributed: every owed response is treated as refused.
+                    for assembler in self.mbo_books.values_mut() {
+                        assembler.reject_snapshot_level(rejection);
+                    }
+                }
+                Ok(None)
+            }
             DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
-                accepted,
+                outcome,
                 identity,
                 sequence_number,
             }) => {
                 let instrument = if let Some(identity) = identity.as_ref() {
                     self.instrument(identity)?.clone()
+                } else if let Some(instrument) = self.anonymous_completion_owner() {
+                    instrument
                 } else {
-                    // An anonymous completion belongs to the one book awaiting a
-                    // snapshot; if that is ambiguous, every waiting book re-snapshots.
-                    let awaiting = self
-                        .instruments
-                        .iter()
-                        .filter(|instrument| {
-                            instrument.order_book
-                                && self
-                                    .mbo_books
-                                    .get(&instrument.descriptor.instrument_id)
-                                    .is_some_and(MboBookAssembler::awaiting_snapshot)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    match awaiting.as_slice() {
-                        [] => return Ok(None),
-                        [instrument] => instrument.clone(),
-                        _ => {
-                            for instrument in &awaiting {
-                                if let Some(assembler) =
-                                    self.mbo_books.get_mut(&instrument.descriptor.instrument_id)
-                                {
-                                    let _ = order_level_outcome(
-                                        assembler,
-                                        Err((
-                                            ProviderInvalidationReason::SequenceGap,
-                                            RetryDisposition::Transient,
-                                        )),
-                                        &instrument.descriptor.instrument_id,
-                                        &mut self.depth_resnapshots,
-                                    );
-                                }
-                            }
-                            return Ok(None);
-                        }
-                    }
+                    return Ok(None);
                 };
                 let assembler = self
                     .mbo_books
                     .get_mut(&instrument.descriptor.instrument_id)
                     .ok_or_else(malformed)?;
-                // A rejected order-level snapshot leaves depth to the aggregate book.
-                let outcome = if accepted {
-                    assembler.finish_snapshot(
-                        sequence_number,
-                        instrument.descriptor.price_scale,
-                        instrument.descriptor.quantity_scale,
-                    )
-                } else {
-                    Err((
-                        ProviderInvalidationReason::Transport,
-                        RetryDisposition::Transient,
-                    ))
-                };
+                let outcome = assembler.complete_snapshot(
+                    outcome,
+                    sequence_number,
+                    instrument.descriptor.price_scale,
+                    instrument.descriptor.quantity_scale,
+                );
                 match order_level_outcome(
                     assembler,
                     outcome,
                     &instrument.descriptor.instrument_id,
                     &mut self.depth_resnapshots,
                 ) {
-                    None | Some(MboBookOutcome::Pending | MboBookOutcome::IgnoredStale) => Ok(None),
-                    Some(MboBookOutcome::Snapshot {
-                        timestamp,
-                        bids,
-                        asks,
-                    }) => {
+                    None
+                    | Some(
+                        MboBookOutcome::Pending
+                        | MboBookOutcome::IgnoredStale
+                        | MboBookOutcome::AbandonedResponseDrained,
+                    ) => Ok(None),
+                    Some(MboBookOutcome::Snapshot { clocks, bids, asks }) => {
                         let event = MarketEvent::DepthSnapshot(DepthSnapshot {
                             metadata: metadata(
                                 &instrument,
                                 self.generation,
                                 source_ordinal,
-                                timestamp,
+                                clocks,
                                 received_unix_nanos,
                             )?,
                             bids,
@@ -854,18 +1003,19 @@ impl CanonicalSessionState {
                     &instrument.descriptor.instrument_id,
                     &mut self.depth_resnapshots,
                 ) {
-                    None | Some(MboBookOutcome::Pending | MboBookOutcome::IgnoredStale) => Ok(None),
-                    Some(MboBookOutcome::Snapshot {
-                        timestamp,
-                        bids,
-                        asks,
-                    }) => {
+                    None
+                    | Some(
+                        MboBookOutcome::Pending
+                        | MboBookOutcome::IgnoredStale
+                        | MboBookOutcome::AbandonedResponseDrained,
+                    ) => Ok(None),
+                    Some(MboBookOutcome::Snapshot { clocks, bids, asks }) => {
                         let event = MarketEvent::DepthSnapshot(DepthSnapshot {
                             metadata: metadata(
                                 &instrument,
                                 self.generation,
                                 source_ordinal,
-                                timestamp,
+                                clocks,
                                 received_unix_nanos,
                             )?,
                             bids,
@@ -902,18 +1052,19 @@ impl CanonicalSessionState {
                     &instrument.descriptor.instrument_id,
                     &mut self.depth_resnapshots,
                 ) {
-                    None | Some(MboBookOutcome::Pending | MboBookOutcome::IgnoredStale) => Ok(None),
-                    Some(MboBookOutcome::Snapshot {
-                        timestamp,
-                        bids,
-                        asks,
-                    }) => {
+                    None
+                    | Some(
+                        MboBookOutcome::Pending
+                        | MboBookOutcome::IgnoredStale
+                        | MboBookOutcome::AbandonedResponseDrained,
+                    ) => Ok(None),
+                    Some(MboBookOutcome::Snapshot { clocks, bids, asks }) => {
                         let event = MarketEvent::DepthSnapshot(DepthSnapshot {
                             metadata: metadata(
                                 instrument,
                                 self.generation,
                                 source_ordinal,
-                                timestamp,
+                                clocks,
                                 received_unix_nanos,
                             )?,
                             bids,
@@ -922,6 +1073,42 @@ impl CanonicalSessionState {
                         self.publishable(event)
                     }
                 }
+            }
+        }
+    }
+
+    /// Attributes a snapshot completion without an identity to the one book
+    /// owed a response. When several are owed, which response ended is
+    /// unknown: every owed book turns order-level depth off for the session
+    /// rather than risk completing an image from another book's response.
+    fn anonymous_completion_owner(&mut self) -> Option<RithmicProviderInstrument> {
+        let owed = self
+            .instruments
+            .iter()
+            .filter(|instrument| {
+                self.mbo_books
+                    .get(&instrument.descriptor.instrument_id)
+                    .is_some_and(MboBookAssembler::owes_snapshot_response)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match owed.as_slice() {
+            [] => None,
+            [instrument] if !self.anonymous_completions_ambiguous => Some(instrument.clone()),
+            _ => {
+                self.anonymous_completions_ambiguous = true;
+                for instrument in &owed {
+                    if let Some(assembler) =
+                        self.mbo_books.get_mut(&instrument.descriptor.instrument_id)
+                    {
+                        assembler.disable();
+                    }
+                }
+                diagnostic!(
+                    "Aeris Rithmic order-level depth disabled for this session: an unattributed snapshot completion arrived while {} books awaited one",
+                    owed.len()
+                );
+                None
             }
         }
     }
@@ -1025,11 +1212,14 @@ fn apply_quote_side(state: &mut Option<QuoteLevel>, update: QuoteSideUpdate) {
     }
 }
 
+/// The Rithmic gateway clock publishes as the provider time. The exchange time
+/// is published only from the exchange clock, and only when its parts resolve
+/// to one instant; it is never inferred from the gateway clock.
 fn metadata(
     instrument: &RithmicProviderInstrument,
     generation: SessionGeneration,
     source_sequence: u64,
-    timestamp: Option<ProviderTimestamp>,
+    clocks: FrameClocks,
     received_unix_nanos: i64,
 ) -> Result<EventMetadata, (ProviderInvalidationReason, RetryDisposition)> {
     Ok(EventMetadata {
@@ -1039,8 +1229,8 @@ fn metadata(
         source_sequence,
         session_generation: generation.get(),
         timestamps: QualifiedTimestamp {
-            exchange_unix_nanos: timestamp.map(provider_timestamp_nanos).transpose()?,
-            provider_unix_nanos: None,
+            exchange_unix_nanos: clocks.source.and_then(SourceTimestamp::unix_nanos),
+            provider_unix_nanos: clocks.gateway.map(provider_timestamp_nanos).transpose()?,
             received_unix_nanos,
         },
     })
@@ -1126,8 +1316,10 @@ pub(super) const fn malformed() -> (ProviderInvalidationReason, RetryDisposition
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{identity, timestamp};
+    use super::super::tests::{generation, identity, instrument, timestamp};
     use super::*;
+    use DepthByOrderSnapshotOutcome::Accepted;
+
     #[test]
     fn mbo_snapshot_atomically_replays_interleaved_live_updates() {
         let mut assembler = MboBookAssembler::new(identity());
@@ -1144,6 +1336,8 @@ mod tests {
                 exchange_order_id: "bid-1".to_string(),
             }],
             timestamp: Some(timestamp()),
+            source_timestamp: None,
+            jop_timestamp: None,
         };
         assert!(matches!(
             assembler
@@ -1193,7 +1387,7 @@ mod tests {
         }
 
         let MboBookOutcome::Snapshot { bids, asks, .. } = assembler
-            .finish_snapshot(Some(40), 2, 2)
+            .complete_snapshot(Accepted, Some(40), 2, 2)
             .expect("covering snapshot completes and live delta replays")
         else {
             panic!("covering snapshot must publish");
@@ -1208,20 +1402,8 @@ mod tests {
         assert_eq!(asks[0].quantity, 400);
         assert_eq!(asks[0].order_count, Some(1));
 
-        let delete = crate::DepthByOrderUpdate {
-            identity: identity(),
-            sequence_number: Some(42),
-            mutations: vec![DepthByOrderMutation {
-                kind: DepthByOrderMutationKind::Delete,
-                side: DepthByOrderSide::Bid,
-                price: 5_100.0,
-                previous_price: Some(5_100.0),
-                size: 0,
-                priority: 12,
-                exchange_order_id: "bid-2".to_string(),
-            }],
-            timestamp: Some(timestamp()),
-        };
+        let mut delete = bid_update(Some(42), DepthByOrderMutationKind::Delete, "bid-2");
+        delete.mutations[0].size = 0;
         let MboBookOutcome::Snapshot { bids, .. } = assembler
             .accept_update(delete, 2, 2)
             .expect("next live update applies")
@@ -1250,6 +1432,8 @@ mod tests {
                         exchange_order_id: "bid-1".to_string(),
                     }],
                     timestamp: Some(timestamp()),
+                    source_timestamp: None,
+                    jop_timestamp: None,
                 },
                 2,
                 2,
@@ -1307,6 +1491,8 @@ mod tests {
                 exchange_order_id: exchange_order_id.to_string(),
             }],
             timestamp: Some(timestamp()),
+            source_timestamp: None,
+            jop_timestamp: None,
         }
     }
 
@@ -1317,7 +1503,7 @@ mod tests {
             .accept_snapshot_level(bid_level(Some(40)), 2, 2)
             .expect("sequenced snapshot level installs");
         assembler
-            .finish_snapshot(Some(40), 2, 2)
+            .complete_snapshot(Accepted, Some(40), 2, 2)
             .expect("sequenced snapshot completes");
 
         let MboBookOutcome::Snapshot { bids, .. } = assembler
@@ -1352,11 +1538,13 @@ mod tests {
             assembler
                 .accept_snapshot_level(bid_level(Some(40)), 2, 2)
                 .expect("sequenced level contributes orders");
-            let outcome = assembler.finish_snapshot(Some(41), 2, 2);
-            assert!(matches!(
-                outcome,
-                Err((ProviderInvalidationReason::SequenceGap, _))
-            ));
+            let outcome = assembler.complete_snapshot(Accepted, Some(41), 2, 2);
+            assert_eq!(
+                outcome.as_ref().err(),
+                Some(&OrderLevelFault::Inconsistent(
+                    ProviderInvalidationReason::SequenceGap
+                ))
+            );
             assert!(
                 order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
                     .is_none()
@@ -1368,7 +1556,7 @@ mod tests {
         assembler
             .accept_snapshot_level(bid_level(Some(40)), 2, 2)
             .expect("sequenced level contributes orders");
-        let exhausted = assembler.finish_snapshot(Some(41), 2, 2);
+        let exhausted = assembler.complete_snapshot(Accepted, Some(41), 2, 2);
         assert!(
             order_level_outcome(&mut assembler, exhausted, "instrument", &mut resnapshots)
                 .is_none()
@@ -1403,10 +1591,12 @@ mod tests {
         assembler
             .accept_snapshot_level(bid_level(Some(40)), 2, 2)
             .expect("snapshot level installs");
-        assert!(matches!(
-            assembler.finish_snapshot(Some(40), 2, 2),
-            Err((ProviderInvalidationReason::SequenceGap, _))
-        ));
+        assert_eq!(
+            assembler.complete_snapshot(Accepted, Some(40), 2, 2).err(),
+            Some(OrderLevelFault::Inconsistent(
+                ProviderInvalidationReason::SequenceGap
+            ))
+        );
     }
 
     /// Rithmic Test answers a snapshot request with levels and a completion
@@ -1433,7 +1623,7 @@ mod tests {
                 2,
             )
             .expect("interleaved update buffers");
-        let outcome = assembler.finish_snapshot(None, 2, 2);
+        let outcome = assembler.complete_snapshot(Accepted, None, 2, 2);
         let Some(MboBookOutcome::Snapshot { bids, .. }) =
             order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
         else {
@@ -1494,7 +1684,7 @@ mod tests {
             .accept_snapshot_level(bid_level(None), 2, 2)
             .expect("unsequenced level contributes orders");
         assembler
-            .finish_snapshot(None, 2, 2)
+            .complete_snapshot(Accepted, None, 2, 2)
             .expect("unsequenced snapshot completes");
         assert!(matches!(
             assembler
@@ -1532,15 +1722,211 @@ mod tests {
                 2,
             )
             .expect("interleaved update buffers");
-        let outcome = assembler.finish_snapshot(None, 2, 2);
-        assert!(matches!(
-            outcome,
-            Err((ProviderInvalidationReason::SequenceGap, _))
-        ));
+        let outcome = assembler.complete_snapshot(Accepted, None, 2, 2);
+        assert_eq!(
+            outcome.as_ref().err(),
+            Some(&OrderLevelFault::Inconsistent(
+                ProviderInvalidationReason::SequenceGap
+            ))
+        );
         assert!(
             order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots).is_none()
         );
         assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
         assert!(assembler.awaiting_snapshot());
+    }
+
+    fn ask_level(exchange_order_id: &str) -> DepthByOrderSnapshotLevel {
+        DepthByOrderSnapshotLevel {
+            identity: identity(),
+            sequence_number: None,
+            side: DepthByOrderSide::Ask,
+            price: 5_100.25,
+            orders: vec![crate::DepthByOrderSnapshotOrder {
+                size: 1,
+                priority: 30,
+                exchange_order_id: exchange_order_id.to_string(),
+            }],
+        }
+    }
+
+    const REFUSED: DepthByOrderSnapshotRejection = DepthByOrderSnapshotRejection { code: 5 };
+
+    #[test]
+    fn refused_snapshot_retries_within_the_budget_then_disables_order_level_depth() {
+        let mut assembler = MboBookAssembler::new(identity());
+        let mut resnapshots = VecDeque::new();
+        for attempt in 0..MAXIMUM_DEPTH_RESNAPSHOTS {
+            let outcome = assembler.complete_snapshot(
+                DepthByOrderSnapshotOutcome::Rejected(REFUSED),
+                None,
+                2,
+                2,
+            );
+            assert_eq!(
+                outcome.as_ref().err(),
+                Some(&OrderLevelFault::SnapshotRejected(REFUSED))
+            );
+            assert!(
+                order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
+                    .is_none()
+            );
+            assert!(assembler.awaiting_snapshot(), "attempt {attempt} retries");
+            assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
+        }
+        let exhausted =
+            assembler.complete_snapshot(DepthByOrderSnapshotOutcome::Rejected(REFUSED), None, 2, 2);
+        assert!(
+            order_level_outcome(&mut assembler, exhausted, "instrument", &mut resnapshots)
+                .is_none()
+        );
+        assert!(resnapshots.is_empty());
+        assert!(!assembler.awaiting_snapshot());
+        assert!(!assembler.owes_snapshot_response());
+    }
+
+    #[test]
+    fn refused_snapshot_level_keeps_its_image_from_becoming_authoritative() {
+        let mut assembler = MboBookAssembler::new(identity());
+        let mut resnapshots = VecDeque::new();
+        assembler
+            .accept_snapshot_level(bid_level(None), 2, 2)
+            .expect("first level contributes orders");
+        assembler.reject_snapshot_level(DepthByOrderSnapshotRejection { code: 7 });
+        assert!(matches!(
+            assembler
+                .accept_snapshot_level(ask_level("ask-1"), 2, 2)
+                .expect("levels after a refusal drain"),
+            MboBookOutcome::IgnoredStale
+        ));
+        let outcome = assembler.complete_snapshot(Accepted, None, 2, 2);
+        assert_eq!(
+            outcome.as_ref().err(),
+            Some(&OrderLevelFault::SnapshotRejected(
+                DepthByOrderSnapshotRejection { code: 7 }
+            )),
+            "an accepted terminal frame cannot complete a refused image"
+        );
+        assert!(
+            order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots).is_none()
+        );
+        assert!(!assembler.ready());
+        assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
+    }
+
+    #[test]
+    fn response_cut_short_by_a_recovery_drains_before_the_fresh_snapshot() {
+        let mut assembler = MboBookAssembler::new(identity());
+        let mut resnapshots = VecDeque::new();
+        assembler
+            .accept_snapshot_level(bid_level(None), 2, 2)
+            .expect("first level contributes orders");
+        // A duplicate order id inside the response discards the image mid-response.
+        let duplicate = assembler.accept_snapshot_level(bid_level(None), 2, 2);
+        assert!(
+            order_level_outcome(&mut assembler, duplicate, "instrument", &mut resnapshots)
+                .is_none()
+        );
+        assert!(
+            resnapshots.is_empty(),
+            "the fresh request waits for the in-flight response"
+        );
+        assert!(matches!(
+            assembler
+                .accept_snapshot_level(ask_level("ask-old"), 2, 2)
+                .expect("the rest of the abandoned response drains"),
+            MboBookOutcome::IgnoredStale
+        ));
+        let drained = assembler.complete_snapshot(Accepted, None, 2, 2);
+        assert!(
+            order_level_outcome(&mut assembler, drained, "instrument", &mut resnapshots).is_none(),
+            "the abandoned completion never publishes its partial image"
+        );
+        assert!(!assembler.ready());
+        assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
+
+        assembler
+            .accept_snapshot_level(ask_level("ask-new"), 2, 2)
+            .expect("the fresh response builds the image");
+        let MboBookOutcome::Snapshot { bids, asks, .. } = assembler
+            .complete_snapshot(Accepted, None, 2, 2)
+            .expect("the fresh response completes")
+        else {
+            panic!("the fresh covering snapshot must publish");
+        };
+        assert!(
+            bids.is_empty(),
+            "no order from the abandoned response survives"
+        );
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].order_count, Some(1));
+    }
+
+    #[test]
+    fn unowed_completion_is_ignored_after_the_image_is_ready() {
+        let mut assembler = MboBookAssembler::new(identity());
+        assembler
+            .accept_snapshot_level(bid_level(None), 2, 2)
+            .expect("level contributes orders");
+        assembler
+            .complete_snapshot(Accepted, None, 2, 2)
+            .expect("snapshot completes");
+        assert!(matches!(
+            assembler
+                .complete_snapshot(DepthByOrderSnapshotOutcome::Rejected(REFUSED), None, 2, 2)
+                .expect("an unowed completion is stale"),
+            MboBookOutcome::IgnoredStale
+        ));
+        assert!(assembler.ready());
+    }
+
+    #[test]
+    fn exchange_clock_publishes_only_from_the_source_clock() {
+        let gateway = ProviderTimestamp {
+            seconds: 1_700_000_000,
+            microseconds: 123_456,
+        };
+        let source = SourceTimestamp {
+            seconds: 1_700_000_000,
+            microseconds: Some(123_455),
+            nanoseconds: Some(123_455_789),
+        };
+        let instrument = instrument();
+        let generation = generation(1);
+        let both = metadata(
+            &instrument,
+            generation,
+            1,
+            FrameClocks {
+                gateway: Some(gateway),
+                source: Some(source),
+            },
+            9,
+        )
+        .expect("metadata builds");
+        assert_eq!(
+            both.timestamps,
+            QualifiedTimestamp {
+                exchange_unix_nanos: Some(1_700_000_000_123_455_789),
+                provider_unix_nanos: Some(1_700_000_000_123_456_000),
+                received_unix_nanos: 9,
+            }
+        );
+        let gateway_only = metadata(
+            &instrument,
+            generation,
+            1,
+            FrameClocks {
+                gateway: Some(gateway),
+                source: None,
+            },
+            9,
+        )
+        .expect("metadata builds");
+        assert_eq!(gateway_only.timestamps.exchange_unix_nanos, None);
+        assert_eq!(
+            gateway_only.timestamps.provider_unix_nanos,
+            Some(1_700_000_000_123_456_000)
+        );
     }
 }

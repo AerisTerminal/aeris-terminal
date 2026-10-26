@@ -10,12 +10,13 @@ use crate::{
     DecodedControlMessage, DecodedMarketMessage,
     DepthByOrderEndEvent as DecodedDepthByOrderEndEvent, DepthByOrderMutation,
     DepthByOrderMutationKind, DepthByOrderSide, DepthByOrderSnapshotLevel,
-    DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
-    InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
-    MarketIdentity, ProductCodeCollector, ProductCodeResult, ProviderTimestamp, QuoteLevel,
-    QuoteSideUpdate, RetryDisposition, RithmicApplication, RithmicCredentialBytes,
-    RithmicCredentials, RithmicSession, RithmicSessionError, RithmicSessionLimits,
-    RithmicSessionMessage, RithmicTickerConnection, SearchPattern, SubscriptionAction,
+    DepthByOrderSnapshotMessage, DepthByOrderSnapshotOutcome, DepthByOrderSnapshotRejection,
+    DepthByOrderSnapshotRequest, DepthByOrderSubscription, InstrumentReference,
+    InstrumentReferenceRequest, InstrumentType, MarketDataSubscription, MarketIdentity,
+    ProductCodeCollector, ProductCodeResult, ProviderTimestamp, QuoteLevel, QuoteSideUpdate,
+    RetryDisposition, RithmicApplication, RithmicCredentialBytes, RithmicCredentials,
+    RithmicSession, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
+    RithmicTickerConnection, SearchPattern, SourceTimestamp, SubscriptionAction,
     SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest, SymbolSearchResult,
     TradeAggressor,
 };
@@ -1869,14 +1870,9 @@ pub fn try_recv_rithmic_event<V: CredentialVault>(
         }
         ProviderSessionEvent::Market { generation, event } => {
             ensure_streaming_generation(worker, *generation)?;
-            let message_timestamp = match event {
-                MarketEvent::Trade(trade) => trade.metadata.timestamps.exchange_unix_nanos,
-                MarketEvent::Quote(quote) => quote.metadata.timestamps.provider_unix_nanos,
-                MarketEvent::DepthSnapshot(snapshot) => {
-                    snapshot.metadata.timestamps.provider_unix_nanos
-                }
-                MarketEvent::DepthDelta(delta) => delta.metadata.timestamps.provider_unix_nanos,
-            };
+            // Every Rithmic frame carries the gateway clock; only some carry
+            // an exchange clock, so feed latency is measured from the gateway.
+            let message_timestamp = event.metadata().timestamps.provider_unix_nanos;
             worker.record_market_event_diagnostics(*generation, event, message_timestamp)?;
         }
         ProviderSessionEvent::Heartbeat { generation, .. } => {
@@ -2408,7 +2404,7 @@ mod tests {
         NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN)
     }
 
-    fn generation(value: u64) -> SessionGeneration {
+    pub(super) fn generation(value: u64) -> SessionGeneration {
         SessionGeneration::new(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN))
     }
 
@@ -2426,7 +2422,7 @@ mod tests {
         }
     }
 
-    fn instrument() -> RithmicProviderInstrument {
+    pub(super) fn instrument() -> RithmicProviderInstrument {
         RithmicProviderInstrument {
             descriptor: InstrumentDescriptor {
                 instrument_id: "future-cme-es-2027-06".to_string(),
@@ -3114,6 +3110,10 @@ mod tests {
                     aggressor: Some(TradeAggressor::Buy),
                     is_snapshot: false,
                     timestamp: timestamp(),
+                    exchange_order_id: None,
+                    aggressor_exchange_order_id: None,
+                    source_timestamp: None,
+                    jop_timestamp: None,
                 }),
                 11,
                 1_700_000_000_999_000_000,
@@ -3130,8 +3130,13 @@ mod tests {
         assert_eq!(trade.metadata.source_sequence, 11);
         assert_eq!(trade.metadata.session_generation, 7);
         assert_eq!(
-            trade.metadata.timestamps.exchange_unix_nanos,
-            Some(1_700_000_000_123_456_000)
+            trade.metadata.timestamps.provider_unix_nanos,
+            Some(1_700_000_000_123_456_000),
+            "the gateway clock publishes as the provider time"
+        );
+        assert_eq!(
+            trade.metadata.timestamps.exchange_unix_nanos, None,
+            "a trade without an exchange clock is never given one"
         );
         assert_eq!(trade.trade_id, "rithmic-local-7-11");
         assert_eq!(trade.price, 510_025);
@@ -3147,12 +3152,202 @@ mod tests {
                     aggressor: None,
                     is_snapshot: false,
                     timestamp: timestamp(),
+                    exchange_order_id: None,
+                    aggressor_exchange_order_id: None,
+                    source_timestamp: None,
+                    jop_timestamp: None,
                 }),
                 12,
                 1_700_000_001_000_000_000,
             ),
             Err(malformed())
         );
+    }
+
+    #[test]
+    fn exchange_nanoseconds_survive_into_published_trades_and_depth() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(7));
+        let source = SourceTimestamp {
+            seconds: 1_700_000_000,
+            microseconds: Some(123_455),
+            nanoseconds: Some(123_455_789),
+        };
+        let Some(MarketEvent::Trade(trade)) = canonical
+            .convert(
+                DecodedMarketMessage::Trade(TradeUpdate {
+                    identity: identity(),
+                    price: 5_100.25,
+                    size: 3,
+                    aggressor: Some(TradeAggressor::Sell),
+                    is_snapshot: false,
+                    exchange_order_id: Some("6400001".to_string()),
+                    aggressor_exchange_order_id: Some("6400002".to_string()),
+                    timestamp: timestamp(),
+                    source_timestamp: Some(source),
+                    jop_timestamp: None,
+                }),
+                1,
+                1_700_000_000_999_000_000,
+            )
+            .expect("trade converts")
+        else {
+            panic!("trade input must produce a trade event");
+        };
+        assert_eq!(
+            trade.metadata.timestamps,
+            QualifiedTimestamp {
+                exchange_unix_nanos: Some(1_700_000_000_123_455_789),
+                provider_unix_nanos: Some(1_700_000_000_123_456_000),
+                received_unix_nanos: 1_700_000_000_999_000_000,
+            }
+        );
+
+        let level = DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Level(
+            crate::DepthByOrderSnapshotLevel {
+                identity: identity(),
+                sequence_number: None,
+                side: DepthByOrderSide::Bid,
+                price: 5_100.00,
+                orders: vec![crate::DepthByOrderSnapshotOrder {
+                    size: 2,
+                    priority: 1,
+                    exchange_order_id: "bid-1".to_string(),
+                }],
+            },
+        ));
+        assert_eq!(canonical.convert(level, 2, 2), Ok(None));
+        let complete =
+            DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                outcome: DepthByOrderSnapshotOutcome::Accepted,
+                identity: Some(identity()),
+                sequence_number: None,
+            });
+        assert!(matches!(
+            canonical.convert(complete, 3, 3),
+            Ok(Some(MarketEvent::DepthSnapshot(_)))
+        ));
+        let Some(MarketEvent::DepthSnapshot(depth)) = canonical
+            .convert(
+                DecodedMarketMessage::DepthByOrder(crate::DepthByOrderUpdate {
+                    identity: identity(),
+                    sequence_number: Some(10),
+                    mutations: vec![crate::DepthByOrderMutation {
+                        kind: crate::DepthByOrderMutationKind::New,
+                        side: DepthByOrderSide::Bid,
+                        price: 5_100.00,
+                        previous_price: None,
+                        size: 1,
+                        priority: 2,
+                        exchange_order_id: "bid-2".to_string(),
+                    }],
+                    timestamp: Some(timestamp()),
+                    source_timestamp: Some(source),
+                    jop_timestamp: None,
+                }),
+                4,
+                4,
+            )
+            .expect("live update converts")
+        else {
+            panic!("a ready book publishes its image after a live update");
+        };
+        assert_eq!(
+            depth.metadata.timestamps.exchange_unix_nanos,
+            Some(1_700_000_000_123_455_789)
+        );
+        assert_eq!(
+            depth.metadata.timestamps.provider_unix_nanos,
+            Some(1_700_000_000_123_456_000)
+        );
+    }
+
+    #[test]
+    fn refused_order_level_snapshot_requests_a_resnapshot_without_failing_the_session() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(7));
+        assert_eq!(
+            canonical.convert(
+                DecodedMarketMessage::DepthByOrderSnapshot(
+                    DepthByOrderSnapshotMessage::LevelRejected {
+                        identity: Some(identity()),
+                        rejection: DepthByOrderSnapshotRejection { code: 7 },
+                    }
+                ),
+                1,
+                1,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            canonical.convert(
+                DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                    outcome: DepthByOrderSnapshotOutcome::Accepted,
+                    identity: Some(identity()),
+                    sequence_number: None,
+                }),
+                2,
+                2,
+            ),
+            Ok(None),
+            "a refused image never publishes"
+        );
+        assert_eq!(canonical.take_depth_resnapshots(), vec![instrument()]);
+    }
+
+    #[test]
+    fn unattributed_completion_with_several_owed_books_disables_them_instead_of_guessing() {
+        let mut second = instrument();
+        second.descriptor.instrument_id = "future-cme-nq-2027-06".to_string();
+        second.descriptor.provider_symbol = "NQM7".to_string();
+        let config = RithmicProviderConfig::try_new(
+            crate::RITHMIC_APPLICATION_NAME,
+            "0.1.0",
+            RithmicSessionLimits::default(),
+            Duration::from_secs(30),
+            vec![instrument(), second],
+        )
+        .expect("two-book configuration validates");
+        let mut canonical = CanonicalSessionState::new(&config, generation(7));
+        let anonymous =
+            DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                outcome: DepthByOrderSnapshotOutcome::Accepted,
+                identity: None,
+                sequence_number: None,
+            });
+        assert_eq!(canonical.convert(anonymous.clone(), 1, 1), Ok(None));
+        assert_eq!(
+            canonical.take_depth_resnapshots(),
+            Vec::<RithmicProviderInstrument>::new()
+        );
+        let level = DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Level(
+            crate::DepthByOrderSnapshotLevel {
+                identity: identity(),
+                sequence_number: None,
+                side: DepthByOrderSide::Bid,
+                price: 5_100.00,
+                orders: vec![crate::DepthByOrderSnapshotOrder {
+                    size: 2,
+                    priority: 1,
+                    exchange_order_id: "bid-1".to_string(),
+                }],
+            },
+        ));
+        assert_eq!(canonical.convert(level, 2, 2), Ok(None));
+        assert_eq!(
+            canonical.convert(
+                DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                    outcome: DepthByOrderSnapshotOutcome::Accepted,
+                    identity: Some(identity()),
+                    sequence_number: None,
+                }),
+                3,
+                3,
+            ),
+            Ok(None),
+            "a disabled book never publishes an order-level image"
+        );
+        assert_eq!(canonical.convert(anonymous, 4, 4), Ok(None));
     }
 
     #[test]
@@ -3179,6 +3374,10 @@ mod tests {
                     aggressor: None,
                     is_snapshot: false,
                     timestamp: timestamp(),
+                    exchange_order_id: None,
+                    aggressor_exchange_order_id: None,
+                    source_timestamp: None,
+                    jop_timestamp: None,
                 }),
                 1,
                 1_700_000_000_999_000_000,
@@ -3196,11 +3395,13 @@ mod tests {
             price: 5_100.25,
             size: 2,
             orders: Some(1),
+            implied_size: None,
         };
         let ask = QuoteLevel {
             price: 5_100.50,
             size: 4,
             orders: Some(2),
+            implied_size: None,
         };
         let partial = canonical
             .convert(
@@ -3293,6 +3494,7 @@ mod tests {
             price,
             size,
             orders: Some(1),
+            implied_size: None,
         })
     }
 
@@ -3337,6 +3539,10 @@ mod tests {
                     aggressor: None,
                     is_snapshot: true,
                     timestamp: timestamp(),
+                    exchange_order_id: None,
+                    aggressor_exchange_order_id: None,
+                    source_timestamp: None,
+                    jop_timestamp: None,
                 }),
                 1,
                 1,
@@ -3397,7 +3603,7 @@ mod tests {
         assert_eq!(
             canonical.convert(
                 DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
-                    accepted: true,
+                    outcome: DepthByOrderSnapshotOutcome::Accepted,
                     identity: Some(identity()),
                     sequence_number: None,
                 }),
@@ -3422,6 +3628,8 @@ mod tests {
                         exchange_order_id: "bid-1".to_string(),
                     }],
                     timestamp: Some(timestamp()),
+                    source_timestamp: None,
+                    jop_timestamp: None,
                 }),
                 4,
                 2,

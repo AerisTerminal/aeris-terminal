@@ -43,12 +43,25 @@ impl EventMetadata {
 /// Provider and local timestamps retained without conflating their meanings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualifiedTimestamp {
+    /// Exchange matching-engine time, present only when the provider reports
+    /// that clock; never inferred from another clock.
     pub exchange_unix_nanos: Option<i64>,
+    /// The provider's own clock, the one its history bars are stamped with.
     pub provider_unix_nanos: Option<i64>,
+    /// Local receipt time.
     pub received_unix_nanos: i64,
 }
 
 impl QualifiedTimestamp {
+    /// Returns the time on the clock provider history uses: the provider
+    /// clock, or the exchange clock for a provider that reports only that.
+    /// Live data meets history on this clock so a seam never compares two
+    /// different clocks.
+    #[must_use]
+    pub fn history_clock_unix_nanos(self) -> Option<i64> {
+        self.provider_unix_nanos.or(self.exchange_unix_nanos)
+    }
+
     /// Validates nanosecond timestamp fields.
     ///
     /// # Errors

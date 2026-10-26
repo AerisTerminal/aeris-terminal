@@ -207,14 +207,14 @@ impl HistoryTracker {
         provider: Epoch<ProviderTag>,
         instrument: &str,
         entitlement: &str,
-        exchange_time: i64,
+        history_unix_nanos: i64,
     ) -> Vec<BarSeriesKey> {
         self.entries.iter().filter(|((series, epoch), entry)| {
             *epoch == provider && series.provider_id == provider_id
                 && series.instrument_id == instrument && series.entitlement_id == entitlement
                 && matches!(entry.coverage.current_empty,
                     Some(super::super::EmptyCurrentHistory::AwaitingLiveTrade { boundary_unix_nanos })
-                        if exchange_time > boundary_unix_nanos)
+                        if history_unix_nanos > boundary_unix_nanos)
         }).map(|((series, _), _)| series.clone()).collect()
     }
 

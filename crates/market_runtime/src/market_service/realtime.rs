@@ -1419,13 +1419,13 @@ impl Coordinator<'_> {
             {
                 continue;
             }
-            if let Some(exchange_unix_nanos) = trade.metadata.timestamps.exchange_unix_nanos {
+            if let Some(history_unix_nanos) = trade.metadata.timestamps.history_clock_unix_nanos() {
                 self.request_current_history_after_live_trade(
                     provider,
                     generation,
                     &trade.metadata.instrument_id,
                     &trade.metadata.entitlement_id,
-                    exchange_unix_nanos,
+                    history_unix_nanos,
                 );
             }
         }
@@ -1720,6 +1720,7 @@ impl Coordinator<'_> {
             .metadata
             .timestamps
             .exchange_unix_nanos
+            .or(trade.metadata.timestamps.provider_unix_nanos)
             .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
         let triggers = self.price_alerts.evaluate(
             &instrument,

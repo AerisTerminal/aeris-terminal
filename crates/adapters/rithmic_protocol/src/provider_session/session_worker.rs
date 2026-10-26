@@ -106,14 +106,11 @@ fn await_initial_depth_snapshot(
                     .ok_or(RithmicSessionError::Protocol)?;
                 initial_messages.push_back(message);
             }
+            // A refused snapshot completes the install too: the canonical book
+            // recovers with a bounded resnapshot instead of ending the session.
             RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
-                DepthByOrderSnapshotMessage::Complete {
-                    accepted, identity, ..
-                },
+                DepthByOrderSnapshotMessage::Complete { identity, .. },
             )) => {
-                if !*accepted {
-                    return Err(RithmicSessionError::Protocol);
-                }
                 if identity.is_none() {
                     *identity = Some(MarketIdentity {
                         symbol: instrument.descriptor.provider_symbol.clone(),
@@ -410,55 +407,24 @@ fn handle_session_message(
                 response_timeout,
             )?;
         }
-        RithmicSessionMessage::Market(mut message) => {
-            let snapshot_completion = match &mut message {
-                DecodedMarketMessage::DepthByOrderSnapshot(
-                    DepthByOrderSnapshotMessage::Complete {
-                        accepted, identity, ..
-                    },
-                ) => {
-                    if let Some(plan) = state.catalog.pending_subscription.as_ref()
-                        && let SubscriptionPhase::SubscribeDepthSnapshot(index) = plan.phase
-                    {
-                        let instrument = plan.added.get(index).ok_or_else(malformed)?;
-                        if let Some(identity) = identity.as_ref()
-                            && !instrument.identity_matches(identity)
-                        {
-                            return Err(malformed());
-                        }
-                        if identity.is_none() {
-                            *identity = Some(MarketIdentity {
-                                symbol: instrument.descriptor.provider_symbol.clone(),
-                                exchange: instrument.descriptor.venue_id.clone(),
-                            });
-                        }
-                        if !*accepted {
-                            if let Some((selection, _)) = plan.selection.as_ref() {
-                                send_rejection(
-                                    emitter,
-                                    generation,
-                                    selection.selection_generation,
-                                    RithmicCatalogRejection::SubscriptionRejected,
-                                );
-                            }
-                            return Err((
-                                ProviderInvalidationReason::Transport,
-                                RetryDisposition::Transient,
-                            ));
-                        }
-                    }
-                    // Only a completion owed to a pending subscription advances
-                    // it; any other completion answers an in-session resnapshot.
-                    state
-                        .catalog
-                        .pending_subscription
-                        .as_ref()
-                        .is_some_and(|plan| {
-                            matches!(plan.phase, SubscriptionPhase::SubscribeDepthSnapshot(_))
-                        })
-                        .then_some(*accepted)
-                }
-                _ => None,
+        RithmicSessionMessage::Market(message) => {
+            // Only a completion for the instrument being added advances its
+            // subscription; any other completion answers an in-session
+            // resnapshot. An unattributed completion is left to the canonical
+            // books to attribute. Accepted or refused, the market data is
+            // installed and the book recovers or disables order-level depth.
+            let completes_pending_snapshot = if let DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::Complete { identity, .. },
+            ) = &message
+                && let Some(plan) = state.catalog.pending_subscription.as_ref()
+                && let SubscriptionPhase::SubscribeDepthSnapshot(index) = plan.phase
+            {
+                let instrument = plan.added.get(index).ok_or_else(malformed)?;
+                identity
+                    .as_ref()
+                    .is_none_or(|identity| instrument.identity_matches(identity))
+            } else {
+                false
             };
             let received_unix_nanos = unix_nanos_now()?;
             if let Some(event) =
@@ -473,7 +439,7 @@ fn handle_session_message(
                     .request_depth_by_order_snapshot(instrument.depth_snapshot_request())
                     .map_err(session_failure)?;
             }
-            if snapshot_completion.is_some_and(|accepted| accepted) {
+            if completes_pending_snapshot {
                 let complete = {
                     let Some(plan) = state.catalog.pending_subscription.as_mut() else {
                         return Err(malformed());

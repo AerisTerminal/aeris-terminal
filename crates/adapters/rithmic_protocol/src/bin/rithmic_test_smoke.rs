@@ -4,17 +4,17 @@ use aeris_platform_runtime::{
 use aeris_rithmic_protocol_adapter::{
     AuthenticationState, CollectionProgress, DecodedCatalogMessage, DecodedControlMessage,
     DecodedMarketMessage, DecodedTimeBarType, DepthByOrderSnapshotMessage,
-    DepthByOrderSnapshotRequest, DepthByOrderSubscription, HistoryBars, HistoryCollectionRequest,
-    HistoryCollector, HistorySeries, InstrumentReferenceRequest, InstrumentType,
-    MarketDataSubscription, ProviderInvalidationReason, ProviderSessionDriver,
-    ProviderSessionEvent, RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE,
-    RithmicApplication, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
-    RithmicCredentialBytes, RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents,
-    RithmicSession, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
-    RithmicSessionTiming, SearchPattern, SessionGeneration, SubscriptionAction,
-    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
-    TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
-    collect_rithmic_covering_recovery_evidence,
+    DepthByOrderSnapshotOutcome, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
+    DepthByOrderUpdate, HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
+    InstrumentReferenceRequest, InstrumentType, MarketDataSubscription, MarketIdentity,
+    ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
+    RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication,
+    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCredentialBytes,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicSession,
+    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming,
+    SearchPattern, SessionGeneration, SubscriptionAction, SymbolSearchCollectionRequest,
+    SymbolSearchCollector, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
+    TimeBarType, collect_rithmic_covering_recovery_evidence,
 };
 use std::{
     io::{self, Write},
@@ -25,9 +25,11 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod mbo_stream_evidence;
 mod order_bracket_smoke;
 mod provider_silence_evidence;
 
+use mbo_stream_evidence::MboStreamEvidence;
 use provider_silence_evidence::{
     EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS, EVIDENCE_RESPONSE_TIMEOUT_NANOS, EvidenceFailure,
     EvidenceProvenance, EvidenceStatus, ExpectedSilence, ObservedRetry, ObservedSessionTiming,
@@ -48,6 +50,8 @@ const MAXIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 24 * 60 * 60;
 // observation tolerates per-read deadlines up to this total budget.
 const SUBSCRIPTION_OBSERVATION_BUDGET: Duration = Duration::from_mins(5);
 const SUBSCRIPTION_PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
+const MBO_STREAM_OBSERVATION_BUDGET: Duration = Duration::from_secs(90);
+const MBO_STREAM_FRAME_TARGET: usize = 200;
 
 #[derive(Debug, Eq, PartialEq)]
 enum RunMode {
@@ -496,14 +500,26 @@ fn test_depth_by_order(
     await_depth_by_order_subscription(ticker)?;
     println!("rithmic_mbo_subscription=passed");
 
+    let mut stream = MboStreamEvidence::default();
     ticker
         .request_depth_by_order_snapshot(DepthByOrderSnapshotRequest {
             symbol: &selected.symbol,
             exchange: &selected.exchange,
         })
         .map_err(|error| format!("dbo_snapshot_send_failed={error}"))?;
-    let snapshot = collect_depth_by_order_snapshot(ticker, selected)?;
+    let (outcome, snapshot) = collect_depth_by_order_snapshot(ticker, selected, &mut stream)?;
+    snapshot.print(outcome);
 
+    ticker
+        .update_market_data(mbo_market_data(selected, SubscriptionAction::Subscribe))
+        .map_err(|error| format!("mbo_market_data_send_failed={error}"))?;
+    let observed = observe_mbo_streams(ticker, selected, &mut stream);
+    stream.print();
+    observed?;
+
+    ticker
+        .update_market_data(mbo_market_data(selected, SubscriptionAction::Unsubscribe))
+        .map_err(|error| format!("mbo_market_data_unsubscribe_send_failed={error}"))?;
     ticker
         .update_depth_by_order(DepthByOrderSubscription {
             symbol: &selected.symbol,
@@ -511,14 +527,98 @@ fn test_depth_by_order(
             action: SubscriptionAction::Unsubscribe,
         })
         .map_err(|error| format!("dbo_unsubscribe_send_failed={error}"))?;
+    Ok(())
+}
+
+const fn mbo_market_data(
+    selected: &SelectedInstrument,
+    action: SubscriptionAction,
+) -> MarketDataSubscription<'_> {
+    MarketDataSubscription {
+        symbol: selected.symbol.as_str(),
+        exchange: selected.exchange.as_str(),
+        action,
+        trades: true,
+        quotes: true,
+        order_book: false,
+    }
+}
+
+/// Watches trades, quotes and live DBO beside each other until every stream
+/// reaches its target or the observation budget runs out.
+fn observe_mbo_streams(
+    ticker: &mut aeris_rithmic_protocol_adapter::RithmicTickerConnection,
+    selected: &SelectedInstrument,
+    stream: &mut MboStreamEvidence,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let deadline = started + MBO_STREAM_OBSERVATION_BUDGET;
+    let mut market_data_accepted = false;
+    while !(market_data_accepted
+        && stream.depth_frames() >= MBO_STREAM_FRAME_TARGET
+        && stream.trade_frames() >= MBO_STREAM_FRAME_TARGET
+        && stream.quote_frames() >= MBO_STREAM_FRAME_TARGET)
+        && Instant::now() < deadline
+    {
+        let message = match ticker.read_next() {
+            Ok(message) => message,
+            Err(RithmicSessionError::Deadline) => continue,
+            Err(error) => return Err(format!("mbo_stream_read_failed={error}")),
+        };
+        match message {
+            RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
+                accepted,
+            }) => {
+                if !accepted {
+                    return Err("mbo_market_data_subscription_rejected".to_string());
+                }
+                market_data_accepted = true;
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrder(update))
+                if is_selected(&update.identity, selected) =>
+            {
+                record_live_depth_by_order(stream, &update)?;
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::Trade(trade))
+                if is_selected(&trade.identity, selected) =>
+            {
+                stream.record_trade(&trade);
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::Quote(quote))
+                if is_selected(&quote.identity, selected) =>
+            {
+                stream.record_quote(&quote);
+            }
+            _ => {}
+        }
+    }
     println!(
-        "rithmic_mbo_snapshot=passed sequence={} levels={} unsequenced_levels={} orders={} live_mutations={}",
-        snapshot.sequence.unwrap_or(0),
-        snapshot.levels,
-        snapshot.unsequenced_levels,
-        snapshot.orders,
-        snapshot.live_mutations
+        "rithmic_mbo_stream_observation market_data_accepted={market_data_accepted} elapsed_s={}",
+        started.elapsed().as_secs()
     );
+    if market_data_accepted {
+        Ok(())
+    } else {
+        Err("mbo_market_data_subscription_unacknowledged".to_string())
+    }
+}
+
+fn is_selected(identity: &MarketIdentity, selected: &SelectedInstrument) -> bool {
+    identity.symbol == selected.symbol && identity.exchange == selected.exchange
+}
+
+fn record_live_depth_by_order(
+    stream: &mut MboStreamEvidence,
+    update: &DepthByOrderUpdate,
+) -> Result<(), String> {
+    if update
+        .mutations
+        .iter()
+        .any(|mutation| mutation.exchange_order_id.is_empty())
+    {
+        return Err("dbo_live_missing_exchange_order_id".to_string());
+    }
+    stream.record_depth(update);
     Ok(())
 }
 
@@ -554,13 +654,40 @@ struct MboSnapshotEvidence {
     levels: usize,
     unsequenced_levels: usize,
     orders: usize,
-    live_mutations: usize,
+    refused_levels: usize,
+    refused_level_code: Option<u32>,
 }
 
+impl MboSnapshotEvidence {
+    fn print(&self, outcome: DepthByOrderSnapshotOutcome) {
+        let (outcome, completion_code) = match outcome {
+            DepthByOrderSnapshotOutcome::Accepted => ("accepted", None),
+            DepthByOrderSnapshotOutcome::Rejected(rejection) => ("refused", Some(rejection.code)),
+        };
+        println!(
+            "rithmic_mbo_snapshot={outcome} completion_code={} sequence={} levels={} unsequenced_levels={} orders={} refused_levels={} refused_level_code={}",
+            optional(completion_code),
+            optional(self.sequence),
+            self.levels,
+            self.unsequenced_levels,
+            self.orders,
+            self.refused_levels,
+            optional(self.refused_level_code)
+        );
+    }
+}
+
+fn optional(value: Option<impl std::fmt::Display>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+/// Collects one covering snapshot response. A provider refusal is evidence,
+/// not a probe failure: production falls back to a live-only book for it.
 fn collect_depth_by_order_snapshot(
     ticker: &mut aeris_rithmic_protocol_adapter::RithmicTickerConnection,
     selected: &SelectedInstrument,
-) -> Result<MboSnapshotEvidence, String> {
+    stream: &mut MboStreamEvidence,
+) -> Result<(DepthByOrderSnapshotOutcome, MboSnapshotEvidence), String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut evidence = MboSnapshotEvidence::default();
     loop {
@@ -572,9 +699,7 @@ fn collect_depth_by_order_snapshot(
         match message {
             RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Level(level),
-            )) if level.identity.symbol == selected.symbol
-                && level.identity.exchange == selected.exchange =>
-            {
+            )) if is_selected(&level.identity, selected) => {
                 if let Some(sequence) = level.sequence_number {
                     if evidence
                         .sequence
@@ -596,52 +721,56 @@ fn collect_depth_by_order_snapshot(
                 }
                 evidence.orders = evidence.orders.saturating_add(level.orders.len());
             }
-            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrder(update))
-                if update.identity.symbol == selected.symbol
-                    && update.identity.exchange == selected.exchange =>
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::LevelRejected {
+                    identity,
+                    rejection,
+                },
+            )) if identity
+                .as_ref()
+                .is_none_or(|identity| is_selected(identity, selected)) =>
             {
-                if update
-                    .mutations
-                    .iter()
-                    .any(|mutation| mutation.exchange_order_id.is_empty())
-                {
-                    return Err("dbo_live_missing_exchange_order_id".to_string());
-                }
-                evidence.live_mutations = evidence
-                    .live_mutations
-                    .saturating_add(update.mutations.len());
+                evidence.refused_levels = evidence.refused_levels.saturating_add(1);
+                evidence.refused_level_code.get_or_insert(rejection.code);
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrder(update))
+                if is_selected(&update.identity, selected) =>
+            {
+                record_live_depth_by_order(stream, &update)?;
             }
             RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Complete {
-                    accepted,
+                    outcome,
                     identity,
                     sequence_number,
                 },
             )) => {
-                if !accepted {
-                    return Err("dbo_snapshot_rejected".to_string());
-                }
-                if identity.as_ref().is_some_and(|identity| {
-                    identity.symbol != selected.symbol || identity.exchange != selected.exchange
-                }) {
+                if identity
+                    .as_ref()
+                    .is_some_and(|identity| !is_selected(identity, selected))
+                {
                     return Err("dbo_snapshot_identity_mismatch".to_string());
                 }
-                if evidence
-                    .sequence
-                    .zip(sequence_number)
-                    .is_some_and(|(level, complete)| level != complete)
+                if outcome == DepthByOrderSnapshotOutcome::Accepted
+                    && evidence
+                        .sequence
+                        .zip(sequence_number)
+                        .is_some_and(|(level, complete)| level != complete)
                 {
                     return Err("dbo_snapshot_completion_sequence_mismatch".to_string());
                 }
                 evidence.sequence = evidence.sequence.or(sequence_number);
-                return Ok(evidence);
+                return Ok((outcome, evidence));
             }
             _ => {}
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "dbo_snapshot_timed_out levels={} orders={} live_mutations={}",
-                evidence.levels, evidence.orders, evidence.live_mutations
+                "dbo_snapshot_timed_out levels={} orders={} refused_levels={} live_frames={}",
+                evidence.levels,
+                evidence.orders,
+                evidence.refused_levels,
+                stream.depth_frames()
             ));
         }
     }

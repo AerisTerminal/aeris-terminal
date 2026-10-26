@@ -16,11 +16,67 @@ pub struct MarketIdentity {
     pub exchange: String,
 }
 
-/// Provider timestamp represented without local-clock interpretation.
+/// Rithmic gateway clock (`ssboe`/`usecs`) represented without local-clock
+/// interpretation. Rithmic history bars are stamped with this same clock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderTimestamp {
     pub seconds: i32,
     pub microseconds: i32,
+}
+
+/// Exchange matching-engine clock (`source_ssboe`, `source_usecs`,
+/// `source_nsecs`) kept exactly as received.
+///
+/// Rithmic does not document whether the nanosecond part counts the whole
+/// sub-second or only the remainder below the microsecond part, so decode
+/// never combines the parts; [`Self::unix_nanos`] does so only when they
+/// determine one instant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceTimestamp {
+    pub seconds: i32,
+    pub microseconds: Option<i32>,
+    pub nanoseconds: Option<i32>,
+}
+
+impl SourceTimestamp {
+    /// Returns the exchange instant in Unix nanoseconds, or `None` when the
+    /// parts leave the instant ambiguous or contradict each other.
+    ///
+    /// A nanosecond part of 1,000 or more can only be the whole sub-second,
+    /// so it must agree with any microsecond part. Below 1,000 it reads as
+    /// the same instant under either meaning once a microsecond part is
+    /// present: as the whole sub-second the microsecond part must be zero.
+    /// A zero second count is not a usable exchange instant.
+    #[must_use]
+    pub fn unix_nanos(self) -> Option<i64> {
+        if self.seconds <= 0 {
+            return None;
+        }
+        let sub_second = match (self.microseconds, self.nanoseconds) {
+            (microseconds, Some(nanoseconds)) if nanoseconds >= 1_000 => {
+                if microseconds.is_some_and(|microseconds| microseconds != nanoseconds / 1_000) {
+                    return None;
+                }
+                i64::from(nanoseconds)
+            }
+            (Some(microseconds), nanoseconds) => i64::from(microseconds)
+                .checked_mul(1_000)?
+                .checked_add(i64::from(nanoseconds.unwrap_or(0)))?,
+            (None, _) => return None,
+        };
+        i64::from(self.seconds)
+            .checked_mul(1_000_000_000)?
+            .checked_add(sub_second)
+    }
+}
+
+/// Rithmic `jop_ssboe`/`jop_nsecs` clock kept exactly as received. Rithmic
+/// does not document which event it stamps, so it is evidence only and is
+/// never published as an exchange or provider time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JopTimestamp {
+    pub seconds: i32,
+    pub nanoseconds: Option<i32>,
 }
 
 /// Provider-reported aggressor side.
@@ -38,7 +94,14 @@ pub struct TradeUpdate {
     pub size: u32,
     pub aggressor: Option<TradeAggressor>,
     pub is_snapshot: bool,
+    /// Rithmic `exchange_order_id`, when sent. Rithmic does not document
+    /// which side of the trade it names.
+    pub exchange_order_id: Option<String>,
+    /// Rithmic `aggressor_exchange_order_id`, when sent.
+    pub aggressor_exchange_order_id: Option<String>,
     pub timestamp: ProviderTimestamp,
+    pub source_timestamp: Option<SourceTimestamp>,
+    pub jop_timestamp: Option<JopTimestamp>,
 }
 
 /// One side of a top-of-book update.
@@ -47,6 +110,8 @@ pub struct QuoteLevel {
     pub price: f64,
     pub size: u32,
     pub orders: Option<u32>,
+    /// Rithmic `bid_implicit_size`/`ask_implicit_size`, when sent.
+    pub implied_size: Option<u32>,
 }
 
 /// Exact mutation carried for one quote side.
@@ -143,6 +208,8 @@ pub struct DepthByOrderUpdate {
     pub sequence_number: Option<u64>,
     pub mutations: Vec<DepthByOrderMutation>,
     pub timestamp: Option<ProviderTimestamp>,
+    pub source_timestamp: Option<SourceTimestamp>,
+    pub jop_timestamp: Option<JopTimestamp>,
 }
 
 /// One order contained in a covering DBO snapshot level.
@@ -164,12 +231,31 @@ pub struct DepthByOrderSnapshotLevel {
     pub orders: Vec<DepthByOrderSnapshotOrder>,
 }
 
+/// Nonzero Rithmic response code on a DBO snapshot frame. Only the numeric
+/// code is kept; the provider's free-text detail never leaves decode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepthByOrderSnapshotRejection {
+    pub code: u32,
+}
+
+/// Terminal answer to one covering DBO snapshot request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DepthByOrderSnapshotOutcome {
+    Accepted,
+    Rejected(DepthByOrderSnapshotRejection),
+}
+
 /// Multi-frame covering DBO snapshot response.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DepthByOrderSnapshotMessage {
     Level(DepthByOrderSnapshotLevel),
+    /// A level frame the provider refused, leaving its image incomplete.
+    LevelRejected {
+        identity: Option<MarketIdentity>,
+        rejection: DepthByOrderSnapshotRejection,
+    },
     Complete {
-        accepted: bool,
+        outcome: DepthByOrderSnapshotOutcome,
         identity: Option<MarketIdentity>,
         sequence_number: Option<u64>,
     },
@@ -238,8 +324,13 @@ fn decode_depth_by_order_snapshot(
                 // frame. That is an empty book, not a rejected request.
                 return Ok(None);
             }
-            if !accepted_snapshot_code(&message.rq_handler_rp_code) {
-                return Err(ProtocolError::RejectedDataFrame);
+            if let Some(rejection) = snapshot_rejection(&message.rq_handler_rp_code) {
+                return Ok(Some(DecodedMarketMessage::DepthByOrderSnapshot(
+                    DepthByOrderSnapshotMessage::LevelRejected {
+                        identity: optional_snapshot_identity(message.symbol, message.exchange)?,
+                        rejection,
+                    },
+                )));
             }
             let identity = identity(message.symbol, message.exchange)?;
             let sequence_number = message.sequence_number.filter(|sequence| *sequence != 0);
@@ -308,7 +399,10 @@ fn decode_depth_by_order_snapshot(
             )))
         }
         (true, false) => {
-            let accepted = accepted_snapshot_code(&message.rp_code);
+            let outcome = snapshot_rejection(&message.rp_code).map_or(
+                DepthByOrderSnapshotOutcome::Accepted,
+                DepthByOrderSnapshotOutcome::Rejected,
+            );
             if message.depth_side.is_some()
                 || message.depth_price.is_some()
                 || !message.depth_size.is_empty()
@@ -319,21 +413,10 @@ fn decode_depth_by_order_snapshot(
                     "depth_by_order_snapshot.complete",
                 ));
             }
-            let identity = match (message.symbol, message.exchange) {
-                (Some(symbol), Some(exchange)) => Some(MarketIdentity {
-                    symbol: bounded_string("depth_by_order_snapshot.symbol", symbol)?,
-                    exchange: bounded_string("depth_by_order_snapshot.exchange", exchange)?,
-                }),
-                (None, None) => None,
-                _ => {
-                    return Err(ProtocolError::InconsistentFields(
-                        "depth_by_order_snapshot.complete_identity",
-                    ));
-                }
-            };
+            let identity = optional_snapshot_identity(message.symbol, message.exchange)?;
             Ok(Some(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Complete {
-                    accepted,
+                    outcome,
                     identity,
                     sequence_number: message.sequence_number.filter(|sequence| *sequence != 0),
                 },
@@ -378,9 +461,33 @@ fn validate_snapshot_code_field(
     }
 }
 
+/// Reads a response-code field already checked by
+/// `validate_snapshot_code_field`: `["0"]` accepts and `[code, detail]`
+/// rejects with a positive numeric code.
 #[cfg(rithmic_kit)]
-fn accepted_snapshot_code(codes: &[String]) -> bool {
-    codes.len() == 1 && codes[0] == "0"
+fn snapshot_rejection(codes: &[String]) -> Option<DepthByOrderSnapshotRejection> {
+    codes
+        .first()
+        .and_then(|code| code.parse::<u32>().ok())
+        .filter(|code| *code > 0)
+        .map(|code| DepthByOrderSnapshotRejection { code })
+}
+
+#[cfg(rithmic_kit)]
+fn optional_snapshot_identity(
+    symbol: Option<String>,
+    exchange: Option<String>,
+) -> Result<Option<MarketIdentity>, ProtocolError> {
+    match (symbol, exchange) {
+        (Some(symbol), Some(exchange)) => Ok(Some(MarketIdentity {
+            symbol: bounded_string("depth_by_order_snapshot.symbol", symbol)?,
+            exchange: bounded_string("depth_by_order_snapshot.exchange", exchange)?,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(ProtocolError::InconsistentFields(
+            "depth_by_order_snapshot.identity",
+        )),
+    }
 }
 
 #[cfg(rithmic_kit)]
@@ -436,7 +543,21 @@ fn decode_trade(frame: &[u8]) -> Result<Option<DecodedMarketMessage>, ProtocolEr
         size,
         aggressor,
         is_snapshot: message.is_snapshot.unwrap_or(false),
+        exchange_order_id: optional_bounded_string(
+            "last_trade.exchange_order_id",
+            message.exchange_order_id,
+        )?,
+        aggressor_exchange_order_id: optional_bounded_string(
+            "last_trade.aggressor_exchange_order_id",
+            message.aggressor_exchange_order_id,
+        )?,
         timestamp: timestamp(message.ssboe, message.usecs)?,
+        source_timestamp: source_timestamp(
+            message.source_ssboe,
+            message.source_usecs,
+            message.source_nsecs,
+        )?,
+        jop_timestamp: jop_timestamp(message.jop_ssboe, message.jop_nsecs)?,
     })))
 }
 
@@ -458,6 +579,7 @@ fn decode_quote(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
         message.bid_price,
         message.bid_size,
         message.bid_orders,
+        message.bid_implicit_size,
     )?;
     let ask = quote_level(
         "ask",
@@ -466,6 +588,7 @@ fn decode_quote(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
         message.ask_price,
         message.ask_size,
         message.ask_orders,
+        message.ask_implicit_size,
     )?;
     Ok(DecodedMarketMessage::Quote(QuoteUpdate {
         identity: identity(message.symbol, message.exchange)?,
@@ -608,6 +731,12 @@ fn decode_depth_by_order(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolE
         sequence_number,
         mutations,
         timestamp: optional_timestamp(message.ssboe, message.usecs)?,
+        source_timestamp: source_timestamp(
+            message.source_ssboe,
+            message.source_usecs,
+            message.source_nsecs,
+        )?,
+        jop_timestamp: jop_timestamp(message.jop_ssboe, message.jop_nsecs)?,
     }))
 }
 
@@ -758,6 +887,72 @@ fn optional_timestamp(
     }
 }
 
+/// Range-checks each part without combining them; see [`SourceTimestamp`].
+#[cfg(rithmic_kit)]
+fn source_timestamp(
+    seconds: Option<i32>,
+    microseconds: Option<i32>,
+    nanoseconds: Option<i32>,
+) -> Result<Option<SourceTimestamp>, ProtocolError> {
+    let Some(seconds) = seconds else {
+        return if microseconds.is_none() && nanoseconds.is_none() {
+            Ok(None)
+        } else {
+            Err(ProtocolError::MissingField("source_ssboe"))
+        };
+    };
+    if seconds < 0 {
+        return Err(ProtocolError::InvalidNumber("source_ssboe"));
+    }
+    if microseconds.is_some_and(|value| !(0..1_000_000).contains(&value)) {
+        return Err(ProtocolError::InvalidNumber("source_usecs"));
+    }
+    if nanoseconds.is_some_and(|value| !(0..1_000_000_000).contains(&value)) {
+        return Err(ProtocolError::InvalidNumber("source_nsecs"));
+    }
+    Ok(Some(SourceTimestamp {
+        seconds,
+        microseconds,
+        nanoseconds,
+    }))
+}
+
+#[cfg(rithmic_kit)]
+fn jop_timestamp(
+    seconds: Option<i32>,
+    nanoseconds: Option<i32>,
+) -> Result<Option<JopTimestamp>, ProtocolError> {
+    let Some(seconds) = seconds else {
+        return if nanoseconds.is_none() {
+            Ok(None)
+        } else {
+            Err(ProtocolError::MissingField("jop_ssboe"))
+        };
+    };
+    if seconds < 0 {
+        return Err(ProtocolError::InvalidNumber("jop_ssboe"));
+    }
+    if nanoseconds.is_some_and(|value| !(0..1_000_000_000).contains(&value)) {
+        return Err(ProtocolError::InvalidNumber("jop_nsecs"));
+    }
+    Ok(Some(JopTimestamp {
+        seconds,
+        nanoseconds,
+    }))
+}
+
+/// An empty optional identifier carries no identity and reads as absent.
+#[cfg(rithmic_kit)]
+fn optional_bounded_string(
+    field: &'static str,
+    value: Option<String>,
+) -> Result<Option<String>, ProtocolError> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(|value| bounded_string(field, value))
+        .transpose()
+}
+
 #[cfg(rithmic_kit)]
 fn finite_required(field: &'static str, value: Option<f64>) -> Result<f64, ProtocolError> {
     let value = value.ok_or(ProtocolError::MissingField(field))?;
@@ -791,18 +986,20 @@ fn quote_level(
     price: Option<f64>,
     size: Option<i32>,
     orders: Option<i32>,
+    implied_size: Option<i32>,
 ) -> Result<QuoteSideUpdate, ProtocolError> {
     if cleared && (price.is_none() || size.is_none()) {
         if price.is_some_and(|price| !price.is_finite())
             || size.is_some_and(|size| size < 0)
             || orders.is_some_and(|orders| orders < 0)
+            || implied_size.is_some_and(|implied_size| implied_size < 0)
         {
             return Err(ProtocolError::InvalidNumber(field));
         }
         return Ok(QuoteSideUpdate::Cleared);
     }
     if !present {
-        if price.is_some() || size.is_some() || orders.is_some() {
+        if price.is_some() || size.is_some() || orders.is_some() || implied_size.is_some() {
             return Err(ProtocolError::InconsistentFields(field));
         }
         return Ok(QuoteSideUpdate::Unchanged);
@@ -811,6 +1008,7 @@ fn quote_level(
         price: finite_required(field, price)?,
         size: nonnegative_required(field, size)?,
         orders: optional_nonnegative(field, orders)?,
+        implied_size: optional_nonnegative(field, implied_size)?,
     }))
 }
 
@@ -869,6 +1067,56 @@ fn depth_levels(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod source_clock_tests {
+    use super::SourceTimestamp;
+
+    const fn source(microseconds: Option<i32>, nanoseconds: Option<i32>) -> SourceTimestamp {
+        SourceTimestamp {
+            seconds: 1_800_000_000,
+            microseconds,
+            nanoseconds,
+        }
+    }
+
+    #[test]
+    fn exchange_instant_is_derived_only_from_parts_that_agree() {
+        let base = 1_800_000_000_000_000_000_i64;
+        // A whole sub-second count that matches the microsecond part.
+        assert_eq!(
+            source(Some(123_456), Some(123_456_789)).unix_nanos(),
+            Some(base + 123_456_789)
+        );
+        // A remainder below the microsecond part.
+        assert_eq!(
+            source(Some(123_456), Some(789)).unix_nanos(),
+            Some(base + 123_456_789)
+        );
+        assert_eq!(source(Some(0), Some(789)).unix_nanos(), Some(base + 789));
+        assert_eq!(
+            source(None, Some(123_456_789)).unix_nanos(),
+            Some(base + 123_456_789)
+        );
+        assert_eq!(
+            source(Some(123_456), None).unix_nanos(),
+            Some(base + 123_456_000)
+        );
+        // Contradictory, ambiguous or missing sub-second evidence.
+        assert_eq!(source(Some(123_457), Some(123_456_789)).unix_nanos(), None);
+        assert_eq!(source(None, Some(789)).unix_nanos(), None);
+        assert_eq!(source(None, None).unix_nanos(), None);
+        assert_eq!(
+            SourceTimestamp {
+                seconds: 0,
+                microseconds: Some(1),
+                nanoseconds: None,
+            }
+            .unix_nanos(),
+            None
+        );
+    }
 }
 
 #[cfg(all(test, rithmic_kit))]
@@ -1068,12 +1316,48 @@ mod tests {
                 .expect("DBO snapshot completion decodes"),
             Some(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Complete {
-                    accepted: true,
+                    outcome: DepthByOrderSnapshotOutcome::Accepted,
                     identity: Some(MarketIdentity { symbol, exchange }),
                     sequence_number: Some(40),
                 }
             )) if symbol == "ESM7" && exchange == "CME"
         ));
+    }
+
+    #[test]
+    fn rejected_depth_by_order_snapshot_terminal_keeps_only_the_numeric_code() {
+        let rejected = rti::ResponseDepthByOrderSnapshot {
+            template_id: 116,
+            user_msg: Vec::new(),
+            rq_handler_rp_code: Vec::new(),
+            rp_code: vec!["5".to_string(), "permission denied".to_string()],
+            exchange: Some("CME".to_string()),
+            symbol: Some("MNQU6".to_string()),
+            sequence_number: None,
+            depth_side: None,
+            depth_price: None,
+            depth_size: Vec::new(),
+            depth_order_priority: Vec::new(),
+            exchange_order_id: Vec::new(),
+        }
+        .encode_to_vec();
+        assert_eq!(
+            RithmicProtocolCodec
+                .decode_market(&rejected)
+                .expect("rejected terminal frame decodes"),
+            Some(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::Complete {
+                    outcome: DepthByOrderSnapshotOutcome::Rejected(DepthByOrderSnapshotRejection {
+                        code: 5
+                    }),
+                    identity: Some(MarketIdentity {
+                        symbol: "MNQU6".to_string(),
+                        exchange: "CME".to_string(),
+                    }),
+                    sequence_number: None,
+                }
+            ))
+        );
     }
 
     #[test]
@@ -1115,10 +1399,20 @@ mod tests {
             exchange_order_id: vec!["bid-1".to_string()],
         }
         .encode_to_vec();
-        assert!(matches!(
-            RithmicProtocolCodec.decode_market(&rejected_level),
-            Err(ProtocolError::RejectedDataFrame)
-        ));
+        assert_eq!(
+            RithmicProtocolCodec
+                .decode_market(&rejected_level)
+                .expect("rejected level frame decodes"),
+            Some(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::LevelRejected {
+                    identity: Some(MarketIdentity {
+                        symbol: "MNQZ6".to_string(),
+                        exchange: "CME".to_string(),
+                    }),
+                    rejection: DepthByOrderSnapshotRejection { code: 7 },
+                }
+            ))
+        );
     }
 
     #[test]
@@ -1320,6 +1614,170 @@ mod tests {
         assert!(matches!(
             codec.decode_market(&anonymous.encode_to_vec()),
             Err(ProtocolError::MissingField("symbol"))
+        ));
+    }
+
+    #[test]
+    fn trade_preserves_every_clock_and_both_exchange_order_ids() {
+        let mut trade = trade_message();
+        trade.exchange_order_id = Some("6400001".to_string());
+        trade.aggressor_exchange_order_id = Some("6400002".to_string());
+        trade.source_ssboe = Some(1_800_000_000);
+        trade.source_usecs = Some(123_455);
+        trade.source_nsecs = Some(123_455_789);
+        trade.jop_ssboe = Some(1_800_000_000);
+        trade.jop_nsecs = Some(123_455_901);
+        let Some(DecodedMarketMessage::Trade(decoded)) = RithmicProtocolCodec
+            .decode_market(&trade.encode_to_vec())
+            .expect("trade decodes")
+        else {
+            panic!("trade frame decodes as a trade");
+        };
+        assert_eq!(
+            decoded.timestamp,
+            ProviderTimestamp {
+                seconds: 1_800_000_000,
+                microseconds: 123_456,
+            }
+        );
+        assert_eq!(
+            decoded.source_timestamp,
+            Some(SourceTimestamp {
+                seconds: 1_800_000_000,
+                microseconds: Some(123_455),
+                nanoseconds: Some(123_455_789),
+            })
+        );
+        assert_eq!(
+            decoded
+                .source_timestamp
+                .and_then(SourceTimestamp::unix_nanos),
+            Some(1_800_000_000_123_455_789)
+        );
+        assert_eq!(
+            decoded.jop_timestamp,
+            Some(JopTimestamp {
+                seconds: 1_800_000_000,
+                nanoseconds: Some(123_455_901),
+            })
+        );
+        assert_eq!(decoded.exchange_order_id.as_deref(), Some("6400001"));
+        assert_eq!(
+            decoded.aggressor_exchange_order_id.as_deref(),
+            Some("6400002")
+        );
+
+        let mut anonymous = trade_message();
+        anonymous.exchange_order_id = Some(String::new());
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&anonymous.encode_to_vec()),
+            Ok(Some(DecodedMarketMessage::Trade(TradeUpdate {
+                exchange_order_id: None,
+                source_timestamp: None,
+                jop_timestamp: None,
+                ..
+            })))
+        ));
+    }
+
+    #[test]
+    fn out_of_range_or_orphaned_clock_parts_fail_closed() {
+        let mut nanoseconds = trade_message();
+        nanoseconds.source_ssboe = Some(1_800_000_000);
+        nanoseconds.source_nsecs = Some(1_000_000_000);
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&nanoseconds.encode_to_vec()),
+            Err(ProtocolError::InvalidNumber("source_nsecs"))
+        ));
+
+        let mut orphaned = trade_message();
+        orphaned.source_usecs = Some(1);
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&orphaned.encode_to_vec()),
+            Err(ProtocolError::MissingField("source_ssboe"))
+        ));
+
+        let mut jop = trade_message();
+        jop.jop_nsecs = Some(1);
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&jop.encode_to_vec()),
+            Err(ProtocolError::MissingField("jop_ssboe"))
+        ));
+    }
+
+    #[test]
+    fn depth_by_order_update_preserves_source_and_jop_clocks() {
+        let update = rti::DepthByOrder {
+            template_id: 160,
+            symbol: Some("MNQZ6".to_string()),
+            exchange: Some("CME".to_string()),
+            sequence_number: Some(7),
+            update_type: vec![rti::depth_by_order::UpdateType::New.into()],
+            transaction_type: vec![rti::depth_by_order::TransactionType::Sell.into()],
+            depth_price: vec![21_000.25],
+            prev_depth_price: Vec::new(),
+            prev_depth_price_flag: Vec::new(),
+            depth_size: vec![2],
+            depth_order_priority: vec![5],
+            exchange_order_id: vec!["ask-1".to_string()],
+            ssboe: Some(1_800_000_000),
+            usecs: Some(500_002),
+            source_ssboe: Some(1_800_000_000),
+            source_usecs: Some(500_001),
+            source_nsecs: Some(500_001_250),
+            jop_ssboe: Some(1_800_000_000),
+            jop_nsecs: Some(500_001_600),
+        }
+        .encode_to_vec();
+        let Some(DecodedMarketMessage::DepthByOrder(decoded)) = RithmicProtocolCodec
+            .decode_market(&update)
+            .expect("DBO update decodes")
+        else {
+            panic!("DBO frame decodes as an order-level update");
+        };
+        assert_eq!(
+            decoded.source_timestamp,
+            Some(SourceTimestamp {
+                seconds: 1_800_000_000,
+                microseconds: Some(500_001),
+                nanoseconds: Some(500_001_250),
+            })
+        );
+        assert_eq!(
+            decoded.jop_timestamp,
+            Some(JopTimestamp {
+                seconds: 1_800_000_000,
+                nanoseconds: Some(500_001_600),
+            })
+        );
+    }
+
+    #[test]
+    fn quote_preserves_implied_sizes_per_side() {
+        let mut quote = quote_message();
+        quote.bid_implicit_size = Some(4);
+        quote.ask_implicit_size = Some(0);
+        assert!(matches!(
+            RithmicProtocolCodec
+                .decode_market(&quote.encode_to_vec())
+                .expect("quote decodes"),
+            Some(DecodedMarketMessage::Quote(QuoteUpdate {
+                bid: QuoteSideUpdate::Value(QuoteLevel {
+                    implied_size: Some(4),
+                    ..
+                }),
+                ask: QuoteSideUpdate::Value(QuoteLevel {
+                    implied_size: Some(0),
+                    ..
+                }),
+                ..
+            }))
+        ));
+
+        quote.bid_implicit_size = Some(-1);
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&quote.encode_to_vec()),
+            Err(ProtocolError::InvalidNumber("bid"))
         ));
     }
 

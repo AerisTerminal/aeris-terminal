@@ -70,9 +70,10 @@ pub use instrument_id::{legacy_display_label, parse_rithmic_instrument_id, rithm
 pub use market::{
     DecodedMarketMessage, DepthByOrderEndEvent, DepthByOrderMutation, DepthByOrderMutationKind,
     DepthByOrderSide, DepthByOrderSnapshotLevel, DepthByOrderSnapshotMessage,
-    DepthByOrderSnapshotOrder, DepthByOrderUpdate, MarketIdentity, OrderBookLevel, OrderBookSides,
+    DepthByOrderSnapshotOrder, DepthByOrderSnapshotOutcome, DepthByOrderSnapshotRejection,
+    DepthByOrderUpdate, JopTimestamp, MarketIdentity, OrderBookLevel, OrderBookSides,
     OrderBookUpdate, OrderBookUpdateKind, ProviderTimestamp, QuoteLevel, QuoteSideUpdate,
-    QuoteUpdate, TradeAggressor, TradeUpdate,
+    QuoteUpdate, SourceTimestamp, TradeAggressor, TradeUpdate,
 };
 pub use order_plant::{
     AccountListRequest, BracketLevelUpdateRequest, BracketOrderRequest, CancelAllOrdersRequest,

@@ -357,11 +357,12 @@ impl TradeModel {
         {
             return Ok(false);
         }
+        // Bars are stamped on the history clock, so live trades bucket on it too.
         let exchange_nanos = trade
             .metadata
             .timestamps
-            .exchange_unix_nanos
-            .ok_or_else(|| "Trade-built live trade has no exchange timestamp".to_string())?;
+            .history_clock_unix_nanos()
+            .ok_or_else(|| "Trade-built live trade has no history-clock timestamp".to_string())?;
         if self.last_trade_sequence.is_none() && exchange_nanos <= self.history_boundary_unix_nanos
         {
             return Ok(false);
