@@ -246,7 +246,7 @@ impl TerminalApp {
         let market = self.lifecycle.market().clone();
         let work = cx
             .background_executor()
-            .spawn(async move { market.discover_rithmic_systems(server) });
+            .spawn(async move { market.discover_provider_servers("rithmic", server.host()) });
         self.rithmic_login.discovery = Some(cx.spawn(async move |terminal, cx| {
             let result = work.await;
             if let Err(error) = terminal.update(cx, |terminal, cx| {
@@ -334,16 +334,42 @@ impl TerminalApp {
         let market = self.lifecycle.market().clone();
         let work = cx.background_executor().spawn(async move {
             match (operation, login) {
-                (RithmicLoginOperation::Checking, _) => market.saved_rithmic_login(),
+                (RithmicLoginOperation::Checking, _) => {
+                    market.saved_provider_login("rithmic").map(|saved| {
+                        saved.and_then(|summary| {
+                            RithmicServer::all()
+                                .find(|server| server.host() == summary.server_id)
+                                .map(|server| RithmicLoginSummary {
+                                    server,
+                                    system_name: summary.system_name,
+                                })
+                        })
+                    })
+                }
                 (RithmicLoginOperation::Forgetting, _) => {
-                    market.forget_rithmic_login().map(|()| None)
+                    market.forget_provider_login("rithmic").map(|()| None)
                 }
                 (RithmicLoginOperation::SigningIn, Some(login)) => market
-                    .sign_in_rithmic(
-                        login.server,
-                        &login.system_name,
-                        &login.user,
-                        &login.password,
+                    .sign_in_provider(
+                        "rithmic",
+                        &[
+                            aeris_market_runtime::LoginFieldValue {
+                                id: "server",
+                                value: login.server.host(),
+                            },
+                            aeris_market_runtime::LoginFieldValue {
+                                id: "system",
+                                value: &login.system_name,
+                            },
+                            aeris_market_runtime::LoginFieldValue {
+                                id: "user",
+                                value: &login.user,
+                            },
+                            aeris_market_runtime::LoginFieldValue {
+                                id: "password",
+                                value: &login.password,
+                            },
+                        ],
                     )
                     .map(|()| {
                         Some(RithmicLoginSummary {

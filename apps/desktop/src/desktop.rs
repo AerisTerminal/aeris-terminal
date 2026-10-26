@@ -1156,7 +1156,9 @@ impl DataConnections {
     fn disconnected(&self, provider: ProviderId) -> bool {
         match provider.descriptor().map(|descriptor| descriptor.connect) {
             Some(aeris_market_runtime::ConnectMethod::Public) | None => false,
-            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { form: "rithmic" }) => {
+            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. })
+                if provider.id() == "rithmic" =>
+            {
                 self.rithmic.missing()
             }
             Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. }) => true,

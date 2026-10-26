@@ -4,7 +4,12 @@
 //! The vault is the only credential boundary. Callers hand the user ID and
 //! password over once to be signed in and saved; nothing here returns them again.
 
-use super::MarketService;
+use super::{
+    MarketService,
+    descriptors::{
+        LoginField, LoginFieldValue, LoginSchema, ProviderLoginServer, SavedProviderLogin,
+    },
+};
 use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_observability::diagnostic;
 use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
@@ -21,6 +26,32 @@ use zeroize::Zeroizing;
 
 /// Most systems one discovery answer may list for selection.
 const MAXIMUM_DISCOVERED_SYSTEMS: usize = 64;
+
+pub(super) const LOGIN_SCHEMA: LoginSchema = LoginSchema {
+    fields: &[
+        LoginField {
+            id: "server",
+            label: "Server",
+            secret: false,
+        },
+        LoginField {
+            id: "system",
+            label: "System",
+            secret: false,
+        },
+        LoginField {
+            id: "user",
+            label: "User ID",
+            secret: false,
+        },
+        LoginField {
+            id: "password",
+            label: "Password",
+            secret: true,
+        },
+    ],
+    discover_servers: true,
+};
 
 /// One Rithmic server (R | Protocol connect point) a login can sign in through.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -44,6 +75,10 @@ impl RithmicServer {
     #[must_use]
     pub const fn host(self) -> &'static str {
         self.0.host()
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::all().find(|server| server.host() == id)
     }
 }
 
@@ -75,6 +110,102 @@ impl RithmicLogin {
 }
 
 impl MarketService {
+    fn credential_provider(provider_id: &str) -> Result<(), String> {
+        let registration = super::BUILT_IN_PROVIDER_DESCRIPTORS
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .ok_or_else(|| "Unsupported provider".to_string())?;
+        if registration.login_schema.is_none() {
+            return Err("This provider does not use saved credentials".to_string());
+        }
+        if registration.id != super::RITHMIC_DESCRIPTOR.id {
+            return Err("Provider login is unavailable".to_string());
+        }
+        Ok(())
+    }
+
+    /// The non-secret servers offered by a registered vault login provider.
+    ///
+    /// # Errors
+    /// Rejects unknown or public providers.
+    pub fn provider_login_servers(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ProviderLoginServer>, String> {
+        Self::credential_provider(provider_id)?;
+        Ok(RithmicServer::all()
+            .map(|server| ProviderLoginServer {
+                id: server.host(),
+                label: server.label(),
+            })
+            .collect())
+    }
+
+    /// Discovers the systems at a registered provider's server. Run off the UI thread.
+    ///
+    /// # Errors
+    /// Rejects unsupported servers and reports redacted discovery failures.
+    pub fn discover_provider_servers(
+        &self,
+        provider_id: &str,
+        server_id: &str,
+    ) -> Result<Vec<String>, String> {
+        Self::credential_provider(provider_id)?;
+        let server = RithmicServer::from_id(server_id)
+            .ok_or_else(|| "Unknown provider server".to_string())?;
+        self.discover_rithmic_systems(server)
+    }
+
+    /// Reads only non-secret saved-login metadata from the provider's native vault entry.
+    ///
+    /// # Errors
+    /// Rejects unsupported providers or unreadable vault entries.
+    pub fn saved_provider_login(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<SavedProviderLogin>, String> {
+        Self::credential_provider(provider_id)?;
+        saved_with_vault(provider_id, &native_vault()?)
+    }
+
+    /// Verifies credentials with the provider and stores only an accepted login in its native vault entry.
+    /// Run off the UI thread; submitted fields and their values must not be logged.
+    ///
+    /// # Errors
+    /// Rejects malformed fields, provider refusal or unavailable credential storage.
+    pub fn sign_in_provider(
+        &self,
+        provider_id: &str,
+        fields: &[LoginFieldValue<'_>],
+    ) -> Result<(), String> {
+        Self::credential_provider(provider_id)?;
+        let signing_in = &self.runtime.rithmic_login.signing_in;
+        signing_in
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "A Rithmic sign-in is already running".to_string())?;
+        let stop = Arc::clone(&self.runtime.shutdown);
+        let result = native_vault().and_then(|vault| {
+            sign_in_with_vault(provider_id, fields, &vault, |credentials| {
+                sign_in(credentials, stop)
+            })
+        });
+        signing_in.store(false, Ordering::Release);
+        result?;
+        self.runtime.rithmic_login.revision.advance();
+        Ok(())
+    }
+
+    /// Deletes only the selected provider's native vault entry and retires its old session.
+    ///
+    /// # Errors
+    /// Rejects unsupported providers or reports a failed vault deletion.
+    pub fn forget_provider_login(&self, provider_id: &str) -> Result<(), String> {
+        Self::credential_provider(provider_id)?;
+        forget_with_vault(provider_id, &native_vault()?)?;
+        self.runtime.rithmic_login.revision.advance();
+        Ok(())
+    }
+
     /// Lists the systems one Rithmic server offers, such as
     /// "Rithmic Paper Trading". Discovery needs no credentials. Call from a
     /// background worker: this opens one bounded WSS connection, and only one
@@ -83,7 +214,7 @@ impl MarketService {
     /// # Errors
     /// Rejects a concurrent discovery, or reports a redacted connection or
     /// protocol failure.
-    pub fn discover_rithmic_systems(&self, server: RithmicServer) -> Result<Vec<String>, String> {
+    fn discover_rithmic_systems(&self, server: RithmicServer) -> Result<Vec<String>, String> {
         let discovering = &self.runtime.rithmic_login.discovering;
         discovering
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -98,69 +229,62 @@ impl MarketService {
             .map(selectable_systems)
             .map_err(|error| format!("Rithmic system discovery failed: {error}"))
     }
+}
 
-    /// Describes the saved Rithmic login without exposing its credentials.
-    /// Call from a background worker; this reads the native credential vault.
-    ///
-    /// # Errors
-    /// Reports an unavailable vault or a saved login that can no longer be read.
-    pub fn saved_rithmic_login(&self) -> Result<Option<RithmicLoginSummary>, String> {
-        load_summary(&native_vault()?)
+impl From<RithmicLoginSummary> for SavedProviderLogin {
+    fn from(summary: RithmicLoginSummary) -> Self {
+        Self {
+            server_id: summary.server.host().to_string(),
+            server_label: summary.server.label().to_string(),
+            system_name: summary.system_name,
+        }
     }
+}
 
-    /// Signs in to Rithmic with the login and logs straight out again, then
-    /// saves the login Rithmic accepted to the native credential vault,
-    /// replacing any earlier one, and retires sessions signed in under the
-    /// earlier login so the next connection uses this one. A login Rithmic
-    /// refuses is never saved. Call from a background worker: this opens one
-    /// bounded discovery and one bounded login connection, and only one
-    /// sign-in runs at a time.
-    ///
-    /// # Errors
-    /// Rejects empty, oversized or control-containing fields, reports why
-    /// Rithmic refused or could not be reached, or reports an unavailable vault.
-    pub fn sign_in_rithmic(
-        &self,
-        server: RithmicServer,
-        system_name: &str,
-        user: &str,
-        password: &str,
-    ) -> Result<(), String> {
-        let signing_in = &self.runtime.rithmic_login.signing_in;
-        signing_in
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "A Rithmic sign-in is already running".to_string())?;
-        let stop = Arc::clone(&self.runtime.shutdown);
-        let result = native_vault().and_then(|vault| {
-            save_signed_in_login(
-                &vault,
-                RithmicCredentials {
-                    gateway: server.0,
-                    system_name,
-                    user,
-                    password,
-                },
-                |credentials| sign_in(credentials, stop),
-            )
-        });
-        signing_in.store(false, Ordering::Release);
-        result?;
-        self.runtime.rithmic_login.revision.advance();
-        Ok(())
+fn credentials_from_fields<'a>(
+    fields: &'a [LoginFieldValue<'a>],
+) -> Result<RithmicCredentials<'a>, String> {
+    if fields.len() != LOGIN_SCHEMA.fields.len()
+        || fields
+            .iter()
+            .zip(LOGIN_SCHEMA.fields)
+            .any(|(given, required)| given.id != required.id)
+    {
+        return Err("Invalid provider login fields".to_string());
     }
+    let server = RithmicServer::from_id(fields[0].value)
+        .ok_or_else(|| "Unknown provider server".to_string())?;
+    Ok(RithmicCredentials {
+        gateway: server.0,
+        system_name: fields[1].value,
+        user: fields[2].value,
+        password: fields[3].value,
+    })
+}
 
-    /// Deletes the saved Rithmic login and retires sessions signed in with it.
-    /// Call from a background worker.
-    ///
-    /// # Errors
-    /// Reports an unavailable vault or a failed deletion.
-    pub fn forget_rithmic_login(&self) -> Result<(), String> {
-        native_vault()?
-            .delete(RITHMIC_LOGIN_VAULT_KEY)
-            .map_err(|_| "Saved Rithmic login could not be deleted".to_string())?;
-        self.runtime.rithmic_login.revision.advance();
-        Ok(())
-    }
+fn sign_in_with_vault(
+    provider_id: &str,
+    fields: &[LoginFieldValue<'_>],
+    vault: &impl CredentialVault,
+    sign_in: impl FnOnce(RithmicCredentials<'_>) -> Result<(), RithmicSessionError>,
+) -> Result<(), String> {
+    MarketService::credential_provider(provider_id)?;
+    save_signed_in_login(vault, credentials_from_fields(fields)?, sign_in)
+}
+
+fn forget_with_vault(provider_id: &str, vault: &impl CredentialVault) -> Result<(), String> {
+    MarketService::credential_provider(provider_id)?;
+    vault
+        .delete(RITHMIC_LOGIN_VAULT_KEY)
+        .map_err(|_| "Saved Rithmic login could not be deleted".to_string())
+}
+
+fn saved_with_vault(
+    provider_id: &str,
+    vault: &impl CredentialVault,
+) -> Result<Option<SavedProviderLogin>, String> {
+    MarketService::credential_provider(provider_id)?;
+    load_summary(vault).map(|summary| summary.map(SavedProviderLogin::from))
 }
 
 fn native_vault() -> Result<NativeCredentialVault, String> {
@@ -305,27 +429,94 @@ fn login_field_error(error: RithmicCredentialError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     #[derive(Default)]
-    struct MemoryVault(Mutex<Option<Vec<u8>>>);
+    struct MemoryVault(Mutex<BTreeMap<String, Vec<u8>>>);
 
     impl CredentialVault for MemoryVault {
         type Error = ();
         fn store(&self, key: &str, bytes: &[u8]) -> Result<(), ()> {
             assert_eq!(key, RITHMIC_LOGIN_VAULT_KEY);
-            *self.0.lock().unwrap() = Some(bytes.to_vec());
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), bytes.to_vec());
             Ok(())
         }
         fn load(&self, key: &str) -> Result<Option<Vec<u8>>, ()> {
             assert_eq!(key, RITHMIC_LOGIN_VAULT_KEY);
-            Ok(self.0.lock().unwrap().clone())
+            Ok(self.0.lock().unwrap().get(key).cloned())
         }
         fn delete(&self, key: &str) -> Result<(), ()> {
             assert_eq!(key, RITHMIC_LOGIN_VAULT_KEY);
-            *self.0.lock().unwrap() = None;
+            self.0.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    #[test]
+    fn neutral_login_writes_only_the_provider_vault_entry() {
+        let vault = MemoryVault::default();
+        vault
+            .0
+            .lock()
+            .unwrap()
+            .insert("other-provider".into(), b"untouched".to_vec());
+        let fields = [
+            LoginFieldValue {
+                id: "server",
+                value: chicago().host(),
+            },
+            LoginFieldValue {
+                id: "system",
+                value: "Rithmic Paper Trading",
+            },
+            LoginFieldValue {
+                id: "user",
+                value: "fixture-user",
+            },
+            LoginFieldValue {
+                id: "password",
+                value: "fixture-password",
+            },
+        ];
+        assert_eq!(
+            sign_in_with_vault("hyperliquid", &fields, &vault, |_| panic!(
+                "public provider cannot sign in"
+            )),
+            Err("This provider does not use saved credentials".to_string())
+        );
+        assert_eq!(vault.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            saved_with_vault("hyperliquid", &vault),
+            Err("This provider does not use saved credentials".to_string())
+        );
+        assert_eq!(
+            forget_with_vault("hyperliquid", &vault),
+            Err("This provider does not use saved credentials".to_string())
+        );
+        sign_in_with_vault("rithmic", &fields, &vault, |_| Ok(())).unwrap();
+        assert_eq!(vault.0.lock().unwrap().len(), 2);
+        assert_eq!(
+            vault.0.lock().unwrap().get("other-provider").unwrap(),
+            b"untouched"
+        );
+        let summary = saved_with_vault("rithmic", &vault).unwrap().unwrap();
+        assert_eq!(summary.server_id, chicago().host());
+        assert_eq!(summary.server_label, chicago().label());
+        assert_eq!(summary.system_name, "Rithmic Paper Trading");
+        let summary_text = format!("{summary:?}");
+        assert!(!summary_text.contains("fixture-user"));
+        assert!(!summary_text.contains("fixture-password"));
+        forget_with_vault("rithmic", &vault).unwrap();
+        assert_eq!(vault.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            vault.0.lock().unwrap().get("other-provider").unwrap(),
+            b"untouched"
+        );
+        assert_eq!(saved_with_vault("rithmic", &vault), Ok(None));
     }
 
     fn chicago() -> RithmicServer {

@@ -308,7 +308,9 @@ fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> V
         .map(|provider| {
             let descriptor = provider.descriptor().expect("published provider");
             match descriptor.connect {
-                aeris_market_runtime::ConnectMethod::VaultCredentials { form: "rithmic" } => {
+                aeris_market_runtime::ConnectMethod::VaultCredentials { .. }
+                    if provider.id() == "rithmic" =>
+                {
                     rithmic_group(connections, theme)
                 }
                 aeris_market_runtime::ConnectMethod::Public => settings_group(

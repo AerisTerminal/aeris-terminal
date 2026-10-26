@@ -817,6 +817,7 @@ struct LiveHyperliquidHistory(aeris_hyperliquid_market_adapter::HyperliquidHttpC
 struct ProviderDescriptor {
     id: &'static str,
     presentation: ProviderPresentation,
+    login_schema: Option<&'static descriptors::LoginSchema>,
     capabilities: ProviderCapabilities,
     start: ProviderRuntimeStarter,
     flush_demand: for<'a> fn(&mut Coordinator<'a>),
@@ -958,6 +959,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
 const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "rithmic",
     presentation: &RITHMIC_PRESENTATION,
+    login_schema: Some(&rithmic_login::LOGIN_SCHEMA),
     capabilities: ProviderCapabilities {
         account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
         engine: EngineProviderCapabilities {
@@ -1021,6 +1023,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
 const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "hyperliquid",
     presentation: &HYPERLIQUID_PRESENTATION,
+    login_schema: None,
     capabilities: HYPERLIQUID_CAPABILITIES,
     start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
     flush_demand: flush_hyperliquid_provider_demand,
@@ -1097,9 +1100,7 @@ pub fn published_provider_descriptors() -> &'static [descriptors::ProviderDescri
         .get_or_init(|| {
             BUILT_IN_PROVIDER_DESCRIPTORS
                 .iter()
-                .map(|registration| {
-                    descriptors::ProviderDescriptor::from_presentation(registration.presentation)
-                })
+                .map(descriptors::ProviderDescriptor::from_registration)
                 .collect()
         })
         .as_slice()

@@ -339,7 +339,11 @@ the check.
 - Tests should use minimal sanitized fixtures faithful to real shapes. Never store credentials, account
   data, or raw private payload dumps.
 - Rithmic production credentials never enter source, chat, logs, CI, or environment files. Native vault
-  storage is the credential boundary. Live/test provider sessions must respect provider concurrency limits.
+  storage is the credential boundary. The market runtime publishes provider-owned static login fields
+  through `ConnectMethod::VaultCredentials` and exposes provider-id-keyed saved summary, sign-in,
+  forget and server/system discovery; the Rithmic implementation alone verifies and writes its
+  native-vault entry. Submitted field values never derive `Debug`. Live/test provider sessions must
+  respect provider concurrency limits.
 - Broker orders reach Rithmic only through the venue relay in `market_runtime::rithmic_venue`, started
   once by `MarketService::attach_broker_venue` on its `aeris-broker-venue` worker. It reads the same
   vault login, routes only demo logins (the Rithmic Test gateway and Rithmic Paper Trading) and refuses a

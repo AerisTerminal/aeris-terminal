@@ -21,6 +21,41 @@ fn every_registered_provider_has_a_complete_published_descriptor() {
 }
 
 #[test]
+fn registered_login_schema_is_provider_owned() {
+    let providers = published_provider_descriptors();
+    let rithmic = providers
+        .iter()
+        .find(|provider| provider.id == "rithmic")
+        .unwrap();
+    let descriptors::ConnectMethod::VaultCredentials { schema } = rithmic.connect else {
+        panic!("Rithmic publishes vault login fields");
+    };
+    assert!(schema.discover_servers);
+    assert_eq!(
+        schema
+            .fields
+            .iter()
+            .map(|field| (field.id, field.secret))
+            .collect::<Vec<_>>(),
+        [
+            ("server", false),
+            ("system", false),
+            ("user", false),
+            ("password", true)
+        ]
+    );
+    assert!(schema.fields.iter().all(|field| !field.label.is_empty()));
+    assert_eq!(
+        providers
+            .iter()
+            .find(|provider| provider.id == "hyperliquid")
+            .unwrap()
+            .connect,
+        descriptors::ConnectMethod::Public
+    );
+}
+
+#[test]
 fn published_instrument_series_uses_calendar_resolved_daily_cadence() {
     let hyperliquid = InstallProviderInstrument {
         provider: "hyperliquid".into(),
@@ -197,6 +232,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
     let fourth = ProviderDescriptor {
         id: "fourth-test-provider",
         presentation: &FOURTH_PRESENTATION,
+        login_schema: None,
         capabilities: ProviderCapabilities {
             account_id: "fourth-test-account",
             engine: EngineProviderCapabilities {
