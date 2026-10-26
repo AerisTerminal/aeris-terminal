@@ -1163,6 +1163,153 @@ mod tests {
     }
 
     #[test]
+    fn chart_buy_intent_reaches_runtime_fill() {
+        use aeris_trading::{OrderSide, OrderStatus, OrderType, TimeInForce};
+
+        let (service, root, account, _, instrument, _) = real_owner_fill_fixture();
+        let subscription = service.subscribe().expect("owner subscription");
+        let mut store = TradingStore::default();
+        let initial = subscription
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial");
+        assert!(store.slot.lock().expect("slot").offer(initial));
+        store.drain().expect("initial pane view");
+        let product = aeris_contracts::InstallProviderInstrument {
+            provider: "fixture".into(),
+            session_generation: 1,
+            instrument_id: instrument.as_str().into(),
+            price_scale: 2,
+            quantity_scale: 0,
+            price_increment: Some(1),
+            ..Default::default()
+        };
+        let command = aeris_desktop::trading::prepare_product_order(
+            1_000_000_000_000,
+            &product,
+            OrderSide::Buy,
+            Some(account.as_str().into()),
+            1,
+            OrderType::Market,
+            TimeInForce::Day,
+        )
+        .expect("Buy identity without a pane book");
+        assert!(command.limit_price.is_none(), "the owner prices the Buy");
+        let order = service
+            .place_order_from_market(command, true)
+            .expect("owner fill");
+        assert_eq!(order.status, OrderStatus::Filled);
+        let publication = subscription
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fill");
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        store.drain().expect("fill reaches pane");
+        let set = store.current().expect("current pane state");
+        assert_eq!(set.fills.len(), 1);
+        let chart = crate::desktop::chart_trading_snapshot(
+            set,
+            &store.pane_view(&account, &instrument),
+            Some(&product),
+            Some(&account),
+        )
+        .expect("chart Buy projection");
+        assert_eq!(
+            chart.executions.len(),
+            1,
+            "the runtime fill is visible on the chart"
+        );
+        service
+            .shutdown(Duration::from_secs(2))
+            .expect("owner shutdown");
+        std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn scoped_flatten_cancel_and_kill_reach_owner_without_a_pane_book() {
+        use aeris_trading::{OrderSide, OrderType, TimeInForce};
+        use aeris_trading_runtime::FlattenScope;
+
+        let (service, root, account, other_account, instrument, _) = real_owner_fill_fixture();
+        let product = aeris_contracts::InstallProviderInstrument {
+            provider: "fixture".into(),
+            session_generation: 1,
+            instrument_id: instrument.as_str().into(),
+            quantity_scale: 0,
+            ..Default::default()
+        };
+        let buy = |side| {
+            aeris_desktop::trading::prepare_product_order(
+                1_000_000_000_000,
+                &product,
+                side,
+                Some(account.as_str().into()),
+                1,
+                OrderType::Market,
+                TimeInForce::Day,
+            )
+            .expect("instruction needs no pane frame")
+        };
+        service
+            .place_order_from_market(buy(OrderSide::Buy), true)
+            .expect("open position");
+        let (selected_account, selected_instrument) = aeris_desktop::trading::prepare_flatten_for(
+            &product.instrument_id,
+            Some(account.as_str().into()),
+        )
+        .expect("ticket or bottom-panel selected scope");
+        let closed = service
+            .flatten(FlattenScope {
+                account: Some(selected_account.clone()),
+                instrument: Some(selected_instrument),
+            })
+            .expect("instrument flatten");
+        assert_eq!(closed.fills.len(), 1);
+        assert_eq!(closed.unpriced.len(), 0);
+        let cancelled = service
+            .cancel_all(Some(selected_account.clone()))
+            .expect("account cancel scope");
+        assert!(cancelled.is_empty(), "filled orders are not working orders");
+        assert_eq!(
+            service.cancel_all(None).expect("global cancel scope").len(),
+            0
+        );
+        assert_eq!(
+            service
+                .flatten(FlattenScope {
+                    account: Some(selected_account.clone()),
+                    instrument: None,
+                })
+                .expect("flatten-all selected account scope")
+                .fills
+                .len(),
+            0
+        );
+        let locked = service
+            .kill_switch(
+                Some(selected_account),
+                "test scoped kill".into(),
+                1_000_000_000_000,
+            )
+            .expect("account kill scope");
+        assert_eq!(locked.accounts_locked, 1);
+        let global = service
+            .kill_switch(None, "test global kill".into(), 1_000_000_000_001)
+            .expect("global kill scope");
+        assert!(global.accounts_locked >= 1);
+        assert!(
+            service
+                .snapshot()
+                .expect("owner view")
+                .risk_locks
+                .iter()
+                .any(|lock| lock.account_id == other_account)
+        );
+        service
+            .shutdown(Duration::from_secs(2))
+            .expect("owner shutdown");
+        std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
     fn ticket_hotkey_and_quantity_read_selected_store_publication() {
         let (mut publication, account, other, instrument) = indexed_fixture();
         publication

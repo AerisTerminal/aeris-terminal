@@ -288,7 +288,7 @@ struct TicketView<'a> {
     broker: Option<TicketBroker>,
     position: Option<&'a aeris_trading_runtime::PositionPnl>,
     working_orders: usize,
-    /// Orders may be placed: an unlocked account and a current book.
+    /// Orders may be placed: an unlocked account and instrument.
     ready: bool,
 }
 
@@ -345,7 +345,7 @@ impl<'a> TicketView<'a> {
                     locks: set.map_or(&[], |set| set.risk_locks.as_slice()),
                 })
                 .is_none()
-                && state.frame.is_some(),
+                && instrument.is_some(),
         }
     }
 
@@ -943,7 +943,7 @@ fn ticket_price(
         (TicketAction::Touch | TicketAction::Limit, Sell)
         | (TicketAction::Stop | TicketAction::StopLimit, Buy) => (ask, false),
     };
-    let touch = touch.ok_or("Order requires a current bid and ask")?;
+    let touch = touch.ok_or("Waiting for a quoted price on this instrument")?;
     let offset = if action == TicketAction::Touch {
         0
     } else {
@@ -1019,9 +1019,12 @@ fn order_button(
         aeris_trading::OrderSide::Buy => frame.best_bid.is_some(),
         aeris_trading::OrderSide::Sell => frame.best_ask.is_some(),
     });
-    let enabled = view.ready && (action != TicketAction::Touch || has_touch);
+    let enabled = view.ready
+        && (action == TicketAction::Market || state.frame.is_some())
+        && (action != TicketAction::Touch || has_touch);
     let app = state.app.clone();
     let frame = state.frame.cloned();
+    let product = state.product.cloned();
     let account = view.account_key();
     let quantity = state.trading.order_entry.quantity;
     let settings = state.trading.order_entry.ticket;
@@ -1034,24 +1037,29 @@ fn order_button(
         .label(action.label(side))
         .disabled(!enabled)
         .on_click(move |_, _, cx| {
-            let Some(frame) = frame.as_ref() else {
+            let Some(product) = product.as_ref() else {
                 return;
             };
             let service = app.read(cx).lifecycle.trading().clone();
             let feedback = app.read(cx).lifecycle.trading_feedback().clone();
             let pane = app.read(cx).trading_pane_token.clone();
-            let price_units = match ticket_price(action, side, frame, settings.offset()) {
-                Ok(price_units) => price_units,
-                Err(reason) => {
-                    feedback.record_for_pane(&pane, Err(reason.to_string()));
-                    return;
-                }
+            let price_units = match (action, frame.as_ref()) {
+                (TicketAction::Market, _) => None,
+                (_, Some(frame)) => match ticket_price(action, side, frame, settings.offset()) {
+                    Ok(price_units) => price_units,
+                    Err(reason) => {
+                        feedback.record_for_pane(&pane, Err(reason.to_string()));
+                        return;
+                    }
+                },
+                _ => return,
             };
             aeris_desktop::trading::dispatch_ticket_order(
                 &service,
                 &feedback,
                 &pane,
-                frame,
+                product,
+                frame.as_ref(),
                 aeris_desktop::trading::TicketOrder {
                     side,
                     order_type: action.order_type(),
@@ -1091,15 +1099,18 @@ fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
 /// Cancels the selected account's orders on this instrument and closes its position.
 fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Button {
     let app = state.app.clone();
-    let frame = state.frame.cloned();
+    let instrument = state
+        .product
+        .map(|product| product.instrument_id.clone())
+        .or_else(|| state.frame.map(|frame| frame.instrument_id.clone()));
     let account = view.account_key();
     Button::new("ticket_flat", state.theme)
         .variant(ButtonVariant::Warning)
         .label("Flat")
         .aria_label("Flatten this instrument")
-        .disabled(account.is_none() || frame.is_none())
+        .disabled(account.is_none() || instrument.is_none())
         .on_click(move |_, _, cx| {
-            let Some(frame) = frame.as_ref() else {
+            let Some(instrument) = instrument.as_ref() else {
                 return;
             };
             let service = app.read(cx).lifecycle.trading().clone();
@@ -1109,7 +1120,7 @@ fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> 
                 &service,
                 &feedback,
                 &pane,
-                frame,
+                instrument,
                 account.clone(),
                 cx,
             );

@@ -4626,6 +4626,99 @@ fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn stale_drag_posts_one_notice_and_restores_line(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let id = aeris_trading::ClientOrderId::try_new("filled-before-drag").expect("order id");
+    let quantity = aeris_trading::FixedPoint::try_new(1, 0).expect("quantity");
+    let current = aeris_trading::Order {
+        id: aeris_trading::OrderId::try_new("order-filled-before-drag").expect("id"),
+        client_order_id: id.clone(),
+        account_id: aeris_trading::TradingAccountId::try_new("practice-1").expect("account"),
+        instrument_id: aeris_instruments::InstrumentId::try_new("fixture-instrument")
+            .expect("instrument"),
+        side: aeris_trading::OrderSide::Buy,
+        order_type: aeris_trading::OrderType::Limit,
+        time_in_force: aeris_trading::TimeInForce::Day,
+        quantity,
+        filled_quantity: quantity,
+        limit_price: Some(aeris_trading::FixedPoint::try_new(10_000, 2).expect("price")),
+        stop_price: None,
+        status: aeris_trading::OrderStatus::Filled,
+        submitted_unix_nanos: 1,
+        revision: 2,
+        accepted_unix_nanos: 1,
+        updated_unix_nanos: 2,
+        eligible_after_unix_nanos: 1,
+        triggered_unix_nanos: None,
+        expires_at_unix_nanos: None,
+        terminal_unix_nanos: Some(2),
+        provenance: aeris_trading::TradingProvenance {
+            venue_id: "aeris-sim".into(),
+            provider_id: "fixture".into(),
+            session_generation: 1,
+            source_sequence: 1,
+            observed_unix_nanos: 1,
+        },
+    };
+    let line = ChartWorkingOrder {
+        id: ChartOrderId::new(id.as_str()).expect("line id"),
+        account_id: None,
+        pane_index: 0,
+        price_scale: ChartTradingPriceScale::Right,
+        side: ChartOrderSide::Buy,
+        kind: ChartOrderKind::Limit,
+        role: ChartOrderRole::Working,
+        status: ChartOrderStatus::Working,
+        price: 99.0,
+        stop_price: None,
+        trailing_trigger_price: None,
+        break_even_trigger_price: None,
+        quantity: 1.0,
+        filled_quantity: 0.0,
+        position_id: None,
+        parent_order_id: None,
+        bracket_id: None,
+        oco_group_id: None,
+        revision: 1,
+        annotations: Vec::new(),
+    };
+    harness.pane.update(cx, |pane, cx| {
+        let chart = pane.chart.as_ref().expect("chart");
+        chart.update(cx, |chart, _| {
+            chart
+                .set_trading_snapshot(ChartTradingSnapshot {
+                    orders: vec![line],
+                    ..Default::default()
+                })
+                .expect("original line");
+        });
+        for _ in 0..2 {
+            app_stale_order_notice_and_line(chart, &current, cx);
+        }
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let chart = harness
+            .pane
+            .read(cx)
+            .chart
+            .as_ref()
+            .expect("chart")
+            .read(cx);
+        assert!(
+            chart.trading_snapshot().orders.is_empty(),
+            "filled order line snaps to the owner state"
+        );
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1, "same stale edit is one keyed notice");
+        assert_eq!(notices[0].key.kind, "stale_order_edit");
+        assert_eq!(notices[0].title, aeris_desktop::trading::STALE_ORDER_NOTICE);
+        assert!(!notices[0].detail.contains("StaleRevision"));
+    });
+}
+
+#[gpui::test]
 fn descriptor_labels_render_without_desktop_mapping(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     let mut descriptor = cx.read(|cx| {

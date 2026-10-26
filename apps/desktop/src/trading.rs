@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, Weak};
 /// same map also bounds a suspended window without silently dropping command outcomes.
 pub const MAXIMUM_IN_FLIGHT_TRADING_REQUESTS: usize = 64;
 const REQUEST_CAPACITY_NOTICE: &str = "Too many trading commands are waiting for a result";
+pub const STALE_ORDER_NOTICE: &str = "Order changed before your edit; it was not modified";
 /// Allows a burst of global commands and venue notices between UI wakes without loss.
 pub const MAXIMUM_UNSCOPED_NOTICES: usize = 64;
 
@@ -47,6 +48,8 @@ pub struct TradingCommandFeedback {
     pub revision: u64,
     pub message: String,
     pub is_error: bool,
+    /// The owner's current order after a rejected revisioned edit.
+    pub stale_order: Option<Box<aeris_trading::Order>>,
 }
 
 #[derive(Default)]
@@ -126,12 +129,46 @@ impl TradingFeedback {
                     revision,
                     message,
                     is_error: false,
+                    stale_order: None,
                 },
                 Err(message) => TradingCommandFeedback {
                     revision,
                     message,
                     is_error: true,
+                    stale_order: None,
                 },
+            });
+        }
+        let wake = state.wake.clone();
+        drop(state);
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    /// A stale chart edit has a pane notice instead of a status-row completion.
+    /// Release its reservation without inventing a successful command result.
+    pub fn retire_request(&self, id: RequestId) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .in_flight
+            .remove(&id);
+    }
+
+    pub fn finish_stale_request(&self, id: RequestId, current: Box<aeris_trading::Order>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.revision = state.revision.saturating_add(1).max(1);
+        let revision = state.revision;
+        if let Some(request) = state.in_flight.get_mut(&id) {
+            request.result = Some(TradingCommandFeedback {
+                revision,
+                message: STALE_ORDER_NOTICE.into(),
+                is_error: true,
+                stale_order: Some(current),
             });
         }
         let wake = state.wake.clone();
@@ -182,6 +219,7 @@ impl TradingFeedback {
                 revision: state.revision,
                 message: format!("{count} notices dropped"),
                 is_error: true,
+                stale_order: None,
             });
         }
         state.unscoped_notices.pop_front()
@@ -240,11 +278,13 @@ impl TradingFeedback {
                 revision,
                 message,
                 is_error: false,
+                stale_order: None,
             },
             Err(message) => TradingCommandFeedback {
                 revision,
                 message,
                 is_error: true,
+                stale_order: None,
             },
         });
         if state.unscoped_notices.len() == MAXIMUM_UNSCOPED_NOTICES {
@@ -313,8 +353,9 @@ pub fn flatten_feedback(
     }
     if !outcome.pending_exits.is_empty() {
         parts.push(format!(
-            "{} broker exit request(s) sent",
-            outcome.pending_exits.len()
+            "{} {} exit request(s) sent",
+            outcome.pending_exits.len(),
+            broker_venue_display_name(),
         ));
     }
     if !outcome.unpriced.is_empty() {
@@ -355,8 +396,9 @@ pub fn kill_feedback(
     }
     if !outcome.pending_exits.is_empty() {
         parts.push(format!(
-            "{} broker exit request(s) sent",
-            outcome.pending_exits.len()
+            "{} {} exit request(s) sent",
+            outcome.pending_exits.len(),
+            broker_venue_display_name(),
         ));
     }
     if !outcome.unpriced.is_empty() {
@@ -373,6 +415,15 @@ pub fn kill_feedback(
     } else {
         Ok(message)
     }
+}
+
+fn broker_venue_display_name() -> &'static str {
+    aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| {
+            descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
+        })
+        .map_or("broker venue", |descriptor| descriptor.display_name)
 }
 
 pub fn record_outcome<T>(
@@ -498,7 +549,7 @@ pub fn dispatch_simulated_order(
     service: &TradingService,
     feedback: &TradingFeedback,
     pane: &TradingPaneToken,
-    frame: &aeris_market_data::OrderBookFrame,
+    product: &aeris_contracts::InstallProviderInstrument,
     side: aeris_trading::OrderSide,
     selection: SimulatedOrderSelection,
     cx: &mut gpui::App,
@@ -509,9 +560,9 @@ pub fn dispatch_simulated_order(
     }
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some(command) = prepare_simulated_order(
+    let Some(command) = prepare_product_order(
         feedback.now(),
-        frame,
+        product,
         side,
         selection.account_key,
         selection.quantity,
@@ -520,7 +571,7 @@ pub fn dispatch_simulated_order(
     ) else {
         feedback.record_for_pane(
             pane,
-            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+            Err("Choose a valid account and instrument for this order".to_string()),
         );
         return;
     };
@@ -550,7 +601,7 @@ pub struct SimulatedOrderSelection {
 pub fn dispatch_simulated_selected_order(
     service: &TradingService,
     feedback: &TradingFeedback,
-    frame: &aeris_market_data::OrderBookFrame,
+    product: &aeris_contracts::InstallProviderInstrument,
     side: aeris_trading::OrderSide,
     selection: SimulatedOrderSelection,
     pane: &TradingPaneToken,
@@ -562,9 +613,9 @@ pub fn dispatch_simulated_selected_order(
     }
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some(entry) = prepare_simulated_order(
+    let Some(entry) = prepare_product_order(
         feedback.now(),
-        frame,
+        product,
         side,
         selection.account_key,
         selection.quantity,
@@ -573,7 +624,7 @@ pub fn dispatch_simulated_selected_order(
     ) else {
         feedback.record_for_pane(
             pane,
-            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+            Err("Choose a valid account and instrument for this order".to_string()),
         );
         return;
     };
@@ -612,6 +663,29 @@ pub enum OrderOutcome {
     ProtectionPlaced,
     Modified,
     Cancelled,
+}
+
+/// A revisioned chart command keeps the owner's current order out of display-text errors.
+pub enum ChartOrderResult {
+    Accepted(String),
+    Stale(Box<aeris_trading::Order>),
+    Rejected(String),
+}
+
+impl ChartOrderResult {
+    #[must_use]
+    pub fn from_checked(
+        result: Result<aeris_trading::Order, aeris_trading_runtime::OrderCommandError>,
+        outcome: OrderOutcome,
+    ) -> Self {
+        match result {
+            Ok(order) => Self::Accepted(order_outcome(&order, outcome)),
+            Err(aeris_trading_runtime::OrderCommandError::StaleRevision { current }) => {
+                Self::Stale(current)
+            }
+            Err(error) => Self::Rejected(error.to_string()),
+        }
+    }
 }
 
 /// Feedback for one accepted order command, worded for the venue holding the order: a
@@ -706,7 +780,7 @@ pub fn dispatch_simulated_order_at_price(
     ) else {
         feedback.record_for_pane(
             pane,
-            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+            Err("Choose a valid account and instrument for this order".to_string()),
         );
         return;
     };
@@ -769,29 +843,50 @@ pub fn dispatch_ticket_order(
     service: &TradingService,
     feedback: &TradingFeedback,
     pane: &TradingPaneToken,
-    frame: &aeris_market_data::OrderBookFrame,
+    product: &aeris_contracts::InstallProviderInstrument,
+    frame: Option<&aeris_market_data::OrderBookFrame>,
     order: TicketOrder,
     cx: &mut gpui::App,
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some(mut entry) = prepare_simulated_order(
-        feedback.now(),
-        frame,
-        order.side,
-        order.account_key,
-        order.quantity,
-        order.order_type,
-        aeris_trading::TimeInForce::Day,
-    ) else {
+    let entry =
+        if order.price_units.is_none() && order.order_type == aeris_trading::OrderType::Market {
+            prepare_product_order(
+                feedback.now(),
+                product,
+                order.side,
+                order.account_key,
+                order.quantity,
+                order.order_type,
+                aeris_trading::TimeInForce::Day,
+            )
+        } else {
+            frame.and_then(|frame| {
+                prepare_simulated_order(
+                    feedback.now(),
+                    frame,
+                    order.side,
+                    order.account_key,
+                    order.quantity,
+                    order.order_type,
+                    aeris_trading::TimeInForce::Day,
+                )
+            })
+        };
+    let Some(mut entry) = entry else {
         feedback.record_for_pane(
             pane,
-            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+            Err("Choose a valid account and instrument for this order".to_string()),
         );
         return;
     };
     if let Some(price_units) = order.price_units {
-        let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, frame.price_scale) else {
+        let Ok(scale) = u8::try_from(product.price_scale) else {
+            feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
+            return;
+        };
+        let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, scale) else {
             feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
             return;
         };
@@ -845,8 +940,12 @@ pub fn cancel_simulated_account(
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let account =
-        account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok());
+    let Some(account) =
+        account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
+    else {
+        feedback.record_for_pane(pane, Err("Cancel requires a selected account".to_string()));
+        return;
+    };
     let Some(request_id) = feedback.begin_request(pane) else {
         return;
     };
@@ -855,7 +954,7 @@ pub fn cancel_simulated_account(
             feedback.finish_request(
                 request_id,
                 service
-                    .cancel_all(account)
+                    .cancel_all(Some(account))
                     .map(|orders| cancel_all_outcome(&orders)),
             );
         })
@@ -948,18 +1047,25 @@ pub fn modify_simulated_order_at_price(
     };
     cx.background_executor()
         .spawn(async move {
-            feedback.finish_request(
-                request_id,
-                service
-                    .modify_order_from_market_checked(
-                        aeris_trading_runtime::RevisionedModifyOrder {
-                            order: command,
-                            expected_revision: Some(expected_revision),
-                        },
-                    )
-                    .map(|order| order_outcome(&order, OrderOutcome::Modified))
-                    .map_err(|error| error.to_string()),
-            );
+            match ChartOrderResult::from_checked(
+                service.modify_order_from_market_checked(
+                    aeris_trading_runtime::RevisionedModifyOrder {
+                        order: command,
+                        expected_revision: Some(expected_revision),
+                    },
+                ),
+                OrderOutcome::Modified,
+            ) {
+                ChartOrderResult::Accepted(message) => {
+                    feedback.finish_request(request_id, Ok(message));
+                }
+                ChartOrderResult::Rejected(message) => {
+                    feedback.finish_request(request_id, Err(message));
+                }
+                ChartOrderResult::Stale(current) => {
+                    feedback.finish_stale_request(request_id, current);
+                }
+            }
         })
         .detach();
 }
@@ -997,14 +1103,18 @@ pub fn kill_simulated_account(
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let account =
-        account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok());
+    let Some(account) =
+        account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
+    else {
+        feedback.record(Err("Kill switch requires a selected account".to_string()));
+        return;
+    };
     let locked_at = feedback.now();
     cx.background_executor()
         .spawn(async move {
             feedback.record(kill_feedback(
                 "Kill switch",
-                service.kill_switch(account, "manual kill switch".to_string(), locked_at),
+                service.kill_switch(Some(account), "manual kill switch".to_string(), locked_at),
             ));
         })
         .detach();
@@ -1114,9 +1224,69 @@ pub fn prepare_simulated_order(
     if frame.state != aeris_market_data::OrderBookState::Ready {
         return None;
     }
+    prepare_order_identity(
+        submitted_unix_nanos,
+        OrderInstrumentTerms {
+            instrument: &frame.instrument_id,
+            provider: &frame.provider_id,
+            session_generation: frame.session_generation,
+            quantity_scale: frame.quantity_scale,
+        },
+        side,
+        selected_account_key,
+        quantity_units,
+        order_type,
+        time_in_force,
+    )
+}
+
+/// A market-priced ticket instruction needs instrument terms, not a pane quote.
+#[must_use]
+pub fn prepare_product_order(
+    submitted_unix_nanos: i64,
+    product: &aeris_contracts::InstallProviderInstrument,
+    side: aeris_trading::OrderSide,
+    selected_account_key: Option<String>,
+    quantity_units: u64,
+    order_type: aeris_trading::OrderType,
+    time_in_force: aeris_trading::TimeInForce,
+) -> Option<PlaceOrder> {
+    prepare_order_identity(
+        submitted_unix_nanos,
+        OrderInstrumentTerms {
+            instrument: &product.instrument_id,
+            provider: &product.provider,
+            session_generation: product.session_generation,
+            quantity_scale: u8::try_from(product.quantity_scale).ok()?,
+        },
+        side,
+        selected_account_key,
+        quantity_units,
+        order_type,
+        time_in_force,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct OrderInstrumentTerms<'a> {
+    instrument: &'a str,
+    provider: &'a str,
+    session_generation: u64,
+    quantity_scale: u8,
+}
+
+fn prepare_order_identity(
+    submitted_unix_nanos: i64,
+    terms: OrderInstrumentTerms<'_>,
+    side: aeris_trading::OrderSide,
+    selected_account_key: Option<String>,
+    quantity_units: u64,
+    order_type: aeris_trading::OrderType,
+    time_in_force: aeris_trading::TimeInForce,
+) -> Option<PlaceOrder> {
     let account_id = selected_account_key
         .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
-    let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
+    let instrument_id = InstrumentId::try_new(terms.instrument.to_string()).ok()?;
     let client_order_id = aeris_trading::ClientOrderId::try_new(format!(
         "ui-{}-{submitted_unix_nanos}",
         match side {
@@ -1126,14 +1296,14 @@ pub fn prepare_simulated_order(
     ))
     .ok()?;
     let quantity = aeris_trading::FixedPoint::try_new(
-        display_quantity_units(quantity_units, frame.quantity_scale)?,
-        frame.quantity_scale,
+        display_quantity_units(quantity_units, terms.quantity_scale)?,
+        terms.quantity_scale,
     )
     .ok()?;
     let provenance = aeris_trading::TradingProvenance {
         venue_id: "aeris-sim".to_string(),
-        provider_id: frame.provider_id.clone(),
-        session_generation: frame.session_generation,
+        provider_id: terms.provider.to_string(),
+        session_generation: terms.session_generation,
         source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
         observed_unix_nanos: submitted_unix_nanos,
     };
@@ -1193,16 +1363,16 @@ pub fn flatten_simulated_account_for(
     service: &TradingService,
     feedback: &TradingFeedback,
     pane: &TradingPaneToken,
-    frame: &aeris_market_data::OrderBookFrame,
+    instrument_id: &str,
     account_key: Option<String>,
     cx: &mut gpui::App,
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some((account_id, instrument)) = prepare_flatten_for(frame, account_key) else {
+    let Some((account_id, instrument)) = prepare_flatten_for(instrument_id, account_key) else {
         feedback.record_for_pane(
             pane,
-            Err("Flatten requires a selected account and current bid and ask".to_string()),
+            Err("Flatten requires a selected account and instrument".to_string()),
         );
         return;
     };
@@ -1237,14 +1407,14 @@ fn account_flatten_scope(
 /// Prepares the selected account and instrument identities.
 #[must_use]
 pub fn prepare_flatten_for(
-    frame: &aeris_market_data::OrderBookFrame,
+    instrument_id: &str,
     selected_account_key: Option<String>,
 ) -> Option<(aeris_trading::TradingAccountId, InstrumentId)> {
     let account_id = selected_account_key
         .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
     Some((
         account_id,
-        InstrumentId::try_new(frame.instrument_id.clone()).ok()?,
+        InstrumentId::try_new(instrument_id.to_string()).ok()?,
     ))
 }
 
@@ -1382,6 +1552,53 @@ mod tests {
         assert_eq!(account_flatten_scope(Some(String::new())), None);
     }
 
+    #[test]
+    fn emergency_scopes_need_no_order_book_frame() {
+        let product = aeris_contracts::InstallProviderInstrument {
+            provider: "fixture".into(),
+            instrument_id: "opaque-instrument".into(),
+            session_generation: 7,
+            quantity_scale: 0,
+            ..Default::default()
+        };
+        let account = "practice-1".to_string();
+        let (selected, instrument) =
+            super::prepare_flatten_for(&product.instrument_id, Some(account.clone()))
+                .expect("ticket and chart flatten need only identities");
+        assert_eq!(
+            aeris_trading_runtime::FlattenScope {
+                account: Some(selected.clone()),
+                instrument: Some(instrument.clone()),
+            },
+            aeris_trading_runtime::FlattenScope {
+                account: Some(aeris_trading::TradingAccountId::try_new(account.clone()).unwrap()),
+                instrument: Some(
+                    aeris_instruments::InstrumentId::try_new(product.instrument_id.clone())
+                        .unwrap()
+                ),
+            },
+        );
+        assert_eq!(
+            account_flatten_scope(Some(account)).unwrap().instrument,
+            None,
+            "flatten-all never selects a pane instrument"
+        );
+        let market = super::prepare_product_order(
+            1_000_000_000,
+            &product,
+            aeris_trading::OrderSide::Buy,
+            Some(selected.as_str().into()),
+            1,
+            aeris_trading::OrderType::Market,
+            aeris_trading::TimeInForce::Day,
+        )
+        .expect("a market-priced ticket uses owner quotes without a pane frame");
+        assert_eq!(market.instrument_id, instrument);
+        assert_eq!(market.provenance.provider_id, product.provider);
+        assert!(market.limit_price.is_none());
+        assert!(market.stop_price.is_none());
+    }
+
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
             price,
@@ -1481,7 +1698,10 @@ mod tests {
                     ..FlattenOutcome::default()
                 })
             ),
-            Ok("Flattened · 2 broker exit request(s) sent".to_string())
+            Ok(format!(
+                "Flattened · 2 {} exit request(s) sent",
+                super::broker_venue_display_name()
+            ))
         );
         assert_eq!(
             super::flatten_feedback(
@@ -1599,6 +1819,33 @@ mod tests {
                 observed_unix_nanos: 1,
             },
         }
+    }
+
+    #[test]
+    fn checked_stale_revision_retains_current_order_instead_of_raw_error() {
+        let mut current = working_order("aeris-sim", "stale-drag");
+        current.revision = 3;
+        current.status = aeris_trading::OrderStatus::Filled;
+        let result = super::ChartOrderResult::from_checked(
+            Err(aeris_trading_runtime::OrderCommandError::StaleRevision {
+                current: Box::new(current.clone()),
+            }),
+            super::OrderOutcome::Modified,
+        );
+        match result {
+            super::ChartOrderResult::Stale(received) => assert_eq!(*received, current),
+            _ => panic!("stale revision must not become a displayed error or success"),
+        }
+        let feedback = TradingFeedback::default();
+        let pane = feedback.pane();
+        let request = feedback.begin_request(&pane).expect("reservation");
+        feedback.finish_stale_request(request, Box::new(current.clone()));
+        let results = feedback.take_request_results();
+        assert_eq!(results.len(), 1);
+        assert!(pane.owns(results[0].1.as_ref().expect("pane")));
+        assert_eq!(results[0].2.message, super::STALE_ORDER_NOTICE);
+        assert_eq!(results[0].2.stale_order.as_deref(), Some(&current));
+        assert!(feedback.take_unscoped_notice().is_none());
     }
 
     #[test]

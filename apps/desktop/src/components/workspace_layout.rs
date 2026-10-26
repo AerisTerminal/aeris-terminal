@@ -647,7 +647,15 @@ impl TerminalApp {
             });
             if let Some(pane) = pane {
                 pane.update(cx, |surface, pane_cx| {
-                    surface.trading_pnl.feedback = Some(result);
+                    if let Some(current) = result.stale_order.as_ref() {
+                        if let Some(chart) = surface.chart.as_ref() {
+                            app_stale_order_notice_and_line(chart, current, pane_cx);
+                        } else {
+                            post_stale_order_notice(pane_cx);
+                        }
+                    } else {
+                        surface.trading_pnl.feedback = Some(result);
+                    }
                     pane_cx.notify();
                 });
             } else if let Some(host) = toast_host(&self.workspaces[self.active]) {

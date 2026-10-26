@@ -2452,6 +2452,20 @@ active item (parts 1-8); M6.8-M6.12 are open.
     VAL-DSK-031/032/033/034/035/108/109 not yet validated by the desktop and guarded GUI
     features (D13). No live Rithmic session was exercised.
 - [ ] M6.11 trading-intents-and-snapshot-removal - Revisioned chart intents and scoped emergency buttons; remove `TradingSnapshot`
+  - Status (2026-10-27 Part 1, `feat(desktop): reject stale chart edits and scope emergency commands`):
+    chart modify/cancel map the owner's `StaleRevision { current }` to a typed
+    rejection, restore or remove the current order line and post one keyed notice
+    without showing the raw error. Ladder edits use the same typed stale result.
+    Broker exit feedback uses the registered venue's display name. Ticket Flat and bottom-panel position close
+    use account/instrument identities without a pane book; chart modify/close
+    use the bound product and owner; flatten-all, cancel-all and kill use
+    account/global scopes. Market ticket, chart trade-bar and hotkey Buy/Sell
+    use instrument terms; the owner prices them from its verified quote and
+    rejects an absent quote. D3: no Reverse UI is added. UI-10's trading
+    display-text gate and TR-10's stale edit path close. M6.11 remains unchecked:
+    code complete at this boundary; VAL-DSK-036/110 end-to-end PaneHarness
+    clauses and VAL-CROSS-015/016 GUI clauses not yet validated; VAL-DSK-038
+    snapshot-era removal belongs to the next M6.11 part.
   - Status (2026-10-23 audit): chart intents already carry `expected_revision`. Remaining: the
     desktop does not handle `StaleRevision`, flatten still needs a current bid and ask from the
     pane, and `TradingSnapshot`, `place_order_from_market`/`place_bracket_from_market` and
@@ -3171,6 +3185,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 request routing checkpoint feat(desktop): route bounded pane trading feedback. `pane_request_overflow_rejects_without_calling_the_owner`, `pane_results_follow_the_origin_and_dead_panes_reach_the_center` and `real_owner_fill_changes_one_store_once_and_notifies_only_affected_pane` cover the 64-slot bound, one overflow notice before an owner call, retired-pane notice-center fallback and a scripted real-owner fill (one store change, one fill toast, one affected-pane notify, zero unrelated). Removed `feedback.latest()` fanout; unscoped legacy feedback now goes to the notice center. TR-05 desktop and UI-08 close; M6.10 remains unchecked because chart/hotkey/ladder/broker commands still require pane correlation and VAL-DSK-034/035 GUI evidence is not yet validated.
 
 - 2026-10-27 M6.10 feat(desktop): finish pane trading request routing - `global_notices_are_fifo_and_count_overflow_once`, `pane_request_overflow_rejects_without_calling_the_owner`, `pane_results_follow_the_origin_and_dead_panes_reach_the_center` and `real_owner_fill_changes_one_store_once_and_notifies_only_affected_pane` cover bounded routing, FIFO loss accounting and D17 same-account notifications; code complete, VAL-DSK-034/035 not yet validated.
+- 2026-10-27 M6.11 Part 1 feat(desktop): reject stale chart edits and scope emergency commands - `stale_drag_posts_one_notice_and_restores_line`, `checked_stale_revision_retains_current_order_instead_of_raw_error`, `chart_buy_intent_reaches_runtime_fill`, `emergency_scopes_need_no_order_book_frame` and `scoped_flatten_cancel_and_kill_reach_owner_without_a_pane_book` cover keyed stale refusal, typed ladder feedback, product-scoped emergency identity and owner-priced Buy fill projection through the real owner. Flatten/kill broker exits name the registered venue. VAL-DSK-036/110 PaneHarness end-to-end (including working-line redraw) and VAL-CROSS-015/016 guarded GUI not yet validated; `TradingSnapshot` removal remains the next part.
 
 ## 7. Known gaps / deferred
 

@@ -751,51 +751,33 @@ impl TerminalApp {
         cx.notify();
     }
 
-    /// Closes a practice position at the current quote of any open chart of its instrument;
-    /// the practice venue fills only against a live bid and ask.
+    /// Closes a practice position using the trading owner's current quote.
     fn close_simulated_position(
         &mut self,
         account_key: String,
         instrument_id: &aeris_instruments::InstrumentId,
         cx: &mut Context<Self>,
     ) {
-        let quote = self
-            .workspaces
-            .iter()
-            .flat_map(|workspace| &workspace.panes)
-            .find_map(|pane| {
-                let frame = pane
-                    .surface
-                    .read(cx)
-                    .order_book
-                    .read(cx)
-                    .frame()
-                    .filter(|frame| {
-                        frame.instrument_id == instrument_id.as_str()
-                            && frame.best_bid.is_some()
-                            && frame.best_ask.is_some()
-                    })
-                    .cloned();
-                frame.map(|frame| (frame, pane.surface.read(cx).trading_pane_token.clone()))
-            });
-        if let Some((frame, pane)) = quote {
-            aeris_desktop::trading::flatten_simulated_account_for(
-                self.lifecycle.trading(),
-                self.lifecycle.trading_feedback(),
-                &pane,
-                &frame,
-                Some(account_key),
-                cx,
-            );
-        } else {
-            aeris_desktop::trading::record_notice(
-                self.lifecycle.trading_feedback(),
-                Err(format!(
-                    "Open a {} chart with a live quote to close this practice position",
-                    self.bottom_panel.history.symbol(instrument_id)
-                )),
-            );
-        }
+        let Some(account) = aeris_trading::TradingAccountId::try_new(account_key).ok() else {
+            self.lifecycle
+                .trading_feedback()
+                .record(Err("Position close requires a selected account".to_string()));
+            return;
+        };
+        let service = self.lifecycle.trading().clone();
+        let feedback = self.lifecycle.trading_feedback().clone();
+        let instrument = instrument_id.clone();
+        cx.background_executor()
+            .spawn(async move {
+                feedback.record(aeris_desktop::trading::flatten_feedback(
+                    "Position closed",
+                    service.flatten(aeris_trading_runtime::FlattenScope {
+                        account: Some(account),
+                        instrument: Some(instrument),
+                    }),
+                ));
+            })
+            .detach();
         cx.notify();
     }
 }

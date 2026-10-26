@@ -300,18 +300,18 @@ impl Render for ChartTradeBar {
         let state = surface.read(cx);
         let theme = state.theme;
         let trading = &state.trading_pnl;
-        let frame = state.order_book.read(cx).frame().cloned();
+        let product = state.product.clone();
         let account = trading
             .order_entry
             .selected_account_id
             .as_ref()
             .map(|id| id.as_str().to_string());
-        let ready = frame.is_some()
+        let ready = product.is_some()
             && account.is_some()
             && state.selected_account_lock_reason(cx).is_none();
         let order = MarketOrderTarget {
             surface: surface.clone(),
-            frame,
+            product,
             account,
             quantity: trading.order_entry.quantity,
             ready,
@@ -347,7 +347,7 @@ impl Render for ChartTradeBar {
 /// What a bar order sends, captured at render like the order ticket's buttons.
 struct MarketOrderTarget {
     surface: Entity<WorkspaceSurface>,
-    frame: Option<aeris_market_data::OrderBookFrame>,
+    product: Option<InstallProviderInstrument>,
     account: Option<String>,
     quantity: u64,
     ready: bool,
@@ -360,7 +360,7 @@ fn trade_bar_order_button(
     order: &MarketOrderTarget,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let frame = order.frame.clone();
+    let product = order.product.clone();
     let surface = order.surface.clone();
     let account = order.account.clone();
     let quantity = order.quantity;
@@ -372,14 +372,14 @@ fn trade_bar_order_button(
             .label(label)
             .disabled(!order.ready)
             .on_click(move |_, _, cx| {
-                if let Some(frame) = frame.as_ref() {
+                if let Some(product) = product.as_ref() {
                     let service = surface.read(cx).lifecycle.trading().clone();
                     let feedback = surface.read(cx).lifecycle.trading_feedback().clone();
                     let pane = surface.read(cx).trading_pane_token.clone();
                     aeris_desktop::trading::dispatch_simulated_selected_order(
                         &service,
                         &feedback,
-                        frame,
+                        product,
                         side,
                         aeris_desktop::trading::SimulatedOrderSelection {
                             account_key: account.clone(),

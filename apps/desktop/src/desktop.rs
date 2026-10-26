@@ -2426,7 +2426,6 @@ enum ChartIntentRejection {
     AccountLocked,
     NoInstrument,
     NotOnChart,
-    NoQuote,
     InvalidPrice,
     InvalidQuantity,
     PlannedLegKept,
@@ -2441,7 +2440,6 @@ impl ChartIntentRejection {
             Self::AccountLocked => "The selected account is locked by a risk rule.",
             Self::NoInstrument => "The chart has no instrument loaded yet.",
             Self::NotOnChart => "That order or position belongs to another account or instrument.",
-            Self::NoQuote => "Waiting for a live bid and ask on this instrument.",
             Self::InvalidPrice => "That price isn't valid for this instrument.",
             Self::InvalidQuantity => "That size isn't valid for this instrument.",
             Self::PlannedLegKept => {
@@ -2452,37 +2450,9 @@ impl ChartIntentRejection {
     }
 }
 
-/// The order book's frame, when it is the chart's instrument.
-fn chart_book_frame(
-    app: &WorkspaceSurface,
-    product: &InstallProviderInstrument,
-    cx: &App,
-) -> Result<aeris_market_data::OrderBookFrame, ChartIntentRejection> {
-    app.order_book
-        .read(cx)
-        .frame()
-        .filter(|frame| frame.instrument_id == product.instrument_id)
-        .cloned()
-        .ok_or(ChartIntentRejection::NoQuote)
-}
-
-/// The chart instrument's order book frame, with both sides of the book quoted.
-fn chart_quote_frame(
-    app: &WorkspaceSurface,
-    product: &InstallProviderInstrument,
-    cx: &App,
-) -> Result<aeris_market_data::OrderBookFrame, ChartIntentRejection> {
-    chart_book_frame(app, product, cx).and_then(|frame| {
-        (frame.best_bid.is_some() && frame.best_ask.is_some())
-            .then_some(frame)
-            .ok_or(ChartIntentRejection::NoQuote)
-    })
-}
-
 fn chart_order_from_intent(
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
-    frame: &aeris_market_data::OrderBookFrame,
     order_type: aeris_trading::OrderType,
 ) -> Result<aeris_trading_runtime::PlaceOrder, ChartIntentRejection> {
     let product = app
@@ -2510,8 +2480,8 @@ fn chart_order_from_intent(
     let submitted_unix_nanos = app.lifecycle.clock().wall_unix_nanos();
     let provenance = aeris_trading::TradingProvenance {
         venue_id: "aeris-sim".to_string(),
-        provider_id: frame.provider_id.clone(),
-        session_generation: frame.session_generation,
+        provider_id: product.provider.clone(),
+        session_generation: product.session_generation,
         source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
         observed_unix_nanos: submitted_unix_nanos,
     };
@@ -2577,30 +2547,111 @@ fn dispatch_chart_cancel(
         chart.update(cx, |chart, _| chart.resolve_trading_intent(sequence, false));
         return;
     };
+    let lost_pane_feedback = feedback.clone();
     let task = cx.background_executor().spawn(async move {
-        feedback.finish_pane_result(
-            request_id,
-            service
-                .cancel_order_checked(aeris_trading_runtime::RevisionedCancelOrder {
-                    client_order_id,
-                    expected_revision: Some(expected_revision),
-                })
-                .map(|order| {
-                    aeris_desktop::trading::order_outcome(
-                        &order,
-                        aeris_desktop::trading::OrderOutcome::Cancelled,
-                    )
-                })
-                .map_err(|error| error.to_string()),
-        )
+        let result = aeris_desktop::trading::ChartOrderResult::from_checked(
+            service.cancel_order_checked(aeris_trading_runtime::RevisionedCancelOrder {
+                client_order_id,
+                expected_revision: Some(expected_revision),
+            }),
+            aeris_desktop::trading::OrderOutcome::Cancelled,
+        );
+        finish_chart_order_result(&feedback, request_id, result)
     });
-    cx.spawn(async move |_, cx| {
-        let accepted = task.await;
+    cx.spawn(async move |pane, cx| {
+        let result = task.await;
         chart.update(cx, |chart, _| {
-            chart.resolve_trading_intent(sequence, accepted);
+            chart
+                .resolve_trading_intent(sequence, matches!(result, ChartOrderResolution::Accepted));
         });
+        if let ChartOrderResolution::Stale(current) = result
+            && pane
+                .update(cx, |_, cx| {
+                    app_stale_order_notice_and_line(&chart, &current, cx);
+                })
+                .is_err()
+        {
+            lost_pane_feedback.record(Err(aeris_desktop::trading::STALE_ORDER_NOTICE.to_string()));
+        }
     })
     .detach();
+}
+
+enum ChartOrderResolution {
+    Accepted,
+    Rejected,
+    Stale(Box<aeris_trading::Order>),
+}
+
+fn finish_chart_order_result(
+    feedback: &aeris_desktop::trading::TradingFeedback,
+    request_id: aeris_desktop::trading::RequestId,
+    result: aeris_desktop::trading::ChartOrderResult,
+) -> ChartOrderResolution {
+    match result {
+        aeris_desktop::trading::ChartOrderResult::Accepted(message) => {
+            feedback.finish_request(request_id, Ok(message));
+            ChartOrderResolution::Accepted
+        }
+        aeris_desktop::trading::ChartOrderResult::Rejected(message) => {
+            feedback.finish_request(request_id, Err(message));
+            ChartOrderResolution::Rejected
+        }
+        aeris_desktop::trading::ChartOrderResult::Stale(current) => {
+            feedback.retire_request(request_id);
+            ChartOrderResolution::Stale(current)
+        }
+    }
+}
+
+fn app_stale_order_notice_and_line(
+    chart: &Entity<AerisChartView>,
+    current: &aeris_trading::Order,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    let mut snapshot = chart.read(cx).trading_snapshot().clone();
+    if let Ok(id) = ChartOrderId::new(current.client_order_id.as_str()) {
+        snapshot.orders.retain(|order| order.id != id);
+        if current.status.is_open()
+            && let Some(price) = chart_price(current.limit_price.or(current.stop_price))
+        {
+            let mut line = chart
+                .read(cx)
+                .trading_snapshot()
+                .orders
+                .iter()
+                .find(|order| order.id == id)
+                .cloned();
+            if let Some(line) = line.as_mut() {
+                line.price = price;
+                line.stop_price = chart_price(current.stop_price);
+                line.quantity = chart_quantity(current.quantity).unwrap_or(line.quantity);
+                snapshot.orders.push(line.clone());
+            }
+        }
+        chart.update(cx, |chart, chart_cx| {
+            if chart.set_trading_snapshot(snapshot).is_ok() {
+                chart_cx.notify();
+            }
+        });
+    }
+    post_stale_order_notice(cx);
+}
+
+fn post_stale_order_notice(cx: &mut Context<WorkspaceSurface>) {
+    cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+        key: notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "stale_order_edit",
+        },
+        severity: notification_center::NoticeSeverity::Warning,
+        tone: notification_center::NoticeTone::Warning,
+        source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
+        title: aeris_desktop::trading::STALE_ORDER_NOTICE,
+        detail: "The current order is shown on the chart.".into(),
+        action: None,
+        lifetime: notification_center::NoticeLifetime::UntilDismissed,
+    }));
 }
 
 fn dispatch_chart_place_bracket(
@@ -2638,14 +2689,13 @@ fn dispatch_chart_place_bracket(
 fn chart_bracket_from_intent(
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
-    cx: &App,
+    _cx: &App,
 ) -> Result<aeris_trading_runtime::PlaceChartBracket, ChartIntentRejection> {
     let product = app
         .product
         .as_ref()
         .ok_or(ChartIntentRejection::NoInstrument)?;
-    let frame = chart_quote_frame(app, product, cx)?;
-    let entry = chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::RestingAt)?;
+    let entry = chart_order_from_intent(intent, app, aeris_trading::OrderType::RestingAt)?;
     let price = |price: Option<f64>| {
         price
             .and_then(|price| chart_price_fixed_point(price, product.price_scale))
@@ -2695,13 +2745,12 @@ fn chart_protection_from_intent(
     if !identity_matches {
         return Err(ChartIntentRejection::NotOnChart);
     }
-    let frame = chart_quote_frame(app, product, cx)?;
     let order_type = if intent.action == ChartTradingIntentAction::CreateStopLoss {
         aeris_trading::OrderType::Stop
     } else {
         aeris_trading::OrderType::Limit
     };
-    chart_order_from_intent(intent, app, &frame, order_type)
+    chart_order_from_intent(intent, app, order_type)
 }
 
 fn dispatch_chart_create_protection(
@@ -2777,28 +2826,34 @@ fn dispatch_chart_modify(
         chart.update(cx, |chart, _| chart.resolve_trading_intent(sequence, false));
         return;
     };
+    let lost_pane_feedback = feedback.clone();
     let task = cx.background_executor().spawn(async move {
-        feedback.finish_pane_result(
-            request_id,
-            service
-                .modify_order_from_market_checked(aeris_trading_runtime::RevisionedModifyOrder {
+        let result = aeris_desktop::trading::ChartOrderResult::from_checked(
+            service.modify_order_from_market_checked(
+                aeris_trading_runtime::RevisionedModifyOrder {
                     order: command,
                     expected_revision: Some(order_revision),
-                })
-                .map(|order| {
-                    aeris_desktop::trading::order_outcome(
-                        &order,
-                        aeris_desktop::trading::OrderOutcome::Modified,
-                    )
-                })
-                .map_err(|error| error.to_string()),
-        )
+                },
+            ),
+            aeris_desktop::trading::OrderOutcome::Modified,
+        );
+        finish_chart_order_result(&feedback, request_id, result)
     });
-    cx.spawn(async move |_, cx| {
-        let accepted = task.await;
+    cx.spawn(async move |pane, cx| {
+        let result = task.await;
         chart.update(cx, |chart, _| {
-            chart.resolve_trading_intent(sequence, accepted);
+            chart
+                .resolve_trading_intent(sequence, matches!(result, ChartOrderResolution::Accepted));
         });
+        if let ChartOrderResolution::Stale(current) = result
+            && pane
+                .update(cx, |_, cx| {
+                    app_stale_order_notice_and_line(&chart, &current, cx);
+                })
+                .is_err()
+        {
+            lost_pane_feedback.record(Err(aeris_desktop::trading::STALE_ORDER_NOTICE.to_string()));
+        }
     })
     .detach();
 }
@@ -2807,13 +2862,12 @@ fn chart_modify_from_intent(
     intent: &ChartTradingIntent,
     order: &aeris_trading::Order,
     app: &WorkspaceSurface,
-    cx: &App,
+    _cx: &App,
 ) -> Result<aeris_trading_runtime::ModifyOrder, ChartIntentRejection> {
     let product = app
         .product
         .as_ref()
         .ok_or(ChartIntentRejection::NoInstrument)?;
-    let frame = chart_book_frame(app, product, cx)?;
     let client_order_id = intent
         .order_id
         .as_ref()
@@ -2841,8 +2895,8 @@ fn chart_modify_from_intent(
         modified_unix_nanos,
         provenance: aeris_trading::TradingProvenance {
             venue_id: "aeris-sim".to_string(),
-            provider_id: frame.provider_id.clone(),
-            session_generation: frame.session_generation,
+            provider_id: product.provider.clone(),
+            session_generation: product.session_generation,
             source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
             observed_unix_nanos: modified_unix_nanos,
         },
@@ -2887,9 +2941,11 @@ fn chart_close_position_from_intent(
     if intent.position_id.as_ref() != Some(&expected_position_id) || !has_position {
         return Err(ChartIntentRejection::NotOnChart);
     }
-    let frame = chart_book_frame(app, product, cx)?;
-    aeris_desktop::trading::prepare_flatten_for(&frame, Some(account_id.as_str().to_string()))
-        .ok_or(ChartIntentRejection::NoQuote)
+    aeris_desktop::trading::prepare_flatten_for(
+        &product.instrument_id,
+        Some(account_id.as_str().to_string()),
+    )
+    .ok_or(ChartIntentRejection::NoInstrument)
 }
 
 fn dispatch_chart_close_position(

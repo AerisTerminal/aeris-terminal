@@ -363,8 +363,10 @@ impl TerminalApp {
                 if self.trading_order_entry_locked(cx) {
                     return;
                 }
-                let (Some(frame), Some(side)) = (self.trading_order_frame(cx), hotkey.side())
-                else {
+                let (Some(product), Some(side)) = (
+                    self.active_surface().read(cx).product.clone(),
+                    hotkey.side(),
+                ) else {
                     return;
                 };
                 let (account_id, quantity, order_type, time_in_force) =
@@ -373,7 +375,7 @@ impl TerminalApp {
                     self.lifecycle.trading(),
                     self.lifecycle.trading_feedback(),
                     &pane,
-                    &frame,
+                    &product,
                     side,
                     aeris_desktop::trading::SimulatedOrderSelection {
                         account_key: account_id,
