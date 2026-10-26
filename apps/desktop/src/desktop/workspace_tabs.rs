@@ -55,13 +55,11 @@ fn start_market_summary(
 
 pub(super) fn market_summary_instrument_for_switch(
     product: Option<&InstallProviderInstrument>,
-    previous_selection: Option<&(Option<InstallProviderInstrument>, ChartInterval)>,
+    previous_selection: Option<&InstallProviderInstrument>,
     showing_superseded: bool,
 ) -> Option<InstallProviderInstrument> {
     if showing_superseded {
-        return previous_selection
-            .and_then(|(instrument, _)| instrument.clone())
-            .or_else(|| product.cloned());
+        return previous_selection.cloned().or_else(|| product.cloned());
     }
     product.cloned()
 }
@@ -69,7 +67,7 @@ pub(super) fn market_summary_instrument_for_switch(
 fn market_summary_tab_instrument(surface: &WorkspaceSurface) -> Option<InstallProviderInstrument> {
     market_summary_instrument_for_switch(
         surface.product.as_ref(),
-        surface.rithmic_previous_selection.as_ref(),
+        surface.chart_pane_controller.restore_product(),
         surface.showing_superseded_series(),
     )
 }

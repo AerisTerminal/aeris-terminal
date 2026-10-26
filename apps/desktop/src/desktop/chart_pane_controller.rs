@@ -51,6 +51,7 @@ pub(super) struct PendingChartTarget {
 pub(super) struct ChartPaneController {
     pending_selection: Option<u64>,
     pending_target: Option<PendingChartTarget>,
+    restore_target: Option<PendingChartTarget>,
     latest_selection: u64,
     current_generation: u64,
     displayed_generation: Option<u64>,
@@ -62,6 +63,7 @@ impl Default for ChartPaneController {
         Self {
             pending_selection: None,
             pending_target: None,
+            restore_target: None,
             latest_selection: 0,
             current_generation: 1,
             displayed_generation: None,
@@ -103,6 +105,37 @@ impl ChartPaneController {
     pub(super) fn clear(&mut self) {
         self.pending_selection = None;
         self.pending_target = None;
+    }
+
+    /// The displayed binding is retained while the committed replacement loads.
+    pub(super) fn remember_previous_selection(
+        &mut self,
+        product: Option<InstallProviderInstrument>,
+        interval: ChartInterval,
+    ) {
+        self.restore_target = Some(PendingChartTarget { interval, product });
+    }
+
+    pub(super) fn restore_product(&self) -> Option<&InstallProviderInstrument> {
+        self.restore_target.as_ref()?.product.as_ref()
+    }
+
+    pub(super) fn has_restore_target(&self) -> bool {
+        self.restore_target.is_some()
+    }
+
+    pub(super) fn take_restore_target(&mut self) -> Option<PendingChartTarget> {
+        let target = self.restore_target.take()?;
+        if let Some(displayed) = self.displayed_generation {
+            // The retained chart is the authoritative binding again. Its
+            // publications may continue while the restored demand is sent.
+            self.current_generation = displayed;
+        }
+        Some(target)
+    }
+
+    pub(super) fn finish_replacement(&mut self) {
+        self.restore_target = None;
     }
 
     #[cfg(test)]
@@ -152,8 +185,8 @@ impl ChartPaneController {
         self.displayed_generation != Some(self.current_generation)
     }
 
-    pub(super) fn selection_in_progress(&self, replacement_readiness_pending: bool) -> bool {
-        self.pending_selection.is_some() || replacement_readiness_pending
+    pub(super) fn selection_in_progress(&self) -> bool {
+        self.pending_selection.is_some() || self.restore_target.is_some()
     }
 
     pub(super) fn has_pending_selection(&self) -> bool {
@@ -318,6 +351,34 @@ mod tests {
         assert!(pane.accept(3));
         assert!(!pane.accept_publication(1));
         assert!(pane.accept_publication(3));
+    }
+
+    #[test]
+    fn failed_replacement_re_adopts_previous_instrument_and_interval_once() {
+        let mut pane = ChartPaneController::default();
+        pane.chart_installed();
+        pane.request(2);
+        assert!(pane.accept(2));
+        pane.remember_previous_selection(None, ChartInterval::Hour1);
+        assert!(pane.selection_in_progress());
+        assert_eq!(pane.restore_product(), None);
+        assert_eq!(
+            pane.take_restore_target().map(|target| target.interval),
+            Some(ChartInterval::Hour1)
+        );
+        assert!(
+            pane.accept_publication(1),
+            "the displayed binding is re-adopted"
+        );
+        assert!(!pane.accept_publication(2), "failed replacement is retired");
+        assert!(!pane.chart_needs_replacement());
+        assert!(!pane.selection_in_progress());
+        assert!(pane.take_restore_target().is_none(), "one failure notice");
+        pane.request(3);
+        assert!(pane.accept(3));
+        pane.remember_previous_selection(None, ChartInterval::Day1);
+        pane.finish_replacement();
+        assert!(pane.take_restore_target().is_none());
     }
 
     #[test]

@@ -36,9 +36,7 @@ fn active_header_state(
             .map(|account| account.display_name.clone()),
         pending: HeaderPendingState {
             symbol_selection: workspace.market_state.symbol_selection_pending,
-            series: workspace
-                .chart_pane_controller
-                .selection_in_progress(workspace.rithmic_previous_selection.is_some()),
+            series: workspace.chart_pane_controller.selection_in_progress(),
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(

@@ -41,10 +41,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider chart actions",
     ),
     (
-        "apps/desktop/src/components/chart_toolbar_menus.rs",
-        "legacy provider chart actions",
-    ),
-    (
         "apps/desktop/src/components/order_ticket.rs",
         "legacy provider ticket labels",
     ),
@@ -121,6 +117,183 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider chart fixture",
     ),
 ];
+
+/// Existing non-pane comparisons have a file-local purpose and a fixed count.
+/// A new comparison, or a vanished exception, requires an explicit review.
+const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
+    (
+        "apps/desktop/src/update.rs",
+        6,
+        "release install/readiness generations",
+    ),
+    (
+        "apps/desktop/src/symbol_browser.rs",
+        3,
+        "app-scoped catalog selection fence",
+    ),
+    (
+        "apps/desktop/src/market_worker.rs",
+        3,
+        "verified terms and bounded diagnostics",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker.rs",
+        1,
+        "initial worker selection",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker/selection_commands.rs",
+        4,
+        "worker command and startup admission",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker/runtime.rs",
+        2,
+        "worker coalescing and initial admission",
+    ),
+    (
+        "apps/desktop/src/engine_market_worker/replay_conversion.rs",
+        3,
+        "book session projection before pane delivery",
+    ),
+    (
+        "apps/desktop/src/desktop.rs",
+        1,
+        "chrome overlay closing token",
+    ),
+    (
+        "apps/desktop/src/desktop/workspace_tabs.rs",
+        1,
+        "copy feedback token",
+    ),
+    (
+        "apps/desktop/src/desktop/workspace_surface.rs",
+        4,
+        "accepted tape ordering and study rewrites",
+    ),
+    (
+        "apps/desktop/src/desktop/workspace_persistence.rs",
+        3,
+        "layout save receipt generations",
+    ),
+    (
+        "apps/desktop/src/desktop/market_screener.rs",
+        4,
+        "app-scoped screener fence",
+    ),
+    (
+        "apps/desktop/src/desktop/chart_pane_controller.rs",
+        3,
+        "controller publication/initial/display checks",
+    ),
+    (
+        "apps/desktop/src/components/fullscreen_hint.rs",
+        2,
+        "animation timer tokens",
+    ),
+    (
+        "apps/desktop/src/chart_chrome.rs",
+        7,
+        "chrome persistence receipts",
+    ),
+    (
+        "apps/desktop/src/account.rs",
+        1,
+        "account authorization request",
+    ),
+];
+
+fn desktop_fence_comparison_count(source: &str) -> usize {
+    production_source_prefix(source)
+        .lines()
+        .map(|line| {
+            let line = line.split_once("//").map_or(line, |(code, _)| code);
+            ["generation", "epoch"]
+                .into_iter()
+                .map(|term| {
+                    line.match_indices(term)
+                        .filter(|(index, _)| {
+                            let rest = line[index + term.len()..].trim_start();
+                            if term == "epoch" {
+                                rest.starts_with("==")
+                            } else {
+                                ["==", "!=", "<=", ">=", "<", ">"]
+                                    .iter()
+                                    .any(|operator| rest.starts_with(operator))
+                            }
+                        })
+                        .count()
+                })
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn desktop_market_fence_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut observed = std::collections::BTreeMap::new();
+    collect_desktop_fence_sources(root, &root.join("apps/desktop/src"), &mut observed)?;
+    Ok(desktop_fence_allowlist_violations(
+        DESKTOP_MARKET_FENCE_ALLOWLIST,
+        &observed,
+    ))
+}
+
+fn desktop_source_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut violations = desktop_provider_violations(root)?;
+    violations.extend(desktop_market_fence_violations(root)?);
+    Ok(violations)
+}
+
+fn desktop_fence_allowlist_violations(
+    exceptions: &[(&str, usize, &str)],
+    observed: &std::collections::BTreeMap<String, usize>,
+) -> Vec<PathBuf> {
+    let mut allowed = BTreeSet::new();
+    let mut violations = Vec::new();
+    for (path, expected_count, reason) in exceptions {
+        if reason.trim().is_empty()
+            || *expected_count == 0
+            || !allowed.insert(*path)
+            || observed.get(*path).copied() != Some(*expected_count)
+        {
+            violations.push(PathBuf::from(path));
+        }
+    }
+    for path in observed.keys() {
+        if !allowed.contains(path.as_str()) {
+            violations.push(PathBuf::from(path));
+        }
+    }
+    violations
+}
+
+fn collect_desktop_fence_sources(
+    root: &Path,
+    directory: &Path,
+    observed: &mut std::collections::BTreeMap<String, usize>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if !path.ends_with("test_support") {
+                collect_desktop_fence_sources(root, &path, observed)?;
+            }
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            && path.file_name() != Some(OsStr::new("readiness_conformance.rs"))
+        {
+            let count = desktop_fence_comparison_count(&fs::read_to_string(&path)?);
+            if count > 0 {
+                observed.insert(
+                    relative_to(root, &path)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    count,
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 fn desktop_provider_identity(source: &str) -> bool {
     let production = production_source_prefix(source).to_ascii_lowercase();
@@ -302,10 +475,10 @@ fn main() -> ExitCode {
         eprintln!("failed to inspect desktop quote boundary: {error}");
         return ExitCode::FAILURE;
     }
-    match desktop_provider_violations(&root) {
+    match desktop_source_violations(&root) {
         Ok(found) => violations.extend(found),
         Err(error) => {
-            eprintln!("failed to inspect desktop provider boundary: {error}");
+            eprintln!("failed to inspect desktop source boundaries: {error}");
             return ExitCode::FAILURE;
         }
     }
@@ -1158,6 +1331,62 @@ mod tests {
         assert!(production.contains("fn before()"));
         assert!(production.contains("fn after() { forbidden(); }"));
         assert!(!production.contains("fn hidden()"));
+    }
+
+    #[test]
+    fn desktop_market_fences_stay_in_accept() {
+        assert!(
+            super::desktop_market_fence_violations(repository_root())
+                .expect("desktop sources")
+                .is_empty(),
+            "every production comparison needs an exact reviewed exception"
+        );
+    }
+
+    #[test]
+    fn desktop_market_fences_reject_new_comparisons() {
+        assert_eq!(
+            super::desktop_fence_comparison_count(
+                "#[cfg(test)] mod tests { fn fixture() { let _ = epoch == old; } }\n\
+                 fn update() { if publication_generation >= previous_generation || epoch == old { } }\n"
+            ),
+            2,
+            "production after a test module is scanned"
+        );
+        assert_eq!(
+            super::desktop_fence_comparison_count("fn display() { let label = generation_label; }"),
+            0
+        );
+    }
+
+    #[test]
+    fn desktop_market_fences_reject_stale_exceptions() {
+        let allowed = [(
+            "apps/desktop/src/update.rs",
+            1,
+            "release install generation",
+        )];
+        let observed = std::collections::BTreeMap::new();
+        assert_eq!(
+            super::desktop_fence_allowlist_violations(&allowed, &observed),
+            [PathBuf::from("apps/desktop/src/update.rs")],
+            "removed comparisons make their exception stale"
+        );
+        let observed = std::collections::BTreeMap::from([
+            ("apps/desktop/src/update.rs".to_string(), 1),
+            ("apps/desktop/src/new_market_fence.rs".to_string(), 1),
+        ]);
+        assert_eq!(
+            super::desktop_fence_allowlist_violations(&allowed, &observed),
+            [PathBuf::from("apps/desktop/src/new_market_fence.rs")]
+        );
+        assert_eq!(
+            super::desktop_fence_allowlist_violations(
+                &allowed,
+                &std::collections::BTreeMap::from([("apps/desktop/src/update.rs".to_string(), 1)]),
+            ),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]

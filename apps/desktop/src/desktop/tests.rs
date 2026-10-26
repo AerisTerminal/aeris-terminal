@@ -3877,14 +3877,16 @@ fn engine_switch_keeps_partial_replacement_covered_until_handoff_is_current() {
     pane.chart_installed();
     pane.request(2);
     assert!(!pane.chart_needs_replacement());
-    assert!(pane.selection_in_progress(false));
+    assert!(pane.selection_in_progress());
     assert!(pane.accept(2));
+    pane.remember_previous_selection(None, ChartInterval::Minute1);
     assert!(pane.chart_needs_replacement());
-    assert!(pane.selection_in_progress(true));
+    assert!(pane.selection_in_progress());
     pane.chart_installed();
     assert!(!pane.chart_needs_replacement());
-    assert!(pane.selection_in_progress(true));
-    assert!(!pane.selection_in_progress(false));
+    assert!(pane.selection_in_progress());
+    pane.finish_replacement();
+    assert!(!pane.selection_in_progress());
 }
 
 #[test]
@@ -4774,7 +4776,7 @@ fn pending_market_switch_keeps_the_committed_summary_until_the_marker_arrives() 
     assert_eq!(
         super::workspace_tabs::market_summary_instrument_for_switch(
             Some(&current),
-            Some(&(Some(previous.clone()), ChartInterval::Minute1)),
+            Some(&previous),
             true,
         ),
         Some(previous),

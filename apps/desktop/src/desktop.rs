@@ -873,11 +873,6 @@ struct WorkspaceSurface {
     product: Option<InstallProviderInstrument>,
     interval: ChartInterval,
     chart_pane_controller: chart_pane_controller::ChartPaneController,
-    /// The selection to fall back to if the switch in flight never loads.
-    ///
-    /// A failed switch must leave the trader on the chart they had, not on an
-    /// empty surface, so the previous demand is restored rather than abandoned.
-    rithmic_previous_selection: Option<(Option<InstallProviderInstrument>, ChartInterval)>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
     observed_chart: ObservedChart,

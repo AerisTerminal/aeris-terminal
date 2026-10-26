@@ -119,6 +119,12 @@ violations and missing verification explicitly, and never describe them as satis
 - `market_runtime` is the single owner that merges on-demand history and live state. Preserve one
   canonical forming candle, contiguous completed history, exact generation fencing, and explicit recovery.
 - Retired clients, generations, selections, sessions, and publications must never mutate current state.
+- `desktop_market_fences_stay_in_accept` scans desktop production for epoch/generation
+  comparisons. Pane selection and publication acceptance belongs to `ChartPaneController`;
+  unrelated release, app-command and receipt comparisons have exact reasoned, count-checked
+  exceptions in `tools/naming_check`. An added comparison or a stale exception fails the gate.
+  Failed pane replacements re-adopt the prior instrument and interval through the controller's
+  restore target, not a provider-named workspace field.
 - Production queues, caches, retries, and background work remain bounded with explicit overflow and
   cancellation behavior.
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,

@@ -202,7 +202,6 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         product: init.startup.product,
         interval: init.interval,
         chart_pane_controller,
-        rithmic_previous_selection: None,
         restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
         last_persisted_viewport: None,
         observed_chart: ObservedChart::default(),
@@ -3684,7 +3683,7 @@ impl WorkspaceSurface {
             if super::provider_presentation(self.provider).is_some() {
                 self.market_state.symbol_selection_pending = false;
                 if !self.chart_pane_controller.chart_needs_replacement() {
-                    self.rithmic_previous_selection = None;
+                    self.chart_pane_controller.finish_replacement();
                 }
             }
         } else {
@@ -3951,7 +3950,7 @@ impl WorkspaceSurface {
             && self.chart.is_some()
             && (self.chart_pane_controller.has_pending_selection()
                 || self.chart_pane_controller.chart_needs_replacement()
-                || (self.rithmic_previous_selection.is_some()
+                || (self.chart_pane_controller.has_restore_target()
                     && self.chart_state != ChartState::Ready))
     }
 
@@ -5039,15 +5038,13 @@ impl WorkspaceSurface {
         if state == ChartState::Error && engine_provider {
             let restoring_chart = self.chart_pane_controller.chart_needs_replacement()
                 && self.chart.is_some()
-                && self.rithmic_previous_selection.is_some();
-            let instrument_changed = self
-                .rithmic_previous_selection
-                .as_ref()
-                .is_some_and(|(product, _)| product != &self.product);
+                && self.chart_pane_controller.has_restore_target();
+            let instrument_changed = self.chart_pane_controller.has_restore_target()
+                && self.chart_pane_controller.restore_product() != self.product.as_ref();
             self.chart_pane_controller.clear();
             self.market_state.symbol_selection_pending = false;
             if restoring_chart {
-                self.restore_rithmic_selection_after_failure(cx);
+                self.restore_previous_selection_after_failure(cx);
                 // The displayed chart still belongs to the previous selection.
                 // A rejected replacement is a selection failure, not a failure
                 // of that chart; keep it usable while its demand is restored.
@@ -5070,10 +5067,10 @@ impl WorkspaceSurface {
                 cx.notify();
                 return;
             }
-            self.rithmic_previous_selection = None;
+            self.chart_pane_controller.finish_replacement();
         } else if engine_provider && state == ChartState::Ready {
             if !self.chart_pane_controller.chart_needs_replacement() {
-                self.rithmic_previous_selection = None;
+                self.chart_pane_controller.finish_replacement();
             }
             self.market_state.symbol_selection_pending = false;
         } else if engine_provider && state == ChartState::HistoryUnavailable {
@@ -5250,7 +5247,8 @@ impl WorkspaceSurface {
         {
             return;
         }
-        self.rithmic_previous_selection = Some((self.product.clone(), self.interval));
+        self.chart_pane_controller
+            .remember_previous_selection(self.product.clone(), self.interval);
         // Capture presentation against the chart's current instrument before
         // mutating the pending selection. Timeframe replacement can reuse
         // drawings; a symbol replacement must not carry price-anchored drawings
@@ -5297,10 +5295,12 @@ impl WorkspaceSurface {
     /// The chart on screen is still the previous series, so restoring means
     /// re-stating its demand and reporting an actionable error over it — never
     /// leaving the trader on a surface with no data and no way back.
-    fn restore_rithmic_selection_after_failure(&mut self, cx: &mut Context<Self>) {
-        let Some((product, interval)) = self.rithmic_previous_selection.take() else {
+    fn restore_previous_selection_after_failure(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.chart_pane_controller.take_restore_target() else {
             return;
         };
+        let product = previous.product;
+        let interval = previous.interval;
         self.product.clone_from(&product);
         self.interval = interval;
         self.chart_pane_controller.clear();
