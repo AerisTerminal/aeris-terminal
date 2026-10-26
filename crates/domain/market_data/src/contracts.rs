@@ -1,4 +1,4 @@
-use crate::{MarketBar, MarketDataValidationError};
+use crate::{MarketBar, MarketDataValidationError, OrderLevelEvent};
 use std::collections::BTreeSet;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
@@ -485,7 +485,7 @@ impl BarUpdate {
     }
 }
 
-fn validate_identity_field(
+pub(crate) fn validate_identity_field(
     field: &'static str,
     value: &str,
 ) -> Result<(), MarketDataValidationError> {
@@ -508,6 +508,8 @@ pub enum MarketEvent {
     Quote(TopOfBookQuote),
     DepthSnapshot(DepthSnapshot),
     DepthDelta(DepthDelta),
+    /// Additive order-level data; aggregate depth never derives from it.
+    OrderLevels(OrderLevelEvent),
 }
 
 impl MarketEvent {
@@ -519,6 +521,7 @@ impl MarketEvent {
             Self::Quote(value) => &value.metadata,
             Self::DepthSnapshot(value) => &value.metadata,
             Self::DepthDelta(value) => &value.metadata,
+            Self::OrderLevels(value) => value.metadata(),
         }
     }
 
@@ -533,6 +536,7 @@ impl MarketEvent {
             Self::Quote(value) => value.validate(),
             Self::DepthSnapshot(value) => value.validate(maximum_depth_levels),
             Self::DepthDelta(value) => value.validate(),
+            Self::OrderLevels(value) => value.validate(),
         }
     }
 }

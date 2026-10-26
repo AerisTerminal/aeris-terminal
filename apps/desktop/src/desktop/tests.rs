@@ -1637,15 +1637,7 @@ mod timeframe_input {
     fn order_book_on_chart_holds_the_book_demand_until_removed(cx: &mut TestAppContext) {
         let (surface, requests, _publications, cx) = harness(cx);
         install_chart(&surface, None, cx);
-        let depth_demands = || {
-            requests
-                .try_iter()
-                .filter_map(|command| match command {
-                    MarketWorkerCommand::DepthVisible(visible) => Some(visible),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
+        let depth_demands = || order_book_demands(&requests);
         depth_demands();
         cx.update(|_, cx| {
             surface.update(cx, |surface, cx| {
@@ -1658,7 +1650,7 @@ mod timeframe_input {
         cx.run_until_parked();
         assert_eq!(
             depth_demands(),
-            vec![true],
+            vec![OrderBookDetail::Depth],
             "the chart's book opens the demand"
         );
 
@@ -1671,7 +1663,7 @@ mod timeframe_input {
         cx.run_until_parked();
         assert_eq!(
             depth_demands(),
-            Vec::<bool>::new(),
+            Vec::<OrderBookDetail>::new(),
             "the order book panel shares the open demand"
         );
 
@@ -1690,9 +1682,90 @@ mod timeframe_input {
         cx.run_until_parked();
         assert_eq!(
             depth_demands(),
-            vec![false],
+            vec![OrderBookDetail::Hidden],
             "removing it releases the demand"
         );
+    }
+
+    fn order_book_demands(requests: &mpsc::Receiver<MarketWorkerCommand>) -> Vec<OrderBookDetail> {
+        requests
+            .try_iter()
+            .filter_map(|command| match command {
+                MarketWorkerCommand::OrderBook(detail) => Some(detail),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn queue_column_holds_order_levels_only_while_the_docked_book_shows_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, requests, _publications, cx) = harness_with(
+            cx,
+            aeris_desktop::test_support::fixture_futures_contract("MNQ"),
+        );
+        order_book_demands(&requests);
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.set_side_panel_visible(SidePanel::OrderBook, true, cx);
+                surface.toggle_order_book_column(OrderBookColumn::Queue, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            order_book_demands(&requests),
+            vec![OrderBookDetail::Depth, OrderBookDetail::OrderQueues],
+            "the docked book opens depth and its queue column adds order levels"
+        );
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.toggle_order_book_column(OrderBookColumn::Queue, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            order_book_demands(&requests),
+            vec![OrderBookDetail::Depth],
+            "hiding the queue keeps the book's depth and releases its order levels"
+        );
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.toggle_order_book_column(OrderBookColumn::Queue, cx);
+                surface.set_side_panel_visible(SidePanel::OrderBook, false, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            order_book_demands(&requests),
+            vec![OrderBookDetail::OrderQueues, OrderBookDetail::Hidden],
+            "closing the docked book releases everything it held"
+        );
+    }
+
+    #[gpui::test]
+    fn queue_column_is_not_offered_by_a_price_level_provider(cx: &mut TestAppContext) {
+        let (surface, requests, _publications, cx) = harness(cx);
+        order_book_demands(&requests);
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.set_side_panel_visible(SidePanel::OrderBook, true, cx);
+                surface.toggle_order_book_column(OrderBookColumn::Queue, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            order_book_demands(&requests),
+            vec![OrderBookDetail::Depth],
+            "a provider without order levels is never asked for them"
+        );
+        cx.read(|cx| {
+            let columns = surface.read(cx).order_book.read(cx).columns();
+            assert!(!columns.is_offered(OrderBookColumn::Queue));
+            assert!(!columns.is_visible(OrderBookColumn::Queue));
+        });
     }
 
     #[gpui::test]

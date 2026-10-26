@@ -509,6 +509,7 @@ fn order_book_frame_projects_resting_levels_onto_the_price_grid() {
                 ask: None,
             },
         ],
+        order_queues: None,
     };
     let (tick_size, bids, asks) = chart_order_book_depth(&frame).expect("ready book");
     assert!((tick_size - 0.25).abs() < f64::EPSILON);

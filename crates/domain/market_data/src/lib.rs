@@ -10,6 +10,7 @@ pub use candle::merge_live_candle;
 mod decimal;
 pub use decimal::{expand_decimal_exponent, parse_decimal_to_fixed};
 mod order_book;
+mod order_levels;
 
 pub use chart_interval::{
     ChartAggregation, ChartInterval, RithmicChartAggregation, RithmicDailyAggregation,
@@ -22,7 +23,13 @@ pub use contracts::{
 };
 pub use order_book::{
     AggressorTradeVolumes, OrderBook, OrderBookApplyOutcome, OrderBookColumnLevel, OrderBookFrame,
-    OrderBookPublication, OrderBookRecoveryReason, OrderBookRow, OrderBookState,
+    OrderBookPublication, OrderBookRecoveryReason, OrderBookRow, OrderBookState, OrderQueueFrame,
+    OrderQueueLevel, OrderQueueState,
+};
+pub use order_levels::{
+    MAXIMUM_ORDER_LEVEL_CHANGES, MAXIMUM_ORDER_LEVEL_ORDERS, OrderLevelApplyOutcome,
+    OrderLevelBook, OrderLevelChange, OrderLevelEvent, OrderLevelInterruption, OrderLevelReset,
+    OrderLevelSnapshot, OrderLevelState, OrderLevelUpdate, RestingOrder,
 };
 
 /// Versioned rules used to construct one deterministic bar series.
@@ -143,6 +150,11 @@ pub enum MarketDataValidationError {
     SourceSequenceRegression,
     DepthGap { expected: u64, actual: u64 },
     DepthLimitExceeded { maximum: usize },
+    DuplicateOrderId,
+    UnknownOrderId,
+    EmptyOrderLevelUpdate,
+    OrderLevelGap { expected: u64, actual: u64 },
+    OrderLevelLimitExceeded { maximum: usize },
 }
 
 impl fmt::Display for MarketDataValidationError {
@@ -207,6 +219,18 @@ impl fmt::Display for MarketDataValidationError {
                     formatter,
                     "depth level count exceeds configured maximum {maximum}"
                 )
+            }
+            Self::DuplicateOrderId => formatter.write_str("order id is already resting"),
+            Self::UnknownOrderId => formatter.write_str("order id is not resting"),
+            Self::EmptyOrderLevelUpdate => {
+                formatter.write_str("order-level update carries no changes")
+            }
+            Self::OrderLevelGap { expected, actual } => write!(
+                formatter,
+                "order-level continuity gap: expected {expected}, received {actual}"
+            ),
+            Self::OrderLevelLimitExceeded { maximum } => {
+                write!(formatter, "order-level bound {maximum} exceeded")
             }
         }
     }

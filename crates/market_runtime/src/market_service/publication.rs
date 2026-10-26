@@ -111,6 +111,7 @@ pub(super) fn order_book_snapshot(
     generation: GenerationId,
     order_book: &ProviderOrderBook,
     display_depth: Option<&crate::MarketDisplayDepth>,
+    order_levels_demanded: bool,
 ) -> MarketRuntimeEvent {
     let top_of_book_only = order_book.publishes_top_of_book_only();
     let mut publication = order_book.book.publication();
@@ -184,7 +185,14 @@ pub(super) fn order_book_snapshot(
                 !top_of_book_only && display.provider_generation == provider_generation
             })
             .cloned(),
+        order_levels: order_levels_demanded.then(|| Box::new(order_book.order_level_view())),
     })
+}
+
+fn demands_order_levels(demand: &aeris_market_engine::ConsumerDemand) -> bool {
+    demand
+        .streams
+        .is_some_and(|streams| streams.contains(crate::MarketStream::OrderLevels))
 }
 
 fn trade_tape_snapshot(
@@ -777,6 +785,7 @@ impl Coordinator<'_> {
         let Some(generation) = demand.generation else {
             return;
         };
+        let order_levels = demands_order_levels(demand);
         let Some(order_book) = self
             .order_books
             .get(&(series.provider_id.clone(), series.instrument_id.clone()))
@@ -789,7 +798,13 @@ impl Coordinator<'_> {
         let display_depth = self
             .display_depth
             .get(&(series.provider_id.clone(), series.instrument_id.clone()));
-        let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
+        let event = order_book_snapshot(
+            consumer_id,
+            generation,
+            order_book,
+            display_depth,
+            order_levels,
+        );
         if let Some(events) = self.events.get_mut(&consumer_id) {
             events.order_book = Some(event);
         }
@@ -807,7 +822,7 @@ impl Coordinator<'_> {
                 let generation = demand.generation?;
                 let series = demand.series.as_ref()?;
                 (series.provider_id == provider && series.instrument_id == instrument_id)
-                    .then_some((*consumer_id, generation))
+                    .then_some((*consumer_id, generation, demands_order_levels(demand)))
             })
             .collect::<Vec<_>>();
         let Some(order_book) = self
@@ -819,8 +834,14 @@ impl Coordinator<'_> {
         let display_depth = self
             .display_depth
             .get(&(provider.to_string(), instrument_id.to_string()));
-        for (consumer_id, generation) in consumers {
-            let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
+        for (consumer_id, generation, order_levels) in consumers {
+            let event = order_book_snapshot(
+                consumer_id,
+                generation,
+                order_book,
+                display_depth,
+                order_levels,
+            );
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 events.order_book = Some(event);
             }
@@ -1093,6 +1114,7 @@ mod tests {
             GenerationId(std::num::NonZeroU64::MIN),
             &order_book,
             Some(&display_depth),
+            false,
         );
         let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = event else {
             panic!("order-book publication expected");
@@ -1149,6 +1171,7 @@ mod tests {
             GenerationId(std::num::NonZeroU64::MIN),
             &order_book,
             None,
+            false,
         ) else {
             panic!("order-book publication expected");
         };
@@ -1223,6 +1246,7 @@ mod tests {
             GenerationId(std::num::NonZeroU64::MIN),
             order_book,
             None,
+            false,
         ) else {
             panic!("order-book publication expected");
         };

@@ -7,7 +7,7 @@
 use crate::session_contract::{
     ProviderContractError, ProviderEnvironment, ProviderInvalidationReason,
 };
-use aeris_market_data::MarketEvent;
+use aeris_market_data::{MarketEvent, OrderLevelEvent, OrderLevelInterruption};
 use aeris_observability::{
     DiagnosticsQueue, FeedConnectionState, FeedCounter, FeedDiagnostics, FeedDiagnosticsSnapshot,
     FeedIdentity, FeedRecoveryReason, LatencyTimestampChain, LocalLatencyMetric,
@@ -406,6 +406,23 @@ where
                 feed.set_order_book_state(OrderBookDiagnosticsState::Ready);
             }
             MarketEvent::DepthDelta(_) => feed.increment(FeedCounter::DepthDeltas),
+            MarketEvent::OrderLevels(OrderLevelEvent::Snapshot(_)) => {
+                feed.increment(FeedCounter::OrderLevelSnapshots);
+            }
+            MarketEvent::OrderLevels(OrderLevelEvent::Update(_)) => {
+                feed.increment(FeedCounter::OrderLevelUpdates);
+            }
+            MarketEvent::OrderLevels(OrderLevelEvent::Reset(reset)) => {
+                feed.increment(FeedCounter::OrderLevelResets);
+                match reset.reason {
+                    OrderLevelInterruption::SequenceGap => feed.increment(FeedCounter::Gaps),
+                    OrderLevelInterruption::Overflow => feed.increment(FeedCounter::Overflows),
+                    OrderLevelInterruption::SubscriptionRefused
+                    | OrderLevelInterruption::SnapshotRefused
+                    | OrderLevelInterruption::InvalidUpdate
+                    | OrderLevelInterruption::Released => {}
+                }
+            }
         }
         Ok(())
     }

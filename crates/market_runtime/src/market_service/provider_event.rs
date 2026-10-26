@@ -1,4 +1,7 @@
-use super::{DepthSnapshot, MarketBar, MarketTrade, TopOfBookQuote, lifecycle::RecoveryReason};
+use super::{
+    DepthSnapshot, MarketBar, MarketTrade, OrderLevelEvent, TopOfBookQuote,
+    lifecycle::RecoveryReason,
+};
 use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
 use crate::rithmic_realtime::RithmicRealtimeEvent;
 use aeris_market_engine::fence::{Epoch, ProviderTag};
@@ -174,6 +177,7 @@ pub(super) enum ProviderEventKind {
     Trades(ProviderTradeBatch),
     Quote(TopOfBookQuote),
     Depth(DepthSnapshot),
+    OrderLevels(OrderLevelEvent),
     Candle {
         symbol: ProviderCandleSymbol,
         bar: MarketBar,
@@ -234,6 +238,7 @@ impl ProviderEvent {
             Wire::Trade(_, trade) => ProviderEventKind::Trades(ProviderTradeBatch::One(trade)),
             Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
             Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
+            Wire::OrderLevels(_, event) => ProviderEventKind::OrderLevels(event),
         };
         WireProviderEvent {
             provider: "rithmic",

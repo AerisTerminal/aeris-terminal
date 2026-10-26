@@ -22,7 +22,7 @@ use crate::{
 };
 use aeris_market_data::{
     AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
-    QualifiedTimestamp, TopOfBookQuote,
+    OrderLevelChange, OrderLevelEvent, QualifiedTimestamp, RestingOrder, TopOfBookQuote,
 };
 use aeris_observability::diagnostic;
 use aeris_platform_runtime::{CredentialVault, PowerEvent};
@@ -86,12 +86,16 @@ const RETRY_DELAYS: [Duration; 7] = [
 
 /// Explicit provider-to-canonical registry entry and data selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Four independent provider stream subscriptions.
 pub struct RithmicProviderInstrument {
     pub descriptor: InstrumentDescriptor,
     pub entitlement_id: String,
     pub trades: bool,
     pub quotes: bool,
+    /// Aggregate price-level depth.
     pub order_book: bool,
+    /// Every resting order (market by order), subscribed only on demand.
+    pub order_levels: bool,
 }
 
 /// Bounded, owned symbol-search intent for one session-unique search generation.
@@ -2028,8 +2032,8 @@ fn stream_ticker(
     if stop.load(Ordering::Acquire) {
         return Ok(());
     }
-    let initial_messages = match install_subscriptions(connection, config, stop) {
-        Ok(messages) => messages,
+    let installed = match install_subscriptions(connection, config, stop) {
+        Ok(installed) => installed,
         Err(_) if stop.load(Ordering::Acquire) => return Ok(()),
         Err(error) => return Err(session_failure(error)),
     };
@@ -2045,13 +2049,7 @@ fn stream_ticker(
         return Ok(());
     }
     collect_market(
-        connection,
-        config,
-        generation,
-        stop,
-        commands,
-        emitter,
-        initial_messages,
+        connection, config, generation, stop, commands, emitter, installed,
     )
 }
 
@@ -2240,6 +2238,7 @@ fn retained_event_bytes(event: &ProviderSessionEvent) -> Option<usize> {
                         .capacity()
                         .checked_mul(size_of::<DepthLevel>())?)?;
                 }
+                MarketEvent::OrderLevels(event) => add(order_level_event_bytes(event)?)?,
                 MarketEvent::Quote(_) | MarketEvent::DepthDelta(_) => {}
             }
         }
@@ -2248,6 +2247,41 @@ fn retained_event_bytes(event: &ProviderSessionEvent) -> Option<usize> {
         | ProviderSessionEvent::Heartbeat { .. }
         | ProviderSessionEvent::Invalidated { .. }
         | ProviderSessionEvent::Stopped => {}
+    }
+    Some(bytes)
+}
+
+fn order_level_event_bytes(event: &OrderLevelEvent) -> Option<usize> {
+    let mut bytes = 0_usize;
+    let mut add = |value: usize| {
+        bytes = bytes.checked_add(value)?;
+        Some(())
+    };
+    match event {
+        OrderLevelEvent::Snapshot(snapshot) => {
+            add(snapshot
+                .orders
+                .capacity()
+                .checked_mul(size_of::<RestingOrder>())?)?;
+            for order in &snapshot.orders {
+                add(order.order_id.capacity())?;
+            }
+        }
+        OrderLevelEvent::Update(update) => {
+            add(update
+                .changes
+                .capacity()
+                .checked_mul(size_of::<OrderLevelChange>())?)?;
+            for change in &update.changes {
+                add(match change {
+                    OrderLevelChange::Add(order) | OrderLevelChange::Change(order) => {
+                        order.order_id.capacity()
+                    }
+                    OrderLevelChange::Delete { order_id, .. } => order_id.capacity(),
+                })?;
+            }
+        }
+        OrderLevelEvent::Reset(_) => {}
     }
     Some(bytes)
 }
@@ -2350,6 +2384,7 @@ const fn provider_event_kind(event: &ProviderSessionEvent) -> &'static str {
             MarketEvent::Quote(_) => "quote",
             MarketEvent::DepthSnapshot(_) => "depth",
             MarketEvent::DepthDelta(_) => "depth_delta",
+            MarketEvent::OrderLevels(_) => "order_levels",
         },
         ProviderSessionEvent::Heartbeat { .. } => "heartbeat",
         ProviderSessionEvent::Invalidated { .. } => "invalidated",
@@ -2373,7 +2408,7 @@ mod tests {
         MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, OrderBookSides, OrderBookUpdate,
         OrderBookUpdateKind, QuoteUpdate, TradeUpdate,
     };
-    use aeris_market_data::{BookSide, DepthDelta};
+    use aeris_market_data::{BookSide, DepthDelta, OrderLevelInterruption};
     use std::{
         io::Read,
         net::{TcpListener, TcpStream},
@@ -2444,6 +2479,7 @@ mod tests {
             trades: true,
             quotes: true,
             order_book: true,
+            order_levels: true,
         }
     }
 
@@ -3165,7 +3201,7 @@ mod tests {
     }
 
     #[test]
-    fn exchange_nanoseconds_survive_into_published_trades_and_depth() {
+    fn exchange_nanoseconds_survive_into_published_trades_and_order_levels() {
         let config = config();
         let mut canonical = CanonicalSessionState::new(&config, generation(7));
         let source = SourceTimestamp {
@@ -3225,9 +3261,9 @@ mod tests {
             });
         assert!(matches!(
             canonical.convert(complete, 3, 3),
-            Ok(Some(MarketEvent::DepthSnapshot(_)))
+            Ok(Some(MarketEvent::OrderLevels(OrderLevelEvent::Snapshot(_))))
         ));
-        let Some(MarketEvent::DepthSnapshot(depth)) = canonical
+        let Some(MarketEvent::OrderLevels(OrderLevelEvent::Update(update))) = canonical
             .convert(
                 DecodedMarketMessage::DepthByOrder(crate::DepthByOrderUpdate {
                     identity: identity(),
@@ -3250,14 +3286,14 @@ mod tests {
             )
             .expect("live update converts")
         else {
-            panic!("a ready book publishes its image after a live update");
+            panic!("a ready book publishes each live update");
         };
         assert_eq!(
-            depth.metadata.timestamps.exchange_unix_nanos,
+            update.metadata.timestamps.exchange_unix_nanos,
             Some(1_700_000_000_123_455_789)
         );
         assert_eq!(
-            depth.metadata.timestamps.provider_unix_nanos,
+            update.metadata.timestamps.provider_unix_nanos,
             Some(1_700_000_000_123_456_000)
         );
     }
@@ -3289,10 +3325,109 @@ mod tests {
                 2,
                 2,
             ),
-            Ok(None),
-            "a refused image never publishes"
+            Ok(Some(MarketEvent::OrderLevels(OrderLevelEvent::Reset(
+                aeris_market_data::OrderLevelReset {
+                    metadata: EventMetadata {
+                        provider_id: PROVIDER_ID.to_string(),
+                        instrument_id: instrument().descriptor.instrument_id,
+                        entitlement_id: instrument().entitlement_id,
+                        source_sequence: 2,
+                        session_generation: 7,
+                        timestamps: QualifiedTimestamp {
+                            exchange_unix_nanos: None,
+                            provider_unix_nanos: None,
+                            received_unix_nanos: 2,
+                        },
+                    },
+                    image: 0,
+                    reason: OrderLevelInterruption::SnapshotRefused,
+                    resnapshot: true,
+                }
+            )))),
+            "a refused image never publishes; its reset announces the resnapshot"
         );
         assert_eq!(canonical.take_depth_resnapshots(), vec![instrument()]);
+    }
+
+    #[test]
+    fn refused_order_level_subscription_publishes_one_terminal_reset() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(7));
+        canonical.refuse_order_levels(&instrument().descriptor.instrument_id);
+        canonical.refuse_order_levels(&instrument().descriptor.instrument_id);
+        let resets = canonical
+            .take_order_level_resets(3, 3)
+            .expect("resets publish");
+        let [MarketEvent::OrderLevels(OrderLevelEvent::Reset(reset))] = resets.as_slice() else {
+            panic!("one refusal publishes exactly one reset, got {resets:?}");
+        };
+        assert_eq!(reset.reason, OrderLevelInterruption::SubscriptionRefused);
+        assert!(!reset.resnapshot, "a refused subscription is not retried");
+        assert_eq!(
+            canonical.take_depth_resnapshots(),
+            Vec::<RithmicProviderInstrument>::new()
+        );
+        assert_eq!(canonical.take_order_level_resets(4, 4), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_removed_order_level_book_is_released_and_re_added_above_its_image() {
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(7));
+        let snapshot = |canonical: &mut CanonicalSessionState, ordinal| {
+            canonical
+                .convert(
+                    DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Level(
+                        crate::DepthByOrderSnapshotLevel {
+                            identity: identity(),
+                            sequence_number: None,
+                            side: DepthByOrderSide::Bid,
+                            price: 5_100.00,
+                            orders: vec![crate::DepthByOrderSnapshotOrder {
+                                size: 2,
+                                priority: 1,
+                                exchange_order_id: "bid-1".to_string(),
+                            }],
+                        },
+                    )),
+                    ordinal,
+                    1,
+                )
+                .expect("level converts");
+            let Ok(Some(MarketEvent::OrderLevels(OrderLevelEvent::Snapshot(image)))) = canonical
+                .convert(
+                    DecodedMarketMessage::DepthByOrderSnapshot(
+                        DepthByOrderSnapshotMessage::Complete {
+                            outcome: DepthByOrderSnapshotOutcome::Accepted,
+                            identity: Some(identity()),
+                            sequence_number: None,
+                        },
+                    ),
+                    ordinal + 1,
+                    1,
+                )
+            else {
+                panic!("a completed snapshot publishes its image");
+            };
+            image.image
+        };
+        assert_eq!(snapshot(&mut canonical, 1), 1);
+        canonical.remove_instrument(&instrument().descriptor.instrument_id);
+        let released = canonical
+            .take_order_level_resets(3, 3)
+            .expect("the release publishes");
+        let [MarketEvent::OrderLevels(OrderLevelEvent::Reset(reset))] = released.as_slice() else {
+            panic!("a removed order-level book publishes one release, got {released:?}");
+        };
+        assert_eq!(
+            (reset.image, reset.reason, reset.resnapshot),
+            (1, OrderLevelInterruption::Released, false)
+        );
+        assert_eq!(canonical.take_order_level_resets(4, 4), Ok(Vec::new()));
+        canonical
+            .add_instrument(instrument())
+            .expect("the instrument is added again");
+        assert_eq!(snapshot(&mut canonical, 5), 2);
     }
 
     #[test]
@@ -3567,8 +3702,10 @@ mod tests {
         assert_eq!(published.ask.map(|level| level.price), Some(510_050));
     }
 
+    /// Order levels are published unfiltered: a pre-open book is legitimately
+    /// crossed, and withholding any update would break continuity.
     #[test]
-    fn crossed_order_level_image_is_withheld_until_the_book_uncrosses() {
+    fn crossed_order_level_image_publishes_every_resting_order() {
         let config = config();
         let mut canonical = CanonicalSessionState::new(&config, generation(5));
         for (ordinal, (side, price, order_id)) in [
@@ -3601,19 +3738,28 @@ mod tests {
             );
         }
         assert_eq!(
-            canonical.convert(
-                DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
-                    outcome: DepthByOrderSnapshotOutcome::Accepted,
-                    identity: Some(identity()),
-                    sequence_number: None,
+            canonical
+                .convert(
+                    DecodedMarketMessage::DepthByOrderSnapshot(
+                        DepthByOrderSnapshotMessage::Complete {
+                            outcome: DepthByOrderSnapshotOutcome::Accepted,
+                            identity: Some(identity()),
+                            sequence_number: None,
+                        }
+                    ),
+                    3,
+                    1,
+                )
+                .map(|event| match event {
+                    Some(MarketEvent::OrderLevels(OrderLevelEvent::Snapshot(image))) => {
+                        image.orders.len()
+                    }
+                    _ => 0,
                 }),
-                3,
-                1,
-            ),
-            Ok(None),
-            "a crossed pre-open image is withheld, not a session failure"
+            Ok(2),
+            "a crossed pre-open image publishes, not a session failure"
         );
-        let Some(MarketEvent::DepthSnapshot(depth)) = canonical
+        let Some(MarketEvent::OrderLevels(OrderLevelEvent::Update(update))) = canonical
             .convert(
                 DecodedMarketMessage::DepthByOrder(crate::DepthByOrderUpdate {
                     identity: identity(),
@@ -3636,46 +3782,151 @@ mod tests {
             )
             .expect("live update applies to the retained image")
         else {
-            panic!("the uncrossed book must publish");
+            panic!("the live update must publish");
         };
-        assert_eq!(depth.bids, [] as [aeris_market_data::DepthLevel; 0]);
-        assert_eq!(depth.asks.first().map(|level| level.price), Some(510_025));
+        assert_eq!(
+            update.changes,
+            [OrderLevelChange::Delete {
+                order_id: "bid-1".to_string(),
+                side: BookSide::Bid,
+                price: 510_050,
+            }]
+        );
+    }
+
+    fn price_level_frame(
+        kind: OrderBookUpdateKind,
+        bids: &[(f64, u32)],
+        asks: &[(f64, u32)],
+    ) -> DecodedMarketMessage {
+        let levels = |levels: &[(f64, u32)]| {
+            levels
+                .iter()
+                .map(|(price, size)| crate::OrderBookLevel {
+                    price: *price,
+                    size: *size,
+                    orders: Some(1),
+                    implied_size: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        DecodedMarketMessage::OrderBook(OrderBookUpdate {
+            identity: identity(),
+            kind,
+            present_sides: OrderBookSides {
+                bids: !bids.is_empty(),
+                asks: !asks.is_empty(),
+            },
+            bids: levels(bids),
+            asks: levels(asks),
+            timestamp: Some(timestamp()),
+        })
+    }
+
+    type Sides = (Vec<(i64, i64)>, Vec<(i64, i64)>);
+
+    fn published_depth(
+        event: Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)>,
+    ) -> Sides {
+        let Ok(Some(MarketEvent::DepthSnapshot(depth))) = event else {
+            panic!("an authoritative aggregate change publishes depth, got {event:?}");
+        };
+        let side = |levels: &[DepthLevel]| {
+            levels
+                .iter()
+                .map(|level| (level.price, level.quantity))
+                .collect::<Vec<_>>()
+        };
+        (side(&depth.bids), side(&depth.asks))
+    }
+
+    /// Aggregate depth comes from the provider's price-level stream, never
+    /// from order levels, in the observed image-then-upsert shape.
+    #[test]
+    fn price_level_frames_build_the_aggregate_book_and_withhold_crossed_images() {
+        use OrderBookUpdateKind::{Begin, Clear, End, Snapshot, Solo};
+        let config = config();
+        let mut canonical = CanonicalSessionState::new(&config, generation(5));
+        assert_eq!(
+            canonical.convert(price_level_frame(Solo, &[(5_100.0, 1)], &[]), 1, 1),
+            Ok(None),
+            "no update applies before the first image"
+        );
+        assert_eq!(
+            published_depth(canonical.convert(
+                price_level_frame(Snapshot, &[(5_100.0, 5), (5_099.75, 7)], &[(5_100.25, 3)]),
+                2,
+                2
+            )),
+            (vec![(510_000, 500), (509_975, 700)], vec![(510_025, 300)])
+        );
+        assert_eq!(
+            published_depth(canonical.convert(price_level_frame(Solo, &[(5_100.0, 0)], &[]), 3, 3)),
+            (vec![(509_975, 700)], vec![(510_025, 300)]),
+            "a zero size removes the level"
+        );
+        assert_eq!(
+            canonical.convert(price_level_frame(Begin, &[], &[(5_100.25, 0)]), 4, 4),
+            Ok(None),
+            "an open group publishes nothing"
+        );
+        assert_eq!(
+            published_depth(canonical.convert(price_level_frame(End, &[], &[(5_100.5, 2)]), 5, 5)),
+            (vec![(509_975, 700)], vec![(510_050, 200)])
+        );
+        assert_eq!(
+            canonical.convert(price_level_frame(Solo, &[(5_100.75, 1)], &[]), 6, 6),
+            Ok(None),
+            "a crossed image is withheld, not a session failure"
+        );
+        assert_eq!(
+            published_depth(canonical.convert(price_level_frame(Clear, &[], &[]), 7, 7)),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            canonical.convert(price_level_frame(End, &[(5_100.0, 1)], &[]), 8, 8),
+            Err((
+                ProviderInvalidationReason::SequenceGap,
+                RetryDisposition::Transient
+            )),
+            "a broken group replaces the session to rebuild the image"
+        );
     }
 
     #[test]
-    fn price_level_frames_never_publish_depth_or_invalidate_the_session() {
-        let config = config();
+    fn an_instrument_without_order_level_demand_keeps_no_order_level_book() {
+        let mut quiet = instrument();
+        quiet.order_levels = false;
+        let config = RithmicProviderConfig::try_new(
+            crate::RITHMIC_APPLICATION_NAME,
+            "0.1.0",
+            RithmicSessionLimits::default(),
+            Duration::from_secs(30),
+            vec![quiet],
+        )
+        .expect("configuration validates");
         let mut canonical = CanonicalSessionState::new(&config, generation(5));
-        for (ordinal, kind) in [
-            OrderBookUpdateKind::Begin,
-            OrderBookUpdateKind::End,
-            OrderBookUpdateKind::Solo,
-            OrderBookUpdateKind::Clear,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let ordinal = u64::try_from(ordinal).expect("small ordinal") + 1;
-            let received = i64::try_from(ordinal).expect("small timestamp");
-            assert_eq!(
-                canonical.convert(
-                    DecodedMarketMessage::OrderBook(OrderBookUpdate {
-                        identity: identity(),
-                        kind,
-                        present_sides: OrderBookSides {
-                            bids: false,
-                            asks: false,
-                        },
-                        bids: Vec::new(),
-                        asks: Vec::new(),
-                        timestamp: Some(timestamp()),
-                    }),
-                    ordinal,
-                    received,
-                ),
-                Ok(None)
-            );
-        }
+        assert_eq!(
+            published_depth(canonical.convert(
+                price_level_frame(OrderBookUpdateKind::Snapshot, &[(5_100.0, 5)], &[]),
+                1,
+                1
+            )),
+            (vec![(510_000, 500)], vec![])
+        );
+        assert_eq!(
+            canonical.convert(
+                DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                    outcome: DepthByOrderSnapshotOutcome::Accepted,
+                    identity: Some(identity()),
+                    sequence_number: None,
+                }),
+                2,
+                2,
+            ),
+            Err(malformed()),
+            "order-level frames for an instrument never subscribed to them are a protocol fault"
+        );
     }
 
     #[test]

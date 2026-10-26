@@ -168,7 +168,7 @@ impl PaneHarness {
         if fill_command_queue {
             for _ in 0..8 {
                 worker
-                    .try_set_order_book_visible(true)
+                    .try_set_order_book_detail(OrderBookDetail::Depth)
                     .expect("fill bounded command queue before restore");
             }
         }
@@ -3034,7 +3034,7 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
     harness.pane.update(cx, |pane, _| {
         for _ in 0..8 {
             pane.market_worker
-                .try_set_order_book_visible(true)
+                .try_set_order_book_detail(OrderBookDetail::Depth)
                 .expect("fill bounded command queue");
         }
     });
@@ -3728,7 +3728,7 @@ fn pane_harness_alert_delete_queue_failure_renders_once_then_success_clears(
     harness.pane.update(cx, |pane, _| {
         for _ in 0..7 {
             pane.market_worker
-                .try_set_order_book_visible(true)
+                .try_set_order_book_detail(OrderBookDetail::Depth)
                 .expect("fill remaining command slots");
         }
     });
@@ -4334,7 +4334,7 @@ fn pane_harness_repeated_series_dispatch_failure_has_one_notice_and_retry_clears
             .display_symbol = "private-credential-sentinel".into();
         for _ in 0..8 {
             pane.market_worker
-                .try_set_order_book_visible(true)
+                .try_set_order_book_detail(OrderBookDetail::Depth)
                 .expect("fill bounded command queue");
         }
     });

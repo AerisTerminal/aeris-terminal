@@ -26,10 +26,12 @@ use std::{
 use zeroize::Zeroize;
 
 mod mbo_stream_evidence;
+mod mbp_stream_evidence;
 mod order_bracket_smoke;
 mod provider_silence_evidence;
 
 use mbo_stream_evidence::MboStreamEvidence;
+use mbp_stream_evidence::MbpStreamEvidence;
 use provider_silence_evidence::{
     EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS, EVIDENCE_RESPONSE_TIMEOUT_NANOS, EvidenceFailure,
     EvidenceProvenance, EvidenceStatus, ExpectedSilence, ObservedRetry, ObservedSessionTiming,
@@ -52,12 +54,14 @@ const SUBSCRIPTION_OBSERVATION_BUDGET: Duration = Duration::from_mins(5);
 const SUBSCRIPTION_PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 const MBO_STREAM_OBSERVATION_BUDGET: Duration = Duration::from_secs(90);
 const MBO_STREAM_FRAME_TARGET: usize = 200;
+const MBP_STREAM_FRAME_TARGET: usize = 400;
 
 #[derive(Debug, Eq, PartialEq)]
 enum RunMode {
     Smoke,
     HistoryOnly,
     MboOnly,
+    MbpOnly,
     OrderBracketSmoke {
         product: String,
     },
@@ -106,6 +110,7 @@ fn main() -> Result<(), String> {
         }
         RunMode::HistoryOnly => return run_history_only(&credentials),
         RunMode::MboOnly => return run_mbo_only(&credentials),
+        RunMode::MbpOnly => return run_mbp_only(&credentials),
         RunMode::ProviderObservedSilence {
             expected,
             observation_seconds,
@@ -183,6 +188,91 @@ fn run_mbo_only(credentials: &RithmicCredentialBytes) -> Result<(), String> {
     Ok(())
 }
 
+fn run_mbp_only(credentials: &RithmicCredentialBytes) -> Result<(), String> {
+    let (mut ticker, selected) = login_and_select(credentials, application(), SYMBOL)?;
+    let probe = observe_price_levels(&mut ticker, &selected);
+    let close = ticker
+        .close()
+        .map_err(|error| format!("ticker_close_failed={error}"));
+    match (probe, close) {
+        (Ok(()), Ok(())) => {}
+        (Err(probe), Ok(())) => return Err(probe),
+        (Ok(()), Err(close)) => return Err(close),
+        (Err(probe), Err(close)) => return Err(format!("{probe}; {close}")),
+    }
+    println!(
+        "rithmic_mbp_only=passed symbol={} exchange={}",
+        selected.symbol, selected.exchange
+    );
+    Ok(())
+}
+
+/// Subscribes best bid/offer and price-level depth only, and records how the
+/// price-level frames build a book from the first frame after subscribing.
+fn observe_price_levels(
+    ticker: &mut aeris_rithmic_protocol_adapter::RithmicTickerConnection,
+    selected: &SelectedInstrument,
+) -> Result<(), String> {
+    let subscription = |action| MarketDataSubscription {
+        symbol: selected.symbol.as_str(),
+        exchange: selected.exchange.as_str(),
+        action,
+        trades: false,
+        quotes: true,
+        order_book: true,
+    };
+    ticker
+        .update_market_data(subscription(SubscriptionAction::Subscribe))
+        .map_err(|error| format!("mbp_subscription_send_failed={error}"))?;
+    let mut evidence = MbpStreamEvidence::default();
+    let mut accepted = None;
+    let started = Instant::now();
+    let deadline = started + MBO_STREAM_OBSERVATION_BUDGET;
+    while evidence.book_frames() < MBP_STREAM_FRAME_TARGET && Instant::now() < deadline {
+        let message = match ticker.read_next() {
+            Ok(message) => message,
+            Err(RithmicSessionError::Deadline) => continue,
+            Err(error) => return Err(format!("mbp_stream_read_failed={error}")),
+        };
+        match message {
+            RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
+                accepted: value,
+            }) => {
+                println!(
+                    "rithmic_mbp_subscription accepted={value} book_frames_before_ack={}",
+                    evidence.book_frames()
+                );
+                if !value {
+                    return Err("mbp_subscription_rejected".to_string());
+                }
+                accepted = Some(value);
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::OrderBook(update))
+                if is_selected(&update.identity, selected) =>
+            {
+                evidence.record_book(&update);
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::Quote(quote))
+                if is_selected(&quote.identity, selected) =>
+            {
+                evidence.record_quote(&quote);
+            }
+            _ => {}
+        }
+    }
+    println!(
+        "rithmic_mbp_observation elapsed_s={}",
+        started.elapsed().as_secs()
+    );
+    evidence.print();
+    ticker
+        .update_market_data(subscription(SubscriptionAction::Unsubscribe))
+        .map_err(|error| format!("mbp_unsubscribe_send_failed={error}"))?;
+    accepted
+        .map(|_| ())
+        .ok_or_else(|| "mbp_subscription_unacknowledged".to_string())
+}
+
 fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode, String> {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     match arguments.as_slice() {
@@ -192,6 +282,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
         }
         [argument] if argument == "--history-only" => Ok(RunMode::HistoryOnly),
         [argument] if argument == "--mbo-only" => Ok(RunMode::MboOnly),
+        [argument] if argument == "--mbp-only" => Ok(RunMode::MbpOnly),
         [flag, product] if flag == "--order-bracket-smoke" && is_product_code(product) => {
             Ok(RunMode::OrderBracketSmoke {
                 product: product.clone(),
@@ -240,7 +331,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
 }
 
 fn usage() -> String {
-    "usage: rithmic_test_smoke [--history-only | --mbo-only | --order-bracket-smoke <product-code> | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
+    "usage: rithmic_test_smoke [--history-only | --mbo-only | --mbp-only | --order-bracket-smoke <product-code> | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
 }
 
 #[derive(Clone)]
@@ -1430,6 +1521,10 @@ mod tests {
         assert_eq!(
             parse_run_mode(vec!["--mbo-only".to_string()]),
             Ok(RunMode::MboOnly)
+        );
+        assert_eq!(
+            parse_run_mode(vec!["--mbp-only".to_string()]),
+            Ok(RunMode::MbpOnly)
         );
         assert_eq!(
             parse_run_mode(vec!["--order-bracket-smoke".to_string(), "ES".to_string()]),

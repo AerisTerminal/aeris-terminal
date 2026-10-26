@@ -96,9 +96,19 @@ impl Boundary {
         generation_number: u64,
         streams: StreamRequirements,
     ) {
+        self.demand_for(self.consumer, series, generation_number, streams);
+    }
+
+    pub(super) fn demand_for(
+        &mut self,
+        consumer_id: ConsumerId,
+        series: BarSeriesKey,
+        generation_number: u64,
+        streams: StreamRequirements,
+    ) {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
         self.command(Command::Demand(
-            client(1), self.consumer, generation(generation_number),
+            client(1), consumer_id, generation(generation_number),
             series, streams, reply,
         ));
         received.recv().expect("demand reply").expect("demand succeeds");
@@ -111,16 +121,20 @@ impl Boundary {
     }
 
     pub(super) fn register_alert_consumer(&mut self) {
+        self.register_consumer(consumer(2));
+    }
+
+    pub(super) fn register_consumer(&mut self, consumer_id: ConsumerId) {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
         self.command(Command::Register(
             ConsumerIdentity {
                 client_id: client(1),
                 workspace_id: WorkspaceId(nonzero(1)),
-                consumer_id: consumer(2),
+                consumer_id,
             },
             reply,
         ));
-        received.recv().expect("register reply").expect("alert consumer registers");
+        received.recv().expect("register reply").expect("consumer registers");
     }
 
     pub(super) fn remove_consumer(&mut self) {
@@ -170,6 +184,10 @@ impl Boundary {
         self.history.try_recv().expect("provider history request")
     }
 
+    pub(super) fn discard_history_requests(&self) {
+        self.history.try_iter().for_each(drop);
+    }
+
     pub(super) fn provider_requests(&self) -> Vec<super::super::super::RithmicRealtimeControl> {
         self.provider_requests.try_iter().collect()
     }
@@ -207,8 +225,12 @@ impl Boundary {
     }
 
     pub(super) fn events(&mut self) -> Vec<MarketRuntimeEvent> {
+        self.events_for(self.consumer)
+    }
+
+    pub(super) fn events_for(&mut self, consumer_id: ConsumerId) -> Vec<MarketRuntimeEvent> {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.command(Command::DrainClient(client(1), vec![(self.consumer, 256)], reply));
+        self.command(Command::DrainClient(client(1), vec![(consumer_id, 256)], reply));
         received.recv().expect("poll reply").expect("poll succeeds")
             .into_iter().map(|(_, event)| event.value).collect()
     }

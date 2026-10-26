@@ -153,10 +153,13 @@ pub enum FeedCounter {
     StaleCallbacks,
     Overflows,
     CoalescedUiUpdates,
+    OrderLevelSnapshots,
+    OrderLevelUpdates,
+    OrderLevelResets,
 }
 
 impl FeedCounter {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 14;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Trades,
         Self::Quotes,
@@ -169,6 +172,9 @@ impl FeedCounter {
         Self::StaleCallbacks,
         Self::Overflows,
         Self::CoalescedUiUpdates,
+        Self::OrderLevelSnapshots,
+        Self::OrderLevelUpdates,
+        Self::OrderLevelResets,
     ];
 }
 
@@ -322,6 +328,9 @@ pub struct FeedCounterSnapshot {
     pub stale_callbacks: u64,
     pub overflows: u64,
     pub coalesced_ui_updates: u64,
+    pub order_level_snapshots: u64,
+    pub order_level_updates: u64,
+    pub order_level_resets: u64,
 }
 
 impl From<[u64; FeedCounter::COUNT]> for FeedCounterSnapshot {
@@ -338,6 +347,9 @@ impl From<[u64; FeedCounter::COUNT]> for FeedCounterSnapshot {
             stale_callbacks: values[FeedCounter::StaleCallbacks as usize],
             overflows: values[FeedCounter::Overflows as usize],
             coalesced_ui_updates: values[FeedCounter::CoalescedUiUpdates as usize],
+            order_level_snapshots: values[FeedCounter::OrderLevelSnapshots as usize],
+            order_level_updates: values[FeedCounter::OrderLevelUpdates as usize],
+            order_level_resets: values[FeedCounter::OrderLevelResets as usize],
         }
     }
 }

@@ -7,7 +7,10 @@ use super::{
     Provenanced, ReplayProvenance, ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate,
     SeriesTailOperation, provider_display_name,
 };
+use aeris_market_data::{OrderQueueFrame, OrderQueueLevel, OrderQueueState};
+use aeris_market_runtime::{MarketOrderLevelStatus, MarketOrderLevelView, MarketOrderQueue};
 use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
+use std::collections::BTreeMap;
 
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
@@ -132,7 +135,7 @@ pub(crate) fn runtime_order_book_frame(
         u8::try_from(instrument.quantity_scale).ok()?,
     )
     .ok()?;
-    project_order_book(
+    let mut frame = project_order_book(
         &OrderBookSelection {
             provider_id: publication.provider_id.clone(),
             instrument_id: publication.instrument_id.clone(),
@@ -143,7 +146,50 @@ pub(crate) fn runtime_order_book_frame(
             price_increment: instrument.price_increment,
         },
         publication,
-    )
+    )?;
+    frame.order_queues = snapshot
+        .order_levels
+        .as_ref()
+        .map(|view| order_queue_frame(view, publication.session_generation));
+    Some(frame)
+}
+
+/// Queues from another provider session than the book's are never shown as current.
+fn order_queue_frame(view: &MarketOrderLevelView, session_generation: u64) -> OrderQueueFrame {
+    let state = match view.status {
+        MarketOrderLevelStatus::Ready if view.provider_generation == session_generation => {
+            OrderQueueState::Ready
+        }
+        MarketOrderLevelStatus::Ready | MarketOrderLevelStatus::AwaitingSnapshot => {
+            OrderQueueState::Loading
+        }
+        MarketOrderLevelStatus::Recovering(_) | MarketOrderLevelStatus::Stale => {
+            OrderQueueState::Recovering
+        }
+        MarketOrderLevelStatus::Unavailable(_) => OrderQueueState::Unavailable,
+        MarketOrderLevelStatus::BudgetExhausted => OrderQueueState::LimitReached,
+    };
+    let queues = |side: &[MarketOrderQueue]| {
+        if state != OrderQueueState::Ready {
+            return BTreeMap::new();
+        }
+        side.iter()
+            .map(|queue| {
+                (
+                    queue.price,
+                    OrderQueueLevel {
+                        order_count: queue.order_count,
+                        quantities: queue.orders.iter().map(|order| order.quantity).collect(),
+                    },
+                )
+            })
+            .collect()
+    };
+    OrderQueueFrame {
+        state,
+        bids: queues(&view.bids),
+        asks: queues(&view.asks),
+    }
 }
 
 fn provenanced_runtime_bar(

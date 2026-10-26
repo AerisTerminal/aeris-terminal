@@ -31,7 +31,8 @@ use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
 use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
-    TopOfBookQuote, merge_live_candle,
+    OrderLevelApplyOutcome, OrderLevelBook, OrderLevelEvent, OrderLevelInterruption,
+    OrderLevelState, TopOfBookQuote, merge_live_candle,
 };
 use aeris_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
@@ -544,6 +545,9 @@ struct ProviderInstrumentDemand {
     instrument: InstallProviderInstrument,
     streams: StreamRequirements,
     display_depth: bool,
+    /// Order levels are demanded and the instrument holds one of the
+    /// provider's order-level subscriptions.
+    order_levels: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -569,12 +573,16 @@ impl ProviderDemand {
                         || requested.streams.contains(MarketStream::Depth);
                     let quotes = requested.streams.contains(MarketStream::Quotes);
                     let order_book = requested.streams.contains(MarketStream::Depth);
-                    (trades || quotes || order_book).then_some(RithmicInstrumentDemand {
-                        instrument: requested.instrument.clone(),
-                        trades,
-                        quotes,
-                        order_book,
-                    })
+                    let order_levels = requested.order_levels;
+                    (trades || quotes || order_book || order_levels).then_some(
+                        RithmicInstrumentDemand {
+                            instrument: requested.instrument.clone(),
+                            trades,
+                            quotes,
+                            order_book,
+                            order_levels,
+                        },
+                    )
                 })
                 .collect(),
         })
@@ -764,6 +772,22 @@ struct ProviderOrderBook {
     /// When the current session last delivered a newer top of book. Trade-built
     /// series on the same instrument treat it as feed liveness between trades.
     quote_observed_at: Option<std::time::Instant>,
+    /// Canonical market-by-order image. It mirrors the provider's order-level
+    /// stream, which flows only while the instrument holds a subscription.
+    order_levels: OrderLevelBook,
+    order_level_subscription: OrderLevelSubscription,
+    /// Images discarded since this book opened, for consumer diagnostics.
+    order_level_recoveries: u64,
+}
+
+/// Whether current demand holds one of a provider's bounded order-level
+/// subscriptions for an instrument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderLevelSubscription {
+    Off,
+    Admitted,
+    /// Demanded while other instruments hold the provider's whole budget.
+    BudgetExhausted,
 }
 
 mod lifecycle;
@@ -826,6 +850,9 @@ struct ProviderCapabilities {
     trade_demand_policy: TradeDemandPolicy,
     instrument_missing_detail: &'static str,
     catalog_session_binding: CatalogSessionBinding,
+    /// Instruments that may hold an order-level subscription at once. Each
+    /// canonical order-level book holds at most `MAXIMUM_ORDER_LEVEL_ORDERS`.
+    maximum_order_level_instruments: usize,
 }
 
 /// Which provider session a resolved catalog instrument belongs to.
@@ -939,7 +966,8 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
             streams: StreamRequirements::BARS
                 .with(MarketStream::Trades)
                 .with(MarketStream::Quotes)
-                .with(MarketStream::Depth),
+                .with(MarketStream::Depth)
+                .with(MarketStream::OrderLevels),
         },
         always_open: false,
         concurrency: ConcurrencyLimits {
@@ -964,6 +992,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         trade_demand_policy: TradeDemandPolicy::Immediate,
         instrument_missing_detail: "Rithmic instrument is not installed",
         catalog_session_binding: CatalogSessionBinding::ResolvingSession,
+        maximum_order_level_instruments: 8,
     },
     start: ProviderRuntimeRegistry::start_rithmic_runtime,
     flush_demand: flush_rithmic_provider_demand,
@@ -999,7 +1028,14 @@ const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID,
-    engine: RITHMIC_DESCRIPTOR.capabilities.engine,
+    engine: EngineProviderCapabilities {
+        historical_bars: true,
+        realtime_bars: true,
+        streams: StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth),
+    },
     always_open: true,
     concurrency: ConcurrencyLimits {
         maximum_sessions: 1,
@@ -1023,6 +1059,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     trade_demand_policy: TradeDemandPolicy::SessionManaged,
     instrument_missing_detail: "Hyperliquid instrument is not installed",
     catalog_session_binding: CatalogSessionBinding::CurrentSession,
+    maximum_order_level_instruments: 0,
 };
 
 fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {
@@ -1540,6 +1577,10 @@ fn configured_engine() -> Result<MarketEngine, String> {
     configured_engine_from_descriptors(BUILT_IN_PROVIDER_DESCRIPTORS)
 }
 
+fn publishes_order_levels(descriptor: &ProviderDescriptor) -> bool {
+    descriptor.presentation.feed_level == aeris_contracts::ProviderFeedLevel::OrderLevels
+}
+
 fn configured_engine_from_descriptors(
     descriptors: &[ProviderDescriptor],
 ) -> Result<MarketEngine, String> {
@@ -1566,6 +1607,13 @@ fn configured_engine_from_descriptors(
                 != capabilities.engine.streams.contains(MarketStream::Depth)
             || capabilities.quotes.is_some()
                 != capabilities.engine.streams.contains(MarketStream::Quotes)
+            || publishes_order_levels(descriptor)
+                != capabilities
+                    .engine
+                    .streams
+                    .contains(MarketStream::OrderLevels)
+            || publishes_order_levels(descriptor)
+                != (capabilities.maximum_order_level_instruments > 0)
         {
             return Err(format!(
                 "{} has inconsistent market capabilities",

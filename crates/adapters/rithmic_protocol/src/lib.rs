@@ -35,10 +35,6 @@ mod session_contract;
 #[cfg(test)]
 mod session_tests;
 
-pub use book::{
-    AggregateBookAssembler, AggregateBookConfigError, AggregateBookImage, AggregateBookLimits,
-    AggregateBookOutcome, AggregateBookRecoveryReason,
-};
 pub use catalog::{
     DecodedCatalogMessage, InstrumentReference, ProductCodeResult, SymbolSearchResult,
 };

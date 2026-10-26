@@ -1732,6 +1732,7 @@ mod tests {
             trades: true,
             quotes: false,
             order_book: false,
+            order_levels: false,
         }
     }
 

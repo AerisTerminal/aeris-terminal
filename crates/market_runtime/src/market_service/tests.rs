@@ -215,6 +215,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             alert_demand_update: AlertDemandUpdate::MarkDirty,
             overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
             instrument_missing_detail: "Provider instrument is not installed",
+            maximum_order_level_instruments: 0,
             ..RITHMIC_DESCRIPTOR.capabilities
         },
         start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
@@ -272,6 +273,17 @@ fn registered_provider_capabilities_match_presentations_and_streams() {
         assert_eq!(
             capabilities.quotes.is_some(),
             capabilities.engine.streams.contains(MarketStream::Quotes)
+        );
+        assert_eq!(
+            publishes_order_levels(descriptor),
+            capabilities
+                .engine
+                .streams
+                .contains(MarketStream::OrderLevels)
+        );
+        assert_eq!(
+            publishes_order_levels(descriptor),
+            capabilities.maximum_order_level_instruments > 0
         );
         assert!(capabilities.concurrency.maximum_sessions > 0);
         assert_eq!(

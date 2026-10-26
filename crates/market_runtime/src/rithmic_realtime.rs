@@ -19,7 +19,9 @@ use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentKind, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument,
 };
-use aeris_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
+use aeris_market_data::{
+    DepthSnapshot, MarketEvent, MarketTrade, OrderLevelEvent, OrderLevelUpdate, TopOfBookQuote,
+};
 use aeris_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
@@ -57,11 +59,13 @@ const ENVIRONMENT_CAPACITY: usize = 8;
 const LISTED_PRODUCT_ASSET_CLASS: &str = "futures";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Four independent provider stream subscriptions.
 pub(crate) struct RithmicInstrumentDemand {
     pub(crate) instrument: InstallProviderInstrument,
     pub(crate) trades: bool,
     pub(crate) quotes: bool,
     pub(crate) order_book: bool,
+    pub(crate) order_levels: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -113,6 +117,7 @@ pub(crate) enum RithmicRealtimeEvent {
     Trade(u64, MarketTrade),
     Quote(u64, TopOfBookQuote),
     Depth(u64, DepthSnapshot),
+    OrderLevels(u64, OrderLevelEvent),
     Heartbeat(u64, Option<u64>),
     Recovering(u64, Option<ProviderInvalidationReason>),
     Disconnected(u64, Option<ProviderInvalidationReason>),
@@ -129,7 +134,8 @@ impl RithmicRealtimeEvent {
             | RithmicRealtimeEvent::Heartbeat(g, _)
             | RithmicRealtimeEvent::Trade(g, _)
             | RithmicRealtimeEvent::Quote(g, _)
-            | RithmicRealtimeEvent::Depth(g, _) => *g,
+            | RithmicRealtimeEvent::Depth(g, _)
+            | RithmicRealtimeEvent::OrderLevels(g, _) => *g,
         }
     }
 }
@@ -2064,7 +2070,7 @@ fn drain_live_events(
     generation: u64,
     subscription_generation: &mut Option<SessionGeneration>,
 ) -> LiveDrain {
-    let mut pending_depth = None;
+    let mut pending = PendingBooks::default();
     for _ in (0..CALLBACK_CAPACITY).take_while(|_| {
         events.has_ready() && !channels.coordinator_wake.overflowed("rithmic", generation)
     }) {
@@ -2074,7 +2080,7 @@ fn drain_live_events(
                     generation: ready_generation,
                     ..
                 } => {
-                    publish_pending_depth(channels, generation, &mut pending_depth);
+                    pending.flush(channels, generation);
                     *subscription_generation = Some(ready_generation);
                     channels.publish_realtime(RithmicRealtimeEvent::Connected(generation));
                 }
@@ -2082,7 +2088,7 @@ fn drain_live_events(
                     event: MarketEvent::Trade(mut trade),
                     ..
                 } => {
-                    publish_pending_depth(channels, generation, &mut pending_depth);
+                    pending.flush(channels, generation);
                     trade.metadata.session_generation = generation;
                     channels.publish_realtime(RithmicRealtimeEvent::Trade(generation, trade));
                 }
@@ -2090,7 +2096,7 @@ fn drain_live_events(
                     event: MarketEvent::Quote(mut quote),
                     ..
                 } => {
-                    publish_pending_depth(channels, generation, &mut pending_depth);
+                    pending.flush(channels, generation);
                     quote.metadata.session_generation = generation;
                     channels.publish_realtime(RithmicRealtimeEvent::Quote(generation, quote));
                 }
@@ -2099,16 +2105,25 @@ fn drain_live_events(
                     ..
                 } => {
                     snapshot.metadata.session_generation = generation;
-                    if let Some(previous) = queue_depth_snapshot(&mut pending_depth, snapshot) {
-                        channels
-                            .publish_realtime(RithmicRealtimeEvent::Depth(generation, previous));
-                    }
+                    pending.queue_depth(channels, generation, snapshot);
+                }
+                ProviderSessionEvent::Market {
+                    event: MarketEvent::OrderLevels(mut event),
+                    ..
+                } => {
+                    let metadata = match &mut event {
+                        OrderLevelEvent::Snapshot(snapshot) => &mut snapshot.metadata,
+                        OrderLevelEvent::Update(update) => &mut update.metadata,
+                        OrderLevelEvent::Reset(reset) => &mut reset.metadata,
+                    };
+                    metadata.session_generation = generation;
+                    pending.queue_order_levels(channels, generation, event);
                 }
                 ProviderSessionEvent::Heartbeat {
                     transport_rtt_nanos,
                     ..
                 } => {
-                    publish_pending_depth(channels, generation, &mut pending_depth);
+                    pending.flush(channels, generation);
                     publish_heartbeat(channels, generation, transport_rtt_nanos);
                 }
                 ProviderSessionEvent::DiscoveryStarted
@@ -2117,18 +2132,18 @@ fn drain_live_events(
                 | ProviderSessionEvent::Market { .. }
                 | ProviderSessionEvent::Invalidated { .. }
                 | ProviderSessionEvent::Stopped => {
-                    publish_pending_depth(channels, generation, &mut pending_depth);
+                    pending.flush(channels, generation);
                 }
             },
             Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket))) => {
-                publish_pending_depth(channels, generation, &mut pending_depth);
+                pending.flush(channels, generation);
                 diagnostic!("Aeris Rithmic live session recovering: {:?}", ticket.reason);
                 *subscription_generation = None;
                 let reason = Some(ticket.reason);
                 channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, reason));
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
-                publish_pending_depth(channels, generation, &mut pending_depth);
+                pending.flush(channels, generation);
                 diagnostic!("Aeris Rithmic live session failed: {reason:?}");
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
@@ -2136,19 +2151,19 @@ fn drain_live_events(
                 return LiveDrain::SessionEnded;
             }
             Err(error) => {
-                publish_pending_depth(channels, generation, &mut pending_depth);
+                pending.flush(channels, generation);
                 diagnostic!("Aeris Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
                 return LiveDrain::SessionEnded;
             }
             Ok(None) => {
-                publish_pending_depth(channels, generation, &mut pending_depth);
+                pending.flush(channels, generation);
                 break;
             }
         }
     }
-    publish_pending_depth(channels, generation, &mut pending_depth);
+    pending.flush(channels, generation);
     LiveDrain::Open
 }
 
@@ -2170,13 +2185,63 @@ fn queue_depth_snapshot(
     pending.replace(next)
 }
 
-fn publish_pending_depth(
-    channels: ProviderChannels<'_>,
-    generation: u64,
-    pending: &mut Option<DepthSnapshot>,
-) {
-    if let Some(snapshot) = pending.take() {
-        channels.publish_realtime(RithmicRealtimeEvent::Depth(generation, snapshot));
+/// Book publications coalesced within one drain round: a newer aggregate
+/// image supersedes the pending one and contiguous order-level updates of one
+/// image merge. The two books are independent, so they coalesce independently;
+/// every other event flushes both first.
+#[derive(Default)]
+struct PendingBooks {
+    depth: Option<DepthSnapshot>,
+    order_levels: Option<OrderLevelUpdate>,
+}
+
+impl PendingBooks {
+    fn queue_depth(
+        &mut self,
+        channels: ProviderChannels<'_>,
+        generation: u64,
+        next: DepthSnapshot,
+    ) {
+        if let Some(previous) = queue_depth_snapshot(&mut self.depth, next) {
+            channels.publish_realtime(RithmicRealtimeEvent::Depth(generation, previous));
+        }
+    }
+
+    fn queue_order_levels(
+        &mut self,
+        channels: ProviderChannels<'_>,
+        generation: u64,
+        event: OrderLevelEvent,
+    ) {
+        let OrderLevelEvent::Update(update) = event else {
+            self.flush_order_levels(channels, generation);
+            channels.publish_realtime(RithmicRealtimeEvent::OrderLevels(generation, event));
+            return;
+        };
+        let unmerged = match self.order_levels.as_mut() {
+            Some(pending) => pending.merge(update),
+            None => Some(update),
+        };
+        if let Some(next) = unmerged {
+            self.flush_order_levels(channels, generation);
+            self.order_levels = Some(next);
+        }
+    }
+
+    fn flush_order_levels(&mut self, channels: ProviderChannels<'_>, generation: u64) {
+        if let Some(update) = self.order_levels.take() {
+            channels.publish_realtime(RithmicRealtimeEvent::OrderLevels(
+                generation,
+                OrderLevelEvent::Update(update),
+            ));
+        }
+    }
+
+    fn flush(&mut self, channels: ProviderChannels<'_>, generation: u64) {
+        if let Some(snapshot) = self.depth.take() {
+            channels.publish_realtime(RithmicRealtimeEvent::Depth(generation, snapshot));
+        }
+        self.flush_order_levels(channels, generation);
     }
 }
 
@@ -2425,6 +2490,7 @@ fn provider_instrument(
         trades: demand.trades,
         quotes: demand.quotes,
         order_book: demand.order_book,
+        order_levels: demand.order_levels,
     })
 }
 
@@ -2506,17 +2572,20 @@ mod tests {
         CatalogSession, EnvironmentState, MAXIMUM_RITHMIC_RETAINED_SEARCHES,
         MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogControl, RithmicCatalogEvent,
         RithmicInstrumentSelection, RithmicProductListing, RithmicProviderCommandError,
-        RithmicRealtimeControl, RithmicSymbolSearch, SearchLane, SentSearch, SessionGeneration,
-        bounded_search_results, catalog_selection_subscription, dispatch_catalog_control,
-        dispatch_queued_searches, next_generation, publish_catalog_callback, queue_depth_snapshot,
-        reject_catalog_generation, reject_pending_catalog, reject_undispatched,
-        retire_pending_catalog_generation,
+        RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSymbolSearch, SearchLane, SentSearch,
+        SessionGeneration, bounded_search_results, catalog_selection_subscription,
+        dispatch_catalog_control, dispatch_queued_searches, next_generation,
+        publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
+        reject_pending_catalog, reject_undispatched, retire_pending_catalog_generation,
     };
     use aeris_contracts::{
         InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentKind,
         ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
     };
-    use aeris_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
+    use aeris_market_data::{
+        BookSide, DepthSnapshot, EventMetadata, OrderLevelChange, OrderLevelEvent,
+        OrderLevelSnapshot, OrderLevelUpdate, QualifiedTimestamp,
+    };
     use aeris_platform_runtime::{NetworkEvent, PowerEvent};
     use aeris_rithmic_protocol_adapter::{
         CollectedProducts, CollectedSymbols, InstrumentType, ProductCodeResult,
@@ -2613,6 +2682,102 @@ mod tests {
         );
     }
 
+    fn order_level_update(previous_revision: u64) -> OrderLevelUpdate {
+        OrderLevelUpdate {
+            metadata: depth_snapshot("MNQ", 10 + previous_revision).metadata,
+            image: 1,
+            previous_revision,
+            revision: previous_revision + 1,
+            provider_sequence: Some(10 + previous_revision),
+            changes: vec![OrderLevelChange::Delete {
+                order_id: format!("order-{previous_revision}"),
+                side: BookSide::Bid,
+                price: 100,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_drain_round_merges_contiguous_order_level_updates_independently_of_depth() {
+        let (_catalog_sender, catalog_controls) = mpsc::sync_channel(1);
+        let (catalog_events, _catalog_published) = mpsc::sync_channel(1);
+        let catalog_publications = super::CatalogPublisher::new(
+            catalog_events,
+            "rithmic",
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
+        let (_realtime_sender, realtime_controls) = mpsc::sync_channel(1);
+        let (realtime_publications, published) = mpsc::sync_channel(8);
+        let coordinator_wake = crate::market_service::ProviderCoordinatorWake::for_tests();
+        let login = super::RithmicLoginRevision::default();
+        let channels = super::ProviderChannels {
+            catalog_controls: &catalog_controls,
+            catalog_publications: &catalog_publications,
+            realtime_controls: &realtime_controls,
+            realtime_publications: &realtime_publications,
+            coordinator_wake: &coordinator_wake,
+            reconnect_delay: std::time::Duration::ZERO,
+            login: &login,
+        };
+        let mut pending = super::PendingBooks::default();
+
+        pending.queue_order_levels(channels, 7, OrderLevelEvent::Update(order_level_update(0)));
+        pending.queue_depth(channels, 7, depth_snapshot("MNQ", 5));
+        pending.queue_order_levels(channels, 7, OrderLevelEvent::Update(order_level_update(1)));
+        pending.queue_depth(channels, 7, depth_snapshot("MNQ", 6));
+        assert!(
+            published.try_recv().is_err(),
+            "contiguous updates and a newer aggregate image stay pending"
+        );
+
+        pending.queue_order_levels(channels, 7, OrderLevelEvent::Update(order_level_update(3)));
+        let Ok(RithmicRealtimeEvent::OrderLevels(7, OrderLevelEvent::Update(merged))) =
+            published.try_recv()
+        else {
+            panic!("a discontinuous update flushes the merged one first");
+        };
+        assert_eq!(
+            (
+                merged.previous_revision,
+                merged.revision,
+                merged.changes.len(),
+                merged.provider_sequence
+            ),
+            (0, 2, 2, Some(11))
+        );
+
+        pending.queue_order_levels(
+            channels,
+            7,
+            OrderLevelEvent::Snapshot(OrderLevelSnapshot {
+                metadata: depth_snapshot("MNQ", 20).metadata,
+                image: 2,
+                revision: 0,
+                provider_sequence: Some(20),
+                orders: Vec::new(),
+            }),
+        );
+        assert!(matches!(
+            published.try_recv(),
+            Ok(RithmicRealtimeEvent::OrderLevels(7, OrderLevelEvent::Update(update)))
+                if (update.previous_revision, update.revision) == (3, 4)
+        ));
+        assert!(
+            matches!(
+                published.try_recv(),
+                Ok(RithmicRealtimeEvent::OrderLevels(7, OrderLevelEvent::Snapshot(snapshot)))
+                    if snapshot.image == 2
+            ),
+            "a covering image is never held behind an older update"
+        );
+
+        pending.flush(channels, 7);
+        assert!(matches!(
+            published.try_recv(),
+            Ok(RithmicRealtimeEvent::Depth(7, snapshot)) if snapshot.metadata.source_sequence == 6
+        ));
+        assert!(published.try_recv().is_err());
+    }
     type Publications = (
         super::CatalogPublisher<RithmicCatalogEvent>,
         mpsc::Receiver<RithmicCatalogEvent>,

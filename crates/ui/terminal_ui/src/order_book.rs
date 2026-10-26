@@ -104,6 +104,7 @@ pub fn project_order_book(
         traded_volumes: publication.traded_volumes.clone(),
         trade_source_watermark: publication.trade_source_watermark,
         rows,
+        order_queues: None,
     })
 }
 

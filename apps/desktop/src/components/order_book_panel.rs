@@ -70,29 +70,22 @@ pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
                 .overflow_hidden()
                 .child(order_book.clone()),
         )
-        .children(
-            column_menu_open.then(|| order_book_column_menu_layer(app, order_book, columns, theme)),
-        )
+        .children(column_menu_open.then(|| order_book_column_menu_layer(app, columns, theme)))
 }
 
 fn order_book_column_menu_layer(
     app: Entity<WorkspaceSurface>,
-    order_book: &Entity<ReadOnlyOrderBookView>,
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let dismiss_app = app;
     let panel = MenuPanel::new("order_book_column_menu", MenuPlacement::InFlow, theme)
         .width(px(196.0))
         .animate_from(PopupAnimationOrigin::TOP_RIGHT)
-        .children(OrderBookColumn::ALL.into_iter().map(|column| {
-            order_book_column_menu_item(
-                order_book.clone(),
-                column,
-                columns.is_visible(column),
-                theme,
-            )
-        }));
+        .children(
+            OrderBookColumn::ALL
+                .into_iter()
+                .map(|column| order_book_column_menu_item(app.clone(), column, columns, theme)),
+        );
     div()
         .id("order_book_column_menu_layer")
         .absolute()
@@ -104,7 +97,7 @@ fn order_book_column_menu_layer(
                 .inset_0()
                 .occlude()
                 .on_click(move |_, _, cx| {
-                    dismiss_app.update(cx, WorkspaceSurface::close_order_book_column_menu);
+                    app.update(cx, WorkspaceSurface::close_order_book_column_menu);
                     cx.stop_propagation();
                 }),
         )
@@ -113,16 +106,16 @@ fn order_book_column_menu_layer(
 }
 
 fn order_book_column_menu_item(
-    order_book: Entity<ReadOnlyOrderBookView>,
+    app: Entity<WorkspaceSurface>,
     column: OrderBookColumn,
-    checked: bool,
+    columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let available = column.available();
-    let label = if available {
+    let offered = columns.is_offered(column);
+    let label = if offered {
         column.label().to_string()
     } else {
-        "P/L · routing unavailable".to_string()
+        format!("{} · not offered by this provider", column.label())
     };
     let id = match column {
         OrderBookColumn::ProfitLoss => "order_book_column_profit_loss",
@@ -132,13 +125,14 @@ fn order_book_column_menu_item(
         OrderBookColumn::BuyTrades => "order_book_column_buy_trades",
         OrderBookColumn::Ask => "order_book_column_ask",
         OrderBookColumn::Orders => "order_book_column_orders",
+        OrderBookColumn::Queue => "order_book_column_queue",
     };
     MenuRow::compact(id, label, theme)
-        .disabled(!available)
-        .checked(checked)
+        .disabled(!offered)
+        .checked(columns.is_visible(column))
         .on_click(move |_, _, cx| {
-            order_book.update(cx, |order_book, order_book_cx| {
-                order_book.toggle_column(column, order_book_cx);
+            app.update(cx, |surface, surface_cx| {
+                surface.toggle_order_book_column(column, surface_cx);
             });
         })
 }

@@ -1,6 +1,13 @@
 //! Canonical market.
 
-use aeris_market_data::MarketDataValidationError;
+use crate::book::{
+    PriceLevel, PriceLevelBook, PriceLevelFault, PriceLevelFrame, PriceLevelOutcome,
+};
+use aeris_market_data::{
+    MAXIMUM_ORDER_LEVEL_CHANGES, MAXIMUM_ORDER_LEVEL_ORDERS, MarketDataValidationError,
+    OrderLevelChange, OrderLevelEvent, OrderLevelInterruption, OrderLevelReset, OrderLevelSnapshot,
+    OrderLevelUpdate, RestingOrder,
+};
 use aeris_observability::diagnostic;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -20,8 +27,22 @@ pub(super) struct CanonicalSessionState {
     instruments: Vec<RithmicProviderInstrument>,
     generation: SessionGeneration,
     quotes: BTreeMap<String, QuoteState>,
+    /// Aggregate books, kept only for instruments subscribed to price levels.
+    price_books: BTreeMap<String, PriceLevelBook>,
+    /// Order-level books, kept only for instruments with order-level demand.
     mbo_books: BTreeMap<String, MboBookAssembler>,
     depth_resnapshots: VecDeque<String>,
+    /// Order-level resets raised outside one frame's conversion (a refused
+    /// subscription or an ambiguous completion), at most one per instrument.
+    order_level_resets: VecDeque<(String, OrderLevelInterruption)>,
+    /// Order-level books removed with their instrument and the image each
+    /// last published, owed a released reset so no consumer keeps presenting
+    /// an image the provider no longer maintains.
+    released_order_levels: VecDeque<(RithmicProviderInstrument, u64)>,
+    /// Highest image any removed order-level book published. A book installed
+    /// later in the session numbers its images above it, so a consumer never
+    /// mistakes a re-added instrument's first image for a retired one.
+    retired_order_level_image: u64,
     /// Instrument and condition pairs already reported as withheld, so each
     /// is logged once per session.
     withheld: BTreeSet<(String, WithheldFrame)>,
@@ -66,8 +87,8 @@ struct QuoteState {
     ask: Option<QuoteLevel>,
 }
 
-pub(super) const MAXIMUM_MBO_ORDERS: usize = 131_072;
-const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
+pub(super) const MAXIMUM_MBO_ORDERS: usize = MAXIMUM_ORDER_LEVEL_ORDERS;
+const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = crate::book::MAXIMUM_PRICE_LEVELS_PER_SIDE;
 const MAXIMUM_PENDING_MBO_MUTATIONS: usize = 131_072;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,21 +99,16 @@ struct MboOrder {
     priority: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MboAggregateLevel {
-    quantity: i64,
-    order_count: u32,
-}
-
 struct MboBookAssembler {
     identity: MarketIdentity,
+    /// The last image published this session. It survives recovery so a
+    /// newer image is always distinguishable from a discarded one.
+    image: u64,
+    /// Updates published against `image`.
+    revision: u64,
     orders: BTreeMap<String, MboOrder>,
-    bids: BTreeMap<i64, MboAggregateLevel>,
-    asks: BTreeMap<i64, MboAggregateLevel>,
     last_provider_sequence: Option<u64>,
     snapshot_orders: BTreeMap<String, MboOrder>,
-    snapshot_bids: BTreeMap<i64, MboAggregateLevel>,
-    snapshot_asks: BTreeMap<i64, MboAggregateLevel>,
     snapshot_sequence: Option<u64>,
     pending_updates: VecDeque<crate::DepthByOrderUpdate>,
     /// Buffered updates that arrived before the first snapshot level. They
@@ -140,6 +156,21 @@ impl From<(ProviderInvalidationReason, RetryDisposition)> for OrderLevelFault {
     }
 }
 
+impl OrderLevelFault {
+    const fn interruption(self) -> OrderLevelInterruption {
+        match self {
+            Self::Inconsistent(ProviderInvalidationReason::SequenceGap) => {
+                OrderLevelInterruption::SequenceGap
+            }
+            Self::Inconsistent(ProviderInvalidationReason::QueueOverflow) => {
+                OrderLevelInterruption::Overflow
+            }
+            Self::Inconsistent(_) => OrderLevelInterruption::InvalidUpdate,
+            Self::SnapshotRejected(_) => OrderLevelInterruption::SnapshotRefused,
+        }
+    }
+}
+
 enum Recovery {
     RequestSnapshot,
     AfterAbandonedResponse,
@@ -149,15 +180,36 @@ enum Recovery {
 const MAXIMUM_DEPTH_RESNAPSHOTS: usize = 3;
 const DEPTH_RESNAPSHOT_WINDOW: Duration = Duration::from_secs(60);
 
+#[derive(Debug)]
 enum MboBookOutcome {
     Pending,
     IgnoredStale,
     /// An abandoned response completed; the deferred snapshot is now due.
     AbandonedResponseDrained,
+    Publish(OrderLevelPublication),
+}
+
+/// Order-level state to publish, before event metadata is attached.
+#[derive(Debug)]
+enum OrderLevelPublication {
     Snapshot {
         clocks: FrameClocks,
-        bids: Vec<DepthLevel>,
-        asks: Vec<DepthLevel>,
+        image: u64,
+        provider_sequence: Option<u64>,
+        orders: Vec<RestingOrder>,
+    },
+    Update {
+        clocks: FrameClocks,
+        image: u64,
+        previous_revision: u64,
+        revision: u64,
+        provider_sequence: Option<u64>,
+        changes: Vec<OrderLevelChange>,
+    },
+    Reset {
+        image: u64,
+        reason: OrderLevelInterruption,
+        resnapshot: bool,
     },
 }
 
@@ -165,13 +217,11 @@ impl MboBookAssembler {
     fn new(identity: MarketIdentity) -> Self {
         Self {
             identity,
+            image: 0,
+            revision: 0,
             orders: BTreeMap::new(),
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
             last_provider_sequence: None,
             snapshot_orders: BTreeMap::new(),
-            snapshot_bids: BTreeMap::new(),
-            snapshot_asks: BTreeMap::new(),
             snapshot_sequence: None,
             pending_updates: VecDeque::new(),
             updates_before_snapshot: None,
@@ -211,7 +261,9 @@ impl MboBookAssembler {
         {
             resnapshot_times.pop_front();
         }
+        let image = self.image;
         *self = Self::new(self.identity.clone());
+        self.image = image;
         self.snapshot_request = if owed {
             SnapshotRequest::Abandoned
         } else {
@@ -245,7 +297,9 @@ impl MboBookAssembler {
 
     /// Turns order-level depth off for the rest of the session.
     fn disable(&mut self) {
+        let image = self.image;
         *self = Self::new(self.identity.clone());
+        self.image = image;
         self.disabled = true;
         self.snapshot_request = SnapshotRequest::Idle;
     }
@@ -312,21 +366,38 @@ impl MboBookAssembler {
             return Ok(MboBookOutcome::Pending);
         }
         let clocks = FrameClocks::of_update(&update);
-        if self.apply_live_update(update, price_scale, quantity_scale)? {
-            Ok(self.snapshot(clocks))
-        } else {
-            Ok(MboBookOutcome::IgnoredStale)
+        let provider_sequence = update.sequence_number;
+        match self.apply_live_update(update, price_scale, quantity_scale)? {
+            Some(changes) if !changes.is_empty() => {
+                let previous_revision = self.revision;
+                self.revision = self.revision.checked_add(1).ok_or_else(malformed)?;
+                Ok(MboBookOutcome::Publish(OrderLevelPublication::Update {
+                    clocks,
+                    image: self.image,
+                    previous_revision,
+                    revision: self.revision,
+                    provider_sequence,
+                    changes,
+                }))
+            }
+            Some(_) | None => Ok(MboBookOutcome::IgnoredStale),
         }
     }
 
-    /// Applies one update to the ready image in arrival order. Returns false
-    /// for a stale update that was not applied.
+    /// Applies one update to the ready image in arrival order and returns
+    /// its changes, or `None` for a stale update that was not applied.
     fn apply_live_update(
         &mut self,
         update: crate::DepthByOrderUpdate,
         price_scale: u8,
         quantity_scale: u8,
-    ) -> Result<bool, (ProviderInvalidationReason, RetryDisposition)> {
+    ) -> Result<Option<Vec<OrderLevelChange>>, (ProviderInvalidationReason, RetryDisposition)> {
+        if update.mutations.len() > MAXIMUM_ORDER_LEVEL_CHANGES {
+            return Err((
+                ProviderInvalidationReason::QueueOverflow,
+                RetryDisposition::Transient,
+            ));
+        }
         // An unsequenced frame applies in arrival order without consuming a
         // sequence. If it did consume one, the next sequenced frame is a gap.
         // Continuity starts at the first sequence observed after an image
@@ -334,7 +405,7 @@ impl MboBookAssembler {
         if let (Some(sequence), Some(last)) = (update.sequence_number, self.last_provider_sequence)
         {
             if sequence <= last {
-                return Ok(false);
+                return Ok(None);
             }
             if sequence != last.saturating_add(1) {
                 return Err((
@@ -343,13 +414,14 @@ impl MboBookAssembler {
                 ));
             }
         }
+        let mut changes = Vec::with_capacity(update.mutations.len());
         for mutation in update.mutations {
-            self.apply_mutation(mutation, price_scale, quantity_scale)?;
+            changes.push(self.apply_mutation(mutation, price_scale, quantity_scale)?);
         }
         if let Some(sequence) = update.sequence_number {
             self.last_provider_sequence = Some(sequence);
         }
-        Ok(true)
+        Ok(Some(changes))
     }
 
     fn accept_snapshot_level(
@@ -406,25 +478,30 @@ impl MboBookAssembler {
         };
         let price = fixed_price(level.price, price_scale)?;
         for snapshot_order in level.orders {
+            // A repeated order id means the response contradicts itself.
             if self
                 .snapshot_orders
                 .contains_key(&snapshot_order.exchange_order_id)
-                || self.snapshot_orders.len() >= MAXIMUM_MBO_ORDERS
             {
+                return Err((
+                    ProviderInvalidationReason::SequenceGap,
+                    RetryDisposition::Transient,
+                ));
+            }
+            if self.snapshot_orders.len() >= MAXIMUM_MBO_ORDERS {
                 return Err((
                     ProviderInvalidationReason::QueueOverflow,
                     RetryDisposition::Transient,
                 ));
             }
-            let exchange_order_id = snapshot_order.exchange_order_id;
             let order = MboOrder {
                 side,
                 price,
                 quantity: fixed_quantity(snapshot_order.size, quantity_scale)?,
                 priority: snapshot_order.priority,
             };
-            add_mbo_aggregate(&mut self.snapshot_bids, &mut self.snapshot_asks, order)?;
-            self.snapshot_orders.insert(exchange_order_id, order);
+            self.snapshot_orders
+                .insert(snapshot_order.exchange_order_id, order);
         }
         Ok(MboBookOutcome::Pending)
     }
@@ -453,8 +530,6 @@ impl MboBookAssembler {
             .take()
             .unwrap_or(self.pending_updates.len());
         self.orders = std::mem::take(&mut self.snapshot_orders);
-        self.bids = std::mem::take(&mut self.snapshot_bids);
-        self.asks = std::mem::take(&mut self.snapshot_asks);
         self.last_provider_sequence = baseline;
         self.snapshot_sequence = None;
         self.ready = true;
@@ -507,7 +582,7 @@ impl MboBookAssembler {
                 clocks = frame;
             }
         }
-        Ok(self.snapshot(clocks))
+        self.snapshot(clocks)
     }
 
     /// Rithmic Test sends order-level snapshots with no sequence on any level
@@ -528,11 +603,15 @@ impl MboBookAssembler {
                 return Err(malformed());
             }
             let frame = FrameClocks::of_update(&update);
-            if self.apply_live_update(update, price_scale, quantity_scale)? && !frame.is_empty() {
+            if self
+                .apply_live_update(update, price_scale, quantity_scale)?
+                .is_some()
+                && !frame.is_empty()
+            {
                 clocks = frame;
             }
         }
-        Ok(self.snapshot(clocks))
+        self.snapshot(clocks)
     }
 
     fn finish_initial_image(
@@ -574,177 +653,110 @@ impl MboBookAssembler {
         mutation: DepthByOrderMutation,
         price_scale: u8,
         quantity_scale: u8,
-    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    ) -> Result<OrderLevelChange, (ProviderInvalidationReason, RetryDisposition)> {
+        let gap = || {
+            (
+                ProviderInvalidationReason::SequenceGap,
+                RetryDisposition::Transient,
+            )
+        };
         let side = match mutation.side {
             DepthByOrderSide::Bid => BookSide::Bid,
             DepthByOrderSide::Ask => BookSide::Ask,
         };
         let price = fixed_price(mutation.price, price_scale)?;
-        match mutation.kind {
-            DepthByOrderMutationKind::New => {
-                if self.orders.contains_key(&mutation.exchange_order_id)
-                    || self.orders.len() >= MAXIMUM_MBO_ORDERS
-                {
-                    return Err((
-                        ProviderInvalidationReason::QueueOverflow,
-                        RetryDisposition::Transient,
-                    ));
-                }
-                let quantity = fixed_quantity(mutation.size, quantity_scale)?;
-                let order = MboOrder {
-                    side,
-                    price,
-                    quantity,
-                    priority: mutation.priority,
-                };
-                self.add_aggregate(order)?;
-                self.orders.insert(mutation.exchange_order_id, order);
+        if mutation.kind == DepthByOrderMutationKind::New {
+            // Adding an order already resting means its removal was missed.
+            if self.orders.contains_key(&mutation.exchange_order_id) {
+                return Err(gap());
             }
-            DepthByOrderMutationKind::Change => {
-                let Some(previous) = self.orders.remove(&mutation.exchange_order_id) else {
-                    return Err((
-                        ProviderInvalidationReason::SequenceGap,
-                        RetryDisposition::Transient,
-                    ));
-                };
-                if let Some(previous_price) = mutation.previous_price {
-                    let expected = fixed_price(previous_price, price_scale)?;
-                    if expected != previous.price {
-                        return Err((
-                            ProviderInvalidationReason::SequenceGap,
-                            RetryDisposition::Transient,
-                        ));
-                    }
-                }
-                self.remove_aggregate(previous)?;
-                let quantity = fixed_quantity(mutation.size, quantity_scale)?;
-                let updated = MboOrder {
-                    side,
-                    price,
-                    quantity,
-                    priority: mutation.priority,
-                };
-                self.add_aggregate(updated)?;
-                self.orders.insert(mutation.exchange_order_id, updated);
+            if self.orders.len() >= MAXIMUM_MBO_ORDERS {
+                return Err((
+                    ProviderInvalidationReason::QueueOverflow,
+                    RetryDisposition::Transient,
+                ));
             }
-            DepthByOrderMutationKind::Delete => {
-                let Some(previous) = self.orders.remove(&mutation.exchange_order_id) else {
-                    return Err((
-                        ProviderInvalidationReason::SequenceGap,
-                        RetryDisposition::Transient,
-                    ));
-                };
-                if let Some(previous_price) = mutation.previous_price {
-                    let expected = fixed_price(previous_price, price_scale)?;
-                    if expected != previous.price {
-                        return Err((
-                            ProviderInvalidationReason::SequenceGap,
-                            RetryDisposition::Transient,
-                        ));
-                    }
-                }
-                self.remove_aggregate(previous)?;
-            }
+            let order = MboOrder {
+                side,
+                price,
+                quantity: fixed_quantity(mutation.size, quantity_scale)?,
+                priority: mutation.priority,
+            };
+            let change = OrderLevelChange::Add(resting_order(&mutation.exchange_order_id, order));
+            self.orders.insert(mutation.exchange_order_id, order);
+            return Ok(change);
         }
-        Ok(())
+        // A change or delete must name a resting order on the same side, at the
+        // previous price when the provider states one.
+        let Some(previous) = self.orders.remove(&mutation.exchange_order_id) else {
+            return Err(gap());
+        };
+        if previous.side != side {
+            return Err(gap());
+        }
+        if let Some(previous_price) = mutation.previous_price
+            && fixed_price(previous_price, price_scale)? != previous.price
+        {
+            return Err(gap());
+        }
+        if mutation.kind == DepthByOrderMutationKind::Delete {
+            return Ok(OrderLevelChange::Delete {
+                order_id: mutation.exchange_order_id,
+                side: previous.side,
+                price: previous.price,
+            });
+        }
+        let updated = MboOrder {
+            side,
+            price,
+            quantity: fixed_quantity(mutation.size, quantity_scale)?,
+            priority: mutation.priority,
+        };
+        let change = OrderLevelChange::Change(resting_order(&mutation.exchange_order_id, updated));
+        self.orders.insert(mutation.exchange_order_id, updated);
+        Ok(change)
     }
 
-    fn add_aggregate(
+    /// Publishes the assembled image as the next covering image.
+    fn snapshot(
         &mut self,
-        order: MboOrder,
-    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-        add_mbo_aggregate(&mut self.bids, &mut self.asks, order)
-    }
-
-    fn remove_aggregate(
-        &mut self,
-        order: MboOrder,
-    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-        remove_mbo_aggregate(&mut self.bids, &mut self.asks, order)
-    }
-
-    fn snapshot(&self, clocks: FrameClocks) -> MboBookOutcome {
-        let bids = self
-            .bids
-            .iter()
-            .rev()
-            .take(MAXIMUM_CANONICAL_DEPTH_LEVELS)
-            .map(|(price, level)| DepthLevel {
-                price: *price,
-                quantity: level.quantity,
-                order_count: Some(level.order_count),
-            })
-            .collect();
-        let asks = self
-            .asks
-            .iter()
-            .take(MAXIMUM_CANONICAL_DEPTH_LEVELS)
-            .map(|(price, level)| DepthLevel {
-                price: *price,
-                quantity: level.quantity,
-                order_count: Some(level.order_count),
-            })
-            .collect();
-        MboBookOutcome::Snapshot { clocks, bids, asks }
+        clocks: FrameClocks,
+    ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
+        self.image = self.image.checked_add(1).ok_or_else(malformed)?;
+        self.revision = 0;
+        Ok(MboBookOutcome::Publish(OrderLevelPublication::Snapshot {
+            clocks,
+            image: self.image,
+            provider_sequence: self.last_provider_sequence,
+            orders: self
+                .orders
+                .iter()
+                .map(|(order_id, order)| resting_order(order_id, *order))
+                .collect(),
+        }))
     }
 }
 
-fn add_mbo_aggregate(
-    bids: &mut BTreeMap<i64, MboAggregateLevel>,
-    asks: &mut BTreeMap<i64, MboAggregateLevel>,
-    order: MboOrder,
-) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-    let levels = match order.side {
-        BookSide::Bid => bids,
-        BookSide::Ask => asks,
-    };
-    let level = levels.entry(order.price).or_insert(MboAggregateLevel {
-        quantity: 0,
-        order_count: 0,
-    });
-    level.quantity = level
-        .quantity
-        .checked_add(order.quantity)
-        .ok_or_else(malformed)?;
-    level.order_count = level.order_count.checked_add(1).ok_or_else(malformed)?;
-    Ok(())
-}
-
-fn remove_mbo_aggregate(
-    bids: &mut BTreeMap<i64, MboAggregateLevel>,
-    asks: &mut BTreeMap<i64, MboAggregateLevel>,
-    order: MboOrder,
-) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-    let levels = match order.side {
-        BookSide::Bid => bids,
-        BookSide::Ask => asks,
-    };
-    let Some(level) = levels.get_mut(&order.price) else {
-        return Err(malformed());
-    };
-    level.quantity = level
-        .quantity
-        .checked_sub(order.quantity)
-        .ok_or_else(malformed)?;
-    level.order_count = level.order_count.checked_sub(1).ok_or_else(malformed)?;
-    if level.quantity == 0 && level.order_count == 0 {
-        levels.remove(&order.price);
-    } else if level.quantity <= 0 || level.order_count == 0 {
-        return Err(malformed());
+fn resting_order(order_id: &str, order: MboOrder) -> RestingOrder {
+    RestingOrder {
+        order_id: order_id.to_string(),
+        side: order.side,
+        price: order.price,
+        quantity: order.quantity,
+        priority: order.priority,
     }
-    Ok(())
 }
 
 /// Order-level inconsistencies and refused snapshots recover the book with a
 /// fresh snapshot on the live connection instead of invalidating the session
 /// and its chart streams. No image becomes authoritative until a covering
-/// snapshot completes.
+/// snapshot completes, and every discarded image publishes a reset.
 fn order_level_outcome<E: Into<OrderLevelFault>>(
     assembler: &mut MboBookAssembler,
     outcome: Result<MboBookOutcome, E>,
     instrument_id: &str,
     depth_resnapshots: &mut VecDeque<String>,
-) -> Option<MboBookOutcome> {
+) -> Option<OrderLevelPublication> {
     let fault = match outcome {
         Ok(MboBookOutcome::AbandonedResponseDrained) => {
             if assembler.resume_after_drained_response() {
@@ -752,24 +764,49 @@ fn order_level_outcome<E: Into<OrderLevelFault>>(
             }
             return None;
         }
-        Ok(outcome) => return Some(outcome),
+        Ok(MboBookOutcome::Publish(publication)) => return Some(publication),
+        Ok(MboBookOutcome::Pending | MboBookOutcome::IgnoredStale) => return None,
         Err(fault) => fault.into(),
     };
-    match assembler.recover(Instant::now()) {
+    Some(recover_order_levels(
+        assembler,
+        fault,
+        instrument_id,
+        depth_resnapshots,
+    ))
+}
+
+fn recover_order_levels(
+    assembler: &mut MboBookAssembler,
+    fault: OrderLevelFault,
+    instrument_id: &str,
+    depth_resnapshots: &mut VecDeque<String>,
+) -> OrderLevelPublication {
+    let resnapshot = match assembler.recover(Instant::now()) {
         Recovery::RequestSnapshot => {
             diagnostic!("Aeris Rithmic order-level depth resnapshot requested: {fault:?}");
             queue_depth_resnapshot(depth_resnapshots, instrument_id);
+            true
         }
-        Recovery::AfterAbandonedResponse => diagnostic!(
-            "Aeris Rithmic order-level depth resnapshot requested after the in-flight response drains: {fault:?}"
-        ),
-        Recovery::Disabled => diagnostic!(
-            "Aeris Rithmic order-level depth disabled for this session after repeated {fault:?}"
-        ),
+        Recovery::AfterAbandonedResponse => {
+            diagnostic!(
+                "Aeris Rithmic order-level depth resnapshot requested after the in-flight response drains: {fault:?}"
+            );
+            true
+        }
+        Recovery::Disabled => {
+            diagnostic!(
+                "Aeris Rithmic order-level depth disabled for this session after repeated {fault:?}"
+            );
+            false
+        }
+    };
+    OrderLevelPublication::Reset {
+        image: assembler.image,
+        reason: fault.interruption(),
+        resnapshot,
     }
-    None
 }
-
 fn queue_depth_resnapshot(depth_resnapshots: &mut VecDeque<String>, instrument_id: &str) {
     if !depth_resnapshots
         .iter()
@@ -785,30 +822,46 @@ impl CanonicalSessionState {
     }
 
     pub(super) fn new(config: &RithmicProviderConfig, generation: SessionGeneration) -> Self {
-        let mut mbo_books = BTreeMap::new();
-        for instrument in &config.instruments {
-            if instrument.order_book {
-                mbo_books.insert(
-                    instrument.descriptor.instrument_id.clone(),
-                    MboBookAssembler::new(MarketIdentity {
-                        symbol: instrument.descriptor.provider_symbol.clone(),
-                        exchange: instrument.descriptor.venue_id.clone(),
-                    }),
-                );
-            }
-        }
-        Self {
-            instruments: config.instruments.clone(),
+        let mut state = Self {
+            instruments: Vec::new(),
             generation,
             quotes: BTreeMap::new(),
-            mbo_books,
+            price_books: BTreeMap::new(),
+            mbo_books: BTreeMap::new(),
             depth_resnapshots: VecDeque::new(),
+            order_level_resets: VecDeque::new(),
+            released_order_levels: VecDeque::new(),
+            retired_order_level_image: 0,
             withheld: BTreeSet::new(),
             anonymous_completions_ambiguous: false,
+        };
+        for instrument in &config.instruments {
+            state.install_books(instrument);
+        }
+        state.instruments.clone_from(&config.instruments);
+        state
+    }
+
+    fn install_books(&mut self, instrument: &RithmicProviderInstrument) {
+        let instrument_id = &instrument.descriptor.instrument_id;
+        if instrument.order_book {
+            self.price_books
+                .insert(instrument_id.clone(), PriceLevelBook::default());
+        }
+        if instrument.order_levels {
+            let mut assembler = MboBookAssembler::new(MarketIdentity {
+                symbol: instrument.descriptor.provider_symbol.clone(),
+                exchange: instrument.descriptor.venue_id.clone(),
+            });
+            assembler.image = self
+                .mbo_books
+                .values()
+                .map(|book| book.image)
+                .fold(self.retired_order_level_image, u64::max);
+            self.mbo_books.insert(instrument_id.clone(), assembler);
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) fn convert(
         &mut self,
         message: DecodedMarketMessage,
@@ -817,125 +870,33 @@ impl CanonicalSessionState {
     ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
         match message {
             DecodedMarketMessage::Trade(trade) => {
-                let instrument = self.instrument(&trade.identity)?;
-                if trade.size == 0 {
-                    let instrument_id = instrument.descriptor.instrument_id.clone();
-                    self.withhold(&instrument_id, WithheldFrame::ZeroQuantity);
-                    return Ok(None);
-                }
-                let event = MarketEvent::Trade(MarketTrade {
-                    metadata: metadata(
-                        instrument,
-                        self.generation,
-                        source_ordinal,
-                        FrameClocks {
-                            gateway: Some(trade.timestamp),
-                            source: trade.source_timestamp,
-                        },
-                        received_unix_nanos,
-                    )?,
-                    trade_id: format!("rithmic-local-{}-{source_ordinal}", self.generation.get()),
-                    price: fixed_price(trade.price, instrument.descriptor.price_scale)?,
-                    quantity: fixed_quantity(trade.size, instrument.descriptor.quantity_scale)?,
-                    aggressor: match trade.aggressor {
-                        Some(TradeAggressor::Buy) => AggressorSide::Buy,
-                        Some(TradeAggressor::Sell) => AggressorSide::Sell,
-                        None => AggressorSide::Unknown,
-                    },
-                });
-                self.publishable(event)
+                self.convert_trade(&trade, source_ordinal, received_unix_nanos)
             }
             DecodedMarketMessage::Quote(quote) => {
-                let instrument = self.instrument(&quote.identity)?.clone();
-                let state = self
-                    .quotes
-                    .entry(instrument.descriptor.instrument_id.clone())
-                    .or_default();
-                if quote.is_snapshot {
-                    *state = QuoteState::default();
-                }
-                apply_quote_side(&mut state.bid, quote.bid);
-                apply_quote_side(&mut state.ask, quote.ask);
-                // Best bid/offer frames carry only the gateway clock.
-                let event = MarketEvent::Quote(TopOfBookQuote {
-                    metadata: metadata(
-                        &instrument,
-                        self.generation,
-                        source_ordinal,
-                        FrameClocks {
-                            gateway: Some(quote.timestamp),
-                            source: None,
-                        },
-                        received_unix_nanos,
-                    )?,
-                    bid: state
-                        .bid
-                        .map(|level| canonical_quote_level(level, &instrument))
-                        .transpose()?
-                        .flatten(),
-                    ask: state
-                        .ask
-                        .map(|level| canonical_quote_level(level, &instrument))
-                        .transpose()?
-                        .flatten(),
-                });
-                self.publishable(event)
+                self.convert_quote(&quote, source_ordinal, received_unix_nanos)
             }
-            // Depth comes from the order-level book. Price-level frames carry
-            // incremental changes (including zero-size removals) that the image
-            // assembler would misread as whole books, so they are not a depth source.
             DecodedMarketMessage::OrderBook(update) => {
-                self.instrument(&update.identity)?;
-                Ok(None)
+                self.convert_price_levels(&update, source_ordinal, received_unix_nanos)
             }
             DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Level(
                 level,
             )) => {
                 let instrument = self.instrument(&level.identity)?.clone();
-                let assembler = self
-                    .mbo_books
-                    .get_mut(&instrument.descriptor.instrument_id)
-                    .ok_or_else(malformed)?;
-                let outcome = assembler.accept_snapshot_level(
-                    level,
-                    instrument.descriptor.price_scale,
-                    instrument.descriptor.quantity_scale,
-                );
-                match order_level_outcome(
-                    assembler,
-                    outcome,
-                    &instrument.descriptor.instrument_id,
-                    &mut self.depth_resnapshots,
-                ) {
-                    None
-                    | Some(
-                        MboBookOutcome::Pending
-                        | MboBookOutcome::IgnoredStale
-                        | MboBookOutcome::AbandonedResponseDrained,
-                    ) => Ok(None),
-                    Some(MboBookOutcome::Snapshot { .. }) => Err(malformed()),
-                }
+                self.advance_order_levels(
+                    &instrument,
+                    source_ordinal,
+                    received_unix_nanos,
+                    |book, price_scale, quantity_scale| {
+                        book.accept_snapshot_level(level, price_scale, quantity_scale)
+                    },
+                )
             }
             DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::LevelRejected {
                     identity,
                     rejection,
                 },
-            ) => {
-                if let Some(identity) = identity.as_ref() {
-                    let instrument_id = self.instrument(identity)?.descriptor.instrument_id.clone();
-                    self.mbo_books
-                        .get_mut(&instrument_id)
-                        .ok_or_else(malformed)?
-                        .reject_snapshot_level(rejection);
-                } else {
-                    // Unattributed: every owed response is treated as refused.
-                    for assembler in self.mbo_books.values_mut() {
-                        assembler.reject_snapshot_level(rejection);
-                    }
-                }
-                Ok(None)
-            }
+            ) => self.reject_order_level_snapshot(identity.as_ref(), rejection),
             DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
                 outcome,
                 identity,
@@ -948,82 +909,30 @@ impl CanonicalSessionState {
                 } else {
                     return Ok(None);
                 };
-                let assembler = self
-                    .mbo_books
-                    .get_mut(&instrument.descriptor.instrument_id)
-                    .ok_or_else(malformed)?;
-                let outcome = assembler.complete_snapshot(
-                    outcome,
-                    sequence_number,
-                    instrument.descriptor.price_scale,
-                    instrument.descriptor.quantity_scale,
-                );
-                match order_level_outcome(
-                    assembler,
-                    outcome,
-                    &instrument.descriptor.instrument_id,
-                    &mut self.depth_resnapshots,
-                ) {
-                    None
-                    | Some(
-                        MboBookOutcome::Pending
-                        | MboBookOutcome::IgnoredStale
-                        | MboBookOutcome::AbandonedResponseDrained,
-                    ) => Ok(None),
-                    Some(MboBookOutcome::Snapshot { clocks, bids, asks }) => {
-                        let event = MarketEvent::DepthSnapshot(DepthSnapshot {
-                            metadata: metadata(
-                                &instrument,
-                                self.generation,
-                                source_ordinal,
-                                clocks,
-                                received_unix_nanos,
-                            )?,
-                            bids,
-                            asks,
-                        });
-                        self.publishable(event)
-                    }
-                }
+                self.advance_order_levels(
+                    &instrument,
+                    source_ordinal,
+                    received_unix_nanos,
+                    |book, price_scale, quantity_scale| {
+                        book.complete_snapshot(
+                            outcome,
+                            sequence_number,
+                            price_scale,
+                            quantity_scale,
+                        )
+                    },
+                )
             }
             DecodedMarketMessage::DepthByOrder(update) => {
                 let instrument = self.instrument(&update.identity)?.clone();
-                let assembler = self
-                    .mbo_books
-                    .get_mut(&instrument.descriptor.instrument_id)
-                    .ok_or_else(malformed)?;
-                let outcome = assembler.accept_update(
-                    update,
-                    instrument.descriptor.price_scale,
-                    instrument.descriptor.quantity_scale,
-                );
-                match order_level_outcome(
-                    assembler,
-                    outcome,
-                    &instrument.descriptor.instrument_id,
-                    &mut self.depth_resnapshots,
-                ) {
-                    None
-                    | Some(
-                        MboBookOutcome::Pending
-                        | MboBookOutcome::IgnoredStale
-                        | MboBookOutcome::AbandonedResponseDrained,
-                    ) => Ok(None),
-                    Some(MboBookOutcome::Snapshot { clocks, bids, asks }) => {
-                        let event = MarketEvent::DepthSnapshot(DepthSnapshot {
-                            metadata: metadata(
-                                &instrument,
-                                self.generation,
-                                source_ordinal,
-                                clocks,
-                                received_unix_nanos,
-                            )?,
-                            bids,
-                            asks,
-                        });
-                        self.publishable(event)
-                    }
-                }
+                self.advance_order_levels(
+                    &instrument,
+                    source_ordinal,
+                    received_unix_nanos,
+                    |book, price_scale, quantity_scale| {
+                        book.accept_update(update, price_scale, quantity_scale)
+                    },
+                )
             }
             DecodedMarketMessage::DepthByOrderEnd(event) => {
                 let matching = self
@@ -1037,44 +946,317 @@ impl CanonicalSessionState {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if matching.len() != 1 {
+                let [instrument] = matching.as_slice() else {
                     return Err(malformed());
-                }
-                let instrument = &matching[0];
-                let assembler = self
-                    .mbo_books
-                    .get_mut(&instrument.descriptor.instrument_id)
-                    .ok_or_else(malformed)?;
-                let outcome = assembler.finish_initial_image(&event);
-                match order_level_outcome(
-                    assembler,
-                    outcome,
-                    &instrument.descriptor.instrument_id,
-                    &mut self.depth_resnapshots,
-                ) {
-                    None
-                    | Some(
-                        MboBookOutcome::Pending
-                        | MboBookOutcome::IgnoredStale
-                        | MboBookOutcome::AbandonedResponseDrained,
-                    ) => Ok(None),
-                    Some(MboBookOutcome::Snapshot { clocks, bids, asks }) => {
-                        let event = MarketEvent::DepthSnapshot(DepthSnapshot {
-                            metadata: metadata(
-                                instrument,
-                                self.generation,
-                                source_ordinal,
-                                clocks,
-                                received_unix_nanos,
-                            )?,
-                            bids,
-                            asks,
-                        });
-                        self.publishable(event)
-                    }
-                }
+                };
+                self.advance_order_levels(
+                    instrument,
+                    source_ordinal,
+                    received_unix_nanos,
+                    |book, _, _| book.finish_initial_image(&event),
+                )
             }
         }
+    }
+
+    fn convert_trade(
+        &mut self,
+        trade: &crate::TradeUpdate,
+        source_ordinal: u64,
+        received_unix_nanos: i64,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let instrument = self.instrument(&trade.identity)?;
+        if trade.size == 0 {
+            let instrument_id = instrument.descriptor.instrument_id.clone();
+            self.withhold(&instrument_id, WithheldFrame::ZeroQuantity);
+            return Ok(None);
+        }
+        let event = MarketEvent::Trade(MarketTrade {
+            metadata: metadata(
+                instrument,
+                self.generation,
+                source_ordinal,
+                FrameClocks {
+                    gateway: Some(trade.timestamp),
+                    source: trade.source_timestamp,
+                },
+                received_unix_nanos,
+            )?,
+            trade_id: format!("rithmic-local-{}-{source_ordinal}", self.generation.get()),
+            price: fixed_price(trade.price, instrument.descriptor.price_scale)?,
+            quantity: fixed_quantity(trade.size, instrument.descriptor.quantity_scale)?,
+            aggressor: match trade.aggressor {
+                Some(TradeAggressor::Buy) => AggressorSide::Buy,
+                Some(TradeAggressor::Sell) => AggressorSide::Sell,
+                None => AggressorSide::Unknown,
+            },
+        });
+        self.publishable(event)
+    }
+
+    fn convert_quote(
+        &mut self,
+        quote: &crate::QuoteUpdate,
+        source_ordinal: u64,
+        received_unix_nanos: i64,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let instrument = self.instrument(&quote.identity)?.clone();
+        let state = self
+            .quotes
+            .entry(instrument.descriptor.instrument_id.clone())
+            .or_default();
+        if quote.is_snapshot {
+            *state = QuoteState::default();
+        }
+        apply_quote_side(&mut state.bid, quote.bid);
+        apply_quote_side(&mut state.ask, quote.ask);
+        // Best bid/offer frames carry only the gateway clock.
+        let event = MarketEvent::Quote(TopOfBookQuote {
+            metadata: metadata(
+                &instrument,
+                self.generation,
+                source_ordinal,
+                FrameClocks {
+                    gateway: Some(quote.timestamp),
+                    source: None,
+                },
+                received_unix_nanos,
+            )?,
+            bid: state
+                .bid
+                .map(|level| canonical_quote_level(level, &instrument))
+                .transpose()?
+                .flatten(),
+            ask: state
+                .ask
+                .map(|level| canonical_quote_level(level, &instrument))
+                .transpose()?
+                .flatten(),
+        });
+        self.publishable(event)
+    }
+
+    fn reject_order_level_snapshot(
+        &mut self,
+        identity: Option<&MarketIdentity>,
+        rejection: DepthByOrderSnapshotRejection,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        if let Some(identity) = identity {
+            let instrument_id = self.instrument(identity)?.descriptor.instrument_id.clone();
+            self.mbo_books
+                .get_mut(&instrument_id)
+                .ok_or_else(malformed)?
+                .reject_snapshot_level(rejection);
+        } else {
+            // Unattributed: every owed response is treated as refused.
+            for assembler in self.mbo_books.values_mut() {
+                assembler.reject_snapshot_level(rejection);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Runs one order-level step on the instrument's book and publishes what
+    /// it produced, recovering the book on a fault.
+    fn advance_order_levels<E: Into<OrderLevelFault>>(
+        &mut self,
+        instrument: &RithmicProviderInstrument,
+        source_ordinal: u64,
+        received_unix_nanos: i64,
+        step: impl FnOnce(&mut MboBookAssembler, u8, u8) -> Result<MboBookOutcome, E>,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let instrument_id = &instrument.descriptor.instrument_id;
+        let assembler = self
+            .mbo_books
+            .get_mut(instrument_id)
+            .ok_or_else(malformed)?;
+        let outcome = step(
+            assembler,
+            instrument.descriptor.price_scale,
+            instrument.descriptor.quantity_scale,
+        );
+        let publication = order_level_outcome(
+            assembler,
+            outcome,
+            instrument_id,
+            &mut self.depth_resnapshots,
+        );
+        self.publish_order_levels(instrument, publication, source_ordinal, received_unix_nanos)
+    }
+
+    /// Aggregate depth comes only from the provider's price-level book, never
+    /// from order-level data. A frame sequence the book cannot represent
+    /// replaces the session: only a new subscription image can rebuild it.
+    fn convert_price_levels(
+        &mut self,
+        update: &crate::OrderBookUpdate,
+        source_ordinal: u64,
+        received_unix_nanos: i64,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let instrument = self.instrument(&update.identity)?.clone();
+        let Some(book) = self
+            .price_books
+            .get_mut(&instrument.descriptor.instrument_id)
+        else {
+            return Ok(None);
+        };
+        let frame = PriceLevelFrame {
+            kind: update.kind,
+            bids: price_levels(&update.bids, &instrument)?,
+            asks: price_levels(&update.asks, &instrument)?,
+        };
+        match book.apply(frame) {
+            Ok(PriceLevelOutcome::Pending) => Ok(None),
+            Ok(PriceLevelOutcome::Changed) => {
+                let event = MarketEvent::DepthSnapshot(DepthSnapshot {
+                    metadata: metadata(
+                        &instrument,
+                        self.generation,
+                        source_ordinal,
+                        FrameClocks {
+                            gateway: update.timestamp,
+                            source: None,
+                        },
+                        received_unix_nanos,
+                    )?,
+                    bids: book.bids().map(depth_level).collect(),
+                    asks: book.asks().map(depth_level).collect(),
+                });
+                self.publishable(event)
+            }
+            Err(fault) => {
+                diagnostic!("Aeris Rithmic aggregate book discarded: {fault:?}");
+                Err((
+                    match fault {
+                        PriceLevelFault::BrokenGroup => ProviderInvalidationReason::SequenceGap,
+                        PriceLevelFault::LevelLimitExceeded => {
+                            ProviderInvalidationReason::QueueOverflow
+                        }
+                    },
+                    RetryDisposition::Transient,
+                ))
+            }
+        }
+    }
+
+    /// Order-level events are never withheld: a skipped update would break
+    /// continuity. An event the canonical contract rejects discards the image
+    /// and publishes its reset instead.
+    fn publish_order_levels(
+        &mut self,
+        instrument: &RithmicProviderInstrument,
+        publication: Option<OrderLevelPublication>,
+        source_ordinal: u64,
+        received_unix_nanos: i64,
+    ) -> Result<Option<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let Some(publication) = publication else {
+            return Ok(None);
+        };
+        let event = order_level_event(
+            instrument,
+            self.generation,
+            publication,
+            source_ordinal,
+            received_unix_nanos,
+        )?;
+        if event.validate().is_ok() {
+            return Ok(Some(MarketEvent::OrderLevels(event)));
+        }
+        let instrument_id = &instrument.descriptor.instrument_id;
+        let assembler = self
+            .mbo_books
+            .get_mut(instrument_id)
+            .ok_or_else(malformed)?;
+        let reset = recover_order_levels(
+            assembler,
+            OrderLevelFault::Inconsistent(ProviderInvalidationReason::MalformedMessage),
+            instrument_id,
+            &mut self.depth_resnapshots,
+        );
+        let event = order_level_event(
+            instrument,
+            self.generation,
+            reset,
+            source_ordinal,
+            received_unix_nanos,
+        )?;
+        event.validate().map_err(|_| malformed())?;
+        Ok(Some(MarketEvent::OrderLevels(event)))
+    }
+
+    /// Turns order-level data off for an instrument whose order-level
+    /// subscription the provider refused; its other streams continue.
+    pub(super) fn refuse_order_levels(&mut self, instrument_id: &str) {
+        if let Some(assembler) = self.mbo_books.get_mut(instrument_id) {
+            assembler.disable();
+            self.depth_resnapshots
+                .retain(|pending| pending != instrument_id);
+            self.queue_order_level_reset(
+                instrument_id,
+                OrderLevelInterruption::SubscriptionRefused,
+            );
+            diagnostic!("Aeris Rithmic order-level subscription refused; order levels stay off");
+        }
+    }
+
+    fn queue_order_level_reset(&mut self, instrument_id: &str, reason: OrderLevelInterruption) {
+        if !self
+            .order_level_resets
+            .iter()
+            .any(|(pending, _)| pending == instrument_id)
+        {
+            self.order_level_resets
+                .push_back((instrument_id.to_string(), reason));
+        }
+    }
+
+    /// Resets raised outside a frame conversion, ready to publish.
+    pub(super) fn take_order_level_resets(
+        &mut self,
+        source_ordinal: u64,
+        received_unix_nanos: i64,
+    ) -> Result<Vec<MarketEvent>, (ProviderInvalidationReason, RetryDisposition)> {
+        let mut events =
+            Vec::with_capacity(self.order_level_resets.len() + self.released_order_levels.len());
+        while let Some((instrument_id, reason)) = self.order_level_resets.pop_front() {
+            let (Some(instrument), Some(assembler)) = (
+                self.instruments
+                    .iter()
+                    .find(|instrument| instrument.descriptor.instrument_id == instrument_id),
+                self.mbo_books.get(&instrument_id),
+            ) else {
+                continue;
+            };
+            let event = order_level_event(
+                instrument,
+                self.generation,
+                OrderLevelPublication::Reset {
+                    image: assembler.image,
+                    reason,
+                    resnapshot: false,
+                },
+                source_ordinal,
+                received_unix_nanos,
+            )?;
+            event.validate().map_err(|_| malformed())?;
+            events.push(MarketEvent::OrderLevels(event));
+        }
+        while let Some((instrument, image)) = self.released_order_levels.pop_front() {
+            let event = order_level_event(
+                &instrument,
+                self.generation,
+                OrderLevelPublication::Reset {
+                    image,
+                    reason: OrderLevelInterruption::Released,
+                    resnapshot: false,
+                },
+                source_ordinal,
+                received_unix_nanos,
+            )?;
+            event.validate().map_err(|_| malformed())?;
+            events.push(MarketEvent::OrderLevels(event));
+        }
+        Ok(events)
     }
 
     /// Attributes a snapshot completion without an identity to the one book
@@ -1098,10 +1280,13 @@ impl CanonicalSessionState {
             _ => {
                 self.anonymous_completions_ambiguous = true;
                 for instrument in &owed {
-                    if let Some(assembler) =
-                        self.mbo_books.get_mut(&instrument.descriptor.instrument_id)
-                    {
+                    let instrument_id = &instrument.descriptor.instrument_id;
+                    if let Some(assembler) = self.mbo_books.get_mut(instrument_id) {
                         assembler.disable();
+                        self.queue_order_level_reset(
+                            instrument_id,
+                            OrderLevelInterruption::InvalidUpdate,
+                        );
                     }
                 }
                 diagnostic!(
@@ -1126,7 +1311,7 @@ impl CanonicalSessionState {
     /// Canonical events reject crossed or locked books, non-positive prices
     /// and zero quantities. A futures book in pre-open is legitimately crossed
     /// and spreads trade at or below zero, so such a frame is withheld instead
-    /// of failing every stream on the session. The order-level image stays
+    /// of failing every stream on the session. The aggregate image stays
     /// intact and the next representable frame publishes.
     fn publishable(
         &mut self,
@@ -1164,26 +1349,31 @@ impl CanonicalSessionState {
         {
             return Err(malformed());
         }
-        if instrument.order_book {
-            self.mbo_books.insert(
-                instrument.descriptor.instrument_id.clone(),
-                MboBookAssembler::new(MarketIdentity {
-                    symbol: instrument.descriptor.provider_symbol.clone(),
-                    exchange: instrument.descriptor.venue_id.clone(),
-                }),
-            );
-        }
+        self.install_books(&instrument);
         self.instruments.push(instrument);
         Ok(())
     }
 
     pub(super) fn remove_instrument(&mut self, instrument_id: &str) {
+        if let Some(book) = self.mbo_books.remove(instrument_id) {
+            self.retired_order_level_image = self.retired_order_level_image.max(book.image);
+            if let Some(instrument) = self
+                .instruments
+                .iter()
+                .find(|instrument| instrument.descriptor.instrument_id == instrument_id)
+            {
+                self.released_order_levels
+                    .push_back((instrument.clone(), book.image));
+            }
+        }
         self.instruments
             .retain(|instrument| instrument.descriptor.instrument_id != instrument_id);
         self.quotes.remove(instrument_id);
-        self.mbo_books.remove(instrument_id);
+        self.price_books.remove(instrument_id);
         self.depth_resnapshots
             .retain(|pending| pending != instrument_id);
+        self.order_level_resets
+            .retain(|(pending, _)| pending != instrument_id);
         self.withheld
             .retain(|(withheld, _)| withheld != instrument_id);
     }
@@ -1204,6 +1394,91 @@ impl CanonicalSessionState {
     }
 }
 
+fn price_levels(
+    levels: &[crate::OrderBookLevel],
+    instrument: &RithmicProviderInstrument,
+) -> Result<Vec<PriceLevel>, (ProviderInvalidationReason, RetryDisposition)> {
+    levels
+        .iter()
+        .map(|level| {
+            Ok(PriceLevel {
+                price: fixed_price(level.price, instrument.descriptor.price_scale)?,
+                // Zero size removes the level.
+                quantity: if level.size == 0 {
+                    0
+                } else {
+                    fixed_quantity(level.size, instrument.descriptor.quantity_scale)?
+                },
+                order_count: level.orders,
+            })
+        })
+        .collect()
+}
+
+const fn depth_level(level: PriceLevel) -> DepthLevel {
+    DepthLevel {
+        price: level.price,
+        quantity: level.quantity,
+        order_count: level.order_count,
+    }
+}
+
+fn order_level_event(
+    instrument: &RithmicProviderInstrument,
+    generation: SessionGeneration,
+    publication: OrderLevelPublication,
+    source_ordinal: u64,
+    received_unix_nanos: i64,
+) -> Result<OrderLevelEvent, (ProviderInvalidationReason, RetryDisposition)> {
+    let event_metadata = |clocks| {
+        metadata(
+            instrument,
+            generation,
+            source_ordinal,
+            clocks,
+            received_unix_nanos,
+        )
+    };
+    Ok(match publication {
+        OrderLevelPublication::Snapshot {
+            clocks,
+            image,
+            provider_sequence,
+            orders,
+        } => OrderLevelEvent::Snapshot(OrderLevelSnapshot {
+            metadata: event_metadata(clocks)?,
+            image,
+            revision: 0,
+            provider_sequence,
+            orders,
+        }),
+        OrderLevelPublication::Update {
+            clocks,
+            image,
+            previous_revision,
+            revision,
+            provider_sequence,
+            changes,
+        } => OrderLevelEvent::Update(OrderLevelUpdate {
+            metadata: event_metadata(clocks)?,
+            image,
+            previous_revision,
+            revision,
+            provider_sequence,
+            changes,
+        }),
+        OrderLevelPublication::Reset {
+            image,
+            reason,
+            resnapshot,
+        } => OrderLevelEvent::Reset(OrderLevelReset {
+            metadata: event_metadata(FrameClocks::default())?,
+            image,
+            reason,
+            resnapshot,
+        }),
+    })
+}
 fn apply_quote_side(state: &mut Option<QuoteLevel>, update: QuoteSideUpdate) {
     match update {
         QuoteSideUpdate::Unchanged => {}
@@ -1320,6 +1595,65 @@ mod tests {
     use super::*;
     use DepthByOrderSnapshotOutcome::Accepted;
 
+    fn published_snapshot(outcome: MboBookOutcome) -> (u64, Option<u64>, Vec<RestingOrder>) {
+        let MboBookOutcome::Publish(OrderLevelPublication::Snapshot {
+            image,
+            provider_sequence,
+            orders,
+            ..
+        }) = outcome
+        else {
+            panic!("a covering snapshot must publish, got {outcome:?}");
+        };
+        (image, provider_sequence, orders)
+    }
+
+    fn published_update(outcome: MboBookOutcome) -> (u64, u64, Vec<OrderLevelChange>) {
+        let MboBookOutcome::Publish(OrderLevelPublication::Update {
+            previous_revision,
+            revision,
+            changes,
+            ..
+        }) = outcome
+        else {
+            panic!("a ready update must publish its changes, got {outcome:?}");
+        };
+        (previous_revision, revision, changes)
+    }
+
+    fn reset_of(publication: Option<OrderLevelPublication>) -> (OrderLevelInterruption, bool) {
+        match publication {
+            Some(OrderLevelPublication::Reset {
+                reason, resnapshot, ..
+            }) => (reason, resnapshot),
+            other => panic!("a discarded image must publish a reset, got {other:?}"),
+        }
+    }
+
+    fn resting(
+        order_id: &str,
+        side: BookSide,
+        price: i64,
+        quantity: i64,
+        priority: u64,
+    ) -> RestingOrder {
+        RestingOrder {
+            order_id: order_id.to_string(),
+            side,
+            price,
+            quantity,
+            priority,
+        }
+    }
+
+    fn bid_delete(order_id: &str) -> OrderLevelChange {
+        OrderLevelChange::Delete {
+            order_id: order_id.to_string(),
+            side: BookSide::Bid,
+            price: 510_000,
+        }
+    }
+
     #[test]
     fn mbo_snapshot_atomically_replays_interleaved_live_updates() {
         let mut assembler = MboBookAssembler::new(identity());
@@ -1386,32 +1720,31 @@ mod tests {
             ));
         }
 
-        let MboBookOutcome::Snapshot { bids, asks, .. } = assembler
-            .complete_snapshot(Accepted, Some(40), 2, 2)
-            .expect("covering snapshot completes and live delta replays")
-        else {
-            panic!("covering snapshot must publish");
-        };
+        let (image, provider_sequence, orders) = published_snapshot(
+            assembler
+                .complete_snapshot(Accepted, Some(40), 2, 2)
+                .expect("covering snapshot completes and live delta replays"),
+        );
         assert!(assembler.ready());
-        assert_eq!(bids.len(), 1);
-        assert_eq!(bids[0].price, 510_000);
-        assert_eq!(bids[0].quantity, 800);
-        assert_eq!(bids[0].order_count, Some(2));
-        assert_eq!(asks.len(), 1);
-        assert_eq!(asks[0].price, 510_025);
-        assert_eq!(asks[0].quantity, 400);
-        assert_eq!(asks[0].order_count, Some(1));
+        assert_eq!((image, provider_sequence), (1, Some(41)));
+        assert_eq!(
+            orders,
+            [
+                resting("ask-1", BookSide::Ask, 510_025, 400, 21),
+                resting("bid-1", BookSide::Bid, 510_000, 500, 13),
+                resting("bid-2", BookSide::Bid, 510_000, 300, 12),
+            ]
+        );
 
         let mut delete = bid_update(Some(42), DepthByOrderMutationKind::Delete, "bid-2");
         delete.mutations[0].size = 0;
-        let MboBookOutcome::Snapshot { bids, .. } = assembler
-            .accept_update(delete, 2, 2)
-            .expect("next live update applies")
-        else {
-            panic!("ready MBO update must publish");
-        };
-        assert_eq!(bids[0].quantity, 500);
-        assert_eq!(bids[0].order_count, Some(1));
+        let (previous_revision, revision, changes) = published_update(
+            assembler
+                .accept_update(delete, 2, 2)
+                .expect("next live update applies"),
+        );
+        assert_eq!((previous_revision, revision), (0, 1));
+        assert_eq!(changes, [bid_delete("bid-2")]);
     }
 
     #[test]
@@ -1506,28 +1839,38 @@ mod tests {
             .complete_snapshot(Accepted, Some(40), 2, 2)
             .expect("sequenced snapshot completes");
 
-        let MboBookOutcome::Snapshot { bids, .. } = assembler
-            .accept_update(
-                bid_update(None, DepthByOrderMutationKind::Delete, "bid-2"),
-                2,
-                2,
-            )
-            .expect("unsequenced live delete applies in arrival order")
-        else {
-            panic!("ready MBO update must publish");
-        };
-        assert_eq!(bids[0].order_count, Some(1));
+        let (_, revision, changes) = published_update(
+            assembler
+                .accept_update(
+                    bid_update(None, DepthByOrderMutationKind::Delete, "bid-2"),
+                    2,
+                    2,
+                )
+                .expect("unsequenced live delete applies in arrival order"),
+        );
+        assert_eq!(revision, 1);
+        assert_eq!(changes, [bid_delete("bid-2")]);
 
-        assert!(matches!(
+        let (previous_revision, revision, changes) = published_update(
             assembler
                 .accept_update(
                     bid_update(Some(41), DepthByOrderMutationKind::Change, "bid-1"),
                     2,
-                    2
+                    2,
                 )
                 .expect("next sequenced update follows the snapshot baseline"),
-            MboBookOutcome::Snapshot { .. }
-        ));
+        );
+        assert_eq!((previous_revision, revision), (1, 2));
+        assert_eq!(
+            changes,
+            [OrderLevelChange::Change(resting(
+                "bid-1",
+                BookSide::Bid,
+                510_000,
+                400,
+                12
+            ))]
+        );
     }
 
     #[test]
@@ -1545,9 +1888,14 @@ mod tests {
                     ProviderInvalidationReason::SequenceGap
                 ))
             );
-            assert!(
-                order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
-                    .is_none()
+            assert_eq!(
+                reset_of(order_level_outcome(
+                    &mut assembler,
+                    outcome,
+                    "instrument",
+                    &mut resnapshots
+                )),
+                (OrderLevelInterruption::SequenceGap, true)
             );
             assert!(assembler.awaiting_snapshot(), "attempt {attempt} retries");
             assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
@@ -1557,9 +1905,15 @@ mod tests {
             .accept_snapshot_level(bid_level(Some(40)), 2, 2)
             .expect("sequenced level contributes orders");
         let exhausted = assembler.complete_snapshot(Accepted, Some(41), 2, 2);
-        assert!(
-            order_level_outcome(&mut assembler, exhausted, "instrument", &mut resnapshots)
-                .is_none()
+        assert_eq!(
+            reset_of(order_level_outcome(
+                &mut assembler,
+                exhausted,
+                "instrument",
+                &mut resnapshots
+            )),
+            (OrderLevelInterruption::SequenceGap, false),
+            "an exhausted budget turns order levels off"
         );
         assert!(
             resnapshots.is_empty(),
@@ -1604,7 +1958,6 @@ mod tests {
     #[test]
     fn unsequenced_snapshot_installs_and_checks_continuity_from_the_first_live_sequence() {
         let mut assembler = MboBookAssembler::new(identity());
-        let mut resnapshots = VecDeque::new();
         // Precedes the snapshot response, so the image already reflects it.
         assembler
             .accept_update(
@@ -1623,16 +1976,19 @@ mod tests {
                 2,
             )
             .expect("interleaved update buffers");
-        let outcome = assembler.complete_snapshot(Accepted, None, 2, 2);
-        let Some(MboBookOutcome::Snapshot { bids, .. }) =
-            order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
-        else {
-            panic!("an unsequenced snapshot must publish its image");
-        };
-        assert!(resnapshots.is_empty(), "no resnapshot for a valid image");
+        let outcome = assembler
+            .complete_snapshot(Accepted, None, 2, 2)
+            .expect("an unsequenced snapshot completes");
+        let (image, provider_sequence, orders) = published_snapshot(outcome);
         assert!(assembler.ready());
-        assert_eq!(bids[0].quantity, 700);
-        assert_eq!(bids[0].order_count, Some(2));
+        assert_eq!((image, provider_sequence), (1, Some(700)));
+        assert_eq!(
+            orders,
+            [
+                resting("bid-1", BookSide::Bid, 510_000, 400, 12),
+                resting("bid-2", BookSide::Bid, 510_000, 300, 12),
+            ]
+        );
 
         assert!(matches!(
             assembler
@@ -1654,18 +2010,16 @@ mod tests {
                 .expect("a replayed sequence is stale"),
             MboBookOutcome::IgnoredStale
         ));
-        let MboBookOutcome::Snapshot { bids, .. } = assembler
-            .accept_update(
-                bid_update(Some(701), DepthByOrderMutationKind::Delete, "bid-2"),
-                2,
-                2,
-            )
-            .expect("the next live sequence applies")
-        else {
-            panic!("ready MBO update must publish");
-        };
-        assert_eq!(bids[0].quantity, 400);
-        assert_eq!(bids[0].order_count, Some(1));
+        let (_, _, changes) = published_update(
+            assembler
+                .accept_update(
+                    bid_update(Some(701), DepthByOrderMutationKind::Delete, "bid-2"),
+                    2,
+                    2,
+                )
+                .expect("the next live sequence applies"),
+        );
+        assert_eq!(changes, [bid_delete("bid-2")]);
 
         assert!(matches!(
             assembler.accept_update(
@@ -1704,7 +2058,7 @@ mod tests {
                     2
                 )
                 .expect("the first live sequence starts continuity"),
-            MboBookOutcome::Snapshot { .. }
+            MboBookOutcome::Publish(OrderLevelPublication::Update { .. })
         ));
     }
 
@@ -1729,8 +2083,14 @@ mod tests {
                 ProviderInvalidationReason::SequenceGap
             ))
         );
-        assert!(
-            order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots).is_none()
+        assert_eq!(
+            reset_of(order_level_outcome(
+                &mut assembler,
+                outcome,
+                "instrument",
+                &mut resnapshots
+            )),
+            (OrderLevelInterruption::SequenceGap, true)
         );
         assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
         assert!(assembler.awaiting_snapshot());
@@ -1767,18 +2127,28 @@ mod tests {
                 outcome.as_ref().err(),
                 Some(&OrderLevelFault::SnapshotRejected(REFUSED))
             );
-            assert!(
-                order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots)
-                    .is_none()
+            assert_eq!(
+                reset_of(order_level_outcome(
+                    &mut assembler,
+                    outcome,
+                    "instrument",
+                    &mut resnapshots
+                )),
+                (OrderLevelInterruption::SnapshotRefused, true)
             );
             assert!(assembler.awaiting_snapshot(), "attempt {attempt} retries");
             assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
         }
         let exhausted =
             assembler.complete_snapshot(DepthByOrderSnapshotOutcome::Rejected(REFUSED), None, 2, 2);
-        assert!(
-            order_level_outcome(&mut assembler, exhausted, "instrument", &mut resnapshots)
-                .is_none()
+        assert_eq!(
+            reset_of(order_level_outcome(
+                &mut assembler,
+                exhausted,
+                "instrument",
+                &mut resnapshots
+            )),
+            (OrderLevelInterruption::SnapshotRefused, false)
         );
         assert!(resnapshots.is_empty());
         assert!(!assembler.awaiting_snapshot());
@@ -1807,8 +2177,14 @@ mod tests {
             )),
             "an accepted terminal frame cannot complete a refused image"
         );
-        assert!(
-            order_level_outcome(&mut assembler, outcome, "instrument", &mut resnapshots).is_none()
+        assert_eq!(
+            reset_of(order_level_outcome(
+                &mut assembler,
+                outcome,
+                "instrument",
+                &mut resnapshots
+            )),
+            (OrderLevelInterruption::SnapshotRefused, true)
         );
         assert!(!assembler.ready());
         assert_eq!(resnapshots.pop_front().as_deref(), Some("instrument"));
@@ -1823,9 +2199,14 @@ mod tests {
             .expect("first level contributes orders");
         // A duplicate order id inside the response discards the image mid-response.
         let duplicate = assembler.accept_snapshot_level(bid_level(None), 2, 2);
-        assert!(
-            order_level_outcome(&mut assembler, duplicate, "instrument", &mut resnapshots)
-                .is_none()
+        assert_eq!(
+            reset_of(order_level_outcome(
+                &mut assembler,
+                duplicate,
+                "instrument",
+                &mut resnapshots
+            )),
+            (OrderLevelInterruption::SequenceGap, true)
         );
         assert!(
             resnapshots.is_empty(),
@@ -1848,18 +2229,17 @@ mod tests {
         assembler
             .accept_snapshot_level(ask_level("ask-new"), 2, 2)
             .expect("the fresh response builds the image");
-        let MboBookOutcome::Snapshot { bids, asks, .. } = assembler
-            .complete_snapshot(Accepted, None, 2, 2)
-            .expect("the fresh response completes")
-        else {
-            panic!("the fresh covering snapshot must publish");
-        };
-        assert!(
-            bids.is_empty(),
+        let (image, _, orders) = published_snapshot(
+            assembler
+                .complete_snapshot(Accepted, None, 2, 2)
+                .expect("the fresh response completes"),
+        );
+        assert_eq!(image, 1, "the abandoned response never published an image");
+        assert_eq!(
+            orders,
+            [resting("ask-new", BookSide::Ask, 510_025, 100, 30)],
             "no order from the abandoned response survives"
         );
-        assert_eq!(asks.len(), 1);
-        assert_eq!(asks[0].order_count, Some(1));
     }
 
     #[test]

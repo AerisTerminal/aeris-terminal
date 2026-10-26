@@ -380,6 +380,18 @@ pub fn market_projection_channel(
     pane_projection_channel(capacity, is_market_publication)
 }
 
+/// How much of the selected market's book a pane's shown consumers need.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OrderBookDetail {
+    /// No order-book consumer is shown.
+    #[default]
+    Hidden,
+    /// Aggregated size at each price.
+    Depth,
+    /// Aggregated size plus the individual resting orders at each price.
+    OrderQueues,
+}
+
 pub enum MarketWorkerCommand {
     Recovery {
         selection_generation: Option<u64>,
@@ -391,7 +403,7 @@ pub enum MarketWorkerCommand {
     EngineSelect(Box<EngineSelectionRequest>),
     SelectCatalog(Box<CatalogSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
-    DepthVisible(bool),
+    OrderBook(OrderBookDetail),
     ResourceClass(ConsumerResourceClass),
     ReplacePriceAlerts {
         sequence: u64,
@@ -964,28 +976,31 @@ impl MarketDataWorker {
             })
     }
 
-    /// Enables or disables depth demand for the currently selected market
+    /// Sets how much of the currently selected market's book is demanded
     /// without changing symbol/timeframe generation.
     ///
     /// # Errors
-    /// Returns the requested visibility when the bounded worker command lane is
+    /// Returns the requested detail when the bounded worker command lane is
     /// full or disconnected.
-    pub fn try_set_order_book_visible(&self, visible: bool) -> Result<(), TrySendError<bool>> {
+    pub fn try_set_order_book_detail(
+        &self,
+        detail: OrderBookDetail,
+    ) -> Result<(), TrySendError<OrderBookDetail>> {
         let Some(commands) = self.commands.as_ref() else {
-            return Err(TrySendError::Disconnected(visible));
+            return Err(TrySendError::Disconnected(detail));
         };
         commands
-            .try_send(MarketWorkerCommand::DepthVisible(visible))
+            .try_send(MarketWorkerCommand::OrderBook(detail))
             .inspect(|()| commands.notify())
             .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::DepthVisible(visible)) => {
-                    TrySendError::Full(visible)
+                TrySendError::Full(MarketWorkerCommand::OrderBook(detail)) => {
+                    TrySendError::Full(detail)
                 }
-                TrySendError::Disconnected(MarketWorkerCommand::DepthVisible(visible)) => {
-                    TrySendError::Disconnected(visible)
+                TrySendError::Disconnected(MarketWorkerCommand::OrderBook(detail)) => {
+                    TrySendError::Disconnected(detail)
                 }
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    unreachable!("depth visibility send errors retain the depth command")
+                    unreachable!("order-book send errors retain the order-book command")
                 }
             })
     }
@@ -1088,7 +1103,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::SelectCatalog(_)
                     | MarketWorkerCommand::ChartViewport(_)
-                    | MarketWorkerCommand::DepthVisible(_)
+                    | MarketWorkerCommand::OrderBook(_)
                     | MarketWorkerCommand::ResourceClass(_)
                     | MarketWorkerCommand::ReplacePriceAlerts { .. }
                     | MarketWorkerCommand::RegisterStudy(_)
@@ -1103,7 +1118,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::SelectCatalog(_)
                     | MarketWorkerCommand::ChartViewport(_)
-                    | MarketWorkerCommand::DepthVisible(_)
+                    | MarketWorkerCommand::OrderBook(_)
                     | MarketWorkerCommand::ResourceClass(_)
                     | MarketWorkerCommand::ReplacePriceAlerts { .. }
                     | MarketWorkerCommand::RegisterStudy(_)
@@ -3144,6 +3159,7 @@ mod tests {
             trade_source_watermark: revision,
             top_of_book_only: false,
             rows: Vec::new(),
+            order_queues: None,
         };
         assert!(
             sender
@@ -3194,6 +3210,7 @@ mod tests {
             trade_source_watermark: revision,
             top_of_book_only: false,
             rows: Vec::new(),
+            order_queues: None,
         };
         sender
             .send(book_message(frame(2)))
@@ -3274,6 +3291,7 @@ mod tests {
             trade_source_watermark: revision,
             top_of_book_only: false,
             rows: Vec::new(),
+            order_queues: None,
         };
         sender
             .send(book_message(frame(7, 99, 40)))

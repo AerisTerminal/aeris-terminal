@@ -90,17 +90,75 @@ pub struct MarketDisplayDepth {
     pub asks: Vec<aeris_market_data::DepthLevel>,
 }
 
+/// Most prices per side one [`MarketOrderLevelView`] carries, best first.
+pub const MAXIMUM_ORDER_LEVEL_VIEW_PRICES: usize = 32;
+/// Most resting orders one [`MarketOrderQueue`] lists.
+pub const MAXIMUM_ORDER_LEVEL_VIEW_QUEUE: usize = 64;
+
+/// Resting orders at one price, front of the queue first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketOrderQueue {
+    pub price: i64,
+    /// At most [`MAXIMUM_ORDER_LEVEL_VIEW_QUEUE`] orders in ascending provider
+    /// priority, each with its exchange order id and quantity.
+    pub orders: Vec<aeris_market_data::RestingOrder>,
+    /// Every order resting at the price, including those beyond `orders`.
+    pub order_count: usize,
+    /// Total quantity resting at the price.
+    pub quantity: i64,
+}
+
+/// Authority of the order-level image behind a [`MarketOrderLevelView`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketOrderLevelStatus {
+    /// The provider was asked for order levels and no covering image arrived yet.
+    AwaitingSnapshot,
+    Ready,
+    /// The image was discarded and the provider is sending a covering image.
+    Recovering(aeris_market_data::OrderLevelInterruption),
+    /// The provider turned order levels off for its session.
+    Unavailable(aeris_market_data::OrderLevelInterruption),
+    /// The provider session that owned the image ended.
+    Stale,
+    /// Other instruments hold every order-level subscription the provider allows.
+    BudgetExhausted,
+}
+
+/// Bounded market-by-order view of the runtime's canonical order-level book.
+///
+/// Queues are present only while `status` is `Ready`: a gap, refusal or bound
+/// violation empties them until a covering image arrives. `image`, `revision`
+/// and `provider_sequence` are the canonical continuity evidence of the image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketOrderLevelView {
+    pub status: MarketOrderLevelStatus,
+    pub provider_generation: u64,
+    pub image: u64,
+    pub revision: u64,
+    pub provider_sequence: Option<u64>,
+    /// Images discarded since the runtime opened this instrument's book.
+    pub recoveries: u64,
+    /// At most [`MAXIMUM_ORDER_LEVEL_VIEW_PRICES`] bid prices, best first.
+    pub bids: Vec<MarketOrderQueue>,
+    /// At most [`MAXIMUM_ORDER_LEVEL_VIEW_PRICES`] ask prices, best first.
+    pub asks: Vec<MarketOrderQueue>,
+}
+
 /// Direct in-process order-book image for one consumer generation.
 ///
 /// `display_depth` is an optional provider-aggregated presentation sidecar. It
 /// never enters the canonical `OrderBook`; consumers may use it for a coarse
 /// DOM while retaining canonical raw depth for correctness and fallback.
+/// `order_levels` is present only while the consumer demands
+/// `MarketStream::OrderLevels` from a provider that publishes them; it is boxed
+/// so depth-only snapshots stay small.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketOrderBookSnapshot {
     pub consumer_id: aeris_market_engine::ConsumerId,
     pub generation: aeris_market_engine::GenerationId,
     pub publication: aeris_market_data::OrderBookPublication,
     pub display_depth: Option<MarketDisplayDepth>,
+    pub order_levels: Option<Box<MarketOrderLevelView>>,
 }
 
 /// One exact canonical trade retained by the market runtime's bounded tape.

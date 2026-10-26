@@ -392,6 +392,7 @@ fn provider_instrument(
         trades: true,
         quotes: true,
         order_book: false,
+        order_levels: false,
     })
 }
 

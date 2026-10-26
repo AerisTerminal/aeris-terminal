@@ -32,6 +32,7 @@ pub enum ProviderRequest {
     Trades,
     Quotes,
     Depth,
+    OrderLevels,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,6 +214,10 @@ impl ProviderManager {
                 streams.contains(MarketStream::Depth),
                 ProviderRequest::Depth,
             ),
+            (
+                streams.contains(MarketStream::OrderLevels),
+                ProviderRequest::OrderLevels,
+            ),
         ] {
             if required && !supports(record.config.capabilities, request) {
                 return Err(EngineError::UnsupportedProviderRequest {
@@ -252,6 +257,7 @@ const fn supports(capabilities: ProviderCapabilities, request: ProviderRequest) 
         ProviderRequest::Trades => capabilities.streams.contains(MarketStream::Trades),
         ProviderRequest::Quotes => capabilities.streams.contains(MarketStream::Quotes),
         ProviderRequest::Depth => capabilities.streams.contains(MarketStream::Depth),
+        ProviderRequest::OrderLevels => capabilities.streams.contains(MarketStream::OrderLevels),
     }
 }
 

@@ -48,7 +48,8 @@ use aeris_observability::FeedConnectionState;
 
 use aeris_desktop::market_worker::{
     LocalCommandOutcome, MarketDataWorker, MarketProjectionSender, MarketRecoveryFailure,
-    MarketWorkerCommand, MarketWorkerStartup, PaneProjectionEvent, market_projection_channel,
+    MarketWorkerCommand, MarketWorkerStartup, OrderBookDetail, PaneProjectionEvent,
+    market_projection_channel,
 };
 
 #[cfg(test)]
@@ -64,19 +65,23 @@ const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST
 pub(super) fn chart_demand_streams(
     market: &MarketService,
     provider: &str,
-    depth_visible: bool,
+    order_book: OrderBookDetail,
 ) -> Result<StreamRequirements, String> {
-    market.available_streams(provider, chart_streams(depth_visible))
+    market.available_streams(provider, chart_streams(order_book))
 }
 
-fn chart_streams(depth_visible: bool) -> StreamRequirements {
+/// Order levels are demanded only for a shown queue, never for depth alone, so an
+/// unrelated chart or book never spends the provider's order-level budget.
+fn chart_streams(order_book: OrderBookDetail) -> StreamRequirements {
     let streams = StreamRequirements::BARS
         .with(MarketStream::Trades)
         .with(MarketStream::Quotes);
-    if depth_visible {
-        streams.with(MarketStream::Depth)
-    } else {
-        streams
+    match order_book {
+        OrderBookDetail::Hidden => streams,
+        OrderBookDetail::Depth => streams.with(MarketStream::Depth),
+        OrderBookDetail::OrderQueues => streams
+            .with(MarketStream::Depth)
+            .with(MarketStream::OrderLevels),
     }
 }
 
@@ -527,7 +532,7 @@ struct WorkerEndpoint {
     pending_recovery: Option<ReplayRecoveryCommand>,
     active_generation: u64,
     resource_class: ConsumerResourceClass,
-    depth_visible: bool,
+    order_book: OrderBookDetail,
     active: bool,
 }
 
@@ -667,7 +672,7 @@ fn worker_endpoint_with_wake(
             pending_recovery: None,
             active_generation: initial_generation,
             resource_class: ConsumerResourceClass::Foreground,
-            depth_visible: false,
+            order_book: OrderBookDetail::Hidden,
             active: true,
         },
     };
@@ -847,7 +852,7 @@ mod selection_commands;
 #[cfg(test)]
 use selection_commands::initialize_catalog_endpoint;
 #[cfg(test)]
-use selection_commands::retain_depth_visibility;
+use selection_commands::retain_order_book_detail;
 use selection_commands::{initialize_endpoint, initialize_market_screen_endpoint, process_command};
 
 #[path = "engine_market_worker/publications.rs"]
@@ -909,18 +914,40 @@ mod tests {
             pending_recovery: None,
             active_generation: generation,
             resource_class: ConsumerResourceClass::Foreground,
-            depth_visible: false,
+            order_book: OrderBookDetail::Hidden,
             active: true,
         }
     }
 
     #[test]
     fn depth_visible_chart_explicitly_demands_real_trades() {
-        let streams = chart_streams(true);
+        let streams = chart_streams(OrderBookDetail::Depth);
         assert!(streams.contains(MarketStream::Bars));
         assert!(streams.contains(MarketStream::Depth));
         assert!(streams.contains(MarketStream::Trades));
-        assert!(chart_streams(false).contains(MarketStream::Trades));
+        assert!(chart_streams(OrderBookDetail::Hidden).contains(MarketStream::Trades));
+    }
+
+    #[test]
+    fn only_a_shown_queue_demands_order_levels() {
+        assert!(!chart_streams(OrderBookDetail::Hidden).contains(MarketStream::OrderLevels));
+        assert!(!chart_streams(OrderBookDetail::Depth).contains(MarketStream::OrderLevels));
+        let queues = chart_streams(OrderBookDetail::OrderQueues);
+        assert!(queues.contains(MarketStream::Depth));
+        assert!(queues.contains(MarketStream::OrderLevels));
+
+        let market = MarketService::start().expect("market runtime");
+        let price_levels_only = chart_demand_streams(
+            &market,
+            &fixture_public_crypto().provider,
+            OrderBookDetail::OrderQueues,
+        )
+        .expect("a price-level provider takes queue demand");
+        assert!(price_levels_only.contains(MarketStream::Depth));
+        assert!(
+            !price_levels_only.contains(MarketStream::OrderLevels),
+            "a provider without order levels is never asked for them"
+        );
     }
 
     #[test]
@@ -932,16 +959,17 @@ mod tests {
         // The order book opens while the restored instrument is still being
         // resolved: no demand exists yet, so the intent is retained for selection.
         assert_eq!(
-            retain_depth_visibility(&mut record.endpoint, true, true),
+            retain_order_book_detail(&mut record.endpoint, true, OrderBookDetail::Depth),
             None
         );
-        assert!(record.endpoint.depth_visible);
-        assert!(chart_streams(record.endpoint.depth_visible).contains(MarketStream::Depth));
+        assert_eq!(record.endpoint.order_book, OrderBookDetail::Depth);
+        assert!(chart_streams(record.endpoint.order_book).contains(MarketStream::Depth));
 
-        let streams = retain_depth_visibility(&mut record.endpoint, false, false)
-            .expect("installed demand receives the new streams");
+        let streams =
+            retain_order_book_detail(&mut record.endpoint, false, OrderBookDetail::Hidden)
+                .expect("installed demand receives the new streams");
         assert!(!streams.contains(MarketStream::Depth));
-        assert!(!record.endpoint.depth_visible);
+        assert_eq!(record.endpoint.order_book, OrderBookDetail::Hidden);
     }
 
     #[test]
@@ -959,16 +987,16 @@ mod tests {
         assert!(record.initial_selection_pending);
 
         // The restored generation has no demand until `select_and_demand` replies, so
-        // the intent must be retained for `apply_depth_visibility` instead of being
+        // the intent must be retained for `apply_order_book_detail` instead of being
         // applied to the unresolved generation and lost.
         process_command(
             &market,
             1,
             &mut record,
-            MarketWorkerCommand::DepthVisible(true),
+            MarketWorkerCommand::OrderBook(OrderBookDetail::Depth),
         )
         .expect("visibility is retained without touching unresolved demand");
-        assert!(record.endpoint.depth_visible);
+        assert_eq!(record.endpoint.order_book, OrderBookDetail::Depth);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3060,6 +3088,104 @@ mod tests {
                 top_of_book_only: false,
             },
             display_depth: None,
+            order_levels: None,
+        }
+    }
+
+    #[test]
+    fn order_level_views_reach_the_book_as_queues_only_while_current() {
+        use aeris_market_data::{BookSide, OrderQueueLevel, OrderQueueState, RestingOrder};
+        use aeris_market_runtime::{
+            MarketOrderLevelStatus, MarketOrderLevelView, MarketOrderQueue,
+        };
+
+        let product = fixture_futures_contract("MNQ");
+        let snapshot = mnq_top_of_book_snapshot(&product);
+        assert_eq!(
+            runtime_order_book_frame(&snapshot, &product, 1)
+                .expect("depth frame")
+                .order_queues,
+            None,
+            "a consumer that demanded no order levels gets no queues"
+        );
+        let order = |order_id: &str, quantity, priority| RestingOrder {
+            order_id: order_id.into(),
+            side: BookSide::Bid,
+            price: 7_798_670,
+            quantity,
+            priority,
+        };
+        let ready = MarketOrderLevelView {
+            status: MarketOrderLevelStatus::Ready,
+            provider_generation: 1,
+            image: 1,
+            revision: 4,
+            provider_sequence: Some(19),
+            recoveries: 0,
+            bids: vec![MarketOrderQueue {
+                price: 7_798_670,
+                orders: vec![order("a", 2, 1), order("b", 5, 2)],
+                order_count: 3,
+                quantity: 8,
+            }],
+            asks: Vec::new(),
+        };
+        let queues_for = |view: &MarketOrderLevelView| {
+            let mut snapshot = snapshot.clone();
+            snapshot.order_levels = Some(Box::new(view.clone()));
+            runtime_order_book_frame(&snapshot, &product, 1)
+                .and_then(|frame| frame.order_queues)
+                .expect("queue frame")
+        };
+        let queues = queues_for(&ready);
+        assert_eq!(queues.state, OrderQueueState::Ready);
+        assert_eq!(
+            queues.bids.get(&7_798_670),
+            Some(&OrderQueueLevel {
+                order_count: 3,
+                quantities: vec![2, 5],
+            }),
+            "listed orders keep their queue priority and the unlisted one is counted"
+        );
+        assert!(queues.asks.is_empty());
+
+        let mut retired = ready.clone();
+        retired.provider_generation = 2;
+        let queues = queues_for(&retired);
+        assert_eq!(queues.state, OrderQueueState::Loading);
+        assert!(
+            queues.bids.is_empty(),
+            "another session's queues are never current"
+        );
+
+        for (status, state) in [
+            (
+                MarketOrderLevelStatus::AwaitingSnapshot,
+                OrderQueueState::Loading,
+            ),
+            (
+                MarketOrderLevelStatus::Recovering(
+                    aeris_market_data::OrderLevelInterruption::SequenceGap,
+                ),
+                OrderQueueState::Recovering,
+            ),
+            (MarketOrderLevelStatus::Stale, OrderQueueState::Recovering),
+            (
+                MarketOrderLevelStatus::Unavailable(
+                    aeris_market_data::OrderLevelInterruption::SnapshotRefused,
+                ),
+                OrderQueueState::Unavailable,
+            ),
+            (
+                MarketOrderLevelStatus::BudgetExhausted,
+                OrderQueueState::LimitReached,
+            ),
+        ] {
+            let mut view = ready.clone();
+            view.status = status;
+            let queues = queues_for(&view);
+            assert_eq!(queues.state, state, "{status:?}");
+            assert!(queues.bids.is_empty() && queues.asks.is_empty());
         }
     }
 

@@ -7,7 +7,7 @@ use super::{
     WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams, retire_endpoint,
     send_recovery,
 };
-use aeris_desktop::market_worker::MarketWorkerSendError;
+use aeris_desktop::market_worker::{MarketWorkerSendError, OrderBookDetail};
 use aeris_market_runtime::{InstrumentRef, InstrumentRequest, SelectionRequest};
 use aeris_observability::diagnostic;
 
@@ -91,11 +91,8 @@ fn begin_endpoint_demand(
     client_id: u64,
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
-    let streams = chart_demand_streams(
-        market,
-        &record.product.provider,
-        record.endpoint.depth_visible,
-    )?;
+    let streams =
+        chart_demand_streams(market, &record.product.provider, record.endpoint.order_book)?;
     if let Err(error) = dispatch_initial_selection(record, streams, |request| {
         market.select_and_demand(client_id, request)
     }) {
@@ -134,21 +131,21 @@ fn instrument_ref(product: &InstallProviderInstrument) -> InstrumentRequest {
     })
 }
 
-/// Records the desired order-book depth visibility and applies it to installed demand.
+/// Records the desired order-book detail and applies it to installed demand.
 ///
-/// Visibility is endpoint intent, so it is retained even when no series demand
+/// The detail is endpoint intent, so it is retained even when no series demand
 /// exists yet: while the startup instrument is still resolving against the live
 /// catalog, the adopted selection receives the retained streams through
-/// `apply_depth_visibility`.
-pub(super) fn set_depth_visible(
+/// `apply_order_book_detail`.
+pub(super) fn set_order_book_detail(
     market: &MarketService,
     client_id: u64,
     endpoint: &mut WorkerEndpoint,
     provider: &str,
     startup_resolving: bool,
-    visible: bool,
+    detail: OrderBookDetail,
 ) -> Result<(), String> {
-    let Some(streams) = retain_depth_visibility(endpoint, startup_resolving, visible) else {
+    let Some(streams) = retain_order_book_detail(endpoint, startup_resolving, detail) else {
         return Ok(());
     };
     market.set_streams(
@@ -159,10 +156,10 @@ pub(super) fn set_depth_visible(
     )
 }
 
-/// Applies the retained depth visibility to an adopted selection's demand. A selection
+/// Applies the retained order-book detail to an adopted selection's demand. A selection
 /// dispatched before the order book opened or closed carried the older streams; when they
 /// already match, the runtime leaves the demand unchanged.
-pub(super) fn apply_depth_visibility(
+pub(super) fn apply_order_book_detail(
     market: &MarketService,
     client_id: u64,
     record: &EndpointRecord,
@@ -172,18 +169,18 @@ pub(super) fn apply_depth_visibility(
         client_id,
         endpoint.consumer_id,
         endpoint.active_generation,
-        chart_demand_streams(market, &record.product.provider, endpoint.depth_visible)?,
+        chart_demand_streams(market, &record.product.provider, endpoint.order_book)?,
     )
 }
 
-/// Retains the visibility and returns the streams to apply when demand is installed.
-pub(super) fn retain_depth_visibility(
+/// Retains the detail and returns the streams to apply when demand is installed.
+pub(super) fn retain_order_book_detail(
     endpoint: &mut WorkerEndpoint,
     startup_resolving: bool,
-    visible: bool,
+    detail: OrderBookDetail,
 ) -> Option<StreamRequirements> {
-    endpoint.depth_visible = visible;
-    (endpoint.active_generation != 0 && !startup_resolving).then(|| chart_streams(visible))
+    endpoint.order_book = detail;
+    (endpoint.active_generation != 0 && !startup_resolving).then(|| chart_streams(detail))
 }
 
 pub(super) fn process_command(
@@ -248,13 +245,13 @@ pub(super) fn process_command(
             }
             Ok(())
         }
-        MarketWorkerCommand::DepthVisible(visible) => set_depth_visible(
+        MarketWorkerCommand::OrderBook(detail) => set_order_book_detail(
             market,
             client_id,
             endpoint,
             &product.provider,
             endpoint.active_generation == 0 || *initial_selection_pending,
-            visible,
+            detail,
         ),
         MarketWorkerCommand::ResourceClass(resource_class) => {
             set_resource_class(market, client_id, endpoint, resource_class)
@@ -295,7 +292,7 @@ fn process_catalog_select(
                 search_generation: request.search_generation,
             },
             interval: request.interval,
-            streams: chart_demand_streams(market, &request.provider, endpoint.depth_visible)?,
+            streams: chart_demand_streams(market, &request.provider, endpoint.order_book)?,
             viewport: None,
         },
     )?;
@@ -325,11 +322,7 @@ fn process_engine_select(
             generation: request.sequence,
             instrument: instrument_ref(&request.product),
             interval: request.interval,
-            streams: chart_demand_streams(
-                market,
-                &request.product.provider,
-                endpoint.depth_visible,
-            )?,
+            streams: chart_demand_streams(market, &request.product.provider, endpoint.order_book)?,
             viewport: None,
         },
     )?;

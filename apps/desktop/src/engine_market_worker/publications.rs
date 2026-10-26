@@ -42,8 +42,8 @@ pub(super) fn send_recovery(
             .map_err(|error| error.to_string())?;
     }
     endpoint.pending_recovery = Some(command);
-    let demand = chart_demand_streams(market, &product.provider, endpoint.depth_visible).and_then(
-        |streams| {
+    let demand =
+        chart_demand_streams(market, &product.provider, endpoint.order_book).and_then(|streams| {
             market.set_demand(
                 client_id,
                 endpoint.consumer_id,
@@ -51,8 +51,7 @@ pub(super) fn send_recovery(
                 &series,
                 streams,
             )
-        },
-    );
+        });
     if let Err(error) = demand {
         endpoint
             .messages

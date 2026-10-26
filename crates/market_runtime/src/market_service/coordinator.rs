@@ -7,12 +7,12 @@ use super::{
     MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT,
     MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE, MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS,
     MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketDataLeaseId, MarketEngine, MarketServiceStatus,
-    MarketStream, Mutex, NonZeroUsize, Ordering, PriceAlertRegistry, ProviderConnectionState,
-    ProviderDispatch, ProviderEpochRegistry, ProviderGeneration, ProviderHealth, ProviderOrderBook,
-    ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState, REALTIME_CAPACITY,
-    REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply, StreamRequirements,
-    StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
-    publish_state, thread,
+    MarketStream, Mutex, NonZeroUsize, OrderLevelSubscription, Ordering, PriceAlertRegistry,
+    ProviderConnectionState, ProviderDispatch, ProviderEpochRegistry, ProviderGeneration,
+    ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry,
+    ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
+    StreamRequirements, StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig,
+    authorize_consumer, publish_state, thread,
 };
 #[cfg(test)]
 use super::{
@@ -894,6 +894,36 @@ fn study_live_market_data<'a>(
 }
 
 type OrderBookIdentity = (String, String, String);
+
+/// Canonical book identities current demand needs, by what it needs them for.
+#[derive(Default)]
+struct OrderBookDemand {
+    required: BTreeSet<OrderBookIdentity>,
+    depth: BTreeSet<OrderBookIdentity>,
+    order_levels: BTreeSet<OrderBookIdentity>,
+}
+
+impl OrderBookDemand {
+    fn insert(&mut self, identity: OrderBookIdentity, streams: StreamRequirements) {
+        if streams.contains(MarketStream::Depth) {
+            self.depth.insert(identity.clone());
+        }
+        if streams.contains(MarketStream::OrderLevels) {
+            self.order_levels.insert(identity.clone());
+        }
+        if [
+            MarketStream::Depth,
+            MarketStream::OrderLevels,
+            MarketStream::Trades,
+            MarketStream::Quotes,
+        ]
+        .into_iter()
+        .any(|stream| streams.contains(stream))
+        {
+            self.required.insert(identity);
+        }
+    }
+}
 
 pub(super) struct Coordinator<'a> {
     pub(super) engine: MarketEngine,
@@ -1967,7 +1997,8 @@ impl Coordinator<'_> {
                 events.trade_tape = None;
             }
             self.ensure_realtime(&series)?;
-            if streams.contains(MarketStream::Depth) {
+            if streams.contains(MarketStream::Depth) || streams.contains(MarketStream::OrderLevels)
+            {
                 self.publish_order_book_to_consumer(consumer_id);
             }
             if streams.contains(MarketStream::Trades) {
@@ -2274,7 +2305,7 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn reconcile_order_books(&mut self) {
-        let (required_identities, depth_identities) = self.required_order_book_identities();
+        let demand = self.required_order_book_identities();
         let mut retained_keys = self
             .engine
             .instrument_subscriptions()
@@ -2302,7 +2333,7 @@ impl Coordinator<'_> {
             .catalog
             .values()
             .filter(|instrument| {
-                required_identities.contains(&(
+                demand.required.contains(&(
                     instrument.provider.clone(),
                     instrument.instrument_id.clone(),
                     instrument.entitlement_id.clone(),
@@ -2327,7 +2358,7 @@ impl Coordinator<'_> {
                 instrument.provider.clone(),
                 instrument.instrument_id.clone(),
             );
-            let depth_subscribed = depth_identities.contains(&(
+            let depth_subscribed = demand.depth.contains(&(
                 instrument.provider.clone(),
                 instrument.instrument_id.clone(),
                 instrument.entitlement_id.clone(),
@@ -2351,6 +2382,10 @@ impl Coordinator<'_> {
                 self.order_books.insert(identity, book);
             }
         }
+        for (provider, instrument_id) in self.grant_order_level_subscriptions(&demand.order_levels)
+        {
+            self.broadcast_order_book(&provider, &instrument_id);
+        }
         // Like the canonical image, a display image stops being current once nothing
         // subscribes to depth; keeping it would republish a stale book on resubscription.
         self.display_depth.retain(|identity, display| {
@@ -2365,44 +2400,85 @@ impl Coordinator<'_> {
         });
     }
 
-    fn required_order_book_identities(
-        &self,
-    ) -> (BTreeSet<OrderBookIdentity>, BTreeSet<OrderBookIdentity>) {
-        let mut required_identities = BTreeSet::new();
-        let mut depth_identities = BTreeSet::new();
+    fn required_order_book_identities(&self) -> OrderBookDemand {
+        let mut demand = OrderBookDemand::default();
         for (series, subscription) in self.engine.subscriptions() {
-            let identity = (
-                series.provider_id.clone(),
-                series.instrument_id.clone(),
-                series.entitlement_id.clone(),
+            demand.insert(
+                (
+                    series.provider_id.clone(),
+                    series.instrument_id.clone(),
+                    series.entitlement_id.clone(),
+                ),
+                subscription.streams,
             );
-            if subscription.streams.contains(MarketStream::Depth) {
-                depth_identities.insert(identity.clone());
-            }
-            if subscription.streams.contains(MarketStream::Depth)
-                || subscription.streams.contains(MarketStream::Trades)
-                || subscription.streams.contains(MarketStream::Quotes)
-            {
-                required_identities.insert(identity);
-            }
         }
         for (key, streams) in self.engine.instrument_subscriptions() {
-            let identity = (
-                key.provider,
-                key.instrument.as_str().to_string(),
-                key.entitlement.unwrap_or_default(),
+            demand.insert(
+                (
+                    key.provider,
+                    key.instrument.as_str().to_string(),
+                    key.entitlement.unwrap_or_default(),
+                ),
+                streams,
             );
-            if streams.contains(MarketStream::Depth) {
-                depth_identities.insert(identity.clone());
-            }
-            if streams.contains(MarketStream::Quotes)
-                || streams.contains(MarketStream::Depth)
-                || streams.contains(MarketStream::Trades)
-            {
-                required_identities.insert(identity);
+        }
+        demand
+    }
+
+    /// Grants each provider's bounded order-level subscriptions and returns
+    /// the books whose grant changed. A book keeps its grant while demanded,
+    /// so new demand never evicts a working book; other demanded books are
+    /// granted in identity order until the provider's budget is spent.
+    fn grant_order_level_subscriptions(
+        &mut self,
+        demanded: &BTreeSet<OrderBookIdentity>,
+    ) -> Vec<(String, String)> {
+        let is_demanded = |(provider, instrument_id): &(String, String),
+                           book: &ProviderOrderBook| {
+            demanded.contains(&(
+                provider.clone(),
+                instrument_id.clone(),
+                book.instrument.entitlement_id.clone(),
+            ))
+        };
+        let mut granted = BTreeMap::<String, usize>::new();
+        let mut previous = BTreeMap::new();
+        for (identity, book) in &mut self.order_books {
+            let subscription = book.order_level_subscription();
+            previous.insert(identity.clone(), subscription);
+            if subscription == OrderLevelSubscription::Admitted && is_demanded(identity, book) {
+                *granted.entry(identity.0.clone()).or_default() += 1;
+            } else {
+                book.set_order_level_subscription(OrderLevelSubscription::Off);
             }
         }
-        (required_identities, depth_identities)
+        for (identity, book) in &mut self.order_books {
+            if book.order_level_subscription() == OrderLevelSubscription::Admitted
+                || !is_demanded(identity, book)
+            {
+                continue;
+            }
+            let budget = self
+                .providers
+                .descriptor(&identity.0)
+                .map_or(0, |descriptor| {
+                    descriptor.capabilities.maximum_order_level_instruments
+                });
+            let count = granted.entry(identity.0.clone()).or_default();
+            book.set_order_level_subscription(if *count < budget {
+                *count += 1;
+                OrderLevelSubscription::Admitted
+            } else {
+                OrderLevelSubscription::BudgetExhausted
+            });
+        }
+        self.order_books
+            .iter()
+            .filter(|(identity, book)| {
+                previous.get(*identity) != Some(&book.order_level_subscription())
+            })
+            .map(|(identity, _)| identity.clone())
+            .collect()
     }
 
     pub(super) fn status(&self) -> MarketServiceStatus {
@@ -2615,6 +2691,9 @@ mod tests {
     }
     mod recovery {
         include!("tests/recovery.rs");
+    }
+    mod order_levels {
+        include!("tests/order_levels.rs");
     }
 
     use super::super::lifecycle::RecoveryReason;

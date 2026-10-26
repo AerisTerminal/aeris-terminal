@@ -6,7 +6,10 @@ use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
     platform_mono_font_family, platform_typography,
 };
-use aeris_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
+use aeris_market_data::{
+    AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState, OrderQueueLevel,
+    OrderQueueState,
+};
 use aeris_trading::{FixedPoint, OrderSide, project_unrealized_pnl};
 use gpui::{
     AnyElement, Context, Div, Entity, EventEmitter, Hsla, IntoElement, Render, ScrollStrategy,
@@ -106,6 +109,9 @@ const BOOK_WIDTH: f32 = 0.30;
 const TRADE_WIDTH: f32 = 0.10;
 const PRICE_WIDTH: f32 = 0.20;
 const ORDERS_WIDTH: f32 = 0.10;
+const QUEUE_WIDTH: f32 = 0.30;
+/// A queue cell lists at most this many leading orders; the rest show as a count.
+const MAXIMUM_QUEUE_CELL_ORDERS: usize = 12;
 
 fn platform_font_weight(role: TypographyRole) -> gpui::FontWeight {
     gpui::FontWeight(f32::from(platform_typography().weight(role)))
@@ -127,7 +133,10 @@ pub enum OrderBookColumn {
     Price,
     BuyTrades,
     Ask,
+    /// The trader's own working orders and position, else the level's order count.
     Orders,
+    /// The individual resting orders at each price in queue-priority order.
+    Queue,
 }
 
 /// Provider connectivity shown independently from the last valid book frame.
@@ -139,7 +148,7 @@ pub enum OrderBookConnectionState {
 }
 
 impl OrderBookColumn {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ProfitLoss,
         Self::Bid,
         Self::SellTrades,
@@ -147,6 +156,7 @@ impl OrderBookColumn {
         Self::BuyTrades,
         Self::Ask,
         Self::Orders,
+        Self::Queue,
     ];
 
     #[must_use]
@@ -159,6 +169,7 @@ impl OrderBookColumn {
             Self::BuyTrades => "Buy",
             Self::Ask => "Ask",
             Self::Orders => "Orders",
+            Self::Queue => "Queue",
         }
     }
 
@@ -169,6 +180,7 @@ impl OrderBookColumn {
             Self::SellTrades | Self::BuyTrades => TRADE_WIDTH,
             Self::Price => PRICE_WIDTH,
             Self::Orders => ORDERS_WIDTH,
+            Self::Queue => QUEUE_WIDTH,
         }
     }
 
@@ -181,19 +193,18 @@ impl OrderBookColumn {
             Self::BuyTrades => 1 << 4,
             Self::Ask => 1 << 5,
             Self::Orders => 1 << 6,
+            Self::Queue => 1 << 7,
         }
-    }
-
-    #[must_use]
-    pub const fn available(self) -> bool {
-        true
     }
 }
 
-/// Current depth-ladder column visibility.
+/// Current depth-ladder column visibility. A column shows only while it is both
+/// chosen and offered; the queue column is offered only for a provider that
+/// streams individual resting orders.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OrderBookColumnVisibility {
     visible: u8,
+    offered: u8,
 }
 
 impl Default for OrderBookColumnVisibility {
@@ -204,6 +215,7 @@ impl Default for OrderBookColumnVisibility {
                 | OrderBookColumn::Price.bit()
                 | OrderBookColumn::BuyTrades.bit()
                 | OrderBookColumn::Ask.bit(),
+            offered: !OrderBookColumn::Queue.bit(),
         }
     }
 }
@@ -211,15 +223,33 @@ impl Default for OrderBookColumnVisibility {
 impl OrderBookColumnVisibility {
     #[must_use]
     pub const fn is_visible(self, column: OrderBookColumn) -> bool {
-        self.visible & column.bit() != 0
+        self.visible & self.offered & column.bit() != 0
+    }
+
+    #[must_use]
+    pub const fn is_offered(self, column: OrderBookColumn) -> bool {
+        self.offered & column.bit() != 0
     }
 
     fn toggle(&mut self, column: OrderBookColumn) -> bool {
-        if !column.available() {
+        if !self.is_offered(column) {
             return false;
         }
         self.visible ^= column.bit();
         true
+    }
+
+    /// Offers or withdraws the queue column, keeping the trader's choice for
+    /// when it is offered again. Returns whether the offer changed.
+    fn offer_order_queues(&mut self, offered: bool) -> bool {
+        let offered = if offered {
+            self.offered | OrderBookColumn::Queue.bit()
+        } else {
+            self.offered & !OrderBookColumn::Queue.bit()
+        };
+        let changed = offered != self.offered;
+        self.offered = offered;
+        changed
     }
 
     fn width(self, column: OrderBookColumn) -> f32 {
@@ -310,6 +340,13 @@ impl ReadOnlyOrderBookView {
 
     pub fn toggle_column(&mut self, column: OrderBookColumn, cx: &mut Context<Self>) {
         if self.columns.toggle(column) {
+            cx.notify();
+        }
+    }
+
+    /// Offers the queue column while the selected provider streams resting orders.
+    pub fn set_order_queues_offered(&mut self, offered: bool, cx: &mut Context<Self>) {
+        if self.columns.offer_order_queues(offered) {
             cx.notify();
         }
     }
@@ -499,6 +536,12 @@ impl Render for ReadOnlyOrderBookView {
                                 })
                             })
                             .flatten(),
+                    )
+                    .children(
+                        (self.connection_state == OrderBookConnectionState::Online
+                            && columns.is_visible(OrderBookColumn::Queue))
+                        .then(|| order_queue_banner(frame.as_deref(), &self.theme))
+                        .flatten(),
                     )
                     .child(render_ladder(
                         frame,
@@ -1460,6 +1503,7 @@ struct LevelCellContext<'a> {
     price_scale: u8,
     working_order: Option<&'a OrderBookWorkingOrder>,
     position_marker: Option<&'a OrderBookPositionMarker>,
+    queue: Option<&'a OrderQueueLevel>,
 }
 
 #[derive(Clone, Copy)]
@@ -1536,6 +1580,7 @@ fn render_level_row(
         position_marker: interaction.position_marker.filter(|marker| {
             marker.price == level.price && marker.side == order_book_level_side(side)
         }),
+        queue: order_queue_at(frame, side, level.price),
     };
     div()
         .id((row_id, signed_price_element_id(level.price)))
@@ -1665,6 +1710,7 @@ fn render_empty_price_tick(
                         quantity_scale,
                         trade_volumes,
                         working_order,
+                        queue: order_queue_at(frame, side, price),
                         click_side,
                         interaction,
                         maximum_trade_quantity: stats.maximum_trade_quantity,
@@ -1710,6 +1756,7 @@ struct EmptyPriceCellContext<'a> {
     quantity_scale: u8,
     trade_volumes: AggressorTradeVolumes,
     working_order: Option<&'a OrderBookWorkingOrder>,
+    queue: Option<&'a OrderQueueLevel>,
     click_side: OrderBookLevelSide,
     interaction: LadderInteraction<'a>,
     maximum_trade_quantity: i64,
@@ -1758,6 +1805,13 @@ fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
             context.price,
             context.price_scale,
             context.interaction.theme,
+        )
+        .into_any_element(),
+        OrderBookColumn::Queue => queue_cell(
+            width,
+            context.queue,
+            context.quantity_scale,
+            context.price_color,
         )
         .into_any_element(),
         OrderBookColumn::Bid | OrderBookColumn::Ask => table_cell(width).into_any_element(),
@@ -1842,7 +1896,64 @@ fn render_level_cell(
             context.theme,
         )
         .into_any_element(),
+        OrderBookColumn::Queue => queue_cell(
+            width,
+            context.queue,
+            context.quantity_scale,
+            context.price_color,
+        )
+        .into_any_element(),
     }
+}
+
+/// The ready queue resting at `price` on `side`; a queue that is loading or
+/// recovering is never shown as if it were current.
+fn order_queue_at(
+    frame: &OrderBookFrame,
+    side: BookColumnSide,
+    price: i64,
+) -> Option<&OrderQueueLevel> {
+    let queues = frame
+        .order_queues
+        .as_ref()
+        .filter(|queues| queues.state == OrderQueueState::Ready)?;
+    match side {
+        BookColumnSide::Bid => queues.bids.get(&price),
+        BookColumnSide::Ask => queues.asks.get(&price),
+    }
+}
+
+fn queue_cell(
+    width: f32,
+    queue: Option<&OrderQueueLevel>,
+    quantity_scale: u8,
+    color: ThemeColor,
+) -> Div {
+    table_cell(width)
+        .px_1()
+        .text_left()
+        .text_color(gpui_color(color))
+        .child(
+            div()
+                .w_full()
+                .truncate()
+                .child(queue.map_or_else(String::new, |queue| queue_text(queue, quantity_scale))),
+        )
+}
+
+/// Leading order quantities front first, then a count of the orders not listed.
+fn queue_text(queue: &OrderQueueLevel, quantity_scale: u8) -> String {
+    let mut parts = queue
+        .quantities
+        .iter()
+        .take(MAXIMUM_QUEUE_CELL_ORDERS)
+        .map(|quantity| compact_quantity_text(*quantity, quantity_scale))
+        .collect::<Vec<_>>();
+    let hidden = queue.order_count.saturating_sub(parts.len());
+    if hidden > 0 {
+        parts.push(format!("+{hidden}"));
+    }
+    parts.join(" ")
 }
 
 fn working_order_cell(
@@ -1963,7 +2074,9 @@ fn header_cell(width: f32, label: String, alignment: CellAlignment) -> impl Into
 
 const fn column_alignment(column: OrderBookColumn) -> CellAlignment {
     match column {
-        OrderBookColumn::Ask | OrderBookColumn::BuyTrades => CellAlignment::Left,
+        OrderBookColumn::Ask | OrderBookColumn::BuyTrades | OrderBookColumn::Queue => {
+            CellAlignment::Left
+        }
         OrderBookColumn::Price => CellAlignment::Center,
         OrderBookColumn::ProfitLoss
         | OrderBookColumn::Bid
@@ -2160,6 +2273,37 @@ fn banner_row(label: String, tone: BannerTone, theme: &AerisTheme) -> Div {
         .child(label)
 }
 
+fn order_queue_banner(
+    frame: Option<&OrderBookFrame>,
+    theme: &AerisTheme,
+) -> Option<impl IntoElement + use<>> {
+    let state = frame?
+        .order_queues
+        .as_ref()
+        .map_or(OrderQueueState::Loading, |queues| queues.state);
+    let (label, tone) = order_queue_presentation(state)?;
+    Some(banner_row(label.to_owned(), tone, theme))
+}
+
+const fn order_queue_presentation(state: OrderQueueState) -> Option<(&'static str, BannerTone)> {
+    match state {
+        OrderQueueState::Ready => None,
+        OrderQueueState::Loading => Some(("Order queues loading", BannerTone::Neutral)),
+        OrderQueueState::Recovering => Some((
+            "Order queues recovering · awaiting a complete order image",
+            BannerTone::Failure,
+        )),
+        OrderQueueState::Unavailable => Some((
+            "Order queues unavailable for this market",
+            BannerTone::Failure,
+        )),
+        OrderQueueState::LimitReached => Some((
+            "Order queues limit reached · close the queue column on another book",
+            BannerTone::Neutral,
+        )),
+    }
+}
+
 fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String, BannerTone)> {
     match state {
         OrderBookState::Ready => None,
@@ -2266,6 +2410,7 @@ mod tests {
                 })
                 .into_iter()
                 .collect(),
+            order_queues: None,
         }
     }
 
@@ -2443,6 +2588,81 @@ mod tests {
             .map(|column| columns.width(column))
             .sum::<f32>();
         assert!((width - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn queue_column_shows_only_while_its_provider_streams_resting_orders() {
+        let mut columns = OrderBookColumnVisibility::default();
+        assert!(!columns.is_offered(OrderBookColumn::Queue));
+        assert!(
+            !columns.toggle(OrderBookColumn::Queue),
+            "a provider without order levels cannot choose the queue column"
+        );
+        assert!(columns.offer_order_queues(true));
+        assert!(
+            !columns.offer_order_queues(true),
+            "an unchanged offer is not a change"
+        );
+        assert!(columns.toggle(OrderBookColumn::Queue));
+        assert!(columns.is_visible(OrderBookColumn::Queue));
+        assert!(columns.offer_order_queues(false));
+        assert!(!columns.is_visible(OrderBookColumn::Queue));
+        let width = OrderBookColumn::ALL
+            .into_iter()
+            .filter(|column| columns.is_visible(*column))
+            .map(|column| columns.width(column))
+            .sum::<f32>();
+        assert!(
+            (width - 1.0).abs() < f32::EPSILON,
+            "a withdrawn column takes no width"
+        );
+        assert!(columns.offer_order_queues(true));
+        assert!(
+            columns.is_visible(OrderBookColumn::Queue),
+            "the trader's choice returns with the next provider that offers it"
+        );
+    }
+
+    #[test]
+    fn queue_cells_show_only_a_ready_queue_at_the_rows_side_and_price() {
+        let mut frame = price_grid_frame();
+        let queue = OrderQueueLevel {
+            order_count: 15,
+            quantities: (1..=14).collect(),
+        };
+        frame.order_queues = Some(aeris_market_data::OrderQueueFrame {
+            state: OrderQueueState::Ready,
+            bids: std::collections::BTreeMap::from([(20_000, queue.clone())]),
+            asks: std::collections::BTreeMap::new(),
+        });
+        assert_eq!(
+            order_queue_at(&frame, BookColumnSide::Bid, 20_000),
+            Some(&queue)
+        );
+        assert_eq!(order_queue_at(&frame, BookColumnSide::Ask, 20_000), None);
+        assert_eq!(order_queue_at(&frame, BookColumnSide::Bid, 19_975), None);
+        assert_eq!(
+            queue_text(&queue, 0),
+            "1 2 3 4 5 6 7 8 9 10 11 12 +3",
+            "the cell lists the front of the queue and counts the rest"
+        );
+        for state in [
+            OrderQueueState::Loading,
+            OrderQueueState::Recovering,
+            OrderQueueState::Unavailable,
+            OrderQueueState::LimitReached,
+        ] {
+            if let Some(queues) = frame.order_queues.as_mut() {
+                queues.state = state;
+            }
+            assert_eq!(
+                order_queue_at(&frame, BookColumnSide::Bid, 20_000),
+                None,
+                "{state:?} queues are never shown as current"
+            );
+            assert!(order_queue_presentation(state).is_some());
+        }
+        assert!(order_queue_presentation(OrderQueueState::Ready).is_none());
     }
 
     #[test]
@@ -2917,6 +3137,7 @@ mod tests {
                     ask: Some(grid_level(20_150, 2)),
                 },
             ],
+            order_queues: None,
         }
     }
 

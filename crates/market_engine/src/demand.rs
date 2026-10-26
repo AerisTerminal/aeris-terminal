@@ -7,7 +7,11 @@ pub enum MarketStream {
     Bars,
     Trades,
     Quotes,
+    /// Aggregate size at each price level.
     Depth,
+    /// Every resting order with its provider identity and queue priority.
+    /// Additive to `Depth`, and demanded only by surfaces that read orders.
+    OrderLevels,
 }
 
 /// Exact presentation/retention state for one engine consumer.
@@ -38,6 +42,7 @@ impl StreamRequirements {
     const TRADES_BIT: u8 = 1 << 1;
     const QUOTES_BIT: u8 = 1 << 2;
     const DEPTH_BIT: u8 = 1 << 3;
+    const ORDER_LEVELS_BIT: u8 = 1 << 4;
 
     pub const NONE: Self = Self(0);
     pub const BARS: Self = Self(Self::BARS_BIT);
@@ -49,6 +54,7 @@ impl StreamRequirements {
             MarketStream::Trades => Self::TRADES_BIT,
             MarketStream::Quotes => Self::QUOTES_BIT,
             MarketStream::Depth => Self::DEPTH_BIT,
+            MarketStream::OrderLevels => Self::ORDER_LEVELS_BIT,
         };
         Self(self.0 | bit)
     }
@@ -60,6 +66,7 @@ impl StreamRequirements {
             MarketStream::Trades => Self::TRADES_BIT,
             MarketStream::Quotes => Self::QUOTES_BIT,
             MarketStream::Depth => Self::DEPTH_BIT,
+            MarketStream::OrderLevels => Self::ORDER_LEVELS_BIT,
         };
         self.0 & bit != 0
     }

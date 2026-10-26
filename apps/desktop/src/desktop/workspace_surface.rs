@@ -216,7 +216,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         restored_chart_state: init.restored_chart_state,
         chart_persistence_dirty: false,
         last_chart_user_state_revision: 0,
-        order_book_demand: OrderBookDemand::Released,
+        order_book_demand: OrderBookDetail::Hidden,
         price_alerts: init.price_alerts,
         price_alert_dialog: None,
         price_alert_restore_status: init.price_alert_restore_status,
@@ -2143,7 +2143,12 @@ impl WorkspaceSurface {
             cx,
         );
         let bridge_label = chart_bridge_label(startup_state.chart.as_ref(), cx);
-        let order_book = cx.new(move |_| ReadOnlyOrderBookView::new(theme));
+        let order_queues_offered = super::provider_order_queues_available(startup_state.provider);
+        let order_book = cx.new(move |cx| {
+            let mut order_book = ReadOnlyOrderBookView::new(theme);
+            order_book.set_order_queues_offered(order_queues_offered, cx);
+            order_book
+        });
         let context_view = lifecycle.context_view();
         let context_snapshot = context_view.as_ref().map_or_else(
             || Arc::new(ContextSnapshot::empty(1)),
@@ -5259,6 +5264,12 @@ impl WorkspaceSurface {
                     && provider != self.provider
                 {
                     self.provider = provider;
+                    self.order_book.update(cx, |order_book, order_book_cx| {
+                        order_book.set_order_queues_offered(
+                            super::provider_order_queues_available(provider),
+                            order_book_cx,
+                        );
+                    });
                 }
                 self.product = Some(product);
                 self.market_session_status = None;
@@ -5277,6 +5288,7 @@ impl WorkspaceSurface {
         self.restored_viewport = None;
         self.last_persisted_viewport = None;
         self.chart_state = ChartState::Loading;
+        self.sync_order_book_demand(cx);
         cx.notify();
     }
 
@@ -6600,32 +6612,54 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Whether any consumer of this pane's live order-book frame is shown: a docked panel, the
-    /// chart's right-edge book or its depth heatmap.
-    fn order_book_demanded(&self, cx: &App) -> bool {
-        self.side_panels.needs_order_book()
+    /// How much of the book this pane's shown consumers need: a docked panel, the chart's
+    /// right-edge book or its depth heatmap need depth, and the docked book's queue column
+    /// also needs each price's resting orders.
+    fn order_book_detail(&self, cx: &App) -> OrderBookDetail {
+        let depth = self.side_panels.needs_order_book()
             || self.chart.as_ref().is_some_and(|chart| {
                 let settings = chart.read(cx).order_flow_settings();
                 settings.order_book_depth.is_some_and(|book| book.visible)
                     || settings
                         .depth_heatmap
                         .is_some_and(|heatmap| heatmap.visible)
-            })
+            });
+        if !depth {
+            OrderBookDetail::Hidden
+        } else if self.side_panels.contains(SidePanel::OrderBook)
+            && self
+                .order_book
+                .read(cx)
+                .columns()
+                .is_visible(OrderBookColumn::Queue)
+        {
+            OrderBookDetail::OrderQueues
+        } else {
+            OrderBookDetail::Depth
+        }
     }
 
-    /// Opens or releases the pane's order-book demand when its consumers changed it. A request
-    /// the worker could not take is sent again on the next change.
+    /// Shows or hides one docked order-book column; the queue column opens or releases
+    /// the pane's order-level demand with it.
+    pub(super) fn toggle_order_book_column(
+        &mut self,
+        column: OrderBookColumn,
+        cx: &mut Context<Self>,
+    ) {
+        self.order_book.update(cx, |order_book, order_book_cx| {
+            order_book.toggle_column(column, order_book_cx);
+        });
+        self.sync_order_book_demand(cx);
+    }
+
+    /// Opens, changes or releases the pane's order-book demand when its consumers changed
+    /// it. A request the worker could not take is sent again on the next change.
     pub(super) fn sync_order_book_demand(&mut self, cx: &mut Context<Self>) {
-        let demanded = self.order_book_demanded(cx);
-        let demand = if demanded {
-            OrderBookDemand::Open
-        } else {
-            OrderBookDemand::Released
-        };
+        let demand = self.order_book_detail(cx);
         if demand == self.order_book_demand {
             return;
         }
-        if demanded {
+        if self.order_book_demand == OrderBookDetail::Hidden {
             self.order_book
                 .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
         }
@@ -6635,7 +6669,7 @@ impl WorkspaceSurface {
         };
         if self
             .market_worker
-            .try_set_order_book_visible(demanded)
+            .try_set_order_book_detail(demand)
             .is_err()
         {
             cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {

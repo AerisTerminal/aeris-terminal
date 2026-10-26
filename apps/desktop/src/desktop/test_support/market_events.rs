@@ -72,6 +72,7 @@ impl FixtureMarketEvents {
                 generation: Self::generation(selection),
                 publication,
                 display_depth: None,
+                order_levels: None,
             }),
         }
     }

@@ -112,6 +112,41 @@ pub struct OrderBookFrame {
     /// True when this frame is an explicit Level 1 BBO publication.
     pub top_of_book_only: bool,
     pub rows: Vec<OrderBookRow>,
+    /// Individual resting orders by price, present only for a consumer that
+    /// asked its provider for order levels.
+    pub order_queues: Option<OrderQueueFrame>,
+}
+
+/// Whether the queues of an [`OrderQueueFrame`] are current.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderQueueState {
+    /// Waiting for the provider's first complete order-level image.
+    Loading,
+    Ready,
+    /// The image was discarded and a complete image is expected.
+    Recovering,
+    /// The provider turned order levels off for this market.
+    Unavailable,
+    /// Other books hold every order-level subscription the provider allows.
+    LimitReached,
+}
+
+/// The resting orders at one price, front of the queue first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderQueueLevel {
+    /// Every order resting at the price, including those beyond `quantities`.
+    pub order_count: usize,
+    /// Leading order quantities in queue-priority order.
+    pub quantities: Vec<i64>,
+}
+
+/// Bounded market-by-order queues shown beside an [`OrderBookFrame`], keyed by
+/// price per side. The queues are empty unless `state` is `Ready`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderQueueFrame {
+    pub state: OrderQueueState,
+    pub bids: BTreeMap<i64, OrderQueueLevel>,
+    pub asks: BTreeMap<i64, OrderQueueLevel>,
 }
 
 /// Result of applying a snapshot or ordered delta.

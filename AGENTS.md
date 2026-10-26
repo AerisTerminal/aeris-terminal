@@ -261,6 +261,12 @@ the check.
 - Every runtime-to-consumer market event variant leaves the coordinator inside a
   `Fenced<ConsumerTag, MarketRuntimeEvent>` envelope for that registered consumer lifetime;
   selection-bound events are rejected against the exact current demand before delivery.
+- Trades, aggregate depth and order levels are separate additive streams. Aggregate depth comes only
+  from a provider's price-level feed, never from order-level data. `MarketStream::OrderLevels` is
+  explicit consumer demand (depth demand alone never subscribes it); the coordinator admits at most
+  the provider's `maximum_order_level_instruments` and reports the rest as `BudgetExhausted` without
+  evicting an admitted instrument. A gap or bound violation empties the bounded `MarketOrderLevelView`
+  until a covering provider image arrives, and order levels are never persisted.
 - Provider catalog controls and responses pass through one bounded `ProviderCatalogChannel`
   boundary; provider-specific command translation stays with each registered channel.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider

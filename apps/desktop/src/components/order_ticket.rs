@@ -1365,6 +1365,7 @@ mod tests {
             trade_source_watermark: 7,
             top_of_book_only: false,
             rows: Vec::new(),
+            order_queues: None,
         }
     }
 

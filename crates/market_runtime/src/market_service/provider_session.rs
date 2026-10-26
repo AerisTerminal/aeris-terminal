@@ -810,6 +810,7 @@ mod tests {
             instrument: scripted_instrument("provider_b", "book"),
             streams: StreamRequirements::NONE.with(MarketStream::Depth),
             display_depth: true,
+            order_levels: false,
         };
         let mut demand = ProviderDemand {
             instruments: vec![book.clone()],
@@ -830,6 +831,7 @@ mod tests {
             instrument: scripted_instrument("provider_b", "visible-quote"),
             streams: StreamRequirements::NONE.with(MarketStream::Quotes),
             display_depth: false,
+            order_levels: false,
         });
         changes.push(("viewport", demand.clone()));
         // Switching tabs changes the selected live chart.
@@ -942,6 +944,7 @@ mod tests {
                 instrument: scripted_instrument("provider_a", "quote"),
                 streams: StreamRequirements::NONE.with(MarketStream::Quotes),
                 display_depth: false,
+                order_levels: false,
             }],
             ..Default::default()
         };

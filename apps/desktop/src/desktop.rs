@@ -153,8 +153,8 @@ use aeris_design_system::{
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
     MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerBootstrap,
-    MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup, PaneProjectionEvent,
-    PendingUiDiagnostics, UiDiagnosticsFeedback, verified_terms_supersede,
+    MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup, OrderBookDetail,
+    PaneProjectionEvent, PendingUiDiagnostics, UiDiagnosticsFeedback, verified_terms_supersede,
 };
 use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
 use aeris_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
@@ -673,6 +673,14 @@ fn provider_presentation(
         .find(|descriptor| descriptor.id == terminal_provider_id(provider))
 }
 
+/// Whether the provider streams every resting order at each price, which the
+/// order book's queue column shows.
+fn provider_order_queues_available(provider: TerminalProvider) -> bool {
+    provider_presentation(provider).is_some_and(|descriptor| {
+        descriptor.feed_level == aeris_contracts::ProviderFeedLevel::OrderLevels
+    })
+}
+
 /// Whether the provider streams trade prints. Footprint charts, tape studies and
 /// time and sales are drawn from them, so a provider without a trade tape offers none.
 fn provider_trades_available(provider: TerminalProvider) -> bool {
@@ -791,13 +799,6 @@ struct ObservedChart {
     selected_drawing: Option<ChartDrawingId>,
 }
 
-/// Whether the market worker holds a pane's order-book subscription open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OrderBookDemand {
-    Released,
-    Open,
-}
-
 struct WorkspaceSurface {
     chart: Option<Entity<AerisChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
@@ -890,8 +891,8 @@ struct WorkspaceSurface {
     restored_chart_state: Option<WorkspaceChartState>,
     chart_persistence_dirty: bool,
     last_chart_user_state_revision: u64,
-    /// The order-book demand the market worker last accepted for this pane.
-    order_book_demand: OrderBookDemand,
+    /// The order-book detail the market worker last accepted for this pane.
+    order_book_demand: OrderBookDetail,
     price_alerts: Vec<WorkspacePriceAlertState>,
     price_alert_dialog: Option<PriceAlertDialogState>,
     price_alert_restore_status: PriceAlertRestoreStatus,

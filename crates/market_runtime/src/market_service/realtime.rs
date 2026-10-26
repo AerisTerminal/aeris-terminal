@@ -5,10 +5,12 @@ use super::{
     Coordinator, DepthSnapshot, FailureStage, FormingBar, HyperliquidInstrumentDemand,
     InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS,
     MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
-    OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
-    ProviderEvent, ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
-    ProviderOrderBook, ProviderTradeBatch, SeriesLoadState, TopOfBookQuote, TradeModel, VecDeque,
-    id, merge_live_candle, series_state_payload, series_update_message,
+    OrderBookApplyOutcome, OrderLevelApplyOutcome, OrderLevelBook, OrderLevelEvent,
+    OrderLevelInterruption, OrderLevelState, OrderLevelSubscription, Ordering, ProviderDemand,
+    ProviderDisconnect, ProviderDisplayDepthEvent, ProviderEvent, ProviderEventKind,
+    ProviderGeneration, ProviderHealth, ProviderInstrumentDemand, ProviderOrderBook,
+    ProviderTradeBatch, SeriesLoadState, TopOfBookQuote, TradeModel, VecDeque, id,
+    merge_live_candle, series_state_payload, series_update_message,
 };
 #[cfg(test)]
 use super::{BarPeriod, Duration, HyperliquidDemand, RithmicRealtimeDemand, TradeHandoffSeed};
@@ -19,6 +21,11 @@ use crate::study::{
     StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyNonBarChange, StudyQuoteView,
     StudyTradeWindow,
 };
+use crate::{
+    MAXIMUM_ORDER_LEVEL_VIEW_PRICES, MAXIMUM_ORDER_LEVEL_VIEW_QUEUE, MarketOrderLevelStatus,
+    MarketOrderLevelView, MarketOrderQueue,
+};
+use aeris_market_data::{BookSide, MAXIMUM_ORDER_LEVEL_ORDERS};
 use aeris_observability::diagnostic;
 #[cfg(test)]
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
@@ -92,11 +99,108 @@ impl ProviderOrderBook {
             trade_tape_published_at: None,
             retention_clock_unix_nanos: 0,
             quote_observed_at: None,
+            order_levels: OrderLevelBook::new(
+                NonZeroUsize::new(MAXIMUM_ORDER_LEVEL_ORDERS).unwrap_or(NonZeroUsize::MIN),
+            ),
+            order_level_subscription: OrderLevelSubscription::Off,
+            order_level_recoveries: 0,
         }
     }
 
     pub(super) fn set_depth_subscribed(&mut self, subscribed: bool) {
         self.depth_unsubscribed = !subscribed;
+    }
+
+    pub(super) const fn order_level_subscription(&self) -> OrderLevelSubscription {
+        self.order_level_subscription
+    }
+
+    pub(super) fn set_order_level_subscription(&mut self, subscription: OrderLevelSubscription) {
+        self.order_level_subscription = subscription;
+    }
+
+    /// Applies one provider order-level event and reports whether the
+    /// published view changed. The book mirrors the provider stream whatever
+    /// the current demand, so a subscription kept across a demand flicker
+    /// never misses an update; consumers see the view only while demanding it.
+    pub(super) fn apply_order_levels(&mut self, event: &OrderLevelEvent) -> bool {
+        if event.metadata().entitlement_id != self.instrument.entitlement_id {
+            return false;
+        }
+        match self.order_levels.apply(event) {
+            Ok(OrderLevelApplyOutcome::Applied) => true,
+            Ok(OrderLevelApplyOutcome::IgnoredStale) => false,
+            Ok(OrderLevelApplyOutcome::RecoveryRequired(reason)) => {
+                if reason != OrderLevelInterruption::Released {
+                    self.order_level_recoveries = self.order_level_recoveries.saturating_add(1);
+                }
+                true
+            }
+            Err(error) => {
+                // The adapter validates the same continuity before publishing,
+                // so this fails closed until the provider's next covering image.
+                diagnostic!("Aeris order-level image discarded by the runtime: {error}");
+                self.order_level_recoveries = self.order_level_recoveries.saturating_add(1);
+                true
+            }
+        }
+    }
+
+    /// Bounded market-by-order view for a consumer demanding order levels.
+    pub(super) fn order_level_view(&self) -> MarketOrderLevelView {
+        let book = &self.order_levels;
+        let status = match (self.order_level_subscription, book.state()) {
+            (OrderLevelSubscription::BudgetExhausted, _) => MarketOrderLevelStatus::BudgetExhausted,
+            (_, OrderLevelState::Ready) => MarketOrderLevelStatus::Ready,
+            (_, OrderLevelState::Recovering(reason)) => MarketOrderLevelStatus::Recovering(reason),
+            // A released image means the provider was asked to subscribe again.
+            (
+                _,
+                OrderLevelState::AwaitingSnapshot
+                | OrderLevelState::Unavailable(OrderLevelInterruption::Released),
+            ) => MarketOrderLevelStatus::AwaitingSnapshot,
+            (_, OrderLevelState::Unavailable(reason)) => {
+                MarketOrderLevelStatus::Unavailable(reason)
+            }
+            (_, OrderLevelState::Stale) => MarketOrderLevelStatus::Stale,
+        };
+        let ready = status == MarketOrderLevelStatus::Ready;
+        let queues = |side| {
+            if !ready {
+                return Vec::new();
+            }
+            book.prices(side)
+                .take(MAXIMUM_ORDER_LEVEL_VIEW_PRICES)
+                .map(|price| {
+                    let mut queue = MarketOrderQueue {
+                        price,
+                        orders: Vec::new(),
+                        order_count: 0,
+                        quantity: 0,
+                    };
+                    for order in book.queue(side, price) {
+                        queue.order_count += 1;
+                        queue.quantity = queue.quantity.saturating_add(order.quantity);
+                        if queue.orders.len() < MAXIMUM_ORDER_LEVEL_VIEW_QUEUE {
+                            queue.orders.push(order.clone());
+                        }
+                    }
+                    queue
+                })
+                .collect()
+        };
+        MarketOrderLevelView {
+            status,
+            provider_generation: book
+                .session_generation()
+                .unwrap_or(self.instrument.session_generation),
+            image: book.image(),
+            revision: book.revision(),
+            provider_sequence: book.provider_sequence(),
+            recoveries: self.order_level_recoveries,
+            bids: queues(BookSide::Bid),
+            asks: queues(BookSide::Ask),
+        }
     }
 
     /// Consumers receive only the top of book when the provider has no depth or
@@ -122,7 +226,12 @@ impl ProviderOrderBook {
         let previous_revision = self.book.revision();
         self.reset_recent_trades_for_session(session_generation);
         self.book.mark_stale();
-        quote_changed || trades_changed || self.book.revision() != previous_revision
+        let order_levels_changed = self.order_levels.state() == OrderLevelState::Ready;
+        self.order_levels.mark_stale();
+        quote_changed
+            || trades_changed
+            || order_levels_changed
+            || self.book.revision() != previous_revision
     }
 
     fn reset_recent_trades_for_session(&mut self, session_generation: u64) {
@@ -875,10 +984,24 @@ impl Coordinator<'_> {
                     instrument,
                     streams,
                     display_depth: false,
+                    order_levels: false,
                 });
         }
         self.merge_instrument_subscriptions(provider_id, &mut instruments, &mut missing_catalog);
         self.mark_display_depth_demand(provider_id, &mut instruments);
+        for entry in instruments.values_mut() {
+            entry.order_levels = entry.streams.contains(MarketStream::OrderLevels)
+                && self
+                    .order_books
+                    .get(&(
+                        provider_id.to_string(),
+                        entry.instrument.instrument_id.clone(),
+                    ))
+                    .is_some_and(|book| {
+                        book.instrument.entitlement_id == entry.instrument.entitlement_id
+                            && book.order_level_subscription() == OrderLevelSubscription::Admitted
+                    });
+        }
         ProviderDemand {
             instruments: instruments.into_values().collect(),
             candle_series,
@@ -925,6 +1048,7 @@ impl Coordinator<'_> {
                     instrument,
                     streams,
                     display_depth: false,
+                    order_levels: false,
                 });
         }
     }
@@ -1266,6 +1390,9 @@ impl Coordinator<'_> {
             }
             ProviderEventKind::Quote(quote) => self.provider_quote(provider, generation, &quote),
             ProviderEventKind::Depth(depth) => self.provider_depth(provider, generation, &depth),
+            ProviderEventKind::OrderLevels(event) => {
+                self.provider_order_levels(provider, generation, &event);
+            }
             ProviderEventKind::Candle { symbol, bar } => {
                 self.accept_provider_candle(provider, generation, &symbol, bar, descriptor);
             }
@@ -1808,6 +1935,36 @@ impl Coordinator<'_> {
                 MarketStream::Trades,
                 observed_unix_nanos,
             );
+        }
+    }
+
+    pub(super) fn provider_order_levels(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        event: &OrderLevelEvent,
+    ) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        let metadata = event.metadata();
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            != Some(generation)
+            || metadata.provider_id != provider
+            || metadata.session_generation != generation.0.get()
+        {
+            return;
+        }
+        let instrument_id = metadata.instrument_id.clone();
+        if self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument_id.clone()))
+            .is_some_and(|order_book| order_book.apply_order_levels(event))
+        {
+            self.broadcast_order_book(provider, &instrument_id);
         }
     }
 

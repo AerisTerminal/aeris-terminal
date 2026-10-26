@@ -309,7 +309,7 @@ fn coalesces(previous: &MarketWorkerCommand, next: &MarketWorkerCommand) -> bool
         (MarketWorkerCommand::ChartViewport(first), MarketWorkerCommand::ChartViewport(second)) => {
             first.selection_generation == second.selection_generation
         }
-        (MarketWorkerCommand::DepthVisible(_), MarketWorkerCommand::DepthVisible(_))
+        (MarketWorkerCommand::OrderBook(_), MarketWorkerCommand::OrderBook(_))
         | (MarketWorkerCommand::ResourceClass(_), MarketWorkerCommand::ResourceClass(_))
         | (
             MarketWorkerCommand::ReplacePriceAlerts { .. },
@@ -823,7 +823,7 @@ fn deliver_runtime_demand_error(
         .map_err(|error| error.to_string())
 }
 
-/// Applies a selection reply, then gives an adopted selection the depth visibility the
+/// Applies a selection reply, then gives an adopted selection the order-book detail the
 /// pane requested while it was still resolving.
 fn adopt_selection_outcome(
     market: &MarketService,
@@ -847,7 +847,7 @@ fn adopt_selection_outcome(
     }
     if adopted
         && let Err(error) =
-            super::selection_commands::apply_depth_visibility(market, client_id, record)
+            super::selection_commands::apply_order_book_detail(market, client_id, record)
     {
         report_failure(
             &record.endpoint.messages,
@@ -1008,6 +1008,7 @@ pub(super) fn retire_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_desktop::market_worker::OrderBookDetail;
     use aeris_market_runtime::{
         MarketConsumerId, MarketGenerationId, MarketSeriesState,
         fence::{ConsumerTag, EpochSequence, Fenced},
@@ -1710,10 +1711,10 @@ mod tests {
     fn ordered_command_batch_coalesces_only_adjoining_latest_values() {
         let (sender, receiver) = mpsc::sync_channel(8);
         sender
-            .send(MarketWorkerCommand::DepthVisible(true))
+            .send(MarketWorkerCommand::OrderBook(OrderBookDetail::Depth))
             .expect("queued");
         sender
-            .send(MarketWorkerCommand::DepthVisible(false))
+            .send(MarketWorkerCommand::OrderBook(OrderBookDetail::OrderQueues))
             .expect("queued");
         sender
             .send(MarketWorkerCommand::ProviderSelect(
@@ -1724,16 +1725,16 @@ mod tests {
             ))
             .expect("click queued");
         sender
-            .send(MarketWorkerCommand::DepthVisible(true))
+            .send(MarketWorkerCommand::OrderBook(OrderBookDetail::Hidden))
             .expect("queued after click");
         let (batch, disconnected) = drain_command_batch(&receiver);
         assert!(!disconnected);
         assert!(matches!(
             batch.as_slice(),
             [
-                MarketWorkerCommand::DepthVisible(false),
+                MarketWorkerCommand::OrderBook(OrderBookDetail::OrderQueues),
                 MarketWorkerCommand::ProviderSelect(_),
-                MarketWorkerCommand::DepthVisible(true)
+                MarketWorkerCommand::OrderBook(OrderBookDetail::Hidden)
             ]
         ));
     }

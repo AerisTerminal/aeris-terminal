@@ -37,35 +37,50 @@ pub(super) fn emit_connection_failure(
     emitter.invalid(reason, retry);
 }
 
+/// Messages read while the configured subscriptions installed, and the
+/// instruments whose order-level subscription the provider refused.
+pub(super) struct InstalledSubscriptions {
+    messages: VecDeque<RithmicSessionMessage>,
+    refused_order_levels: Vec<String>,
+}
+
 pub(super) fn install_subscriptions(
     connection: &mut crate::RithmicTickerConnection,
     config: &RithmicProviderConfig,
     stop: &AtomicBool,
-) -> Result<VecDeque<RithmicSessionMessage>, RithmicSessionError> {
+) -> Result<InstalledSubscriptions, RithmicSessionError> {
     let mut initial_messages = VecDeque::new();
+    let mut refused_order_levels = Vec::new();
     let mut messages_read = 0_usize;
     for instrument in &config.instruments {
         connection.update_market_data(instrument.as_request())?;
         if stop.load(Ordering::Acquire) {
             return Err(RithmicSessionError::Cancelled);
         }
-        await_initial_subscription_ack(
+        if !await_initial_subscription_ack(
             connection,
             config.session_limits.response_timeout,
             InitialSubscriptionAck::MarketData,
             &mut messages_read,
             &mut initial_messages,
-        )?;
-        if instrument.order_book {
+        )? {
+            return Err(RithmicSessionError::Protocol);
+        }
+        if instrument.order_levels {
             connection
                 .update_depth_by_order(instrument.depth_request(SubscriptionAction::Subscribe))?;
-            await_initial_subscription_ack(
+            // A refused order-level subscription leaves the instrument's other
+            // streams installed; only its order levels stay off.
+            if !await_initial_subscription_ack(
                 connection,
                 config.session_limits.response_timeout,
                 InitialSubscriptionAck::DepthByOrder,
                 &mut messages_read,
                 &mut initial_messages,
-            )?;
+            )? {
+                refused_order_levels.push(instrument.descriptor.instrument_id.clone());
+                continue;
+            }
             connection.request_depth_by_order_snapshot(instrument.depth_snapshot_request())?;
             await_initial_depth_snapshot(
                 connection,
@@ -75,7 +90,10 @@ pub(super) fn install_subscriptions(
             )?;
         }
     }
-    Ok(initial_messages)
+    Ok(InstalledSubscriptions {
+        messages: initial_messages,
+        refused_order_levels,
+    })
 }
 
 fn await_initial_depth_snapshot(
@@ -139,7 +157,7 @@ fn await_initial_subscription_ack(
     expected: InitialSubscriptionAck,
     messages_read: &mut usize,
     initial_messages: &mut VecDeque<RithmicSessionMessage>,
-) -> Result<(), RithmicSessionError> {
+) -> Result<bool, RithmicSessionError> {
     let deadline = Instant::now() + response_timeout;
     while *messages_read < MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES {
         let message = connection.read_next_until(deadline)?;
@@ -157,7 +175,7 @@ fn await_initial_subscription_ack(
             _ => None,
         };
         if let Some(accepted) = matching {
-            return accepted.then_some(()).ok_or(RithmicSessionError::Protocol);
+            return Ok(accepted);
         }
         initial_messages.push_back(message);
     }
@@ -197,9 +215,13 @@ pub(super) fn collect_market(
     stop: &AtomicBool,
     commands: &Receiver<RithmicSessionCommand>,
     emitter: &SessionEmitter,
-    mut initial_messages: VecDeque<RithmicSessionMessage>,
+    installed: InstalledSubscriptions,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let mut initial_messages = installed.messages;
     let mut canonical = CanonicalSessionState::new(config, generation);
+    for instrument_id in &installed.refused_order_levels {
+        canonical.refuse_order_levels(instrument_id);
+    }
     let heartbeat_interval = connection.heartbeat_interval();
     let silence_evidence_fault = config.silence_evidence_fault(generation);
     if let Some(fault) = silence_evidence_fault {
@@ -486,6 +508,12 @@ fn handle_session_message(
             ));
         }
         _ => return Err(malformed()),
+    }
+    for event in canonical.take_order_level_resets(state.source_ordinal, unix_nanos_now()?)? {
+        if !emitter.send(ProviderSessionEvent::Market { generation, event }) {
+            stop.store(true, Ordering::Release);
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -817,19 +845,17 @@ fn advance_subscription(
         let Some(plan) = pending.as_mut() else {
             return Err(malformed());
         };
-        if !acknowledgement.accepted() {
-            if let Some((selection, _)) = plan.selection.as_ref() {
-                send_rejection(
-                    emitter,
-                    session_generation,
-                    selection.selection_generation,
-                    RithmicCatalogRejection::SubscriptionRejected,
-                );
-            }
-            return Err((
-                ProviderInvalidationReason::Transport,
-                RetryDisposition::Transient,
-            ));
+        // A refused order-level subscription keeps the instrument's other
+        // streams; only its order levels stay off.
+        let order_levels_refused = matches!(
+            (plan.phase, acknowledgement),
+            (
+                SubscriptionPhase::SubscribeDepth(_),
+                SubscriptionAcknowledgement::DepthByOrder(false)
+            )
+        );
+        if !acknowledgement.accepted() && !order_levels_refused {
+            return Err(refuse_subscription(plan, emitter, session_generation));
         }
         match (plan.phase, acknowledgement) {
             (
@@ -837,7 +863,7 @@ fn advance_subscription(
                 SubscriptionAcknowledgement::MarketData(_),
             ) => {
                 let instrument = plan.removed.get(index).ok_or_else(malformed)?;
-                if instrument.order_book {
+                if instrument.order_levels {
                     connection
                         .update_depth_by_order(
                             instrument.depth_request(SubscriptionAction::Unsubscribe),
@@ -865,7 +891,7 @@ fn advance_subscription(
                 SubscriptionAcknowledgement::MarketData(_),
             ) => {
                 let instrument = plan.added.get(index).ok_or_else(malformed)?;
-                if instrument.order_book {
+                if instrument.order_levels {
                     connection
                         .update_depth_by_order(
                             instrument.depth_request(SubscriptionAction::Subscribe),
@@ -883,6 +909,11 @@ fn advance_subscription(
                         response_timeout,
                     )?
                 }
+            }
+            (SubscriptionPhase::SubscribeDepth(index), _) if order_levels_refused => {
+                let instrument = plan.added.get(index).ok_or_else(malformed)?;
+                canonical.refuse_order_levels(&instrument.descriptor.instrument_id);
+                advance_added_subscription(connection, plan, index, canonical, response_timeout)?
             }
             (
                 SubscriptionPhase::SubscribeDepth(index),
@@ -903,6 +934,27 @@ fn advance_subscription(
         finish_subscription(pending, session_generation, emitter)?;
     }
     Ok(())
+}
+
+/// A refused market-data subscription replaces the session; the pending
+/// selection, if any, learns it was rejected.
+fn refuse_subscription(
+    plan: &PendingSubscription,
+    emitter: &SessionEmitter,
+    session_generation: SessionGeneration,
+) -> (ProviderInvalidationReason, RetryDisposition) {
+    if let Some((selection, _)) = plan.selection.as_ref() {
+        send_rejection(
+            emitter,
+            session_generation,
+            selection.selection_generation,
+            RithmicCatalogRejection::SubscriptionRejected,
+        );
+    }
+    (
+        ProviderInvalidationReason::Transport,
+        RetryDisposition::Transient,
+    )
 }
 
 fn begin_added_subscription(
@@ -1058,6 +1110,8 @@ pub(super) fn selected_instrument(
         trades: selection.subscription.trades,
         quotes: selection.subscription.quotes,
         order_book: selection.subscription.order_book,
+        // A selection installs no order-level demand; realtime demand adds it.
+        order_levels: false,
     })
 }
 
