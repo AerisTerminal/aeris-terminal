@@ -2246,6 +2246,18 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 2b of 3, indexed store checkpoint): each adopted
+    WorkingSet rebuilds offset indexes for orders by account/instrument and
+    recent fills/events by order id once. `pane_view` exposes borrowed rows;
+    watchlist activity reads it rather than the pane's copied orders. A
+    publication with only order-local changes now reprojections/notifies
+    affected panes; changes to other working-set fields still conservatively
+    fan out to all panes. `pane_view_indexes_orders_fills_and_events_by_owner_and_order`
+    checks both account isolation and index replacement; the four unchanged
+    trading projection characterization tests pass. The remaining pane
+    projection copies, global-to-account selective notification, test-only
+    `TradingPnlState` fixture and real instrumented owner-read idle test remain
+    for the next part. VAL-DSK-032 is not yet satisfied. Leave M6.10 unchecked.
   - Status (2026-10-26 hosted parallel follow-up): the first fix removed stale
     wakers but CI run 40327391920 still aborted in the parallel desktop suite.
     `ITERATIONS=50` isolated a second case: an active GPUI fixture's subscription
@@ -2982,6 +2994,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 2 continuation refactor(desktop): apply trading publications on subscription wakes. `idle_minute_produces_no_trading_work`, the four unchanged `trading_projection_baseline_*` tests, and three `desktop_trading_reads_come_from_trading_store_*` tests cover the idle and production-read boundary; the 250 ms timer and render-path refresh are removed. Concurrent or verbose GPUI interaction tests reproduce Windows `0xc0000409`; CI runs all cases serially with quiet output. Pane caches, per-revision indexes, selective notifies and history pages remain for Part 3; M6.10 remains unchecked.
 - 2026-10-26 M6.10 fix(desktop): release retired GPUI wake registrations. Parallel Windows abort root cause was a stale `UiWakeNotified` waker kept after task completion/cancellation and invoked by the new TradingStore bridge from a foreign thread after GPUI's test scheduler ended. Both Ready paths and Drop now unregister it; two deterministic regressions cover the late-callback cases. The serial quiet CI workaround and its AGENTS.md claim are removed; M6.10 remains open for Part 3 and GUI evidence.
 - 2026-10-26 M6.10 hosted follow-up fix(desktop): isolate GPUI fixtures from trading bridge threads. Hosted CI 40327391920 still aborted because even a live GPUI test scheduler rejects an external bridge thread's waker; the 50-seed close test reproduced it at seed 1. UI fixtures now construct an empty TradingStore, while the real subscription bridge remains covered by its dedicated owner tests. CI stays parallel; M6.10 remains open for Part 3 and GUI evidence.
+- 2026-10-26 M6.10 Part 2b refactor(desktop): index the subscription store for pane reads. `pane_view_indexes_orders_fills_and_events_by_owner_and_order` covers owner/account isolation, changed pane selection and per-revision index replacement; four unchanged `trading_projection_baseline_*` tests cover chart, ticket, bottom-panel and notice outputs. Watchlist activity now reads the store, and order-local updates skip unaffected pane notifications. The pane projection migration and VAL-DSK-032 real owner-read counters remain open.
 
 ## 7. Known gaps / deferred
 

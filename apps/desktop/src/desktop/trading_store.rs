@@ -3,7 +3,10 @@
 //! Only the bridge waits on the owner. A single replaceable slot and a single
 //! outstanding wake bound work even when the UI is temporarily suspended.
 
+use aeris_instruments::InstrumentId;
+use aeris_trading::{Fill, Order, OrderEvent, OrderId, TradingAccountId};
 use aeris_trading_runtime::{SubscriptionUpdate, TradingSubscription, WorkingSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -13,6 +16,88 @@ use std::time::Duration;
 struct Slot {
     newest: Option<SubscriptionUpdate>,
     wake_pending: bool,
+}
+
+/// Index offsets, never copies of owner facts. Rebuilt once when a publication is adopted.
+#[derive(Default)]
+struct TradingIndexes {
+    orders: BTreeMap<(TradingAccountId, InstrumentId), Vec<usize>>,
+    fills: BTreeMap<OrderId, Vec<usize>>,
+    events: BTreeMap<OrderId, Vec<usize>>,
+}
+
+impl TradingIndexes {
+    fn build(set: &WorkingSet) -> Self {
+        let mut indexes = Self::default();
+        for (index, order) in set.orders.iter().enumerate() {
+            indexes
+                .orders
+                .entry((order.account_id.clone(), order.instrument_id.clone()))
+                .or_default()
+                .push(index);
+        }
+        for (index, fill) in set.fills.iter().enumerate() {
+            indexes
+                .fills
+                .entry(fill.order_id.clone())
+                .or_default()
+                .push(index);
+        }
+        for (index, event) in set.order_events.iter().enumerate() {
+            indexes
+                .events
+                .entry(event.order_id.clone())
+                .or_default()
+                .push(index);
+        }
+        indexes
+    }
+}
+
+/// Borrowed account/instrument slice of one adopted owner publication.
+pub(super) struct PaneTradingView<'a> {
+    set: &'a WorkingSet,
+    indexes: &'a TradingIndexes,
+    selection: (TradingAccountId, InstrumentId),
+}
+
+impl PaneTradingView<'_> {
+    pub(super) fn orders(&self) -> impl Iterator<Item = &Order> {
+        self.indexes
+            .orders
+            .get(&self.selection)
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.set.orders[index])
+    }
+
+    pub(super) fn fills(&self, order: &OrderId) -> impl Iterator<Item = &Fill> {
+        self.indexes
+            .fills
+            .get(order)
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.set.fills[index])
+    }
+
+    pub(super) fn events(&self, order: &OrderId) -> impl Iterator<Item = &OrderEvent> {
+        self.indexes
+            .events
+            .get(order)
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.set.order_events[index])
+    }
+
+    fn changed_from(&self, previous: &Self) -> bool {
+        if !self.orders().eq(previous.orders()) {
+            return true;
+        }
+        self.orders().chain(previous.orders()).any(|order| {
+            !self.fills(&order.id).eq(previous.fills(&order.id))
+                || !self.events(&order.id).eq(previous.events(&order.id))
+        })
+    }
 }
 
 impl Slot {
@@ -41,6 +126,9 @@ impl Slot {
 #[derive(Default)]
 pub(super) struct TradingStore {
     current: Option<WorkingSet>,
+    indexes: TradingIndexes,
+    changed_selections: BTreeSet<(TradingAccountId, InstrumentId)>,
+    all_panes_changed: bool,
     resync_pending: bool,
     slot: Arc<Mutex<Slot>>,
     stop: Arc<AtomicBool>,
@@ -101,7 +189,51 @@ impl TradingStore {
             return None;
         }
         self.resync_pending |= update.lagged;
-        self.current = Some(*update.event.working_set);
+        let next = *update.event.working_set;
+        let next_indexes = TradingIndexes::build(&next);
+        self.changed_selections.clear();
+        self.all_panes_changed = self.current.as_ref().is_none_or(|previous| {
+            previous.accounts != next.accounts
+                || previous.instruments != next.instruments
+                || previous.order_feed_states != next.order_feed_states
+                || previous.order_groups != next.order_groups
+                || previous.positions != next.positions
+                || previous.round_trips != next.round_trips
+                || previous.connected_broker_accounts != next.connected_broker_accounts
+                || previous.position_pnl != next.position_pnl
+                || previous.account_pnl != next.account_pnl
+                || previous.risk_profiles != next.risk_profiles
+                || previous.risk_meters != next.risk_meters
+                || previous.risk_locks != next.risk_locks
+                || previous.session_plans != next.session_plans
+                || previous.managed_brackets != next.managed_brackets
+                || previous.planned_legs != next.planned_legs
+                || previous.protective_orders != next.protective_orders
+                || previous.market_observation_error != next.market_observation_error
+                || previous.recovery_notices != next.recovery_notices
+                || previous.venue_notices != next.venue_notices
+        });
+        if !self.all_panes_changed
+            && let Some(previous) = self.current.as_ref()
+        {
+            for selection in self.indexes.orders.keys().chain(next_indexes.orders.keys()) {
+                let old_view = PaneTradingView {
+                    set: previous,
+                    indexes: &self.indexes,
+                    selection: selection.clone(),
+                };
+                let new_view = PaneTradingView {
+                    set: &next,
+                    indexes: &next_indexes,
+                    selection: selection.clone(),
+                };
+                if new_view.changed_from(&old_view) {
+                    self.changed_selections.insert(selection.clone());
+                }
+            }
+        }
+        self.current = Some(next);
+        self.indexes = next_indexes;
         self.current.as_ref()
     }
 
@@ -111,6 +243,36 @@ impl TradingStore {
 
     pub(super) fn current(&self) -> Option<&WorkingSet> {
         self.current.as_ref()
+    }
+
+    pub(super) fn pane_view(
+        &self,
+        account: &TradingAccountId,
+        instrument: &InstrumentId,
+    ) -> PaneTradingView<'_> {
+        PaneTradingView {
+            set: self
+                .current
+                .as_ref()
+                .expect("pane view requires a publication"),
+            indexes: &self.indexes,
+            selection: (account.clone(), instrument.clone()),
+        }
+    }
+
+    pub(super) fn pane_changed(
+        &self,
+        account: Option<&TradingAccountId>,
+        instrument: Option<&InstrumentId>,
+    ) -> bool {
+        self.all_panes_changed
+            || match (account, instrument) {
+                (Some(account), Some(instrument)) => self
+                    .changed_selections
+                    .contains(&(account.clone(), instrument.clone())),
+                // An unselected account or instrument has no order-scoped view.
+                _ => false,
+            }
     }
 
     pub(super) fn has_pending(&self) -> bool {
@@ -239,6 +401,142 @@ mod tests {
             "a lag requires a downstream history reload"
         );
         assert!(!store.take_resync());
+    }
+
+    fn indexed_fixture() -> (
+        SubscriptionUpdate,
+        aeris_trading::TradingAccountId,
+        aeris_trading::TradingAccountId,
+        aeris_instruments::InstrumentId,
+    ) {
+        use aeris_trading::{
+            ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent, OrderEventId,
+            OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
+            TradingAccountId, TradingProvenance,
+        };
+        let account = TradingAccountId::try_new("sim-a").expect("account");
+        let other = TradingAccountId::try_new("sim-b").expect("account");
+        let instrument =
+            aeris_instruments::InstrumentId::try_new("instrument:fixture:A").expect("instrument");
+        let point = |value| FixedPoint::try_new(value, 0).expect("point");
+        let provenance = TradingProvenance {
+            venue_id: "aeris-sim".into(),
+            provider_id: "fixture".into(),
+            session_generation: 1,
+            source_sequence: 1,
+            observed_unix_nanos: 1,
+        };
+        let make_order = |id: &str, account_id: TradingAccountId| Order {
+            id: OrderId::try_new(id).expect("order"),
+            client_order_id: ClientOrderId::try_new(id).expect("client"),
+            account_id,
+            instrument_id: instrument.clone(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Day,
+            quantity: point(1),
+            filled_quantity: point(0),
+            limit_price: Some(point(10)),
+            stop_price: None,
+            status: OrderStatus::Working,
+            submitted_unix_nanos: 1,
+            revision: 1,
+            accepted_unix_nanos: 1,
+            updated_unix_nanos: 1,
+            eligible_after_unix_nanos: 1,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
+            terminal_unix_nanos: None,
+            provenance: provenance.clone(),
+        };
+        let mut publication = update(3, false);
+        publication.event.working_set.orders = vec![
+            make_order("first", account.clone()),
+            make_order("elsewhere", other.clone()),
+        ];
+        publication.event.working_set.fills = ["first", "elsewhere"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| Fill {
+                id: FillId::try_new(format!("fill-{index}")).expect("fill"),
+                order_id: OrderId::try_new(id).expect("order"),
+                account_id: if index == 0 {
+                    account.clone()
+                } else {
+                    other.clone()
+                },
+                instrument_id: instrument.clone(),
+                side: OrderSide::Buy,
+                price: point(10),
+                quantity: point(1),
+                execution_unix_nanos: 1,
+                provenance: provenance.clone(),
+            })
+            .collect();
+        publication.event.working_set.order_events = ["first", "elsewhere"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| OrderEvent {
+                id: OrderEventId::try_new(format!("event-{index}")).expect("event"),
+                order_id: OrderId::try_new(id).expect("order"),
+                sequence: index as u64 + 1,
+                kind: OrderEventKind::Accepted,
+                reason: None,
+                event_unix_nanos: 1,
+                detail: None,
+                provenance: provenance.clone(),
+            })
+            .collect();
+        (publication, account, other, instrument)
+    }
+
+    #[test]
+    fn pane_view_indexes_orders_fills_and_events_by_owner_and_order() {
+        let (publication, account, other, instrument) = indexed_fixture();
+        let mut other_account_update = publication.clone();
+        other_account_update.event.revision = 4;
+        other_account_update.event.working_set.revision = 4;
+        other_account_update.event.working_set.orders[1].filled_quantity =
+            aeris_trading::FixedPoint::try_new(1, 0).expect("point");
+        let mut store = TradingStore::default();
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        assert_eq!(store.drain().expect("revision").revision, 3);
+        let view = store.pane_view(&account, &instrument);
+        assert_eq!(
+            view.orders()
+                .map(|order| order.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first"]
+        );
+        assert_eq!(
+            view.fills(&view.orders().next().expect("order").id).count(),
+            1
+        );
+        assert_eq!(
+            view.events(&view.orders().next().expect("order").id)
+                .count(),
+            1
+        );
+        assert_eq!(store.pane_view(&other, &instrument).orders().count(), 1);
+        assert!(store.pane_changed(Some(&account), Some(&instrument)));
+        assert_eq!(
+            store
+                .pane_view(
+                    &account,
+                    &aeris_instruments::InstrumentId::try_new("instrument:fixture:B")
+                        .expect("second instrument")
+                )
+                .orders()
+                .count(),
+            0
+        );
+        assert!(store.slot.lock().expect("slot").offer(other_account_update));
+        store.drain().expect("other account changed");
+        assert!(!store.pane_changed(Some(&account), Some(&instrument)));
+        assert!(store.pane_changed(Some(&other), Some(&instrument)));
+        assert!(store.slot.lock().expect("slot").offer(update(5, false)));
+        store.drain().expect("empty next revision");
+        assert_eq!(store.pane_view(&account, &instrument).orders().count(), 0);
     }
 
     #[test]

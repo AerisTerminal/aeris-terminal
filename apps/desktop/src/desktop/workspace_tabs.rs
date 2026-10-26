@@ -369,7 +369,8 @@ impl TerminalApp {
             .chart_pane_controller
             .pending_product()
             .or(surface.product.as_ref());
-        let trading_activity = surface.trading_pnl.instruments_with_activity();
+        let account = surface.trading_pnl.order_entry.selected_account_id.as_ref();
+        let store = self.trading_store.read(cx);
         self.watchlist
             .iter()
             .map(|instrument| {
@@ -392,7 +393,24 @@ impl TerminalApp {
                         active.provider == instrument.provider
                             && active.instrument_id == instrument.instrument_id
                     }),
-                    trading_activity: trading_activity.contains(instrument.instrument_id.as_str()),
+                    trading_activity: account.is_some_and(|account| {
+                        let Ok(id) = aeris_instruments::InstrumentId::try_new(
+                            instrument.instrument_id.clone(),
+                        ) else {
+                            return false;
+                        };
+                        store.current().is_some_and(|current| {
+                            store
+                                .pane_view(account, &id)
+                                .orders()
+                                .any(|order| order.status.is_open())
+                                || current.position_pnl.iter().any(|position| {
+                                    &position.position.account_id == account
+                                        && position.position.instrument_id == id
+                                        && position.position.net_quantity.units() != 0
+                                })
+                        })
+                    }),
                 }
             })
             .collect()

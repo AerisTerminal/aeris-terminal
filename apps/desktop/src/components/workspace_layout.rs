@@ -677,6 +677,24 @@ impl TerminalApp {
         self.announce_trading(&snapshot, cx);
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
+                let state = pane.surface.read(cx);
+                let selected = state.trading_pnl.order_entry.selected_account_id.as_ref();
+                let instrument = state.product.as_ref().and_then(|product| {
+                    aeris_instruments::InstrumentId::try_new(product.instrument_id.clone()).ok()
+                });
+                let changed = self
+                    .trading_store
+                    .read(cx)
+                    .pane_changed(selected, instrument.as_ref());
+                let feedback_changed = latest.as_ref().map(|feedback| feedback.revision)
+                    > state
+                        .trading_pnl
+                        .feedback
+                        .as_ref()
+                        .map(|feedback| feedback.revision);
+                if !changed && !feedback_changed {
+                    continue;
+                }
                 pane.surface.update(cx, |state, state_cx| {
                     if latest.as_ref().map(|feedback| feedback.revision)
                         > state

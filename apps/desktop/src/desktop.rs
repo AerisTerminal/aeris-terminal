@@ -1223,17 +1223,7 @@ impl std::ops::DerefMut for TradingPaneState {
     }
 }
 
-impl TradingPaneState {
-    /// Instruments where the selected account has a working order or an open position.
-    fn instruments_with_activity(&self) -> HashSet<&str> {
-        instruments_with_activity(
-            &self.orders,
-            &self.positions,
-            self.order_entry.selected_account_id.as_ref(),
-        )
-    }
-}
-
+#[cfg(test)]
 fn instruments_with_activity<'a>(
     orders: &'a [aeris_trading::Order],
     positions: &'a [aeris_trading_runtime::PositionPnl],
