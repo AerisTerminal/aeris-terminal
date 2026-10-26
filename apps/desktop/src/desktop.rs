@@ -1042,42 +1042,21 @@ struct ContextCredentialDialogState {
 /// Runtime-derived pane presentation until the next part removes pane caches.
 #[derive(Default)]
 struct TradingProjection {
-    current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
-    orders: Vec<aeris_trading::Order>,
     planned_legs: Vec<aeris_trading_runtime::PlannedLeg>,
-    positions: Vec<aeris_trading_runtime::PositionPnl>,
     /// Broker accounts the attached venue can reach now.
     connected_broker_accounts: std::collections::BTreeSet<aeris_trading::TradingAccountId>,
-    risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
-    risk_locks: Vec<aeris_trading_runtime::RiskLock>,
-    risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
-    market_error: Option<String>,
 }
 
 impl TradingProjection {
     fn from_working_set(
         snapshot: &aeris_trading_runtime::WorkingSet,
-        selected: Option<&aeris_trading::TradingAccountId>,
+        _selected: Option<&aeris_trading::TradingAccountId>,
     ) -> Self {
         Self {
-            current: snapshot
-                .account_pnl
-                .iter()
-                .find(|pnl| selected.is_none_or(|account| account == &pnl.account_id))
-                .cloned(),
             accounts: snapshot.accounts.clone(),
-            orders: snapshot.orders.clone(),
             planned_legs: snapshot.planned_legs.clone(),
-            positions: snapshot.position_pnl.clone(),
             connected_broker_accounts: snapshot.connected_broker_accounts.clone(),
-            risk_profiles: snapshot.risk_profiles.clone(),
-            risk_locks: snapshot.risk_locks.clone(),
-            risk_meters: snapshot.risk_meters.clone(),
-            market_error: snapshot
-                .market_observation_error
-                .as_ref()
-                .map(|error| format!("Trading market update failed: {error}")),
         }
     }
 }
@@ -1249,15 +1228,6 @@ struct PaneLockView<'a> {
     locks: &'a [aeris_trading_runtime::RiskLock],
 }
 
-impl<'a> From<&'a TradingPaneState> for PaneLockView<'a> {
-    fn from(state: &'a TradingPaneState) -> Self {
-        Self {
-            selected_account: state.order_entry.selected_account_id.as_ref(),
-            locks: &state.risk_locks,
-        }
-    }
-}
-
 fn selected_account_lock_reason<'a>(state: impl Into<PaneLockView<'a>>) -> Option<&'a str> {
     let view = state.into();
     let account_id = view.selected_account?;
@@ -1265,6 +1235,18 @@ fn selected_account_lock_reason<'a>(state: impl Into<PaneLockView<'a>>) -> Optio
         .iter()
         .find(|lock| &lock.account_id == account_id)
         .map(|lock| lock.reason.as_str())
+}
+
+impl WorkspaceSurface {
+    fn selected_account_lock_reason(&self, cx: &App) -> Option<String> {
+        let store = self.lifecycle.trading_store()?;
+        let store = store.read(cx);
+        selected_account_lock_reason(PaneLockView {
+            selected_account: self.trading_pnl.order_entry.selected_account_id.as_ref(),
+            locks: store.current()?.risk_locks.as_slice(),
+        })
+        .map(str::to_string)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2727,13 +2709,21 @@ fn chart_protection_from_intent(
         .product
         .as_ref()
         .ok_or(ChartIntentRejection::NoInstrument)?;
+    let store = app
+        .lifecycle
+        .trading_store()
+        .ok_or(ChartIntentRejection::NotOnChart)?;
+    let store = store.read(cx);
+    let instrument = aeris_instruments::InstrumentId::try_new(product.instrument_id.clone())
+        .map_err(|_| ChartIntentRejection::NotOnChart)?;
     let identity_matches = intent.position_id.as_ref().is_some_and(|position_id| {
         chart_position_id(account_id, &product.instrument_id).as_ref() == Some(position_id)
     }) || intent.order_id.as_ref().is_some_and(|order_id| {
-        app.trading_pnl.orders.iter().any(|order| {
-            order.client_order_id.as_str() == order_id.as_str()
-                && &order.account_id == account_id
-                && order.instrument_id.as_str() == product.instrument_id
+        store.current().is_some_and(|_| {
+            store
+                .pane_view(account_id, &instrument)
+                .orders()
+                .any(|order| order.client_order_id.as_str() == order_id.as_str())
         })
     });
     if !identity_matches {
@@ -2920,10 +2910,17 @@ fn chart_close_position_from_intent(
         .ok_or(ChartIntentRejection::NoInstrument)?;
     let expected_position_id = chart_position_id(account_id, &product.instrument_id)
         .ok_or(ChartIntentRejection::NotOnChart)?;
-    let has_position = app.trading_pnl.positions.iter().any(|position| {
-        &position.position.account_id == account_id
-            && position.position.instrument_id.as_str() == product.instrument_id
-            && position.position.net_quantity.units() != 0
+    let has_position = app.lifecycle.trading_store().is_some_and(|store| {
+        let store = store.read(cx);
+        aeris_instruments::InstrumentId::try_new(product.instrument_id.clone())
+            .ok()
+            .filter(|_| store.current().is_some())
+            .is_some_and(|instrument| {
+                store
+                    .pane_view(account_id, &instrument)
+                    .positions()
+                    .any(|position| position.position.net_quantity.units() != 0)
+            })
     });
     if intent.position_id.as_ref() != Some(&expected_position_id) || !has_position {
         return Err(ChartIntentRejection::NotOnChart);
@@ -2995,7 +2992,7 @@ fn dispatch_chart_trading_intent(
         );
         return;
     }
-    if selected_account_lock_reason(&app.trading_pnl).is_some()
+    if app.selected_account_lock_reason(cx).is_some()
         && !matches!(
             action,
             ChartTradingIntentAction::CancelOrder | ChartTradingIntentAction::ClosePosition
@@ -3039,7 +3036,7 @@ fn dispatch_chart_trading_intent(
         }
         return;
     }
-    let order = match chart_intent_order(intent, app) {
+    let order = match chart_intent_order(intent, app, cx) {
         Ok(order) => order,
         Err(reason) => {
             reject_chart_intent(
@@ -3053,7 +3050,7 @@ fn dispatch_chart_trading_intent(
         }
     };
     if action == ChartTradingIntentAction::ModifyOrder {
-        dispatch_chart_modify(chart, intent, order, app, cx);
+        dispatch_chart_modify(chart, intent, &order, app, cx);
         return;
     }
     let service = app.lifecycle.trading().clone();
@@ -3136,10 +3133,11 @@ fn dispatch_chart_move_planned_leg(
 }
 
 /// The selected account's working order on the chart's instrument that `intent` acts on.
-fn chart_intent_order<'a>(
+fn chart_intent_order(
     intent: &ChartTradingIntent,
-    app: &'a WorkspaceSurface,
-) -> Result<&'a aeris_trading::Order, ChartIntentRejection> {
+    app: &WorkspaceSurface,
+    cx: &App,
+) -> Result<aeris_trading::Order, ChartIntentRejection> {
     let order_id = intent
         .order_id
         .as_ref()
@@ -3154,14 +3152,21 @@ fn chart_intent_order<'a>(
         .product
         .as_ref()
         .ok_or(ChartIntentRejection::NoInstrument)?;
-    app.trading_pnl
-        .orders
-        .iter()
-        .find(|order| {
-            order.client_order_id.as_str() == order_id.as_str()
-                && &order.account_id == selected_account
-                && order.instrument_id.as_str() == product.instrument_id
-        })
+    let store = app
+        .lifecycle
+        .trading_store()
+        .ok_or(ChartIntentRejection::NotOnChart)?;
+    let store = store.read(cx);
+    let instrument = aeris_instruments::InstrumentId::try_new(product.instrument_id.clone())
+        .map_err(|_| ChartIntentRejection::NotOnChart)?;
+    if store.current().is_none() {
+        return Err(ChartIntentRejection::NotOnChart);
+    }
+    store
+        .pane_view(selected_account, &instrument)
+        .orders()
+        .find(|order| order.client_order_id.as_str() == order_id.as_str())
+        .cloned()
         .ok_or(ChartIntentRejection::NotOnChart)
 }
 
@@ -5048,7 +5053,7 @@ fn subscribe_order_book_trading(
             move |_, event: &OrderBookLevelClick, _, cx| {
                 let order_entry = {
                     let surface = click_workspace.read(cx);
-                    if selected_account_lock_reason(&surface.trading_pnl).is_some() {
+                    if surface.selected_account_lock_reason(cx).is_some() {
                         return;
                     }
                     surface.trading_pnl.order_entry.clone()
@@ -5103,9 +5108,9 @@ fn subscribe_order_book_trading_drop(
                 if event.source_side != event.target_side {
                     return;
                 }
-                let (account_id, orders) = {
+                let (account_id, store) = {
                     let surface = drop_workspace.read(cx);
-                    if selected_account_lock_reason(&surface.trading_pnl).is_some() {
+                    if surface.selected_account_lock_reason(cx).is_some() {
                         return;
                     }
                     let Some(account_id) =
@@ -5113,19 +5118,34 @@ fn subscribe_order_book_trading_drop(
                     else {
                         return;
                     };
-                    (account_id, surface.trading_pnl.orders.clone())
+                    let Some(store) = surface.lifecycle.trading_store() else {
+                        return;
+                    };
+                    (account_id, store)
                 };
                 let Some(frame) = drop_order_book.read(cx).frame().cloned() else {
                     return;
                 };
-                let Some(order) = orders.into_iter().find(|order| {
-                    order.status.is_open()
-                        && order.account_id.as_str() == account_id.as_str()
-                        && order.instrument_id.as_str() == frame.instrument_id.as_str()
-                        && order_book_row_price(order).is_some_and(|(side, price)| {
-                            side == event.source_side && price.units() == event.source_price
-                        })
-                }) else {
+                let store = store.read(cx);
+                let Ok(instrument) =
+                    aeris_instruments::InstrumentId::try_new(frame.instrument_id.clone())
+                else {
+                    return;
+                };
+                if store.current().is_none() {
+                    return;
+                }
+                let Some(order) = store
+                    .pane_view(&account_id, &instrument)
+                    .orders()
+                    .find(|order| {
+                        order.status.is_open()
+                            && order_book_row_price(order).is_some_and(|(side, price)| {
+                                side == event.source_side && price.units() == event.source_price
+                            })
+                    })
+                    .cloned()
+                else {
                     return;
                 };
                 let Ok(target_price) =

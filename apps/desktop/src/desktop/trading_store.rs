@@ -788,6 +788,87 @@ mod tests {
     }
 
     #[test]
+    fn ticket_hotkey_and_quantity_read_selected_store_publication() {
+        let (mut publication, account, other, instrument) = indexed_fixture();
+        publication
+            .event
+            .working_set
+            .accounts
+            .push(aeris_trading::TradingAccount {
+                id: account.clone(),
+                display_name: "Fixture practice".into(),
+                environment: aeris_trading::AccountEnvironment::Simulated,
+                venue_id: "aeris-sim".into(),
+                broker_ref: None,
+                currency: "USD".into(),
+                currency_scale: 2,
+                starting_equity: None,
+            });
+        publication
+            .event
+            .working_set
+            .risk_locks
+            .push(aeris_trading_runtime::RiskLock {
+                account_id: account.clone(),
+                kind: aeris_trading_runtime::RiskLockKind::Manual,
+                reason: "manual test lock".into(),
+                locked_at_unix_nanos: 1,
+                profile_id: None,
+                profile_version: None,
+            });
+        let mut store = TradingStore::default();
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        store.drain().expect("published");
+        let set = store.current().expect("working set");
+        let (selected_account, position, working_orders) =
+            super::super::order_ticket::ticket_scope(&store, Some(&account), Some(&instrument));
+        let selected_account = selected_account.expect("selected account");
+        assert!(position.is_none());
+        assert_eq!(selected_account.display_name, "Fixture practice");
+        assert_eq!(
+            super::super::order_ticket::TicketBroker::of(selected_account)
+                .map(super::super::order_ticket::TicketBroker::label),
+            Some("Practice")
+        );
+        assert_eq!(
+            super::super::order_ticket::ticket_status(None, working_orders),
+            "Flat · 1 working order"
+        );
+        assert_eq!(store.pane_view(&other, &instrument).orders().count(), 1);
+        assert_eq!(
+            super::super::order_ticket::ticket_scope(&store, Some(&other), Some(&instrument)).2,
+            0,
+            "an account without a registered ticket is not selected"
+        );
+        let reason = super::super::selected_account_lock_reason(super::super::PaneLockView {
+            selected_account: Some(&account),
+            locks: &set.risk_locks,
+        });
+        assert_eq!(
+            super::super::trading_hotkeys::risk_increasing_trade_refusal(
+                &selected_account.display_name,
+                reason
+            ),
+            Some("Fixture practice is locked: manual test lock".into())
+        );
+        assert_eq!(
+            super::super::selected_account_lock_reason(super::super::PaneLockView {
+                selected_account: Some(&other),
+                locks: &set.risk_locks,
+            }),
+            None
+        );
+        assert_eq!(
+            super::super::order_quantity::parse_order_quantity("999"),
+            Some(999)
+        );
+        assert_eq!(
+            super::super::order_quantity::parse_order_quantity("1000"),
+            None
+        );
+    }
+
+    #[test]
     fn account_position_and_risk_updates_notify_only_changed_pane() {
         let (first, account, other, instrument) = indexed_fixture();
         let other_instrument =

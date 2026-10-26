@@ -28,12 +28,15 @@ fn active_header_state(
             .as_ref()
             .and_then(|id| {
                 workspace
-                    .trading_pnl
+                    .lifecycle
+                    .trading_store()?
+                    .read(cx)
+                    .current()?
                     .accounts
                     .iter()
                     .find(|account| &account.id == id)
-            })
-            .map(|account| account.display_name.clone()),
+                    .map(|account| account.display_name.clone())
+            }),
         pending: HeaderPendingState {
             symbol_selection: workspace.market_state.symbol_selection_pending,
             series: workspace.chart_pane_controller.selection_in_progress(),
@@ -311,14 +314,18 @@ impl TerminalApp {
         let surface = self.active_surface();
         let (snapshot, maximum_lead_seconds) = {
             let surface = surface.read(cx);
-            let maximum_lead_seconds = surface
-                .trading_pnl
-                .risk_profiles
-                .iter()
-                .filter(|profile| profile.enabled)
-                .filter_map(|profile| profile.economic_event_rule)
-                .map(|rule| rule.lead_seconds)
-                .max()
+            let maximum_lead_seconds = self
+                .trading_store
+                .read(cx)
+                .current()
+                .and_then(|set| {
+                    set.risk_profiles
+                        .iter()
+                        .filter(|profile| profile.enabled)
+                        .filter_map(|profile| profile.economic_event_rule)
+                        .map(|rule| rule.lead_seconds)
+                        .max()
+                })
                 .unwrap_or(0);
             (Arc::clone(&surface.context_snapshot), maximum_lead_seconds)
         };
@@ -513,6 +520,7 @@ impl TerminalApp {
         workspace_market_area(
             WorkspaceMarketArea {
                 terminal,
+                trading_store: &self.trading_store,
                 workspace: &self.workspaces[self.active],
                 active_surface: active,
                 expanded_drawing_toolbar: self.chart_chrome.drawing_toolbar.shown().then_some(
@@ -823,7 +831,10 @@ impl TerminalApp {
     }
 
     pub(super) fn trading_order_entry_locked(&self, cx: &App) -> bool {
-        super::selected_account_lock_reason(&self.active_surface().read(cx).trading_pnl).is_some()
+        self.active_surface()
+            .read(cx)
+            .selected_account_lock_reason(cx)
+            .is_some()
     }
 
     /// A trading key the workspace does not take moves on to the focused element.

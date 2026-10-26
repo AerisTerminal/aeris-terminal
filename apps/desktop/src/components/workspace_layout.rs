@@ -393,6 +393,7 @@ pub(super) fn workspace_pane_element(
 
 pub(super) struct WorkspaceMarketArea<'a> {
     pub(super) terminal: &'a Entity<TerminalApp>,
+    pub(super) trading_store: &'a Entity<trading_store::TradingStore>,
     pub(super) workspace: &'a WorkspaceTab,
     pub(super) active_surface: &'a Entity<WorkspaceSurface>,
     pub(super) expanded_drawing_toolbar: Option<DrawingSidebar<'a>>,
@@ -407,6 +408,7 @@ pub(super) fn workspace_market_area(
 ) -> impl IntoElement + use<> {
     let WorkspaceMarketArea {
         terminal,
+        trading_store,
         workspace,
         active_surface,
         expanded_drawing_toolbar,
@@ -423,6 +425,7 @@ pub(super) fn workspace_market_area(
         })
     });
     let surface = active_surface.read(cx);
+    let store = trading_store.read(cx);
     let drawing_state = surface.drawing_toolbar_state(cx);
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
@@ -446,6 +449,7 @@ pub(super) fn workspace_market_area(
                 app: active_surface,
                 frame: order_book_frame.as_ref(),
                 product: surface.product.as_ref(),
+                store,
                 trading: &surface.trading_pnl,
                 quantity: &surface.order_quantity,
                 controls: &surface.order_ticket,

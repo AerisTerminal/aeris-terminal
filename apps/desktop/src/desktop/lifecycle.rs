@@ -138,6 +138,11 @@ impl DesktopLifecycle {
         self.trading_stores.borrow_mut().push(store.downgrade());
     }
 
+    /// The instance's subscription view, shared by pane-originated actions.
+    pub(super) fn trading_store(&self) -> Option<Entity<trading_store::TradingStore>> {
+        self.trading_stores.borrow().last()?.upgrade()
+    }
+
     pub(super) fn retire_market_worker(&self, retirement: MarketWorkerRetirement, cx: &App) {
         self.retirements.borrow_mut().push(
             cx.background_executor()

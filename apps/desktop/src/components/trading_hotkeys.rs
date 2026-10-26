@@ -117,6 +117,10 @@ impl ConfirmedTrade {
     }
 }
 
+pub(super) fn risk_increasing_trade_refusal(account: &str, reason: Option<&str>) -> Option<String> {
+    reason.map(|reason| format!("{account} is locked: {reason}"))
+}
+
 struct TradingConfirmation {
     trade: ConfirmedTrade,
     message: String,
@@ -243,12 +247,21 @@ impl TerminalApp {
     }
 
     fn selected_trading_account_name(&self, cx: &App) -> Option<String> {
-        let trading = &self.active_surface().read(cx).trading_pnl;
+        let surface = self.active_surface();
+        let surface = surface.read(cx);
+        let trading = &surface.trading_pnl;
+        let store = self.trading_store.read(cx);
         trading
             .order_entry
             .selected_account_id
             .as_ref()
-            .and_then(|id| trading.accounts.iter().find(|account| &account.id == id))
+            .and_then(|id| {
+                store
+                    .current()?
+                    .accounts
+                    .iter()
+                    .find(|account| &account.id == id)
+            })
             .map(|account| account.display_name.clone())
     }
 
@@ -257,9 +270,13 @@ impl TerminalApp {
             .selected_trading_account_name(cx)
             .ok_or("Choose a trading account first")?;
         let surface = self.active_surface();
-        let trading = &surface.read(cx).trading_pnl;
-        if let Some(reason) = super::selected_account_lock_reason(trading) {
-            return Err(format!("{account} is locked: {reason}"));
+        let surface = surface.read(cx);
+        let trading = &surface.trading_pnl;
+        if let Some(message) = risk_increasing_trade_refusal(
+            &account,
+            surface.selected_account_lock_reason(cx).as_deref(),
+        ) {
+            return Err(message);
         }
         let frame = self
             .trading_order_frame(cx)
@@ -274,14 +291,18 @@ impl TerminalApp {
     /// What the command will do, or why it cannot run now.
     fn trading_hotkey_summary(&self, hotkey: TradingHotkey, cx: &App) -> Result<String, String> {
         let surface = self.active_surface();
-        let trading = &surface.read(cx).trading_pnl;
+        let surface = surface.read(cx);
+        let trading = &surface.trading_pnl;
         let account = self.selected_trading_account_name(cx);
         match hotkey {
             TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
                 let account = account.ok_or("Choose a trading account first")?;
                 // Risk-reducing commands stay available on a locked account; new orders do not.
-                if let Some(reason) = super::selected_account_lock_reason(trading) {
-                    return Err(format!("{account} is locked: {reason}"));
+                if let Some(message) = risk_increasing_trade_refusal(
+                    &account,
+                    surface.selected_account_lock_reason(cx).as_deref(),
+                ) {
+                    return Err(message);
                 }
                 let frame = self
                     .trading_order_frame(cx)

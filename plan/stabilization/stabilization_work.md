@@ -2246,6 +2246,15 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 2d-1 of 3, ticket and risk readers): the order
+    ticket reads account, position, working-order count, broker connection,
+    daily meter, market error and account P/L from the shared WorkingSet and
+    scoped `pane_view`. Chart trade-bar readiness, hotkey confirmations, chart
+    intents, order-book click/drop and the economic-event risk check use the
+    instance's store instead of stale pane facts. `TradingProjection` retains
+    only account/leg/connection readers for Part 2d-2. D15 keeps the ticket
+    characterization assertions and expected outputs unchanged. M6.10 stays
+    unchecked pending Accounts migration, history, notices and GUI evidence.
   - Status (2026-10-26 Part 2d of 3, fixture checkpoint): deleted the
     test-only `TradingPnlState` duplicate. The risk-lock and activity
     characterization fixtures now pass their source rows directly to the
@@ -3031,6 +3040,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 2c test(desktop): observe real trading-store idle work. `idle_minute_produces_no_trading_work` now runs an actual owner and subscription bridge over one ManualClock minute, checking received/applied working sets, bridge wakes, pane notifications and per-instance calls to `TradingService::history` against the initial snapshot. An explicit history page after idle increments the counter; `bridge_shutdown_drops_subscription_and_joins_within_receive_bound` still covers production timeout and shutdown. M6.10 remains unchecked.
 - 2026-10-26 M6.10 Part 2c refactor(desktop): read chart and portfolio from scoped trading views. `account_position_and_risk_updates_notify_only_changed_pane` exercises two accounts/instruments and selective risk, position and account P&L notifications; `chart_order_lines_read_only_selected_pane_view` covers account/instrument order-line isolation. The unchanged `trading_projection_baseline_chart_account_and_risk_lock` and `trading_projection_baseline_panel_rows_and_connected_broker` assert the established chart and portfolio outputs. Hosted CI 40340782916 failed `restart_ack_requires_a_living_handoff_owner` because cold PowerShell fixture startup spent the production 20-second handshake deadline under parallel load; the fixture now signals readiness before starting the real handshake, without changing that deadline or weakening default-parallel CI. `restart_ack_is_rejected_when_helper_exits_immediately_after_it` and `restart_ack_requires_a_living_handoff_owner` exercise the synchronized fixture. Ticket/risk/Accounts pane-copy removal belongs to Part 2d; M6.10 remains unchecked.
 - 2026-10-26 M6.10 Part 2d test(desktop): remove the duplicate trading test fixture. `selected_account_lock_is_derived_from_the_runtime_meter`, `watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_only` and the unchanged `trading_projection_baseline_chart_account_and_risk_lock` now exercise their source rows without `TradingPnlState`; D15 keeps all baseline assertions and outputs intact. Production pane cache migration remains open; M6.10 stays unchecked.
+- 2026-10-26 M6.10 Part 2d-1 refactor(desktop): read ticket and risk from the trading store. `ticket_hotkey_and_quantity_read_selected_store_publication`, `typed_quantities_must_be_whole_lots_within_the_order_entry_range` and the unchanged `trading_projection_baseline_ticket_account_and_status_labels` cover selected-account ticket labels/status, locked hotkey refusal and quantity bounds. Risk-increasing actions consult the current store, while Accounts and planned-leg readers remain for Part 2d-2; M6.10 stays unchecked.
 
 ## 7. Known gaps / deferred
 

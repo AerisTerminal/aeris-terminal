@@ -306,8 +306,9 @@ impl Render for ChartTradeBar {
             .selected_account_id
             .as_ref()
             .map(|id| id.as_str().to_string());
-        let ready =
-            frame.is_some() && account.is_some() && selected_account_lock_reason(trading).is_none();
+        let ready = frame.is_some()
+            && account.is_some()
+            && state.selected_account_lock_reason(cx).is_none();
         let order = MarketOrderTarget {
             surface: surface.clone(),
             frame,

@@ -229,7 +229,6 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         self.trading_pnl.order_entry.selected_account_id = Some(account_id);
-        self.trading_pnl.current = None;
         self.order_ticket.open_menu = None;
         cx.notify();
     }
@@ -238,7 +237,7 @@ impl WorkspaceSurface {
 /// Which venue holds an account's orders, as the ticket's broker field names it. Live broker
 /// accounts are data-only and never offered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TicketBroker {
+pub(super) enum TicketBroker {
     Practice,
     Broker,
 }
@@ -246,7 +245,7 @@ enum TicketBroker {
 impl TicketBroker {
     const ALL: [Self; 2] = [Self::Practice, Self::Broker];
 
-    fn of(account: &aeris_trading::TradingAccount) -> Option<Self> {
+    pub(super) fn of(account: &aeris_trading::TradingAccount) -> Option<Self> {
         match account.environment {
             aeris_trading::AccountEnvironment::Simulated => Some(Self::Practice),
             aeris_trading::AccountEnvironment::Demo
@@ -258,7 +257,7 @@ impl TicketBroker {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::Practice => "Practice",
             Self::Broker => aeris_market_runtime::built_in_provider_presentations()
@@ -276,6 +275,7 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) app: &'a Entity<WorkspaceSurface>,
     pub(super) frame: Option<&'a aeris_market_data::OrderBookFrame>,
     pub(super) product: Option<&'a InstallProviderInstrument>,
+    pub(super) store: &'a trading_store::TradingStore,
     pub(super) trading: &'a super::TradingPaneState,
     pub(super) quantity: &'a super::order_quantity::OrderQuantityControls,
     pub(super) controls: &'a OrderTicketControls,
@@ -292,42 +292,59 @@ struct TicketView<'a> {
     ready: bool,
 }
 
+pub(super) fn ticket_scope<'a>(
+    store: &'a trading_store::TradingStore,
+    selected: Option<&aeris_trading::TradingAccountId>,
+    instrument: Option<&aeris_instruments::InstrumentId>,
+) -> (
+    Option<&'a aeris_trading::TradingAccount>,
+    Option<&'a aeris_trading_runtime::PositionPnl>,
+    usize,
+) {
+    let Some(set) = store.current() else {
+        return (None, None, 0);
+    };
+    let account = selected.and_then(|id| set.accounts.iter().find(|account| &account.id == id));
+    let Some((account, instrument)) = account.zip(instrument) else {
+        return (account, None, 0);
+    };
+    let position = set.position_pnl.iter().find(|position| {
+        position.position.account_id == account.id && &position.position.instrument_id == instrument
+    });
+    let working_orders = store
+        .pane_view(&account.id, instrument)
+        .orders()
+        .filter(|order| order.status.is_open())
+        .count();
+    (Some(account), position, working_orders)
+}
+
 impl<'a> TicketView<'a> {
     fn new(state: &TradingOrderControlsState<'a>) -> Self {
         let trading = state.trading;
-        let account = trading
-            .order_entry
-            .selected_account_id
-            .as_ref()
-            .and_then(|id| trading.accounts.iter().find(|account| &account.id == id));
+        let set = state.store.current();
         let instrument_id = state
             .product
             .map(|product| product.instrument_id.as_str())
             .or_else(|| state.frame.map(|frame| frame.instrument_id.as_str()));
-        let in_scope = |account_id: &aeris_trading::TradingAccountId, instrument: &str| {
-            account.is_some_and(|account| &account.id == account_id)
-                && instrument_id == Some(instrument)
-        };
-        let position = trading.positions.iter().find(|position| {
-            in_scope(
-                &position.position.account_id,
-                position.position.instrument_id.as_str(),
-            )
-        });
-        let working_orders = trading
-            .orders
-            .iter()
-            .filter(|order| {
-                order.status.is_open() && in_scope(&order.account_id, order.instrument_id.as_str())
-            })
-            .count();
+        let instrument = instrument_id
+            .and_then(|id| aeris_instruments::InstrumentId::try_new(id.to_string()).ok());
+        let (account, position, working_orders) = ticket_scope(
+            state.store,
+            trading.order_entry.selected_account_id.as_ref(),
+            instrument.as_ref(),
+        );
         Self {
             account,
             broker: account.and_then(TicketBroker::of),
             position,
             working_orders,
             ready: account.is_some()
-                && selected_account_lock_reason(trading).is_none()
+                && super::selected_account_lock_reason(super::PaneLockView {
+                    selected_account: trading.order_entry.selected_account_id.as_ref(),
+                    locks: set.map_or(&[], |set| set.risk_locks.as_slice()),
+                })
+                .is_none()
                 && state.frame.is_some(),
         }
     }
@@ -377,7 +394,12 @@ pub(super) fn trading_order_controls(
         )
         .children(status_rows(
             state.trading.feedback.as_ref(),
-            state.trading.market_error.as_deref(),
+            state
+                .store
+                .current()
+                .and_then(|set| set.market_observation_error.as_ref())
+                .map(|error| format!("Trading market update failed: {error}"))
+                .as_deref(),
             theme,
         ))
 }
@@ -560,9 +582,14 @@ fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
         );
     // A broker account whose venue is unreachable has no known open P/L.
     let open_pnl_known = state
-        .trading
-        .current
-        .as_ref()
+        .store
+        .current()
+        .into_iter()
+        .flat_map(|set| &set.account_pnl)
+        .find(|pnl| {
+            view.account
+                .is_some_and(|account| account.id == pnl.account_id)
+        })
         .is_none_or(|pnl| pnl.unrealized.is_some());
     let open_pnl = open_pnl_known
         .then(|| {
@@ -573,7 +600,8 @@ fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
         .flatten();
     let daily_pnl = view.account.and_then(|account| {
         state
-            .trading
+            .store
+            .current()?
             .risk_meters
             .iter()
             .find(|meter| meter.account_id == account.id && meter.enabled)
@@ -671,11 +699,14 @@ fn step_button(id: &'static str, plus: bool, theme: &AerisTheme) -> Button {
 
 fn broker_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> MenuAnchor {
     let theme = state.theme;
-    let trading = state.trading;
     let open = state.controls.open_menu == Some(TicketMenu::Broker);
     let menu = open.then(|| {
         select_menu("ticket_broker_menu", theme).children(TicketBroker::ALL.map(|broker| {
-            let account = first_account(trading, broker).map(|account| account.id.clone());
+            let account = state
+                .store
+                .current()
+                .and_then(|set| first_account(set, broker))
+                .map(|account| account.id.clone());
             let choose = state.app.clone();
             MenuRow::compact(
                 ("ticket_broker_option", broker as usize),
@@ -689,15 +720,21 @@ fn broker_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) ->
                     return;
                 };
                 choose.update(cx, |surface, surface_cx| {
-                    if surface
-                        .trading_pnl
-                        .order_entry
-                        .selected_account_id
-                        .as_ref()
-                        .and_then(|id| surface.trading_pnl.accounts.iter().find(|a| &a.id == id))
-                        .and_then(TicketBroker::of)
-                        == Some(broker)
-                    {
+                    let selected_broker = surface.lifecycle.trading_store().and_then(|store| {
+                        let store = store.read(surface_cx);
+                        let id = surface
+                            .trading_pnl
+                            .order_entry
+                            .selected_account_id
+                            .as_ref()?;
+                        store
+                            .current()?
+                            .accounts
+                            .iter()
+                            .find(|account| &account.id == id)
+                            .and_then(TicketBroker::of)
+                    });
+                    if selected_broker == Some(broker) {
                         surface.close_ticket_menu(surface_cx);
                     } else {
                         surface.select_trading_account(account, surface_cx);
@@ -724,18 +761,17 @@ fn broker_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) ->
 /// The account a broker choice switches to: a connected broker account before one whose
 /// venue is unreachable.
 fn first_account(
-    trading: &super::TradingPaneState,
+    set: &aeris_trading_runtime::WorkingSet,
     broker: TicketBroker,
 ) -> Option<&aeris_trading::TradingAccount> {
-    let mut accounts = trading
+    let mut accounts = set
         .accounts
         .iter()
         .filter(|account| TicketBroker::of(account) == Some(broker));
     let first = accounts.clone().next();
     accounts
         .find(|account| {
-            broker == TicketBroker::Practice
-                || trading.connected_broker_accounts.contains(&account.id)
+            broker == TicketBroker::Practice || set.connected_broker_accounts.contains(&account.id)
         })
         .or(first)
 }
@@ -745,9 +781,10 @@ fn account_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
     let open = state.controls.open_menu == Some(TicketMenu::Account);
     let menu = open.then(|| {
         let accounts = state
-            .trading
-            .accounts
-            .iter()
+            .store
+            .current()
+            .into_iter()
+            .flat_map(|set| &set.accounts)
             .filter(|account| view.broker.is_some() && TicketBroker::of(account) == view.broker)
             .enumerate();
         select_menu("ticket_account_menu", theme).children(accounts.map(|(index, account)| {
@@ -764,9 +801,9 @@ fn account_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
             );
             if TicketBroker::of(account) == Some(TicketBroker::Broker)
                 && !state
-                    .trading
-                    .connected_broker_accounts
-                    .contains(&account.id)
+                    .store
+                    .current()
+                    .is_some_and(|set| set.connected_broker_accounts.contains(&account.id))
             {
                 row = row.detail("Not connected");
             }
@@ -1221,7 +1258,10 @@ fn held_by(label: &'static str, selected: bool, enabled: bool, theme: &AerisThem
 
 /// The position and order count the ticket's status line names, such as
 /// `Short 1 · no working orders`.
-fn ticket_status(net: Option<aeris_trading::FixedPoint>, working_orders: usize) -> String {
+pub(super) fn ticket_status(
+    net: Option<aeris_trading::FixedPoint>,
+    working_orders: usize,
+) -> String {
     let side = match net {
         Some(net) if net.units() > 0 => format!("Long {}", format_quantity(net)),
         Some(net) if net.units() < 0 => {
