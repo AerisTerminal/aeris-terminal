@@ -1,11 +1,11 @@
-//! Paged order history served by one reader thread on a read-only SQLite connection (M5.11).
+//! Paged order and closed-trade history on one read-only SQLite reader thread.
 //!
 //! The owner never reads history for a client: `HistoryReader` opens its own connection with
-//! `SQLITE_OPEN_READ_ONLY`, so a write attempt on it fails, and pages keyset-scan the orders
-//! table by rowid (insertion order), at most [`MAXIMUM_HISTORY_PAGE`] rows per page.
+//! `SQLITE_OPEN_READ_ONLY`. Orders keyset-scan rowid; closed trades keyset-scan exit time
+//! and fill identity. Each page has at most [`MAXIMUM_HISTORY_PAGE`] rows.
 
-use crate::store::order_history_page;
-use crate::{Order, TradingAccountId};
+use crate::store::{order_history_page, trade_history_page};
+use crate::{Order, TradeRoundTrip, TradingAccountId};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
@@ -40,8 +40,33 @@ pub struct HistoryPage {
     pub next: Option<HistoryCursor>,
 }
 
+/// Newest-first closed trades for one account. Cursor identity is the exit time and fill ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TradeHistoryQuery {
+    pub account_id: TradingAccountId,
+    pub after: Option<TradeHistoryCursor>,
+    /// Clamped to [`MAXIMUM_HISTORY_PAGE`].
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TradeHistoryCursor {
+    pub exit_unix_nanos: i64,
+    pub exit_fill_id: aeris_trading::FillId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TradeHistoryPage {
+    pub trades: Vec<TradeRoundTrip>,
+    pub next: Option<TradeHistoryCursor>,
+}
+
 enum HistoryRequest {
     Query(HistoryQuery, SyncSender<Result<HistoryPage, String>>),
+    Trades(
+        TradeHistoryQuery,
+        SyncSender<Result<TradeHistoryPage, String>>,
+    ),
     Stop,
 }
 
@@ -88,6 +113,22 @@ impl HistoryReader {
             .map_err(|_| "trading history reader stopped before replying".to_string())?
     }
 
+    /// Reads a bounded page of closed trades on the same read-only worker.
+    pub fn trades(&self, query: TradeHistoryQuery) -> Result<TradeHistoryPage, String> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.requests
+            .try_send(HistoryRequest::Trades(query, reply_tx))
+            .map_err(|error| match error {
+                TrySendError::Full(_) => "trading history queue is full".to_string(),
+                TrySendError::Disconnected(_) => {
+                    "trading history reader is unavailable".to_string()
+                }
+            })?;
+        reply_rx
+            .recv()
+            .map_err(|_| "trading history reader stopped before replying".to_string())?
+    }
+
     fn stop(&mut self) {
         let _ = self.requests.try_send(HistoryRequest::Stop);
         if let Some(worker) = self.worker.take() {
@@ -108,6 +149,11 @@ fn run_reader(connection: &rusqlite::Connection, requests: &Receiver<HistoryRequ
             HistoryRequest::Query(query, reply) => {
                 let page = order_history_page(connection, &query);
                 if reply.send(page).is_err() {
+                    return;
+                }
+            }
+            HistoryRequest::Trades(query, reply) => {
+                if reply.send(trade_history_page(connection, &query)).is_err() {
                     return;
                 }
             }

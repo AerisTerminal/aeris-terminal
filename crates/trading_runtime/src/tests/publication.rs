@@ -653,6 +653,185 @@ fn desktop_history_pages_start_at_recent_orders_and_advance_older_without_duplic
 }
 
 #[test]
+fn closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl() {
+    let directory = TestDirectory::new("closed-trade-pages");
+    let path = config(&directory).database_path;
+    write_load_fixture(&path, 1_203, 0, 1_203);
+    let database = rusqlite::Connection::open(&path).expect("fixture database");
+    database
+        .execute(
+            "UPDATE fill_accounting SET cycle_id = (CAST(substr(fill_id, 11) AS INTEGER) / 2),
+                realized_gross_units = CASE WHEN CAST(substr(fill_id, 11) AS INTEGER) % 2 = 1
+                    THEN 125 ELSE NULL END,
+                realized_gross_scale = CASE WHEN CAST(substr(fill_id, 11) AS INTEGER) % 2 = 1
+                    THEN 2 ELSE NULL END,
+                cycle_closed = CAST(substr(fill_id, 11) AS INTEGER) % 2",
+            [],
+        )
+        .expect("per-exit accounting");
+    drop(database);
+    let service = load_service(&directory);
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let first = service
+        .trade_history(crate::TradeHistoryQuery {
+            account_id: account_id.clone(),
+            after: None,
+            limit: Some(MAXIMUM_HISTORY_PAGE + 100),
+        })
+        .expect("first trade page");
+    assert_eq!(first.trades.len(), MAXIMUM_HISTORY_PAGE);
+    assert!(first.next.is_some());
+    let second = service
+        .trade_history(crate::TradeHistoryQuery {
+            account_id,
+            after: first.next.clone(),
+            limit: None,
+        })
+        .expect("second trade page");
+    assert_eq!(second.trades.len(), 101);
+    assert!(second.next.is_none());
+    assert!(
+        first.trades.last().expect("last").last_fill_unix_nanos()
+            > second.trades.first().expect("first").last_fill_unix_nanos()
+    );
+    let ids = first
+        .trades
+        .iter()
+        .chain(&second.trades)
+        .map(|trade| trade.exit_fill_id.as_ref().expect("closed trade"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), 601, "each closed exit appears once");
+    assert!(
+        first
+            .trades
+            .iter()
+            .chain(&second.trades)
+            .all(|trade| trade.closed
+                && trade.final_pnl == Some(FixedPoint::try_new(125, 2).expect("pnl")))
+    );
+    let owner = service.snapshot().expect("owner round trips");
+    for historical in first.trades.iter().chain(&second.trades) {
+        let owner_trade = owner
+            .round_trips
+            .iter()
+            .find(|trade| trade.exit_fill_id == historical.exit_fill_id)
+            .expect("owner has each closed exit");
+        assert_eq!(
+            historical.final_pnl, owner_trade.final_pnl,
+            "every historical P&L matches the owner's projection"
+        );
+    }
+    let working = service
+        .subscribe()
+        .expect("subscription")
+        .try_recv()
+        .expect("initial event")
+        .event
+        .working_set;
+    let recent = working
+        .round_trips
+        .iter()
+        .filter(|trade| trade.closed)
+        .collect::<Vec<_>>();
+    for (index, trade) in recent.into_iter().enumerate() {
+        let history = first
+            .trades
+            .iter()
+            .chain(&second.trades)
+            .find(|candidate| candidate.exit_fill_id == trade.exit_fill_id)
+            .expect("history head");
+        assert_eq!(
+            history.final_pnl, trade.final_pnl,
+            "owner and history agree on P&L"
+        );
+        if index < 100 {
+            assert_eq!(history, trade, "the newest trades agree with the live head");
+        }
+    }
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn trade_history_ties_and_unknown_pnl_keep_every_closed_exit() {
+    let directory = TestDirectory::new("trade-history-ties");
+    let path = config(&directory).database_path;
+    write_load_fixture(&path, 7, 0, 7);
+    let database = rusqlite::Connection::open(&path).expect("fixture database");
+    database
+        .execute(
+            "UPDATE fill_accounting SET cycle_id = (CAST(substr(fill_id, 11) AS INTEGER) / 2),
+                cycle_closed = CAST(substr(fill_id, 11) AS INTEGER) % 2,
+                realized_gross_units = CASE WHEN CAST(substr(fill_id, 11) AS INTEGER) = 3
+                    THEN NULL WHEN CAST(substr(fill_id, 11) AS INTEGER) % 2 = 1
+                    THEN 125 ELSE NULL END,
+                realized_gross_scale = CASE WHEN CAST(substr(fill_id, 11) AS INTEGER) % 2 = 1
+                    AND CAST(substr(fill_id, 11) AS INTEGER) != 3 THEN 2 ELSE NULL END",
+            [],
+        )
+        .expect("cycle accounting");
+    database
+        .execute("UPDATE fills SET execution_unix_nanos = 100", [])
+        .expect("tie every fill time");
+    drop(database);
+    let service = load_service(&directory);
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut after = None;
+    let mut trades = Vec::new();
+    loop {
+        let page = service
+            .trade_history(crate::TradeHistoryQuery {
+                account_id: account_id.clone(),
+                after,
+                limit: Some(1),
+            })
+            .expect("tied-time page");
+        assert!(page.trades.len() <= 1);
+        trades.extend(page.trades);
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(trades.len(), 3);
+    let ids = trades
+        .iter()
+        .map(|trade| trade.exit_fill_id.as_ref().expect("exit").as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        BTreeSet::from(["load-fill-1", "load-fill-3", "load-fill-5"])
+    );
+    assert_eq!(
+        trades
+            .iter()
+            .find(|trade| trade
+                .exit_fill_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == "load-fill-3"))
+            .expect("unknown-P&L exit")
+            .final_pnl,
+        None
+    );
+    let other = TradingAccountId::try_new("other-account").expect("account");
+    assert_eq!(
+        service
+            .trade_history(crate::TradeHistoryQuery {
+                account_id: other,
+                after: None,
+                limit: None,
+            })
+            .expect("other account page")
+            .trades,
+        Vec::new()
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
 fn an_idle_runtime_publishes_nothing() {
     // VAL-TRD-067: no commands and no quote changes over minutes of timer ticks means zero
     // publications after the initial snapshot.

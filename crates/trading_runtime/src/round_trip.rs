@@ -248,16 +248,51 @@ pub(super) fn project_round_trips<'a>(
     fill_accounting: &BTreeMap<FillId, crate::core::ledger::FillAccounting>,
     trade_cycles: &BTreeMap<PositionKey, crate::core::ledger::TradeCycle>,
 ) -> Result<Vec<TradeRoundTrip>, String> {
+    project_round_trips_with_net_after(
+        fills_newest_first,
+        positions,
+        fill_accounting,
+        trade_cycles,
+        None,
+    )
+}
+
+/// Historical cycle prefixes have no live position. Their net quantity immediately after the
+/// requested exit comes from the durable fills of that cycle, not the current position.
+pub(crate) fn project_historical_cycle<'a>(
+    fills_newest_first: impl DoubleEndedIterator<Item = &'a Fill> + Clone,
+    fill_accounting: &BTreeMap<FillId, crate::core::ledger::FillAccounting>,
+    net_after_exit: FixedPoint,
+) -> Result<Vec<TradeRoundTrip>, String> {
+    project_round_trips_with_net_after(
+        fills_newest_first,
+        &BTreeMap::new(),
+        fill_accounting,
+        &BTreeMap::new(),
+        Some(net_after_exit),
+    )
+}
+
+fn project_round_trips_with_net_after<'a>(
+    fills_newest_first: impl DoubleEndedIterator<Item = &'a Fill> + Clone,
+    positions: &BTreeMap<PositionKey, Position>,
+    fill_accounting: &BTreeMap<FillId, crate::core::ledger::FillAccounting>,
+    trade_cycles: &BTreeMap<PositionKey, crate::core::ledger::TradeCycle>,
+    historical_net_after: Option<FixedPoint>,
+) -> Result<Vec<TradeRoundTrip>, String> {
     let mut net_after = BTreeMap::<PositionKey, FixedPoint>::new();
     let mut quantity_before = Vec::new();
     for fill in fills_newest_first.clone() {
         let key = (fill.account_id.clone(), fill.instrument_id.clone());
         let after = match net_after.get(&key) {
             Some(after) => *after,
-            None => positions.get(&key).map_or_else(
-                || FixedPoint::try_new(0, fill.quantity.scale()).map_err(|e| e.to_string()),
-                |position| Ok(position.net_quantity),
-            )?,
+            None => match historical_net_after {
+                Some(quantity) => quantity,
+                None => positions.get(&key).map_or_else(
+                    || FixedPoint::try_new(0, fill.quantity.scale()).map_err(|e| e.to_string()),
+                    |position| Ok(position.net_quantity),
+                )?,
+            },
         };
         let signed = signed_quantity(fill, after.scale())?;
         let before = FixedPoint::try_new(
@@ -329,7 +364,9 @@ pub(super) fn project_round_trips<'a>(
         let open_pnl = trade.open_pnl(&key, positions, trade_cycles)?;
         round_trips.push(trade.still_open(&key, open_pnl));
     }
-    round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
+    round_trips.sort_by_key(|trip| {
+        std::cmp::Reverse((trip.last_fill_unix_nanos(), trip.exit_fill_id.clone()))
+    });
     Ok(round_trips)
 }
 

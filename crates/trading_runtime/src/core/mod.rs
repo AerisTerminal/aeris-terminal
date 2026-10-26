@@ -871,6 +871,25 @@ impl TradingService {
             .query(query)
     }
 
+    /// Reads closed trades through the read-only history worker, never the owner thread.
+    ///
+    /// # Errors
+    /// Returns an error for an in-memory store, a full reader queue, or a failed read.
+    pub fn trade_history(
+        &self,
+        query: crate::TradeHistoryQuery,
+    ) -> Result<crate::TradeHistoryPage, String> {
+        let reader = self
+            .runtime
+            .history_reader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reader
+            .as_ref()
+            .ok_or_else(|| "trade history requires a file-backed store".to_string())?
+            .trades(query)
+    }
+
     /// Number of real history API calls by this service instance, including failed requests.
     #[cfg(feature = "test-observability")]
     #[must_use]

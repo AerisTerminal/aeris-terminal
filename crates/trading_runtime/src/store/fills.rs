@@ -203,7 +203,7 @@ impl TradingStore {
 const FILL_COLUMNS: &str = "SELECT id, order_id, account_id, instrument_id, side, price_units,
     price_scale, quantity_units, quantity_scale, execution_unix_nanos, provenance_json";
 
-fn decode_fill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Fill, String>> {
+pub(super) fn decode_fill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Fill, String>> {
     let id: String = row.get(0)?;
     let order: String = row.get(1)?;
     let account: String = row.get(2)?;

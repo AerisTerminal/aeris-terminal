@@ -5238,6 +5238,22 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
         ],
         "each exit is its own closed trade, newest first"
     );
+    assert_historical_partial_exits_match_owner(&restarted, &snapshot);
+}
+
+fn assert_historical_partial_exits_match_owner(
+    service: &TradingService,
+    snapshot: &TradingSnapshot,
+) {
+    let historical = service
+        .trade_history(crate::TradeHistoryQuery {
+            account_id: snapshot.round_trips[0].account_id.clone(),
+            after: None,
+            limit: Some(2),
+        })
+        .expect("read-only historical partial exits");
+    assert_eq!(historical.trades, snapshot.round_trips);
+    assert!(historical.next.is_none());
 }
 
 #[test]

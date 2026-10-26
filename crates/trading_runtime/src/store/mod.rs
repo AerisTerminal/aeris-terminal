@@ -9,6 +9,7 @@ mod quotes;
 mod retention;
 mod risk;
 mod schema;
+mod trade_history;
 mod user_records;
 mod venue_sync;
 #[cfg(test)]
@@ -20,6 +21,7 @@ pub use schema::SCHEMA_VERSION;
 pub(crate) use schema::preflight_existing_database;
 #[cfg(test)]
 use schema::*;
+pub(crate) use trade_history::trade_history_page;
 pub(crate) use venue_sync::UnresolvedContracts;
 use {
     ledger::{fixed, optional_fixed, split_optional, upsert_position, upsert_position_basis},

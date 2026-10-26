@@ -244,8 +244,11 @@ violations and missing verification explicitly, and never describe them as satis
   revision-changing step, coalesces quote-only mark changes to one publication per 100 ms with
   a trailing flush, and stays silent while idle. At most eight live subscriptions exist, each
   with a 1,024-event slot that overflows into a `lagged` resync with a fresh working set; paged
-  order history is served by the `aeris-trading-history` thread on a read-only SQLite
-  connection with 500-row keyset pages. The working set projects registered terms only for
+  order and closed-trade history are served by the `aeris-trading-history` thread on a
+  read-only SQLite connection with at most 500-row keyset pages. Trade pages are scoped
+  to one account and use exit time and exit fill ID as the stable cursor; they project
+  exact per-exit P&L through the same round-trip projection as the owner, using at most
+  500 fills per historical cycle prefix. The working set projects registered terms only for
   open orders, open positions and ticket interests; its newest event and fill windows each
   have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
   closed round trip carries its durable exit fill ID, distinct even for partial exits of
@@ -259,9 +262,10 @@ violations and missing verification explicitly, and never describe them as satis
   `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.
   Trading updates are applied on subscription wakes, not a render-path or 250 ms timer.
 - The desktop bottom panel keeps recent fill-based round trips as its live trade head.
-  Historical order records come from the trading service's read-only history worker through
-  background requests, newest first; order records have no historical trade P&L and must not
-  be presented as reconstructed round trips. At most four 500-order pages are retained,
+  The desktop currently requests historical order records through the trading service's
+  read-only history worker on a background thread; they have no historical trade P&L and
+  must not be presented as reconstructed round trips. The owner also exposes historical
+  closed-trade pages, awaiting desktop adoption. At most four 500-order pages are retained,
   with a visible cap, and a lagged subscription resync reloads the first page.
 - The `trading_runtime/test-observability` feature is enabled only by the desktop's
   dev-dependency to count calls to the instance's real `TradingService::history` API
