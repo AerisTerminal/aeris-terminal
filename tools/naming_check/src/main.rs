@@ -77,10 +77,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider bridge fixtures",
     ),
     (
-        "apps/desktop/src/engine_market_worker/replay_conversion.rs",
-        "legacy snapshot identity parser",
-    ),
-    (
         "apps/desktop/src/engine_market_worker/runtime.rs",
         "legacy provider selection tests",
     ),
@@ -91,10 +87,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
     (
         "apps/desktop/src/rithmic_shell.rs",
         "legacy provider connection shell awaiting M6.9",
-    ),
-    (
-        "crates/ui/chart_integration/src/engine_bridge.rs",
-        "legacy provider chart fixture",
     ),
 ];
 
@@ -149,8 +141,8 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
     ),
     (
         "apps/desktop/src/desktop.rs",
-        1,
-        "chrome overlay closing token",
+        2,
+        "chrome overlay closing token and independent summary worker initial binding",
     ),
     (
         "apps/desktop/src/desktop/workspace_tabs.rs",

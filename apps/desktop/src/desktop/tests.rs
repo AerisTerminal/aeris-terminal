@@ -4672,6 +4672,9 @@ fn market_summary_accepts_only_current_fenced_canonical_bars() {
     };
     let mut entry =
         MarketSummaryEntry::new(instrument, None, None, ConsumerResourceClass::Background);
+    let descriptor = entry.descriptor.as_mut().expect("fixture descriptor");
+    descriptor.asset_class = aeris_instruments::InstrumentClass::Future;
+    descriptor.currency = Some("USDC".into());
     let events = FixtureMarketEvents::default();
     let bar = |sequence, close| MarketBar {
         source_sequence: sequence,

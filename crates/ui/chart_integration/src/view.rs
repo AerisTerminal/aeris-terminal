@@ -1200,6 +1200,7 @@ pub struct AerisChartView {
     /// Engine handle of the visible-range volume profile drawn on the price series.
     volume_profile: Option<aeris_charts_engine::NativePrimitiveId>,
     asset_legend_title: String,
+    provider_display_name: Option<String>,
     /// Instrument symbol of the loaded series, naming exported chart images.
     asset_symbol: String,
     /// A load the trader is waiting on, shown by the symbol legend itself so the
@@ -1320,6 +1321,7 @@ impl AerisChartView {
             volume_series,
             volume: None,
             asset_legend_title: String::new(),
+            provider_display_name: None,
             asset_symbol: String::new(),
             asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
@@ -1431,7 +1433,8 @@ impl AerisChartView {
             quantity_divisor: replay_quantity_divisor(replay),
             volume_series,
             volume: None,
-            asset_legend_title: replay_legend_title(replay),
+            asset_legend_title: replay_legend_title(replay, None),
+            provider_display_name: None,
             asset_symbol: replay.instrument().symbol.clone(),
             asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
@@ -1485,6 +1488,17 @@ impl AerisChartView {
         chart
     }
 
+    /// Uses the selected provider's published name rather than deriving it from a venue code.
+    pub fn set_provider_display_name(&mut self, name: &str, replay: &ReplaySnapshot) {
+        self.provider_display_name = Some(name.to_string());
+        self.asset_legend_title = replay_legend_title(replay, Some(name));
+    }
+
+    #[must_use]
+    pub fn legend_title(&self) -> &str {
+        &self.asset_legend_title
+    }
+
     /// Replaces Aeris Charts' authoritative series data with one validated snapshot.
     ///
     /// # Errors
@@ -1512,7 +1526,8 @@ impl AerisChartView {
         apply_replay_time_scale_defaults(&mut self.engine, replay);
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
-        self.asset_legend_title = replay_legend_title(replay);
+        self.asset_legend_title =
+            replay_legend_title(replay, self.provider_display_name.as_deref());
         self.asset_symbol.clone_from(&replay.instrument().symbol);
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
@@ -2059,7 +2074,8 @@ impl AerisChartView {
         apply_replay_contract(&mut self.engine, replay);
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
-        self.asset_legend_title = replay_legend_title(replay);
+        self.asset_legend_title =
+            replay_legend_title(replay, self.provider_display_name.as_deref());
         self.asset_symbol.clone_from(&replay.instrument().symbol);
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
@@ -2124,7 +2140,8 @@ impl AerisChartView {
                 };
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
-                    self.asset_legend_title = replay_legend_title(snapshot);
+                    self.asset_legend_title =
+                        replay_legend_title(snapshot, self.provider_display_name.as_deref());
                     self.asset_symbol.clone_from(&snapshot.instrument().symbol);
                     self.instrument_price_precision = replay_display_precision(snapshot);
                     self.instrument_price_increment = snapshot.instrument().price_increment;

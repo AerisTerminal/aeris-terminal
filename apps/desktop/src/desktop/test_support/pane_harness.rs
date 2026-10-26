@@ -212,6 +212,12 @@ impl PaneHarness {
             )
             .detach();
             pane.update(cx, |pane, cx| {
+                if let Some(descriptor) = pane.descriptor.as_mut()
+                    && descriptor.asset_class == aeris_instruments::InstrumentClass::Other
+                {
+                    descriptor.asset_class = aeris_instruments::InstrumentClass::Future;
+                    descriptor.currency = Some("USDC".into());
+                }
                 pane.emit_initial_price_alert_restore_notice(cx);
                 pane.emit_initial_chart_failure_notice(cx);
                 pane.apply_initial_chart_settings(cx);
@@ -849,6 +855,11 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
 ) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
+    let prior_descriptor = harness.pane.update(cx, |pane, _| {
+        let descriptor = pane.descriptor.as_mut().expect("bound descriptor");
+        descriptor.venue = "Fixture Venue".into();
+        descriptor.clone()
+    });
     let (old_chart, old_product) = cx.read(|cx| {
         let pane = harness.pane.read(cx);
         (
@@ -910,6 +921,7 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
     cx.read(|cx| {
         let pane = harness.pane.read(cx);
         assert_eq!(pane.product, old_product);
+        assert_eq!(pane.descriptor.as_ref(), Some(&prior_descriptor));
         assert_eq!(pane.interval, ChartInterval::Minute1);
         assert_eq!(
             pane.chart.as_ref().map(Entity::entity_id),
@@ -2376,6 +2388,26 @@ fn check_switch_cover_through_ready(
             _ => None,
         })
         .expect("replacement selection");
+    let mut descriptor = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .descriptor
+            .clone()
+            .expect("fixture descriptor")
+    });
+    descriptor.instrument = replacement.clone();
+    descriptor.display_symbol = replacement.display_symbol.clone();
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::BoundDescriptor {
+                generation: sequence,
+                descriptor: Box::new(descriptor),
+                provider_display_name: "Hyperliquid".into(),
+            },
+        ))
+        .expect("replacement descriptor");
     harness
         .publications
         .send(PaneProjectionEvent::LocalCommandOutcome(
@@ -2386,7 +2418,7 @@ fn check_switch_cover_through_ready(
         ))
         .expect("selection commit");
     harness.pane.update(cx, |pane, cx| {
-        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.poll_market_worker(cx), 2);
         assert!(pane.showing_superseded_series());
     });
 
@@ -3415,6 +3447,13 @@ fn pane_harness_verified_terms_replace_the_provisional_chart_descriptor(cx: &mut
             Some(&verified),
             "only the charted instrument's terms replace its descriptor"
         );
+        let descriptor = pane.descriptor.as_ref().expect("updated descriptor");
+        assert_eq!(descriptor.instrument, verified);
+        assert_eq!(
+            descriptor.asset_class,
+            aeris_instruments::InstrumentClass::Future
+        );
+        assert_eq!(descriptor.currency.as_deref(), Some("USDC"));
     });
 }
 
@@ -4568,6 +4607,94 @@ fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext)
                 "Hyperliquid market runtime"
             ),
             "canonical fixture bars use the runtime's projection identity"
+        );
+    });
+}
+
+#[gpui::test]
+fn descriptor_labels_render_without_desktop_mapping(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    let mut descriptor = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .descriptor
+            .clone()
+            .expect("fixture descriptor")
+    });
+    descriptor.instrument.provider = "fixture-provider".into();
+    descriptor.instrument.instrument_id = "opaque-7a1f".into();
+    descriptor.instrument.entitlement_id = "fixture-access".into();
+    descriptor.entitlement_id = "fixture-access".into();
+    descriptor.instrument.display_symbol = "outdated installed symbol".into();
+    descriptor.display_symbol = "Fixture Symbol".into();
+    descriptor.venue = "Fixture Exchange".into();
+    descriptor.asset_class = aeris_instruments::InstrumentClass::Equity;
+    descriptor.currency = Some("EUR".into());
+    let product = descriptor.instrument.clone();
+    harness
+        .pane
+        .update(cx, |pane, _| pane.product = Some(product.clone()));
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::BoundDescriptor {
+                generation: 1,
+                descriptor: Box::new(descriptor.clone()),
+                provider_display_name: "Fixture Venue".into(),
+            },
+        ))
+        .expect("bound descriptor");
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::SelectedInstrument {
+                generation: 1,
+                instrument: product.clone(),
+            },
+        ))
+        .expect("selection");
+    harness
+        .pane
+        .update(cx, |pane, cx| assert_eq!(pane.poll_market_worker(cx), 2));
+    let route = FixtureSeries {
+        series: aeris_market_data::BarSeriesKey {
+            provider_id: product.provider.clone(),
+            instrument_id: product.instrument_id.clone(),
+            entitlement_id: product.entitlement_id.clone(),
+            period: aeris_market_data::BarPeriod::time(60).expect("minute"),
+            definition_version: 1,
+        },
+        provider_generation: product.session_generation,
+        price_scale: descriptor.price_scale,
+        quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+    };
+    let snapshot = harness
+        .market
+        .publish_runtime_snapshot(12, &route, 1, &harness.market_events)
+        .expect("opaque snapshot");
+    harness
+        .publications
+        .send(PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection {
+                event: snapshot,
+                received_unix_nanos: Some(301_000_000_000),
+                recovery_request_id: None,
+                selection_generation: None,
+            },
+        ))
+        .expect("fixture publication");
+    harness
+        .pane
+        .update(cx, |pane, cx| assert_eq!(pane.poll_market_worker(cx), 1));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(terminal_instrument_label(pane), "Fixture Symbol");
+        assert_eq!(pane.provider_display_name.as_deref(), Some("Fixture Venue"));
+        assert_eq!(
+            pane.chart.as_ref().expect("chart").read(cx).legend_title(),
+            "Fixture Symbol · 1m · Fixture Venue"
         );
     });
 }

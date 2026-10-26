@@ -213,6 +213,12 @@ pub enum LocalFailureScope {
 /// Results of local pane commands, fenced by the request sequence or study identity
 /// at the GPUI owner rather than projected as coordinator publications.
 pub enum LocalCommandOutcome {
+    /// Selected catalog metadata for the exact binding, before its selection reply.
+    BoundDescriptor {
+        generation: u64,
+        descriptor: Box<aeris_market_runtime::InstrumentDescriptor>,
+        provider_display_name: String,
+    },
     /// Select-and-demand reply for the exact pending pane request.
     EngineSelection {
         sequence: u64,

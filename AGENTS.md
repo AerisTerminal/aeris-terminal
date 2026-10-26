@@ -124,7 +124,8 @@ violations and missing verification explicitly, and never describe them as satis
   unrelated release, app-command and receipt comparisons have exact reasoned, count-checked
   exceptions in `tools/naming_check`. An added comparison or a stale exception fails the gate.
   Failed pane replacements re-adopt the prior instrument and interval through the controller's
-  restore target, not a provider-named workspace field.
+  restore target, not a provider-named workspace field. The independent market-summary worker
+  checks its initial descriptor generation separately, at the exact reasoned `desktop.rs` exception.
 - Production queues, caches, retries, and background work remain bounded with explicit overflow and
   cancellation behavior.
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
@@ -137,7 +138,9 @@ violations and missing verification explicitly, and never describe them as satis
   During M6.7-M6.9, only the exact
   reasoned file exceptions in `tools/naming_check` may retain existing provider identities;
   an exception must be removed when its final match disappears. Do not add a new exception
-  for new desktop provider logic. The final production exception is the logo mapping in `assets.rs`.
+  for new desktop provider logic. Replay conversion and chart legend projection have no provider
+  identity exceptions: they use the bound instrument descriptor and published provider name.
+  The final production exception is the logo mapping in `assets.rs`.
 - `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`; the module is
   compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
   construct fixture market publications. The diagnostic conformance command is gated likewise.

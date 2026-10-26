@@ -462,7 +462,12 @@ fn apply_received_event(
         epoch: consumer_epoch,
         value: event,
     };
-    if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
+    if complete_pending_recovery(
+        &event,
+        record.descriptor.as_ref(),
+        endpoint,
+        clock.wall_unix_nanos(),
+    )? {
         return Ok(false);
     }
     let event = event.value;
@@ -512,6 +517,8 @@ pub(super) fn deliver_provider_catalog_event(
         // Verified Terms supersede the provisional selected descriptor, not
         // a different pane selection. Ticket demand uses the same identity.
         record.product = selection.instrument.clone();
+        record.descriptor =
+            super::refreshed_descriptor(&selection.instrument, record.descriptor.take());
         // The verified terms may change the calendar without changing the
         // instrument ID. Retry through the single session-status publisher
         // after this catalog reply, including when its mailbox was full.
@@ -892,56 +899,7 @@ pub(super) fn apply_selection_outcome(
             generation,
             descriptor,
             series,
-        } => {
-            if selection_matches_request(record, generation.0.get()) {
-                if !selection_terms_match(record, &descriptor, &series) {
-                    return Err("runtime selection returned inconsistent catalog terms".into());
-                }
-                let selected = descriptor.instrument;
-                record.product = selected.clone();
-                record.initial_selection_pending = false;
-                if let Some((_, _, interval)) = record.pending_selection.take() {
-                    record.interval = interval;
-                    if let Some((sequence, browser_generation)) =
-                        record.pending_catalog_selection.take()
-                    {
-                        record
-                            .endpoint
-                            .messages
-                            .send(PaneProjectionEvent::LocalCommandOutcome(
-                                aeris_desktop::market_worker::LocalCommandOutcome::CatalogSwitch {
-                                    sequence,
-                                    browser_generation,
-                                    result: Ok((selected, interval)),
-                                },
-                            ))
-                            .map_err(|error| error.to_string())?;
-                    } else {
-                        record
-                            .endpoint
-                            .messages
-                            .send(PaneProjectionEvent::LocalCommandOutcome(aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
-                                sequence: generation.0.get(),
-                                succeeded: true,
-                            }))
-                            .map_err(|error| error.to_string())?;
-                    }
-                } else {
-                    record
-                        .endpoint
-                        .messages
-                        .send(PaneProjectionEvent::LocalCommandOutcome(
-                            aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
-                                generation: generation.0.get(),
-                                instrument: selected,
-                            },
-                        ))
-                        .map_err(|error| error.to_string())?;
-                }
-                record.endpoint.active_generation = generation.0.get();
-                record.session_status_sent = None;
-            }
-        }
+        } => apply_selected_descriptor(record, generation.0.get(), *descriptor, &series)?,
         aeris_market_runtime::SelectionOutcome::Failed { generation, error } => {
             if selection_matches_request(record, generation.0.get()) {
                 if record.pending_selection.is_none() {
@@ -983,6 +941,63 @@ pub(super) fn apply_selection_outcome(
             }
         }
     }
+    Ok(())
+}
+
+fn apply_selected_descriptor(
+    record: &mut EndpointRecord,
+    generation: u64,
+    descriptor: aeris_market_runtime::InstrumentDescriptor,
+    series: &aeris_market_runtime::ResolvedSeries,
+) -> Result<(), String> {
+    if !selection_matches_request(record, generation) {
+        return Ok(());
+    }
+    if !selection_terms_match(record, &descriptor, series) {
+        return Err("runtime selection returned inconsistent catalog terms".into());
+    }
+    let selected = descriptor.instrument.clone();
+    record
+        .endpoint
+        .messages
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            aeris_desktop::market_worker::LocalCommandOutcome::BoundDescriptor {
+                generation,
+                provider_display_name: super::provider_display_name(&selected.provider).to_string(),
+                descriptor: Box::new(descriptor.clone()),
+            },
+        ))
+        .map_err(|error| error.to_string())?;
+    record.descriptor = Some(descriptor);
+    record.product = selected.clone();
+    record.initial_selection_pending = false;
+    let selected_outcome = if let Some((_, _, interval)) = record.pending_selection.take() {
+        record.interval = interval;
+        if let Some((sequence, browser_generation)) = record.pending_catalog_selection.take() {
+            aeris_desktop::market_worker::LocalCommandOutcome::CatalogSwitch {
+                sequence,
+                browser_generation,
+                result: Ok((selected, interval)),
+            }
+        } else {
+            aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                sequence: generation,
+                succeeded: true,
+            }
+        }
+    } else {
+        aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+            generation,
+            instrument: selected,
+        }
+    };
+    record
+        .endpoint
+        .messages
+        .send(PaneProjectionEvent::LocalCommandOutcome(selected_outcome))
+        .map_err(|error| error.to_string())?;
+    record.endpoint.active_generation = generation;
+    record.session_status_sent = None;
     Ok(())
 }
 
@@ -1217,12 +1232,20 @@ mod tests {
         .expect("duplicate initial outcome");
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [PaneProjectionEvent::LocalCommandOutcome(
-                aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
-                    generation: 7,
-                    ..
-                }
-            )]
+            [
+                PaneProjectionEvent::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::BoundDescriptor {
+                        generation: 7,
+                        ..
+                    }
+                ),
+                PaneProjectionEvent::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
+                        generation: 7,
+                        ..
+                    }
+                )
+            ]
         ));
 
         record.pending_selection =
@@ -1239,12 +1262,20 @@ mod tests {
         .expect("duplicate replacement outcome");
         assert!(matches!(
             pane.worker.drain_messages().0.as_slice(),
-            [PaneProjectionEvent::LocalCommandOutcome(
-                aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
-                    sequence: 8,
-                    succeeded: true
-                }
-            )]
+            [
+                PaneProjectionEvent::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::BoundDescriptor {
+                        generation: 8,
+                        ..
+                    }
+                ),
+                PaneProjectionEvent::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::EngineSelection {
+                        sequence: 8,
+                        succeeded: true
+                    }
+                )
+            ]
         ));
         assert_eq!(record.interval, aeris_market_data::ChartInterval::Hour1);
     }
@@ -1496,6 +1527,14 @@ mod tests {
             },
         ));
         assert_eq!(records[0].session_status_sent, None);
+        assert_eq!(
+            records[0]
+                .descriptor
+                .as_ref()
+                .map(|descriptor| &descriptor.instrument),
+            Some(&terms),
+            "verified terms update the worker's bound descriptor"
+        );
         publish_session_statuses(&market, &mut records, false, &clock);
         assert_eq!(
             records[0].session_status_sent, None,

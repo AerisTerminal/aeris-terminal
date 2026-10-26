@@ -127,6 +127,14 @@ struct WorkspaceSurfaceInitialization {
 // One line per surface field; splitting the literal would only scatter the defaults.
 #[allow(clippy::too_many_lines)]
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
+    let descriptor = init
+        .startup
+        .product
+        .as_ref()
+        .and_then(engine_market_worker::initial_descriptor);
+    let initial_provider_display_name = init.startup.product.as_ref().map(|product| {
+        engine_market_worker::runtime_provider_display_name(&product.provider).to_string()
+    });
     let mut chart_pane_controller = chart_pane_controller::ChartPaneController::default();
     if init.startup.chart.is_some() {
         chart_pane_controller.chart_installed();
@@ -200,6 +208,12 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chrome_focus: init.chrome_focus,
         provider: init.startup.provider,
         product: init.startup.product,
+        descriptor,
+        pending_descriptor: None,
+        restore_descriptor: None,
+        provider_display_name: initial_provider_display_name,
+        pending_provider_display_name: None,
+        restore_provider_display_name: None,
         interval: init.interval,
         chart_pane_controller,
         restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
@@ -3515,6 +3529,11 @@ impl WorkspaceSurface {
     ) {
         let theme = self.theme;
         let chart = cx.new(move |_| AerisChartView::with_replay_and_theme(snapshot, theme));
+        if let Some(name) = &self.provider_display_name {
+            chart.update(cx, |chart, _| {
+                chart.set_provider_display_name(name, snapshot);
+            });
+        }
         self.apply_chart_chrome_to_chart(&chart, cx);
         // An open settings session previews unconfirmed edits; restore the drawing before
         // its state is carried into the new chart.
@@ -3624,6 +3643,13 @@ impl WorkspaceSurface {
             worker_label,
             ui_diagnostics,
         } = publication;
+        if let (Some(chart), ReplayStreamUpdate::Snapshot(snapshot), Some(name)) =
+            (&self.chart, &update, &self.provider_display_name)
+        {
+            chart.update(cx, |chart, _| {
+                chart.set_provider_display_name(name, snapshot);
+            });
+        }
         self.worker_label = worker_label;
         self.subscription_id = subscription_id;
         self.replay_label =
@@ -3708,13 +3734,13 @@ impl WorkspaceSurface {
                 if !self.chart_pane_controller.accept_publication(generation) {
                     return;
                 }
-                let Some(product) = self.product.as_ref() else {
+                let Some(descriptor) = self.descriptor.as_ref() else {
                     return;
                 };
                 let provider = snapshot.snapshot.series.provider_id.clone();
                 let replay = engine_market_worker::replay_runtime_snapshot(
                     &snapshot,
-                    product,
+                    descriptor,
                     received_unix_nanos,
                 )
                 .map(ReplayStreamUpdate::Snapshot);
@@ -3823,12 +3849,12 @@ impl WorkspaceSurface {
         {
             return;
         }
-        let Some(product) = self.product.as_ref() else {
+        let Some(descriptor) = self.descriptor.as_ref() else {
             return;
         };
         let replay = match engine_market_worker::replay_runtime_snapshot(
             &snapshot,
-            product,
+            descriptor,
             received_unix_nanos,
         ) {
             Ok(replay) => replay,
@@ -4077,6 +4103,20 @@ impl WorkspaceSurface {
     ) {
         use aeris_desktop::market_worker::LocalCommandOutcome;
         match outcome {
+            LocalCommandOutcome::BoundDescriptor {
+                generation,
+                descriptor,
+                provider_display_name,
+            } => {
+                if self.chart_pane_controller.is_pending(generation)
+                    || self
+                        .chart_pane_controller
+                        .accept_initial_instrument(generation)
+                {
+                    self.pending_descriptor = Some((generation, *descriptor));
+                    self.pending_provider_display_name = Some((generation, provider_display_name));
+                }
+            }
             LocalCommandOutcome::EngineSelection {
                 sequence,
                 succeeded,
@@ -4245,6 +4285,20 @@ impl WorkspaceSurface {
             .adopt_initial_instrument(generation)
         {
             self.product = Some(instrument);
+            if self
+                .pending_descriptor
+                .as_ref()
+                .is_some_and(|(bound, _)| *bound == generation)
+            {
+                self.descriptor = self
+                    .pending_descriptor
+                    .take()
+                    .map(|(_, descriptor)| descriptor);
+                self.provider_display_name = self
+                    .pending_provider_display_name
+                    .take()
+                    .map(|(_, name)| name);
+            }
             self.chart_persistence_dirty = true;
         }
     }
@@ -5249,6 +5303,23 @@ impl WorkspaceSurface {
         }
         self.chart_pane_controller
             .remember_previous_selection(self.product.clone(), self.interval);
+        self.restore_descriptor.clone_from(&self.descriptor);
+        self.restore_provider_display_name
+            .clone_from(&self.provider_display_name);
+        if self
+            .pending_descriptor
+            .as_ref()
+            .is_some_and(|(bound, _)| *bound == sequence)
+        {
+            self.descriptor = self
+                .pending_descriptor
+                .take()
+                .map(|(_, descriptor)| descriptor);
+            self.provider_display_name = self
+                .pending_provider_display_name
+                .take()
+                .map(|(_, name)| name);
+        }
         // Capture presentation against the chart's current instrument before
         // mutating the pending selection. Timeframe replacement can reuse
         // drawings; a symbol replacement must not carry price-anchored drawings
@@ -5302,6 +5373,18 @@ impl WorkspaceSurface {
         let product = previous.product;
         let interval = previous.interval;
         self.product.clone_from(&product);
+        self.descriptor = self.restore_descriptor.take().or_else(|| {
+            product
+                .as_ref()
+                .and_then(engine_market_worker::initial_descriptor)
+        });
+        self.provider_display_name = self.restore_provider_display_name.take().or_else(|| {
+            product.as_ref().map(|product| {
+                engine_market_worker::runtime_provider_display_name(&product.provider).to_string()
+            })
+        });
+        self.pending_descriptor = None;
+        self.pending_provider_display_name = None;
         self.interval = interval;
         self.chart_pane_controller.clear();
         self.order_book.update(cx, |order_book, order_book_cx| {
@@ -6471,6 +6554,8 @@ impl WorkspaceSurface {
             product != instrument && verified_terms_supersede(product, instrument)
         }) {
             self.product = Some(instrument.clone());
+            self.descriptor =
+                engine_market_worker::refreshed_descriptor(instrument, self.descriptor.take());
             self.chart_persistence_dirty = true;
         }
     }

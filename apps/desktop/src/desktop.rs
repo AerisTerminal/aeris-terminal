@@ -871,6 +871,12 @@ struct WorkspaceSurface {
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
     product: Option<InstallProviderInstrument>,
+    descriptor: Option<aeris_market_runtime::InstrumentDescriptor>,
+    pending_descriptor: Option<(u64, aeris_market_runtime::InstrumentDescriptor)>,
+    restore_descriptor: Option<aeris_market_runtime::InstrumentDescriptor>,
+    provider_display_name: Option<String>,
+    pending_provider_display_name: Option<(u64, String)>,
+    restore_provider_display_name: Option<String>,
     interval: ChartInterval,
     chart_pane_controller: chart_pane_controller::ChartPaneController,
     restored_viewport: Option<(i64, i64)>,
@@ -3239,6 +3245,7 @@ impl SidePanel {
 
 struct MarketSummaryEntry {
     instrument: InstallProviderInstrument,
+    descriptor: Option<aeris_market_runtime::InstrumentDescriptor>,
     worker: Option<MarketDataWorker>,
     previous_close: Option<i64>,
     last: Option<MarketBar>,
@@ -3430,6 +3437,7 @@ impl MarketSummaryEntry {
         resource_class: ConsumerResourceClass,
     ) -> Self {
         Self {
+            descriptor: engine_market_worker::initial_descriptor(&instrument),
             instrument,
             worker,
             previous_close: None,
@@ -3509,12 +3517,17 @@ impl MarketSummaryEntry {
             MarketRuntimeEvent::SeriesSnapshot(snapshot)
                 if snapshot.generation.0.get() == engine_market_worker::INITIAL_GENERATION =>
             {
-                engine_market_worker::replay_runtime_snapshot(
-                    &snapshot,
-                    &self.instrument,
-                    received_unix_nanos,
-                )
-                .map(ReplayStreamUpdate::Snapshot)
+                self.descriptor
+                    .as_ref()
+                    .ok_or_else(|| "market summary has no bound descriptor".to_string())
+                    .and_then(|descriptor| {
+                        engine_market_worker::replay_runtime_snapshot(
+                            &snapshot,
+                            descriptor,
+                            received_unix_nanos,
+                        )
+                    })
+                    .map(ReplayStreamUpdate::Snapshot)
             }
             MarketRuntimeEvent::SeriesUpdate(tail)
                 if tail.generation.0.get() == engine_market_worker::INITIAL_GENERATION =>
@@ -3538,6 +3551,38 @@ impl MarketSummaryEntry {
         let changed = !messages.is_empty() || disconnected;
         for message in messages {
             match message {
+                PaneProjectionEvent::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::BoundDescriptor {
+                        generation,
+                        descriptor,
+                        ..
+                    },
+                ) if generation == engine_market_worker::INITIAL_GENERATION
+                    && descriptor.instrument.provider == self.instrument.provider
+                    && descriptor.instrument.instrument_id == self.instrument.instrument_id
+                    && descriptor.entitlement_id == self.instrument.entitlement_id =>
+                {
+                    self.instrument = descriptor.instrument.clone();
+                    self.descriptor = Some(*descriptor);
+                }
+                PaneProjectionEvent::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event: aeris_market_runtime::MarketConsumerEvent {
+                            value: aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(selection),
+                            ..
+                        },
+                        ..
+                    },
+                ) if aeris_desktop::market_worker::verified_terms_supersede(
+                    &self.instrument,
+                    &selection.instrument,
+                ) => {
+                    self.instrument = selection.instrument;
+                    self.descriptor = engine_market_worker::refreshed_descriptor(
+                        &self.instrument,
+                        self.descriptor.take(),
+                    );
+                }
                 PaneProjectionEvent::RuntimeProjection(
                     aeris_desktop::market_worker::RuntimeProjection {
                         event,
@@ -3725,6 +3770,15 @@ fn instrument_selector_label(selected: Option<(&str, &str)>) -> String {
 }
 
 fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
+    if let Some(descriptor) = app.descriptor.as_ref()
+        && app.product.as_ref().is_some_and(|product| {
+            product.provider == descriptor.instrument.provider
+                && product.instrument_id == descriptor.instrument.instrument_id
+                && product.entitlement_id == descriptor.entitlement_id
+        })
+    {
+        return descriptor.display_symbol.clone();
+    }
     if provider_presentation(app.provider).is_some() {
         return app.product.as_ref().map_or_else(
             || "Select market".to_string(),

@@ -106,6 +106,7 @@ impl EndpointRole {
 struct EndpointRecord {
     workspace_id: u64,
     product: InstallProviderInstrument,
+    descriptor: Option<aeris_market_runtime::InstrumentDescriptor>,
     initial_instrument: aeris_market_runtime::InstrumentRequest,
     interval: ChartInterval,
     role: EndpointRole,
@@ -655,6 +656,10 @@ fn worker_endpoint_with_wake(
     };
     let endpoint = EndpointRecord {
         workspace_id,
+        descriptor: provider_presentation(&product.provider).and_then(|presentation| {
+            aeris_market_runtime::InstrumentDescriptor::from_install(&product, presentation, true)
+                .ok()
+        }),
         initial_instrument: aeris_market_runtime::InstrumentRequest::startup(&product),
         product,
         interval,
@@ -783,12 +788,43 @@ fn provider_display_name(provider: &str) -> &str {
     provider_presentation(provider).map_or(provider, |descriptor| descriptor.display_name)
 }
 
+pub(crate) fn runtime_provider_display_name(provider: &str) -> &str {
+    provider_display_name(provider)
+}
+
 fn provider_presentation(
     provider: &str,
 ) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider)
+}
+
+pub(crate) fn initial_descriptor(
+    product: &InstallProviderInstrument,
+) -> Option<aeris_market_runtime::InstrumentDescriptor> {
+    aeris_market_runtime::InstrumentDescriptor::from_install(
+        product,
+        provider_presentation(&product.provider)?,
+        true,
+    )
+    .ok()
+}
+
+pub(crate) fn refreshed_descriptor(
+    product: &InstallProviderInstrument,
+    previous: Option<aeris_market_runtime::InstrumentDescriptor>,
+) -> Option<aeris_market_runtime::InstrumentDescriptor> {
+    let mut descriptor = initial_descriptor(product)?;
+    if let Some(previous) = previous {
+        if descriptor.asset_class == aeris_instruments::InstrumentClass::Other {
+            descriptor.asset_class = previous.asset_class;
+        }
+        if descriptor.currency.is_none() {
+            descriptor.currency = previous.currency;
+        }
+    }
+    Some(descriptor)
 }
 
 pub(crate) fn runtime_presentation(provider: &str) -> (String, String) {
@@ -801,7 +837,7 @@ pub(crate) fn runtime_presentation(provider: &str) -> (String, String) {
 #[path = "engine_market_worker/replay_conversion.rs"]
 mod replay_conversion;
 #[cfg(test)]
-use replay_conversion::{replay_bar_definition, snapshot_instrument};
+use replay_conversion::replay_bar_definition;
 pub(crate) use replay_conversion::{replay_runtime_snapshot, replay_runtime_tail_update};
 pub(crate) use replay_conversion::{runtime_order_book_frame, series_key};
 
@@ -874,6 +910,26 @@ mod tests {
         MarketProviderGeneration, MarketProviderInstrumentSelection, MarketTradeTapeSnapshot,
     };
     use std::collections::BTreeMap;
+
+    fn fixture_descriptor(
+        product: &InstallProviderInstrument,
+    ) -> aeris_market_runtime::InstrumentDescriptor {
+        let mut descriptor = initial_descriptor(product).expect("fixture descriptor");
+        if descriptor.asset_class == aeris_instruments::InstrumentClass::Other {
+            descriptor.asset_class = aeris_instruments::InstrumentClass::Future;
+        }
+        if descriptor.currency.is_none() {
+            descriptor.currency = Some(
+                if product.provider == "hyperliquid" {
+                    "USDC"
+                } else {
+                    "USD"
+                }
+                .into(),
+            );
+        }
+        descriptor
+    }
 
     fn fenced_event(value: MarketRuntimeEvent) -> aeris_market_runtime::MarketConsumerEvent {
         Fenced {
@@ -1543,12 +1599,17 @@ mod tests {
         assert!(matches!(
             worker.worker.drain_messages().0.as_slice(),
             [PaneProjectionEvent::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::BoundDescriptor {
+                    generation: descriptor_generation,
+                    ..
+                }
+            ), PaneProjectionEvent::LocalCommandOutcome(
                 aeris_desktop::market_worker::LocalCommandOutcome::SelectedInstrument {
                     generation,
                     instrument
                 }
             )]
-                if *generation == pane.generation && instrument == expected
+                if *generation == pane.generation && *descriptor_generation == pane.generation && instrument == expected
         ));
         assert!(!record.initial_selection_pending);
         requests.pop().expect("one dispatched request")
@@ -1584,14 +1645,12 @@ mod tests {
 
     #[test]
     fn runtime_snapshot_preserves_precision_exact_time_generation_and_engine_provenance() {
+        let mut product = fixture_futures_contract("MNQ");
+        product.quantity_scale = 8;
         let publication = runtime_snapshot(
             1,
             1,
-            series_key(
-                fixture_futures_contracts().first().expect("BTC product"),
-                ChartInterval::Minute1,
-            )
-            .expect("series"),
+            series_key(&product, ChartInterval::Minute1).expect("series"),
             8,
             2,
             8,
@@ -1608,14 +1667,9 @@ mod tests {
             4,
             false,
         );
-        let snapshot = replay_runtime_snapshot(
-            &publication,
-            fixture_futures_contracts()
-                .first()
-                .expect("selected contract"),
-            1_000_000_000,
-        )
-        .expect("snapshot converts");
+        let snapshot =
+            replay_runtime_snapshot(&publication, &fixture_descriptor(&product), 1_000_000_000)
+                .expect("snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 2);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.evidence().session_generation, 8);
@@ -1636,6 +1690,7 @@ mod tests {
     #[test]
     fn replay_snapshot_rejects_mismatched_selected_identity() {
         let selected = fixture_public_crypto();
+        let bound = fixture_descriptor(&selected);
         let series = series_key(&selected, ChartInterval::Minute1).expect("series");
         let snapshot = runtime_snapshot(
             1,
@@ -1657,18 +1712,141 @@ mod tests {
             1,
             false,
         );
-        assert!(replay_runtime_snapshot(&snapshot, &selected, 1).is_ok());
+        assert!(replay_runtime_snapshot(&snapshot, &bound, 1).is_ok());
         for changed in ["provider", "instrument", "entitlement"] {
-            let mut other = selected.clone();
+            let mut other = bound.clone();
             match changed {
-                "provider" => other.provider = "other-provider".into(),
-                "instrument" => other.instrument_id = "other-instrument".into(),
+                "provider" => other.instrument.provider = "other-provider".into(),
+                "instrument" => other.instrument.instrument_id = "other-instrument".into(),
                 "entitlement" => other.entitlement_id = "other-entitlement".into(),
                 _ => unreachable!(),
             }
             assert!(
                 replay_runtime_snapshot(&snapshot, &other, 1).is_err(),
                 "{changed} mismatch must reject the snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_conversion_uses_bound_descriptor() {
+        let mut product = fixture_public_crypto();
+        product.provider = "fixture-venue".into();
+        product.instrument_id = "opaque-71a9".into();
+        product.entitlement_id = "fixture-access".into();
+        product.display_symbol = "FIXTURE-Q".into();
+        product.price_scale = 3;
+        product.quantity_scale = 4;
+        let mut descriptor = aeris_market_runtime::InstrumentDescriptor::from_install(
+            &fixture_public_crypto(),
+            provider_presentation("hyperliquid").expect("fixture presentation"),
+            true,
+        )
+        .expect("base descriptor");
+        descriptor.instrument = product.clone();
+        descriptor.entitlement_id = product.entitlement_id.clone();
+        descriptor.display_symbol = "Descriptor Symbol".into();
+        descriptor.venue = "Fixture Market".into();
+        descriptor.asset_class = aeris_instruments::InstrumentClass::Equity;
+        descriptor.currency = Some("EUR".into());
+        descriptor.price_scale = 3;
+        let snapshot = runtime_snapshot(
+            1,
+            1,
+            BarSeriesKey {
+                provider_id: product.provider.clone(),
+                instrument_id: product.instrument_id.clone(),
+                entitlement_id: product.entitlement_id.clone(),
+                period: BarPeriod::time(60).expect("minute"),
+                definition_version: 1,
+            },
+            1,
+            3,
+            4,
+            vec![MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            1,
+            false,
+        );
+        let replay = replay_runtime_snapshot(&snapshot, &descriptor, 1).expect("opaque identity");
+        assert_eq!(replay.instrument().venue_id, "Fixture Market");
+        assert_eq!(replay.instrument().symbol, "Descriptor Symbol");
+        assert_eq!(replay.instrument().asset_class, AssetClass::Equity);
+        assert_eq!(replay.instrument().trading_currency, "EUR");
+        assert_eq!(replay.instrument().precision.price_scale(), 3);
+        assert_eq!(replay.instrument().precision.quantity_scale(), 4);
+        for scale in ["price", "quantity"] {
+            let mut inconsistent = snapshot.clone();
+            let canonical = Arc::make_mut(&mut inconsistent.snapshot);
+            if scale == "price" {
+                canonical.price_scale = 8;
+            } else {
+                canonical.quantity_scale = 8;
+            }
+            assert!(
+                replay_runtime_snapshot(&inconsistent, &descriptor, 1).is_err(),
+                "{scale} precision cannot override the bound descriptor"
+            );
+        }
+        for field in ["provider", "instrument", "entitlement"] {
+            let mut mismatched = descriptor.clone();
+            match field {
+                "provider" => mismatched.instrument.provider.push_str("-other"),
+                "instrument" => mismatched.instrument.instrument_id.push_str("-other"),
+                _ => mismatched.entitlement_id.push_str("-other"),
+            }
+            assert!(
+                replay_runtime_snapshot(&snapshot, &mismatched, 1).is_err(),
+                "{field} mismatch must reject before conversion"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_fixture_provider_labels_remain_unchanged() {
+        for (product, name) in [
+            (fixture_public_crypto(), "Hyperliquid"),
+            (fixture_futures_contract("MNQ"), "Rithmic"),
+        ] {
+            let descriptor = fixture_descriptor(&product);
+            let publication = runtime_snapshot(
+                1,
+                1,
+                series_key(&product, ChartInterval::Minute1).expect("series"),
+                1,
+                u32::from(descriptor.price_scale),
+                product.quantity_scale,
+                vec![MarketBar {
+                    source_sequence: 1,
+                    exchange_timestamp_seconds: 60,
+                    exchange_timestamp_unix_nanos: 60_000_000_000,
+                    open: 100,
+                    high: 110,
+                    low: 90,
+                    close: 105,
+                    volume: 7,
+                }],
+                1,
+                false,
+            );
+            let replay =
+                replay_runtime_snapshot(&publication, &descriptor, 1).expect("fixture replay");
+            let mut chart = AerisChartView::with_replay_and_theme(&replay, AerisTheme::dark());
+            chart.set_provider_display_name(
+                runtime_provider_display_name(&product.provider),
+                &replay,
+            );
+            assert_eq!(
+                chart.legend_title(),
+                format!("{} · 1m · {name}", descriptor.display_symbol)
             );
         }
     }
@@ -1995,8 +2173,13 @@ mod tests {
         let fenced = fenced_event(snapshot.clone());
         let epoch = fenced.epoch;
         assert!(
-            complete_pending_recovery(&fenced, &product, &mut record.endpoint, 1_000_000_000)
-                .expect("pushed recovery completes")
+            complete_pending_recovery(
+                &fenced,
+                Some(&fixture_descriptor(&product)),
+                &mut record.endpoint,
+                1_000_000_000
+            )
+            .expect("pushed recovery completes")
         );
         assert!(record.endpoint.pending_recovery.is_none());
         let (messages, disconnected) = pane.worker.drain_messages();
@@ -2073,7 +2256,7 @@ mod tests {
         assert!(
             complete_pending_recovery(
                 &fenced_event(event.clone()),
-                &product,
+                Some(&fixture_descriptor(&product)),
                 &mut record.endpoint,
                 1_000_000_000
             )
@@ -2084,7 +2267,7 @@ mod tests {
         assert!(
             complete_pending_recovery(
                 &fenced_event(event.clone()),
-                &product,
+                Some(&fixture_descriptor(&product)),
                 &mut record.endpoint,
                 1_000_000_000
             )
@@ -2139,7 +2322,7 @@ mod tests {
         assert!(
             !complete_pending_recovery(
                 &fenced_event(snapshot),
-                &product,
+                Some(&fixture_descriptor(&product)),
                 &mut record.endpoint,
                 1_000_000_000
             )
@@ -2251,7 +2434,7 @@ mod tests {
             series.clone(),
             7,
             2,
-            8,
+            0,
             vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
@@ -2343,7 +2526,7 @@ mod tests {
                     series.clone(),
                     7,
                     2,
-                    8,
+                    0,
                     vec![burst_bar(1)],
                     1,
                     false,
@@ -2418,10 +2601,12 @@ mod tests {
                     continue;
                 };
                 let update = match &event.value {
-                    MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
-                        replay_runtime_snapshot(snapshot, selected, *received_unix_nanos)
-                            .map(ReplayStreamUpdate::Snapshot)
-                    }
+                    MarketRuntimeEvent::SeriesSnapshot(snapshot) => replay_runtime_snapshot(
+                        snapshot,
+                        &fixture_descriptor(selected),
+                        *received_unix_nanos,
+                    )
+                    .map(ReplayStreamUpdate::Snapshot),
                     MarketRuntimeEvent::SeriesUpdate(tail) => {
                         replay_runtime_tail_update(tail, *received_unix_nanos)
                             .map(ReplayStreamUpdate::Tail)
@@ -3012,7 +3197,7 @@ mod tests {
         assert!(
             !complete_pending_recovery(
                 &fenced_event(event),
-                &product,
+                Some(&fixture_descriptor(&product)),
                 &mut record.endpoint,
                 1_000_000_000
             )
@@ -3425,69 +3610,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_instrument_parses_all_hyperliquid_identities() {
-        let perp = BarSeriesKey {
-            provider_id: "hyperliquid".to_string(),
-            instrument_id: "hyperliquid:perp:BTC".to_string(),
-            entitlement_id: "hyperliquid-public".to_string(),
-            period: BarPeriod::time(60).expect("minute period validates"),
-            definition_version: 1,
-        };
-        assert_eq!(
-            snapshot_instrument(&perp).expect("perp parses"),
-            (
-                "Hyperliquid".to_string(),
-                "BTC".to_string(),
-                AssetClass::Future,
-                "USDC".to_string()
-            )
-        );
-        let spot = BarSeriesKey {
-            instrument_id: "hyperliquid:spot:7:HFUN/USDC".to_string(),
-            ..perp.clone()
-        };
-        assert_eq!(
-            snapshot_instrument(&spot).expect("spot parses"),
-            (
-                "Hyperliquid Spot".to_string(),
-                "HFUN/USDC".to_string(),
-                AssetClass::CryptoAsset,
-                "USDC".to_string()
-            )
-        );
-        let builder = BarSeriesKey {
-            instrument_id: "hyperliquid:builder:xyz:TSLA".to_string(),
-            ..perp.clone()
-        };
-        assert_eq!(
-            snapshot_instrument(&builder).expect("builder parses"),
-            (
-                "xyz".to_string(),
-                "xyz:TSLA".to_string(),
-                AssetClass::Future,
-                "USDC".to_string()
-            )
-        );
-        // Misrouted or truncated identities fail closed.
-        for bad in [
-            "hyperliquid:perp:BTC:EXTRA",
-            "hyperliquid:spot:7:HFUNUSDC",
-            "hyperliquid:spot:HFUN/USDC",
-            "hyperliquid:builder:TSLA",
-            "instrument:rithmic:CME:MNQ",
-            "hyperliquid:",
-            "",
-        ] {
-            let mut series = perp.clone();
-            series.instrument_id = bad.to_string();
-            assert!(
-                snapshot_instrument(&series).is_err(),
-                "{bad} must not parse"
-            );
-        }
-    }
-
-    #[test]
     fn hyperliquid_snapshot_converts_with_eight_place_precision() {
         let product = fixture_public_crypto();
         let series = series_key(&product, ChartInterval::Minute1).expect("HL series");
@@ -3511,8 +3633,9 @@ mod tests {
             1,
             false,
         );
-        let snapshot = replay_runtime_snapshot(&publication, &product, 1_000_000_000)
-            .expect("HL snapshot converts");
+        let snapshot =
+            replay_runtime_snapshot(&publication, &fixture_descriptor(&product), 1_000_000_000)
+                .expect("HL snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 8);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.instrument().symbol, product.display_symbol);

@@ -363,13 +363,13 @@ fn apply_price_series_chrome(engine: &mut ChartEngine, title: &str) {
     }
 }
 
-pub(crate) fn replay_legend_title(replay: &ReplaySnapshot) -> String {
+pub(crate) fn replay_legend_title(replay: &ReplaySnapshot, provider_name: Option<&str>) -> String {
     let instrument = replay.instrument();
     format!(
         "{} · {} · {}",
         instrument.symbol,
         replay_timeframe_label(replay),
-        replay_venue_label(&instrument.venue_id)
+        provider_name.unwrap_or(&instrument.venue_id)
     )
 }
 
@@ -393,14 +393,6 @@ fn replay_timeframe_label(replay: &ReplaySnapshot) -> String {
     }
 }
 
-fn replay_venue_label(venue: &str) -> &str {
-    if venue.eq_ignore_ascii_case("rithmic") {
-        "Rithmic"
-    } else {
-        venue
-    }
-}
-
 fn volume_row(volume: i64, divisor: f64, time: f64) -> (f64, [f64; 4]) {
     let volume = fixed_value(volume, divisor);
     (time, [volume; 4])
@@ -418,7 +410,6 @@ fn fixed_value(value: i64, divisor: f64) -> f64 {
 mod tests {
     use super::{
         ProductPriceBars, fixed_value, increment_display_precision, price_display_precision,
-        replay_venue_label,
     };
 
     #[test]
@@ -456,12 +447,6 @@ mod tests {
         assert_eq!(increment_display_precision(25_000_000, 8), 2);
         assert_eq!(increment_display_precision(1, 8), 8);
         assert_eq!(price_display_precision([33_105_250_000], 8), 4);
-    }
-
-    #[test]
-    fn legend_venues_name_the_provider_not_the_account_environment() {
-        assert_eq!(replay_venue_label("rithmic"), "Rithmic");
-        assert_eq!(replay_venue_label("CME"), "CME");
     }
 
     #[test]

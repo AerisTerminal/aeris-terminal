@@ -7,45 +7,62 @@ use super::{
     Provenanced, ReplayProvenance, ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate,
     SeriesTailOperation, provider_display_name,
 };
+use aeris_instruments::InstrumentClass;
 use aeris_market_data::{OrderQueueFrame, OrderQueueLevel, OrderQueueState};
+use aeris_market_runtime::InstrumentDescriptor;
 use aeris_market_runtime::{MarketOrderLevelStatus, MarketOrderLevelView, MarketOrderQueue};
 use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 use std::collections::BTreeMap;
 
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
-    installed: &InstallProviderInstrument,
+    descriptor: &InstrumentDescriptor,
     received: i64,
 ) -> Result<ReplaySnapshot, String> {
     let snapshot = publication.snapshot.as_ref();
     let series = &snapshot.series;
+    let installed = &descriptor.instrument;
     if series.provider_id != installed.provider
         || series.instrument_id != installed.instrument_id
         || series.entitlement_id != installed.entitlement_id
+        || descriptor.entitlement_id != installed.entitlement_id
     {
         return Err("engine snapshot does not match the selected instrument".to_string());
     }
-    let (venue, symbol, asset_class, provider_currency) = snapshot_instrument(series)?;
-    // Provider-reported contract terms are more precise than the id's default.
-    let trading_currency = installed
-        .contract_metadata
-        .as_deref()
-        .and_then(|terms| terms.currency.clone())
+    let quantity_scale = u8::try_from(installed.quantity_scale)
+        .map_err(|_| "selected instrument quantity precision is invalid".to_string())?;
+    if snapshot.price_scale != descriptor.price_scale || snapshot.quantity_scale != quantity_scale {
+        return Err("engine snapshot precision does not match the selected descriptor".into());
+    }
+    let asset_class = match descriptor.asset_class {
+        InstrumentClass::Equity => AssetClass::Equity,
+        InstrumentClass::Option => AssetClass::Option,
+        InstrumentClass::Future | InstrumentClass::CryptoPerpetual => AssetClass::Future,
+        InstrumentClass::ForeignExchange => AssetClass::ForeignExchange,
+        InstrumentClass::CryptoSpot => AssetClass::CryptoAsset,
+        InstrumentClass::Other => return Err("engine snapshot instrument class is unknown".into()),
+    };
+    let trading_currency = descriptor
+        .currency
+        .clone()
         .filter(|currency| !currency.trim().is_empty())
-        .unwrap_or(provider_currency);
+        .or_else(|| {
+            installed
+                .contract_metadata
+                .as_deref()
+                .and_then(|terms| terms.currency.clone())
+        })
+        .filter(|currency| !currency.trim().is_empty())
+        .ok_or_else(|| "engine snapshot trading currency is unknown".to_string())?;
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_version),
         asset_class,
-        symbol: if installed.display_symbol.is_empty() {
-            symbol
-        } else {
-            installed.display_symbol.clone()
-        },
-        venue_id: venue,
+        symbol: descriptor.display_symbol.clone(),
+        venue_id: descriptor.venue.clone(),
         trading_currency,
-        precision: InstrumentPrecision::try_new(snapshot.price_scale, snapshot.quantity_scale)
+        precision: InstrumentPrecision::try_new(descriptor.price_scale, quantity_scale)
             .map_err(|error| error.to_string())?,
         price_increment: installed.price_increment,
         lifecycle: InstrumentLifecycle::Active,
@@ -230,77 +247,6 @@ fn provenanced_runtime_bar(
             semantic_class: 2,
         },
     )
-}
-
-/// Splits a canonical engine instrument identity into presentation metadata.
-///
-/// Rithmic identities carry `instrument:rithmic:VENUE:SYMBOL`; Hyperliquid
-/// identities carry `hyperliquid:perp:COIN`, `hyperliquid:spot:INDEX:BASE/QUOTE`,
-/// or `hyperliquid:builder:DEX:COIN`. Anything else fails closed instead of
-/// rendering a misrouted instrument.
-pub(super) fn snapshot_instrument(
-    series: &BarSeriesKey,
-) -> Result<(String, String, AssetClass, String), String> {
-    if series.provider_id == "rithmic" {
-        let (venue, symbol) = series
-            .instrument_id
-            .strip_prefix("instrument:rithmic:")
-            .and_then(|value| value.split_once(':'))
-            .filter(|(venue, symbol)| {
-                !venue.is_empty() && !symbol.is_empty() && !symbol.contains(':')
-            })
-            .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
-        return Ok((
-            venue.to_string(),
-            symbol.to_string(),
-            AssetClass::Future,
-            "USD".to_string(),
-        ));
-    }
-    let path = series
-        .instrument_id
-        .strip_prefix("hyperliquid:")
-        .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
-    let (kind, rest) = path
-        .split_once(':')
-        .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
-    match kind {
-        "perp" if !rest.is_empty() && !rest.contains(':') && !rest.contains('/') => Ok((
-            "Hyperliquid".to_string(),
-            rest.to_string(),
-            AssetClass::Future,
-            "USDC".to_string(),
-        )),
-        "spot" => {
-            let (_, pair) = rest
-                .split_once(':')
-                .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
-            let quote = pair
-                .split_once('/')
-                .filter(|(base, quote)| !base.is_empty() && !quote.is_empty())
-                .map(|(_, quote)| quote)
-                .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
-            Ok((
-                "Hyperliquid Spot".to_string(),
-                pair.to_string(),
-                AssetClass::CryptoAsset,
-                quote.to_string(),
-            ))
-        }
-        "builder" => {
-            let (dex, coin) = rest
-                .split_once(':')
-                .filter(|(dex, coin)| !dex.is_empty() && !coin.is_empty())
-                .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
-            Ok((
-                dex.to_string(),
-                format!("{dex}:{coin}"),
-                AssetClass::Future,
-                "USDC".to_string(),
-            ))
-        }
-        _ => Err("engine snapshot instrument identity is invalid".to_string()),
-    }
 }
 
 pub(crate) fn series_key(

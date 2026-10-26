@@ -89,7 +89,7 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
 
 pub(super) fn complete_pending_recovery(
     event: &aeris_market_runtime::MarketConsumerEvent,
-    product: &InstallProviderInstrument,
+    descriptor: Option<&aeris_market_runtime::InstrumentDescriptor>,
     endpoint: &mut WorkerEndpoint,
     received_unix_nanos: i64,
 ) -> Result<bool, String> {
@@ -100,9 +100,16 @@ pub(super) fn complete_pending_recovery(
         MarketRuntimeEvent::SeriesSnapshot(snapshot)
             if snapshot.consumer_id.0.get() == endpoint.consumer_id
                 && snapshot.generation.0.get() == endpoint.active_generation
-                && snapshot.snapshot.provider_generation.0.get() >= product.session_generation =>
+                && descriptor.is_some_and(|descriptor| {
+                    snapshot.snapshot.provider_generation.0.get()
+                        >= descriptor.instrument.session_generation
+                }) =>
         {
-            let replay = replay_runtime_snapshot(snapshot, product, received_unix_nanos)?;
+            let replay = replay_runtime_snapshot(
+                snapshot,
+                descriptor.ok_or("runtime selection has no descriptor")?,
+                received_unix_nanos,
+            )?;
             // Recovery needs a covering bar. Previously the duplicate
             // MarketGeneration constructor rejected this empty case.
             if replay.bars().is_empty() {
