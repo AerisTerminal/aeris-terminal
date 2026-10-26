@@ -6,6 +6,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+fn normalize_source(source: &str) -> String {
+    source.replace("\r\n", "\n")
+}
+
+fn read_source(path: impl AsRef<Path>) -> io::Result<String> {
+    fs::read_to_string(path).map(|source| normalize_source(&source))
+}
+
 /// Trees whose names are not ours to choose: build output, vendored dependencies, third-party
 /// icon and font assets shipped under their upstream names, and gitignored runtime data.
 const SKIPPED_DIRECTORIES: &[&str] = &[
@@ -264,7 +272,7 @@ fn collect_desktop_fence_sources(
         } else if path.extension().is_some_and(|extension| extension == "rs")
             && path.file_name() != Some(OsStr::new("readiness_conformance.rs"))
         {
-            let count = desktop_fence_comparison_count(&fs::read_to_string(&path)?);
+            let count = desktop_fence_comparison_count(&read_source(&path)?);
             if count > 0 {
                 observed.insert(
                     relative_to(root, &path)
@@ -469,7 +477,7 @@ fn main() -> ExitCode {
         "crates/market_runtime/src/market_service/runtime.rs",
     ] {
         let file = root.join(path);
-        match fs::read_to_string(&file) {
+        match read_source(&file) {
             Ok(source) if violates_calendar_boundary(path, &source) => {
                 violations.push(relative_to(&root, &file));
             }
@@ -507,7 +515,7 @@ fn main() -> ExitCode {
         "crates/market_runtime/src/market_service/lifecycle/handlers.rs",
     ] {
         let file = root.join(path);
-        match fs::read_to_string(&file) {
+        match read_source(&file) {
             Ok(source) if violates_series_lifecycle_boundary(path, &source) => {
                 violations.push(relative_to(&root, &file));
             }
@@ -520,7 +528,7 @@ fn main() -> ExitCode {
     }
     let event_path = "crates/market_runtime/src/market_service/provider_event.rs";
     let event_file = root.join(event_path);
-    match fs::read_to_string(&event_file) {
+    match read_source(&event_file) {
         Ok(source) if public_provider_event_has_raw_generation(&source) => {
             violations.push(relative_to(&root, &event_file));
         }
@@ -577,7 +585,7 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     for file in files {
         let relative = relative_to(root, &file);
         let path = relative.to_string_lossy().replace('\\', "/");
-        if violates_generic_market_provider_boundary(&path, &fs::read_to_string(&file)?) {
+        if violates_generic_market_provider_boundary(&path, &read_source(&file)?) {
             violations.push(relative);
         }
     }
@@ -623,24 +631,23 @@ fn collect_desktop_provider_sources(
             let relative = relative_to(root, &path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let source = fs::read_to_string(&path)?;
-            let (gate_source, child_source, root_source) = if DESKTOP_PROVIDER_FIXTURE_PATHS
-                .contains(&relative.as_str())
-            {
-                let library = fs::read_to_string(root.join("apps/desktop/src/lib.rs"))?;
-                let declaration = if relative == "apps/desktop/src/readiness_conformance.rs"
-                    || relative == "apps/desktop/src/desktop/test_support/pane_harness.rs"
-                {
-                    fs::read_to_string(root.join("apps/desktop/src/desktop.rs"))?
+            let source = read_source(&path)?;
+            let (gate_source, child_source, root_source) =
+                if DESKTOP_PROVIDER_FIXTURE_PATHS.contains(&relative.as_str()) {
+                    let library = read_source(root.join("apps/desktop/src/lib.rs"))?;
+                    let declaration = if relative == "apps/desktop/src/readiness_conformance.rs"
+                        || relative == "apps/desktop/src/desktop/test_support/pane_harness.rs"
+                    {
+                        read_source(root.join("apps/desktop/src/desktop.rs"))?
+                    } else {
+                        library.clone()
+                    };
+                    let children =
+                        read_source(root.join("apps/desktop/src/desktop/test_support/mod.rs"))?;
+                    (declaration, children, library)
                 } else {
-                    library.clone()
+                    (String::new(), String::new(), String::new())
                 };
-                let children =
-                    fs::read_to_string(root.join("apps/desktop/src/desktop/test_support/mod.rs"))?;
-                (declaration, children, library)
-            } else {
-                (String::new(), String::new(), String::new())
-            };
             if desktop_provider_identity_at_path(
                 &relative,
                 &source,
@@ -681,7 +688,7 @@ fn inspect_desktop_boundaries(
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             let relative = relative_to(root, &path);
             let relative_path = relative.to_string_lossy().replace('\\', "/");
-            let source = fs::read_to_string(&path)?;
+            let source = read_source(&path)?;
             if violates_desktop_quote_boundary(&relative_path, &source)
                 || violates_fixture_market_boundary(&relative_path, &source)
                 || has_process_global_desktop_trading(&source)
@@ -708,7 +715,7 @@ fn inspect_market_test_names(root: &Path, violations: &mut Vec<PathBuf>) -> io::
         ),
     ] {
         let file = root.join(path);
-        if !missing(&fs::read_to_string(&file)?).is_empty() {
+        if !missing(&read_source(&file)?).is_empty() {
             violations.push(relative_to(root, &file));
         }
     }
@@ -836,11 +843,9 @@ fn consumer_delivery_is_unfenced(consumer: &str, runtime: &str, commands: &str) 
 
 fn inspect_consumer_delivery(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
     let consumer_file = root.join("crates/market_runtime/src/lib.rs");
-    let consumer = fs::read_to_string(&consumer_file)?;
-    let runtime =
-        fs::read_to_string(root.join("crates/market_runtime/src/market_service/runtime.rs"))?;
-    let commands =
-        fs::read_to_string(root.join("crates/market_runtime/src/market_service/mod.rs"))?;
+    let consumer = read_source(&consumer_file)?;
+    let runtime = read_source(root.join("crates/market_runtime/src/market_service/runtime.rs"))?;
+    let commands = read_source(root.join("crates/market_runtime/src/market_service/mod.rs"))?;
     if consumer_delivery_is_unfenced(&consumer, &runtime, &commands) {
         violations.push(relative_to(root, &consumer_file));
     }
@@ -875,7 +880,7 @@ fn inspect_directory(
                 && path
                     .components()
                     .any(|component| component.as_os_str() == "src")
-                && let Ok(source) = fs::read_to_string(&path)
+                && let Ok(source) = read_source(&path)
             {
                 let in_market_service = relative
                     .to_string_lossy()
@@ -1307,9 +1312,8 @@ mod tests {
     }
 
     fn manifest(relative: &str) -> String {
-        fs::read_to_string(repository_root().join(relative))
+        super::read_source(repository_root().join(relative))
             .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
-            .replace("\r\n", "\n")
     }
 
     fn collect_files(directory: &Path, matches: fn(&Path) -> bool, files: &mut Vec<PathBuf>) {
@@ -1540,6 +1544,63 @@ mod tests {
     }
 
     #[test]
+    fn desktop_fixture_gates_accept_crlf_source() {
+        let fixture = "const ID: &str = \"rithmic-test:\";";
+        let root_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"desktop/test_support/mod.rs\"]\npub mod test_support;";
+        let diagnostic_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"readiness_conformance.rs\"]\nmod readiness_conformance;";
+        let pane_gate =
+            "#[cfg(test)]\n#[path = \"desktop/test_support/pane_harness.rs\"]\nmod pane_harness;";
+        for (path, gate, child, root) in [
+            (
+                "apps/desktop/src/desktop/test_support/mod.rs",
+                root_gate,
+                "",
+                root_gate,
+            ),
+            (
+                "apps/desktop/src/desktop/test_support/fixture_market.rs",
+                root_gate,
+                "mod fixture_market;",
+                root_gate,
+            ),
+            (
+                "apps/desktop/src/readiness_conformance.rs",
+                diagnostic_gate,
+                "",
+                "",
+            ),
+            (
+                "apps/desktop/src/desktop/test_support/pane_harness.rs",
+                pane_gate,
+                "",
+                "",
+            ),
+        ] {
+            let lf = super::desktop_provider_identity_at_path(path, fixture, gate, child, root);
+            assert!(!lf, "{path} must be gated with LF");
+            let crlf = |text: &str| super::normalize_source(&text.replace('\n', "\r\n"));
+            assert_eq!(
+                super::desktop_provider_identity_at_path(
+                    path,
+                    &crlf(fixture),
+                    &crlf(gate),
+                    &crlf(child),
+                    &crlf(root)
+                ),
+                lf,
+                "{path} must retain its gate after reading CRLF source"
+            );
+        }
+        let source = "fn before() {}\n#[cfg(test)] mod tests { fn hidden() {} }\nfn after() { forbidden(); }";
+        assert_eq!(
+            super::production_source_prefix(&super::normalize_source(
+                &source.replace('\n', "\r\n")
+            )),
+            super::production_source_prefix(source)
+        );
+    }
+
+    #[test]
     fn desktop_provider_neutrality_rejects_stale_allowlist_entries() {
         assert!(!provider_allowlist_matches(
             ["apps/desktop/src/old_provider.rs"],
@@ -1568,11 +1629,11 @@ mod tests {
             super::DESKTOP_PROVIDER_ALLOWLIST.len(),
             "duplicate provider-neutrality exception"
         );
+        let violations =
+            super::desktop_provider_violations(repository_root()).expect("scan desktop sources");
         assert!(
-            super::desktop_provider_violations(repository_root())
-                .expect("scan desktop sources")
-                .is_empty(),
-            "provider-neutrality allow-list has an unreviewed or stale entry: {expected:?}"
+            violations.is_empty(),
+            "provider-neutrality paths with unreviewed identity or stale exceptions: {violations:?}"
         );
     }
 
@@ -4316,7 +4377,7 @@ jobs:
             );
         }
 
-        let info = manifest("apps/desktop/packaging/macos/Info.plist").replace("\r\n", "\n");
+        let info = manifest("apps/desktop/packaging/macos/Info.plist");
         for (key, value) in [
             ("CFBundleExecutable", "aeris_desktop"),
             ("CFBundleIdentifier", "com.aeris.desktop"),

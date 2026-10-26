@@ -2168,6 +2168,18 @@ active item (parts 1-8); M6.8-M6.12 are open.
     were removed. No finding closes yet: MD-10/UI-03 remain open through M6.8
     and M6.9. M6.7 remains unchecked: descriptor projection code complete; VAL-DSK-103 and guarded
     GUI VAL-DSK-114 not yet validated.
+  - CI fix (2026-10-26): hosted Windows checks out Rust sources with CRLF under
+    `core.autocrlf=true`; the LF-only multi-line fixture gate literals did not
+    match the declarations, so gated test-support paths were misreported as
+    provider identities (runs 40283353152 and 40288631143). The shared
+    naming-check source reader now normalizes CRLF before all production scans,
+    and the test manifest reader uses the same normalization. A CRLF regression
+    covers the root, diagnostic, pane and child fixture gates plus balanced
+    production/test-module stripping. The neutrality failure prints actual
+    violation paths. No rule, gate or exception was weakened. No `.gitattributes`
+    change: the scanner must work with either checkout format, independent of
+    Git configuration. VAL-DSK-116 covered; M6.7 remains unchecked pending
+    VAL-DSK-103 and guarded GUI VAL-DSK-114.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
@@ -2790,6 +2802,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.5 fix(market): restored four-pane/second-tab `select_and_demand` regression catches a provider-session queue refusal painted terminal before the fix. One normalized capacity error and first-demand retry retention leave all five panes ready after covering histories complete; VAL-DSK-115 code regression passes. VAL-DSK-020/VAL-CROSS-002 remain guarded-GUI pending.
 - 2026-10-26 M6.7 Part 9 fix(naming): distinguish provider identity from gated fixtures. `desktop_provider_neutrality_accepts_descriptor_driven_source` rejects the Logarithmic false positive; `desktop_provider_neutrality_rejects_new_identity_and_id_formats` retains provider and ID coverage; `desktop_provider_neutrality_excludes_only_gated_fixture_paths` rejects ungated fixtures and production identities; stale-entry and production-scan tests remain enforced. D2 applied, UI-03/MD-10 remain open pending descriptor work.
 - 2026-10-26 M6.7 Part 10 refactor(desktop): project bound market descriptors. `descriptor_labels_render_without_desktop_mapping` (opaque fixture provider, symbol Button and legend), `replay_conversion_uses_bound_descriptor` (opaque id, class/currency/precision and identity/precision mismatches), `existing_fixture_provider_labels_remain_unchanged`, `pane_harness_failed_committed_interval_restores_previous_chart_with_one_notice` (retains the bound descriptor) and the desktop suite cover the projection. `snapshot_instrument` and `replay_venue_label` are deleted; the two stale provider exceptions are removed. MD-10/UI-03 remain open for the next provider-neutrality parts; VAL-DSK-103 and guarded GUI VAL-DSK-114 not yet validated.
+- 2026-10-26 M6.7 CI fix fix(naming): normalize CRLF at the shared naming-check source reader. Windows `core.autocrlf=true` made LF-only root/diagnostic/pane gate literals miss cfg-gated fixtures, producing stale allow-list and unlisted identity violations in runs 40283353152 and 40288631143. `desktop_fixture_gates_accept_crlf_source` checks all fixture gate variants and production/test stripping; the neutrality assertion now reports actual violation paths. Kept checkout-format tolerance instead of adding `.gitattributes`; no restrictions changed. VAL-DSK-116 requires hosted Windows and Ubuntu CI success for this commit.
 
 ## 7. Known gaps / deferred
 
