@@ -1647,6 +1647,87 @@ mod tests {
         assert!(!panel.apply_snapshot(&second));
     }
 
+    #[test]
+    fn trading_projection_baseline_panel_rows_and_connected_broker() {
+        let mut snapshot = marked_snapshot(-1_250);
+        let (broker, broker_trip) = broker_position("broker", "broker:demo:ESZ6", 50);
+        snapshot.accounts.push(trading_account(
+            "broker",
+            aeris_trading::AccountEnvironment::Demo,
+        ));
+        snapshot
+            .account_pnl
+            .push(account_pnl("broker", "USD", Some(75_000), 0, Some(-6)));
+        snapshot.positions.push(broker);
+        snapshot.round_trips.push(broker_trip);
+        snapshot.round_trips.push(round_trip("broker"));
+        snapshot
+            .connected_broker_accounts
+            .insert(aeris_trading::TradingAccountId::try_new("broker").expect("broker"));
+
+        let mut panel = BottomPanelState::default();
+        assert!(panel.apply_snapshot(&snapshot));
+        assert_eq!(panel.positions.rows.len(), 2);
+        assert_eq!(panel.history.account_name("practice"), "practice");
+        assert_eq!(panel.history.account_name("broker"), "broker");
+        assert_eq!(
+            panel
+                .positions
+                .rows
+                .iter()
+                .map(|index| {
+                    let position = &panel.positions.positions[*index];
+                    (
+                        position.account_id.as_str(),
+                        position.instrument_id.as_str(),
+                        position.closer,
+                        position.open_pnl.map(aeris_trading::FixedPoint::units),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "practice",
+                    "hyperliquid:perp:BTC",
+                    PositionCloser::Simulated,
+                    Some(-1_250)
+                ),
+                (
+                    "broker",
+                    "broker:demo:ESZ6",
+                    PositionCloser::Broker { connected: true },
+                    Some(-6)
+                ),
+            ]
+        );
+        panel.set_filter(TradeHistoryAccountFilter::Account("broker".to_string()));
+        assert_eq!(panel.positions.rows.len(), 1);
+        assert_eq!(
+            &*panel.history.rows,
+            &[2],
+            "only the closed broker trade is listed"
+        );
+        assert_eq!(
+            panel
+                .history
+                .symbol(&panel.history.round_trips[panel.history.rows[0]].instrument_id),
+            "hyperliquid:perp:BTC"
+        );
+        assert_eq!(
+            panel.positions.positions[panel.positions.rows[0]]
+                .account_id
+                .as_str(),
+            "broker"
+        );
+        assert_eq!(panel.history.summaries[0].currency, "USD");
+        assert_eq!(
+            panel.history.summaries[0]
+                .unrealized
+                .map(aeris_trading::FixedPoint::units),
+            Some(-6)
+        );
+    }
+
     fn shown_instruments(state: &BottomPanelState) -> Vec<&str> {
         state
             .positions

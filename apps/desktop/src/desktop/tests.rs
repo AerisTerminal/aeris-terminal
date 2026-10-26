@@ -5627,6 +5627,96 @@ fn a_pending_bracket_entry_carries_its_stop_and_target_on_the_chart() {
 }
 
 #[test]
+fn trading_projection_baseline_chart_account_and_risk_lock() {
+    use super::{ChartOrderRole, ChartOrderStatus};
+    let fixture = ChartOrderFixture::start("projection-baseline");
+    fixture
+        .service
+        .place_order(fixture.limit("resting-entry"))
+        .expect("resting order");
+    fixture
+        .service
+        .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket {
+            entry: fixture.limit("bracket-entry"),
+            template: aeris_trading_runtime::BracketStrategyTemplate {
+                template_id: "projection-bracket".to_string(),
+                revision: 1,
+                name: "Projection bracket".to_string(),
+                stop_offset_ticks: 50,
+                targets: vec![aeris_trading_runtime::BracketTarget {
+                    offset_ticks: 100,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("pending bracket");
+    let snapshot = fixture.service.snapshot().expect("owner snapshot");
+    let lines = super::chart_working_orders(
+        &snapshot,
+        &fixture.account,
+        fixture.instrument_id.as_str(),
+        None,
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| (line.role, line.status, line.price))
+            .collect::<Vec<_>>(),
+        [
+            (ChartOrderRole::Working, ChartOrderStatus::Working, 100.0),
+            (ChartOrderRole::Working, ChartOrderStatus::Working, 100.0),
+            (ChartOrderRole::StopLoss, ChartOrderStatus::Working, 99.5),
+            (ChartOrderRole::TakeProfit, ChartOrderStatus::Working, 101.0),
+        ]
+    );
+    assert_eq!(lines[0].id.as_str(), "resting-entry");
+    assert_eq!(lines[1].id.as_str(), "bracket-entry");
+    assert!(lines[2].id.as_str().starts_with("bracket-stop-"));
+    assert!(lines[3].id.as_str().starts_with("bracket-target-"));
+    assert!(lines[2..].iter().all(|line| {
+        line.parent_order_id
+            .as_ref()
+            .map(super::ChartOrderId::as_str)
+            == Some("bracket-entry")
+    }));
+    let account = snapshot
+        .accounts
+        .iter()
+        .find(|account| account.id == fixture.account)
+        .expect("selected account");
+    assert_eq!(account.display_name, "SIM • Chart fixture");
+    assert_eq!(account.currency, "USD");
+    let mut pane = super::TradingPnlState {
+        accounts: snapshot.accounts,
+        orders: snapshot.orders,
+        planned_legs: snapshot.planned_legs,
+        positions: snapshot.position_pnl,
+        ..super::TradingPnlState::default()
+    };
+    pane.order_entry.selected_account_id = Some(fixture.account.clone());
+    assert_eq!(
+        pane.instruments_with_activity(),
+        std::collections::HashSet::from([fixture.instrument_id.as_str()])
+    );
+    pane.risk_locks.push(aeris_trading_runtime::RiskLock {
+        account_id: fixture.account.clone(),
+        kind: aeris_trading_runtime::RiskLockKind::Manual,
+        reason: "manual test lock".to_string(),
+        locked_at_unix_nanos: 1,
+        profile_id: None,
+        profile_version: None,
+    });
+    assert_eq!(
+        super::selected_account_lock_reason(&pane),
+        Some("manual test lock")
+    );
+    fixture.finish();
+}
+
+#[test]
 fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_only() {
     use aeris_trading::{
         ClientOrderId, FixedPoint, Order, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,

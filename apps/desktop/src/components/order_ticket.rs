@@ -1501,6 +1501,35 @@ mod tests {
     }
 
     #[test]
+    fn trading_projection_baseline_ticket_account_and_status_labels() {
+        let mut account = aeris_trading::TradingAccount {
+            id: aeris_trading::TradingAccountId::try_new("fixture-account").expect("account"),
+            display_name: "Fixture practice".to_string(),
+            environment: aeris_trading::AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: None,
+        };
+        assert_eq!(
+            TicketBroker::of(&account).map(TicketBroker::label),
+            Some("Practice")
+        );
+        assert_eq!(account.display_name, "Fixture practice");
+        assert_eq!(ticket_status(None, 2), "Flat · 2 working orders");
+        account.environment = aeris_trading::AccountEnvironment::Demo;
+        account.venue_id = aeris_trading::venue::BROKER_VENUE_ID.to_string();
+        assert_eq!(
+            TicketBroker::of(&account).map(TicketBroker::label),
+            aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .find(|descriptor| descriptor.broker_venue_id == Some(account.venue_id.as_str()))
+                .map(|descriptor| descriptor.display_name)
+        );
+    }
+
+    #[test]
     fn quantities_and_money_keep_their_exact_scale() {
         assert_eq!(format_quantity(point(-1, 0)), "-1");
         assert_eq!(format_quantity(point(1_500, 3)), "1.5");

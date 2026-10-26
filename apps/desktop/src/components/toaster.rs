@@ -1761,6 +1761,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trading_projection_baseline_fill_and_broker_rejection_news() {
+        use aeris_trading::OrderEventKind;
+        let mut fills = NewsWatch::default();
+        let mut order_ends = NewsWatch::default();
+        let fill = fill(
+            "new-fill",
+            aeris_trading::OrderSide::Sell,
+            NOW_UNIX - 1_000_000_000,
+        );
+        let rejected = order_event(
+            OrderEventKind::Rejected,
+            None,
+            aeris_trading::venue::BROKER_VENUE_ID,
+            "margin exceeded",
+        );
+        assert_eq!(fresh_ids(&mut fills, 10, &[]), Vec::<String>::new());
+        assert_eq!(
+            order_ends
+                .fresh(
+                    10,
+                    &[],
+                    |event: &aeris_trading::OrderEvent| &event.id,
+                    |event| event.event_unix_nanos,
+                    NOW_UNIX
+                )
+                .len(),
+            0
+        );
+        assert_eq!(
+            fresh_ids(&mut fills, 11, std::slice::from_ref(&fill)),
+            ["new-fill"]
+        );
+        assert_eq!(
+            fill_notice_text(&fill, &[], &[]),
+            (
+                "Sold 0.01 EURUSD".to_string(),
+                "at 1.08412 · account".to_string()
+            )
+        );
+        let events = [rejected];
+        let first = order_ends.fresh(
+            11,
+            &events,
+            |event| &event.id,
+            |event| event.event_unix_nanos,
+            NOW_UNIX,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            order_end_notice(first[0], &[], &[], &[]),
+            Some((
+                ToastTone::Loss,
+                "Broker rejected an order".to_string(),
+                "margin exceeded".to_string(),
+            ))
+        );
+        assert_eq!(
+            fresh_ids(&mut fills, 11, std::slice::from_ref(&fill)),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            order_ends
+                .fresh(
+                    11,
+                    &events,
+                    |event| &event.id,
+                    |event| event.event_unix_nanos,
+                    NOW_UNIX
+                )
+                .len(),
+            0
+        );
+    }
+
     fn order_event(
         kind: aeris_trading::OrderEventKind,
         reason: Option<aeris_trading::OrderEventReason>,
