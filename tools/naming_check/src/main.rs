@@ -37,10 +37,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider panel labels",
     ),
     (
-        "apps/desktop/src/components/chart_context_menus.rs",
-        "legacy provider chart actions",
-    ),
-    (
         "apps/desktop/src/components/order_ticket.rs",
         "legacy provider ticket labels",
     ),
@@ -69,14 +65,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider workspace fixture",
     ),
     (
-        "apps/desktop/src/desktop/test_support/pane_harness.rs",
-        "diagnostic pane fixtures",
-    ),
-    (
-        "apps/desktop/src/desktop/test_support/provider_instruments.rs",
-        "diagnostic provider fixtures",
-    ),
-    (
         "apps/desktop/src/desktop/workspace_surface.rs",
         "legacy provider pane controls",
     ),
@@ -101,10 +89,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider worker fixtures",
     ),
     (
-        "apps/desktop/src/readiness_conformance.rs",
-        "legacy provider diagnostic fixture",
-    ),
-    (
         "apps/desktop/src/rithmic_shell.rs",
         "legacy provider connection shell awaiting M6.9",
     ),
@@ -112,10 +96,17 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "crates/ui/chart_integration/src/engine_bridge.rs",
         "legacy provider chart fixture",
     ),
-    (
-        "crates/ui/chart_integration/src/view.rs",
-        "legacy provider chart fixture",
-    ),
+];
+
+// Only these declared modules can be omitted from the production identity scan.
+// The declaration gates are checked below, so moving one into production fails.
+const DESKTOP_PROVIDER_FIXTURE_PATHS: &[&str] = &[
+    "apps/desktop/src/desktop/test_support/mod.rs",
+    "apps/desktop/src/desktop/test_support/fixture_market.rs",
+    "apps/desktop/src/desktop/test_support/market_events.rs",
+    "apps/desktop/src/desktop/test_support/provider_instruments.rs",
+    "apps/desktop/src/desktop/test_support/pane_harness.rs",
+    "apps/desktop/src/readiness_conformance.rs",
 ];
 
 /// Existing non-pane comparisons have a file-local purpose and a fixed count.
@@ -296,10 +287,45 @@ fn collect_desktop_fence_sources(
 }
 
 fn desktop_provider_identity(source: &str) -> bool {
-    let production = production_source_prefix(source).to_ascii_lowercase();
+    let production = production_source_prefix(source)
+        .to_ascii_lowercase()
+        .replace("logarithmic", "")
+        .replace("logarithm", "");
     ["rithmic", "tastytrade", "ctrader", "hyperliquid"]
         .iter()
         .any(|identity| production.contains(identity))
+}
+
+fn desktop_provider_identity_at_path(
+    path: &str,
+    source: &str,
+    gate_source: &str,
+    child_source: &str,
+    root_source: &str,
+) -> bool {
+    if !DESKTOP_PROVIDER_FIXTURE_PATHS.contains(&path) {
+        return desktop_provider_identity(source);
+    }
+    let root_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"desktop/test_support/mod.rs\"]\npub mod test_support;";
+    let diagnostic_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"readiness_conformance.rs\"]\nmod readiness_conformance;";
+    let pane_gate =
+        "#[cfg(test)]\n#[path = \"desktop/test_support/pane_harness.rs\"]\nmod pane_harness;";
+    let gated = match path {
+        "apps/desktop/src/readiness_conformance.rs" => gate_source.contains(diagnostic_gate),
+        "apps/desktop/src/desktop/test_support/pane_harness.rs" => gate_source.contains(pane_gate),
+        "apps/desktop/src/desktop/test_support/mod.rs" => gate_source.contains(root_gate),
+        _ => {
+            let name = path
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches(".rs");
+            gate_source.contains(root_gate)
+                && root_source.contains(root_gate)
+                && child_source.contains(&format!("mod {name};"))
+        }
+    };
+    !gated
 }
 
 fn has_process_global_desktop_trading(source: &str) -> bool {
@@ -573,6 +599,11 @@ fn desktop_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     }
     let mut allowed = BTreeSet::new();
     let mut violations = Vec::new();
+    for path in DESKTOP_PROVIDER_FIXTURE_PATHS {
+        if !root.join(path).is_file() {
+            violations.push(PathBuf::from(path));
+        }
+    }
     for (path, reason) in DESKTOP_PROVIDER_ALLOWLIST {
         if reason.trim().is_empty()
             || !allowed.insert((*path).to_string())
@@ -596,14 +627,37 @@ fn collect_desktop_provider_sources(
         let path = entry?.path();
         if path.is_dir() {
             collect_desktop_provider_sources(root, &path, observed)?;
-        } else if path.extension().is_some_and(|extension| extension == "rs")
-            && desktop_provider_identity(&fs::read_to_string(&path)?)
-        {
-            observed.insert(
-                relative_to(root, &path)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let relative = relative_to(root, &path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = fs::read_to_string(&path)?;
+            let (gate_source, child_source, root_source) = if DESKTOP_PROVIDER_FIXTURE_PATHS
+                .contains(&relative.as_str())
+            {
+                let library = fs::read_to_string(root.join("apps/desktop/src/lib.rs"))?;
+                let declaration = if relative == "apps/desktop/src/readiness_conformance.rs"
+                    || relative == "apps/desktop/src/desktop/test_support/pane_harness.rs"
+                {
+                    fs::read_to_string(root.join("apps/desktop/src/desktop.rs"))?
+                } else {
+                    library.clone()
+                };
+                let children =
+                    fs::read_to_string(root.join("apps/desktop/src/desktop/test_support/mod.rs"))?;
+                (declaration, children, library)
+            } else {
+                (String::new(), String::new(), String::new())
+            };
+            if desktop_provider_identity_at_path(
+                &relative,
+                &source,
+                &gate_source,
+                &child_source,
+                &root_source,
+            ) {
+                observed.insert(relative);
+            }
         }
     }
     Ok(())
@@ -1395,12 +1449,21 @@ mod tests {
             "fn label(descriptor: &ProviderDescriptor) -> &str { descriptor.display_name }\n\
              #[cfg(test)] mod tests { const FIXTURE: &str = \"rithmic-test:\"; }\n"
         ));
+        for source in [
+            "PriceScaleMode::Logarithmic",
+            "\"Logarithmic\"",
+            "logarithm",
+        ] {
+            assert!(!super::desktop_provider_identity(source), "{source}");
+        }
     }
 
     #[test]
     fn desktop_provider_neutrality_rejects_new_identity_and_id_formats() {
         for identity in [
             "RITHMIC",
+            "SavedRithmicLogin",
+            "connect_rithmic",
             "TastyTrade",
             "cTrader",
             "HyperLiquid",
@@ -1415,6 +1478,73 @@ mod tests {
                 "{identity} must not be introduced into provider-neutral production"
             );
         }
+    }
+
+    #[test]
+    fn desktop_provider_neutrality_excludes_only_gated_fixture_paths() {
+        let gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n\
+                    #[path = \"desktop/test_support/mod.rs\"]\npub mod test_support;";
+        let source = "const ID: &str = \"rithmic-test:\";";
+        let fixture = "apps/desktop/src/desktop/test_support/provider_instruments.rs";
+        assert!(!super::desktop_provider_identity_at_path(
+            fixture,
+            source,
+            gate,
+            "mod provider_instruments;",
+            gate
+        ));
+        assert!(super::desktop_provider_identity_at_path(
+            fixture,
+            source,
+            "pub mod test_support;",
+            "mod provider_instruments;",
+            gate
+        ));
+        assert!(super::desktop_provider_identity_at_path(
+            fixture,
+            source,
+            gate,
+            "mod other;",
+            gate
+        ));
+        assert!(super::desktop_provider_identity_at_path(
+            "apps/desktop/src/desktop/production.rs",
+            source,
+            gate,
+            "mod provider_instruments;",
+            gate
+        ));
+        let readiness = "apps/desktop/src/readiness_conformance.rs";
+        let diagnostic_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n\
+                               #[path = \"readiness_conformance.rs\"]\nmod readiness_conformance;";
+        assert!(!super::desktop_provider_identity_at_path(
+            readiness,
+            source,
+            diagnostic_gate,
+            "",
+            ""
+        ));
+        assert!(super::desktop_provider_identity_at_path(
+            readiness,
+            source,
+            "mod readiness_conformance;",
+            "",
+            ""
+        ));
+        let pane = "apps/desktop/src/desktop/test_support/pane_harness.rs";
+        let test_gate =
+            "#[cfg(test)]\n#[path = \"desktop/test_support/pane_harness.rs\"]\nmod pane_harness;";
+        assert!(!super::desktop_provider_identity_at_path(
+            pane, source, test_gate, "", ""
+        ));
+        assert!(super::desktop_provider_identity_at_path(
+            pane,
+            source,
+            "mod pane_harness;",
+            "",
+            ""
+        ));
+        assert_eq!(super::DESKTOP_PROVIDER_FIXTURE_PATHS.len(), 6);
     }
 
     #[test]
@@ -1446,26 +1576,11 @@ mod tests {
             super::DESKTOP_PROVIDER_ALLOWLIST.len(),
             "duplicate provider-neutrality exception"
         );
-        let mut observed = BTreeSet::new();
-        for root in ["apps/desktop/src", "crates/ui/chart_integration/src"] {
-            for path in production_sources_under(root) {
-                let source = fs::read_to_string(&path).expect("source");
-                if super::desktop_provider_identity(&source) {
-                    let relative = relative_string(&path);
-                    assert!(
-                        expected.contains(relative.as_str()),
-                        "{relative} has an unreviewed provider identity"
-                    );
-                    observed.insert(relative);
-                }
-            }
-        }
         assert!(
-            provider_allowlist_matches(
-                expected.iter().copied(),
-                observed.iter().map(String::as_str),
-            ),
-            "provider-neutrality allow-list has an unreviewed or stale entry: expected {expected:?}, observed {observed:?}"
+            super::desktop_provider_violations(repository_root())
+                .expect("scan desktop sources")
+                .is_empty(),
+            "provider-neutrality allow-list has an unreviewed or stale entry: {expected:?}"
         );
     }
 

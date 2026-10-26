@@ -130,10 +130,14 @@ violations and missing verification explicitly, and never describe them as satis
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
   or canonical candle state.
 - `desktop_source_is_provider_neutral` scans production desktop and chart-integration Rust source
-  for provider names and provider-specific ID formats. During M6.7-M6.9, only the exact
+  for provider names and provider-specific ID formats; `Logarithmic` and `logarithm` are not
+  provider identities. Exact fixture module paths compiled only under `cfg(test)` or
+  `cfg(any(test, feature = "diagnostics"))` are outside the production scan, and the rule
+  checks their gated declarations; moving the same identity to an ungated path fails.
+  During M6.7-M6.9, only the exact
   reasoned file exceptions in `tools/naming_check` may retain existing provider identities;
   an exception must be removed when its final match disappears. Do not add a new exception
-  for new desktop provider logic. The final exception is the logo mapping in `assets.rs`.
+  for new desktop provider logic. The final production exception is the logo mapping in `assets.rs`.
 - `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`; the module is
   compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
   construct fixture market publications. The diagnostic conformance command is gated likewise.

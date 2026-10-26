@@ -2147,6 +2147,14 @@ active item (parts 1-8); M6.8-M6.12 are open.
     deterministic endpoint regression exercises each mismatch. Actual
     descriptor projection, replay parser deletion, final neutrality exceptions
     and guarded GUI evidence remain open; M6.7 is unchecked.
+  - Part 9 (2026-10-26, D2): neutrality scans no longer mistake Logarithmic
+    for a provider identity. Six exact fixture paths are excluded only while
+    their module declarations retain the test/diagnostics gate; ungated
+    identities fail. Five stale exceptions were removed, leaving only
+    matching production exceptions. VAL-DSK-101 code complete and validated;
+    UI-03 and MD-10 remain open pending the descriptor projection and final
+    assets-only allow-list. M6.7 remains unchecked: VAL-DSK-025, VAL-DSK-102,
+    VAL-DSK-103 and guarded GUI VAL-DSK-114 not yet validated.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
@@ -2223,6 +2231,12 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- `desktop_source_is_provider_neutral` ignores only exact test/diagnostics-gated
+  fixture module paths after checking their declarations; Logarithmic and
+  logarithm are non-provider words. The same identity in ungated production
+  fails, and the interim reasoned production allow-list shrinks toward the
+  sole final `assets.rs` logo mapping (M6.7 Part 9,
+  `fix(naming): distinguish provider identity from gated fixtures`).
 - Desktop market epoch/generation comparisons are checked by
   `desktop_market_fences_stay_in_accept`: pane acceptance belongs to
   `ChartPaneController`, while unrelated release, app-command and receipt
@@ -2756,6 +2770,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.3/M6.4/M6.5 docs(stabilization): guarded isolated-root GUI baseline at ddbbde60. VAL-DSK-013/015/017 have fresh timed or switch/restart evidence; VAL-DSK-014/020 and VAL-CROSS-002 remain explicitly not yet validated for the exact menu, UIA/time-window and all-live/session clauses respectively. Evidence and helper correction are in the mission library, not in the public repository. M6.3 remains unchecked for its pending code feature; M6.4/M6.5 remain code-checked under D1.
 - 2026-10-26 M6.3 refactor(desktop): own selection restore and fence comparisons. The prior instrument/interval and toolbar in-progress state now come from `ChartPaneController`; the provider-named workspace field and its restore method are gone. PaneHarness failure/cover/interleaving regressions and controller restore-once plus the naming_check positive/negative/stale tests pass. MD-15/UI-02 code findings close, but M6.3 remains unchecked because VAL-DSK-014's guarded six-interval storm is not yet validated.
 - 2026-10-26 M6.5 fix(market): restored four-pane/second-tab `select_and_demand` regression catches a provider-session queue refusal painted terminal before the fix. One normalized capacity error and first-demand retry retention leave all five panes ready after covering histories complete; VAL-DSK-115 code regression passes. VAL-DSK-020/VAL-CROSS-002 remain guarded-GUI pending.
+- 2026-10-26 M6.7 Part 9 fix(naming): distinguish provider identity from gated fixtures. `desktop_provider_neutrality_accepts_descriptor_driven_source` rejects the Logarithmic false positive; `desktop_provider_neutrality_rejects_new_identity_and_id_formats` retains provider and ID coverage; `desktop_provider_neutrality_excludes_only_gated_fixture_paths` rejects ungated fixtures and production identities; stale-entry and production-scan tests remain enforced. D2 applied, UI-03/MD-10 remain open pending descriptor work.
 
 ## 7. Known gaps / deferred
 
