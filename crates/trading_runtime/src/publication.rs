@@ -9,10 +9,17 @@
 //! `lagged = true` with a freshly resynchronized working set.
 
 use crate::service::Command;
-use crate::{OrderGroup, PositionPnl, RecoveryNotice, RiskLock, VenueNotice};
+use crate::{
+    BracketView, GroupKind, OrderGroup, PlannedLeg, PositionPnl, PositionProtection,
+    ProtectionRole, ProtectionView, RecoveryNotice, RiskLock, RiskMeter, RiskProfile, SessionPlan,
+    TradeRoundTrip, TradingInstrument, VenueNotice,
+};
+use aeris_instruments::InstrumentId;
 use aeris_trading::market::{FeedReason, FeedState};
-use aeris_trading::{AccountPnl, Fill, Order, OrderId, Position, TradingAccount};
-use std::collections::VecDeque;
+use aeris_trading::{
+    AccountPnl, Fill, Order, OrderEvent, OrderId, Position, TradingAccount, TradingAccountId,
+};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -26,30 +33,88 @@ pub const SUBSCRIPTION_QUEUE_CAPACITY: usize = 1_024;
 pub const MARK_PUBLICATION_INTERVAL: Duration = Duration::from_millis(100);
 /// The working set carries at most this many of the newest fills, never deeper history.
 pub const WORKING_SET_FILL_LIMIT: usize = 500;
+/// The working set carries only the newest order events; older events remain in history.
+pub const WORKING_SET_EVENT_LIMIT: usize = 500;
+/// Round trips are reconstructed from at most this many recent fills, plus open positions.
+pub const WORKING_SET_ROUND_TRIP_FILL_LIMIT: usize = WORKING_SET_FILL_LIMIT;
 
 /// The current trading working set: open orders (including inactive held legs), active
-/// order groups, open positions and the newest fills, with the account and risk projections
-/// a client needs to render. It carries no order/fill history beyond
-/// [`WORKING_SET_FILL_LIMIT`] recent fills; use `TradingService::history` for the past.
+/// groups, open positions and bounded recent event, fill and round-trip windows, plus
+/// the account, risk and protection projections a client needs to render. Older order
+/// history is served by `TradingService::history`, not by this publication.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkingSet {
     /// The owner revision this working set reflects; equal revisions are identical views.
     pub revision: u64,
     pub accounts: Vec<TradingAccount>,
+    /// Registered terms for open orders, positions and current ticket interests.
+    pub instruments: Vec<TradingInstrument>,
     pub orders: Vec<Order>,
+    /// The newest events, newest first, as in the snapshot window.
+    pub order_events: Vec<OrderEvent>,
     /// Feed readiness for each open order, derived from the owner's verified routes and feed.
     pub order_feed_states: Vec<OrderFeedStatus>,
     pub order_groups: Vec<OrderGroup>,
     pub positions: Vec<Position>,
     /// The newest fills, oldest first within the window.
     pub fills: Vec<Fill>,
+    /// Recent executions and open trades, newest activity first.
+    pub round_trips: Vec<TradeRoundTrip>,
+    pub connected_broker_accounts: BTreeSet<TradingAccountId>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
+    pub risk_profiles: Vec<RiskProfile>,
+    pub risk_meters: Vec<RiskMeter>,
     pub risk_locks: Vec<RiskLock>,
+    pub session_plans: Vec<SessionPlan>,
+    /// Active brackets and their still-pending legs; completed groups are history.
+    pub managed_brackets: Vec<BracketView>,
+    pub planned_legs: Vec<PlannedLeg>,
+    /// Open standalone protective orders; group-owned bracket roles are in `managed_brackets`.
+    pub protective_orders: Vec<ProtectionView>,
+    pub market_observation_error: Option<String>,
     /// Startup repairs the running process performed, published until they are acknowledged.
     pub recovery_notices: Vec<RecoveryNotice>,
     /// The newest broker venue notices, oldest first.
     pub venue_notices: Vec<VenueNotice>,
+}
+
+struct WorkingGroupViews {
+    groups: Vec<OrderGroup>,
+    brackets: Vec<BracketView>,
+    planned_legs: Vec<PlannedLeg>,
+    protections: Vec<ProtectionView>,
+}
+
+impl WorkingSet {
+    /// The active group or standalone protection role of a currently visible order.
+    #[must_use]
+    pub fn protective_role(
+        &self,
+        client_order_id: &aeris_trading::ClientOrderId,
+    ) -> Option<ProtectionRole> {
+        crate::core::protective_role(
+            &self.managed_brackets,
+            &self.protective_orders,
+            client_order_id,
+        )
+    }
+
+    /// The first-triggering stop and target for an open account position.
+    #[must_use]
+    pub fn position_protection(
+        &self,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+    ) -> PositionProtection {
+        crate::core::position_protection(
+            &self.orders,
+            &self.managed_brackets,
+            &self.protective_orders,
+            account_id,
+            instrument_id,
+        )
+    }
 }
 
 /// A per-order feed projection; never an independent feed or route authority.
@@ -387,13 +452,26 @@ impl crate::TradingCore {
             .cloned()
             .collect::<Vec<_>>();
         fills.reverse();
-        let orders = self
+        let orders = self.state.orders.open_orders().cloned().collect::<Vec<_>>();
+        let positions = self
             .state
-            .orders
+            .positions
             .values()
-            .filter(|order| order.status.is_open())
+            .filter(|position| position.net_quantity.units() != 0)
             .cloned()
             .collect::<Vec<_>>();
+        let instrument_ids = orders
+            .iter()
+            .map(|order| &order.instrument_id)
+            .chain(positions.iter().map(|position| &position.instrument_id))
+            .chain(self.ticket_interest.keys())
+            .collect::<BTreeSet<&InstrumentId>>();
+        let WorkingGroupViews {
+            groups: order_groups,
+            brackets: managed_brackets,
+            planned_legs,
+            protections: protective_orders,
+        } = self.working_set_group_views()?;
         let order_feed_states = orders
             .iter()
             .map(|order| OrderFeedStatus {
@@ -406,33 +484,85 @@ impl crate::TradingCore {
         Ok(WorkingSet {
             revision: self.state.revision,
             accounts: self.state.accounts.values().cloned().collect(),
+            instruments: instrument_ids
+                .into_iter()
+                .filter_map(|id| self.state.instruments.get(id).cloned())
+                .collect(),
             orders,
+            order_events: self
+                .state
+                .order_events
+                .iter()
+                .rev()
+                .take(WORKING_SET_EVENT_LIMIT)
+                .cloned()
+                .collect(),
             order_feed_states,
-            order_groups: self
-                .state
-                .order_groups
-                .values()
-                .filter(|group| {
-                    matches!(
-                        group.status,
-                        crate::GroupStatus::Pending | crate::GroupStatus::Active
-                    )
-                })
-                .cloned()
-                .collect(),
-            positions: self
-                .state
-                .positions
-                .values()
-                .filter(|position| position.net_quantity.units() != 0)
-                .cloned()
-                .collect(),
+            order_groups,
+            positions,
             fills,
+            round_trips: crate::round_trip::project_round_trips(
+                self.state
+                    .fills
+                    .iter()
+                    .rev()
+                    .take(WORKING_SET_ROUND_TRIP_FILL_LIMIT),
+                &self.state.positions,
+                &self.state.fill_accounting,
+                &self.state.trade_cycles,
+            )?,
+            connected_broker_accounts: self.connected_broker_accounts.clone(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
+            risk_profiles: self.state.risk_profiles.values().cloned().collect(),
+            risk_meters: self.risk_meters()?,
             risk_locks: self.projected_risk_locks(),
+            session_plans: self.state.session_plans.values().cloned().collect(),
+            managed_brackets,
+            planned_legs,
+            protective_orders,
+            market_observation_error: self.market_observation_error.clone(),
             recovery_notices: self.recovery_notices.clone(),
             venue_notices: self.broker_sync.notices(),
+        })
+    }
+
+    fn working_set_group_views(&self) -> Result<WorkingGroupViews, String> {
+        let active_groups = self
+            .state
+            .active_group_ids
+            .iter()
+            .filter_map(|id| self.state.order_groups.get(id))
+            .collect::<Vec<_>>();
+        let managed_brackets = active_groups
+            .iter()
+            .filter(|group| group.kind == GroupKind::Bracket && !group.legs.is_empty())
+            .map(|group| self.managed_bracket_view(group))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut protective_orders = active_groups
+            .iter()
+            .filter(|group| group.kind == GroupKind::Protection)
+            .flat_map(|group| &group.legs)
+            .filter_map(|leg| {
+                self.state
+                    .orders
+                    .get(&leg.order_id)
+                    .filter(|order| order.status.is_open())
+                    .map(|order| ProtectionView {
+                        client_order_id: order.client_order_id.clone(),
+                        role: match leg.role {
+                            crate::LegRole::StopLoss => ProtectionRole::StopLoss,
+                            crate::LegRole::TakeProfit { .. } => ProtectionRole::TakeProfit,
+                        },
+                    })
+            })
+            .collect::<Vec<_>>();
+        protective_orders.sort_by(|left, right| left.client_order_id.cmp(&right.client_order_id));
+        Ok(WorkingGroupViews {
+            groups: active_groups.into_iter().cloned().collect(),
+            brackets: managed_brackets,
+            planned_legs: self.owned_planned_legs(),
+            protections: protective_orders,
         })
     }
 

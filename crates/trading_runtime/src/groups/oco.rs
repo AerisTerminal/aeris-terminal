@@ -114,7 +114,7 @@ impl TradingCore {
             .revision
             .checked_add(1)
             .ok_or_else(|| "order group revision overflowed".to_string())?;
-        self.state.order_groups.insert(group_id.to_string(), group);
+        self.state.put_group(group);
         self.bump_revision()
     }
 }

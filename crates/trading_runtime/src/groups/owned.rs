@@ -551,7 +551,7 @@ impl TradingCore {
                         .orders
                         .insert(activation.order.id.clone(), activation.order);
                 }
-                self.state.order_groups.insert(group_id.to_string(), group);
+                self.state.put_group(group);
                 self.bump_revision()
             }
             Err(reason) => self.reject_owned_bracket(group, &entry_order, observation, &reason),
@@ -685,9 +685,7 @@ impl TradingCore {
             .checked_add(1)
             .ok_or_else(|| "order group revision overflowed".to_string())?;
         let legs = group.legs.clone();
-        self.state
-            .order_groups
-            .insert(group.group_id.clone(), group);
+        self.state.put_group(group);
         for leg in &legs {
             let Some(order) = self.state.orders.get(&leg.order_id).cloned() else {
                 continue;
@@ -768,7 +766,7 @@ impl TradingCore {
             .revision
             .checked_add(1)
             .ok_or_else(|| "order group revision overflowed".to_string())?;
-        self.state.order_groups.insert(group_id.to_string(), group);
+        self.state.put_group(group);
         self.bump_revision()
     }
 
@@ -786,7 +784,7 @@ impl TradingCore {
             .revision
             .checked_add(1)
             .ok_or_else(|| "order group revision overflowed".to_string())?;
-        self.state.order_groups.insert(group_id.to_string(), group);
+        self.state.put_group(group);
         self.bump_revision()
     }
 
@@ -1213,7 +1211,12 @@ impl TradingCore {
     /// exactly like a legacy bracket whose legs cannot be priced.
     pub(crate) fn owned_planned_legs(&self) -> Vec<PlannedLeg> {
         let mut planned = Vec::new();
-        for group in self.state.order_groups.values() {
+        for group in self
+            .state
+            .active_group_ids
+            .iter()
+            .filter_map(|id| self.state.order_groups.get(id))
+        {
             if group.kind != GroupKind::Bracket || group.status != GroupStatus::Pending {
                 continue;
             }
@@ -1661,7 +1664,7 @@ impl TradingCore {
                 if !self.quote_planning {
                     self.store.put_order_group_projection(&group)?;
                 }
-                self.state.order_groups.insert(group_id, group);
+                self.state.put_group(group);
             }
         }
         Ok(())

@@ -75,7 +75,7 @@ pub use groups::model::{MovePlannedLeg, PlannedLeg};
 pub use publication::{
     MARK_PUBLICATION_INTERVAL, MAXIMUM_SUBSCRIPTIONS, OrderFeedStatus, SUBSCRIPTION_QUEUE_CAPACITY,
     SubscriptionUpdate, TradingEvent, TradingEventCause, TradingSubscription,
-    WORKING_SET_FILL_LIMIT, WorkingSet,
+    WORKING_SET_EVENT_LIMIT, WORKING_SET_FILL_LIMIT, WORKING_SET_ROUND_TRIP_FILL_LIMIT, WorkingSet,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -557,15 +557,11 @@ impl TradingSnapshot {
     /// stop loss or take profit.
     #[must_use]
     pub fn protective_role(&self, client_order_id: &ClientOrderId) -> Option<ProtectionRole> {
-        self.managed_brackets
-            .iter()
-            .find_map(|bracket| groups::managed_bracket_role(bracket, client_order_id))
-            .or_else(|| {
-                self.protective_orders
-                    .iter()
-                    .find(|protective| &protective.client_order_id == client_order_id)
-                    .map(|protective| protective.role)
-            })
+        protective_role(
+            &self.managed_brackets,
+            &self.protective_orders,
+            client_order_id,
+        )
     }
 
     /// The open stop loss and take profit on an account's position in an instrument. With
@@ -576,31 +572,63 @@ impl TradingSnapshot {
         account_id: &TradingAccountId,
         instrument_id: &InstrumentId,
     ) -> PositionProtection {
-        let mut stop_loss: Option<(i64, FixedPoint)> = None;
-        let mut take_profit: Option<(i64, FixedPoint)> = None;
-        for order in self.orders.iter().filter(|order| {
-            order.status.is_open()
-                && &order.account_id == account_id
-                && &order.instrument_id == instrument_id
-        }) {
-            let Some(role) = self.protective_role(&order.client_order_id) else {
-                continue;
-            };
-            let Some((key, price)) = groups::protection_trigger(order, role) else {
-                continue;
-            };
-            let slot = match role {
-                ProtectionRole::StopLoss => &mut stop_loss,
-                ProtectionRole::TakeProfit => &mut take_profit,
-            };
-            if slot.is_none_or(|(first, _)| key < first) {
-                *slot = Some((key, price));
-            }
+        position_protection(
+            &self.orders,
+            &self.managed_brackets,
+            &self.protective_orders,
+            account_id,
+            instrument_id,
+        )
+    }
+}
+
+pub(super) fn protective_role(
+    brackets: &[BracketView],
+    protections: &[ProtectionView],
+    client_order_id: &ClientOrderId,
+) -> Option<ProtectionRole> {
+    brackets
+        .iter()
+        .find_map(|bracket| groups::managed_bracket_role(bracket, client_order_id))
+        .or_else(|| {
+            protections
+                .iter()
+                .find(|protective| &protective.client_order_id == client_order_id)
+                .map(|protective| protective.role)
+        })
+}
+
+pub(super) fn position_protection(
+    orders: &[Order],
+    brackets: &[BracketView],
+    protections: &[ProtectionView],
+    account_id: &TradingAccountId,
+    instrument_id: &InstrumentId,
+) -> PositionProtection {
+    let mut stop_loss: Option<(i64, FixedPoint)> = None;
+    let mut take_profit: Option<(i64, FixedPoint)> = None;
+    for order in orders.iter().filter(|order| {
+        order.status.is_open()
+            && &order.account_id == account_id
+            && &order.instrument_id == instrument_id
+    }) {
+        let Some(role) = protective_role(brackets, protections, &order.client_order_id) else {
+            continue;
+        };
+        let Some((key, price)) = groups::protection_trigger(order, role) else {
+            continue;
+        };
+        let slot = match role {
+            ProtectionRole::StopLoss => &mut stop_loss,
+            ProtectionRole::TakeProfit => &mut take_profit,
+        };
+        if slot.is_none_or(|(first, _)| key < first) {
+            *slot = Some((key, price));
         }
-        PositionProtection {
-            stop_loss: stop_loss.map(|(_, price)| price),
-            take_profit: take_profit.map(|(_, price)| price),
-        }
+    }
+    PositionProtection {
+        stop_loss: stop_loss.map(|(_, price)| price),
+        take_profit: take_profit.map(|(_, price)| price),
     }
 }
 
@@ -2106,12 +2134,10 @@ impl TradingCore {
         }
         self.state.next_sequence = step.next_sequence;
         for group_id in step.deleted_groups {
-            self.state.order_groups.remove(&group_id);
+            self.state.remove_group(&group_id);
         }
         for group in step.groups {
-            self.state
-                .order_groups
-                .insert(group.group_id.clone(), group);
+            self.state.put_group(group);
         }
         for (order, event) in step.inserted.into_iter().chain(step.updated) {
             self.state.orders.insert(order.id.clone(), order);

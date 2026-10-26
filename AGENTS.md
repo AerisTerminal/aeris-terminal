@@ -245,8 +245,13 @@ violations and missing verification explicitly, and never describe them as satis
   a trailing flush, and stays silent while idle. At most eight live subscriptions exist, each
   with a 1,024-event slot that overflows into a `lagged` resync with a fresh working set; paged
   order history is served by the `aeris-trading-history` thread on a read-only SQLite
-  connection with 500-row keyset pages. The compatibility `snapshot()` view is not bounded by
-  stored-order count; retention bounds the live set.
+  connection with 500-row keyset pages. The working set projects registered terms only for
+  open orders, open positions and ticket interests; its newest event and fill windows each
+  have a 500-row limit, and round trips use at most 500 fills plus open positions. Active
+  bracket/protection views come from a live group-id index maintained with group transitions,
+  never a scan of terminal group history. Broker connection, risk profile/meter, session plan
+  and market observation error projections remain owner-owned. The compatibility `snapshot()`
+  view is not bounded by stored-order count; retention bounds the live set.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates.

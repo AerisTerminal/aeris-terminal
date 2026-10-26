@@ -2251,6 +2251,17 @@ active item (parts 1-8); M6.8-M6.12 are open.
     (`announce_trading`). Remaining: `TradingPnlState`, `keep_trading_pnl_fresh` and
     `schedule_trading_refresh` (250 ms) and `service.snapshot()`; the desktop does not call
     `TradingService::subscribe` yet.
+  - Status (2026-10-26 owner projection): code complete at `trading_runtime`; VAL-DSK-107
+    validated by `working_set_fields_match_snapshot_projection`,
+    `working_set_windows_respect_bounds`, `working_set_includes_registered_ticket_terms_without_an_order`,
+    `working_set_active_bracket_and_protection_match_snapshot`,
+    `mark_only_change_keeps_non_mark_fields` and `lagged_resync_carries_new_fields`.
+    Open order/active group indexes and 500-row recent event/fill windows keep publication
+    independent of terminal order/group history; existing 500-row keyset history reads remain
+    on `aeris-trading-history`. TR-05's runtime projection portion closes; TR-05 desktop,
+    TR-10 and UI-08 remain open. M6.10 stays unchecked: code complete at owner boundary;
+    VAL-DSK-031/032/033/034/035/108/109 not yet validated by the desktop and guarded GUI
+    features (D13). No live Rithmic session was exercised.
 - [ ] M6.11 trading-intents-and-snapshot-removal - Revisioned chart intents and scoped emergency buttons; remove `TradingSnapshot`
   - Status (2026-10-23 audit): chart intents already carry `expected_revision`. Remaining: the
     desktop does not handle `StaleRevision`, flatten still needs a current bid and ask from the
@@ -2310,6 +2321,12 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- Trading publications use the `StoredState` live group-id index, updated atomically with
+  every owner group transition and seeded on recovery. Open-order and group projections
+  never scan terminal order/group history; order events and fills publish at most 500 rows
+  each, round trips reconstruct from at most 500 fills plus open positions, and older order
+  history remains on the 500-row read-only keyset reader (M6.10 owner projection,
+  `feat(trading): project bounded desktop working set`).
 - Runtime login metadata comes from provider registration as a static field schema; the
   provider-id-keyed API dispatches Rithmic login checks and credential storage only through
   its native vault entry. Secret field values have no `Debug`, and summary/server discovery
@@ -2893,6 +2910,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.9 runtime part feat(market): publish provider-neutral vault login API. `registered_login_schema_is_provider_owned` checks the Rithmic field/secret schema and Hyperliquid Public descriptor; `neutral_login_writes_only_the_provider_vault_entry` uses only an injected vault and a scripted acceptance, checks other entries survive sign-in/forget and the saved summary omits credentials. UI-03/MD-10 remain open for the form and attribution. M6.9 stays unchecked: code complete at the runtime boundary; VAL-DSK-105 desktop scan, VAL-DSK-030/106 and guarded GUI not yet validated.
 - 2026-10-26 M6.9 desktop form part refactor(desktop): render provider login from published schema. `provider_login_form_writes_only_through_vault_seam`, `connection_list_includes_each_published_provider_in_order`, `neutral_login_writes_only_the_provider_vault_entry` and the native-vault naming test cover form dispatch, exact Accounts rows and runtime vault isolation. VAL-DSK-105/030 code checks close; UI-03's form portion closes. M6.9 stays unchecked: attribution VAL-DSK-024/106 and guarded login GUI not yet validated (D2/D13).
 - 2026-10-26 M6.7/M6.9 refactor(desktop): scope provider attribution to held sessions. `attribution_follows_held_provider_session`, `provider_notices_carry_the_requested_year_and_owners`, `broker_ticket_uses_registered_venue_display_name`, the existing light/dark asset tests and `desktop_source_is_provider_neutral` cover descriptor marks, About notices, recovery, unattributed providers and the final assets-only exception (D2). MD-10/UI-03 code findings close. M6.7 remains unchecked: code complete; VAL-DSK-114 not yet validated. M6.9 remains unchecked: code complete; VAL-DSK-029 not yet validated (D13).
+- 2026-10-26 M6.10 owner projection feat(trading): project bounded desktop working set - `working_set_fields_match_snapshot_projection`, `working_set_windows_respect_bounds`, `working_set_includes_registered_ticket_terms_without_an_order`, `working_set_active_bracket_and_protection_match_snapshot`, `mark_only_change_keeps_non_mark_fields`, `lagged_resync_carries_new_fields` and the existing idle/mark/history tests cover VAL-DSK-107 with open-only indexed groups, bounded recent windows and paged historical reads; M6.10 remains unchecked pending desktop/GUI validation.
 
 ## 7. Known gaps / deferred
 

@@ -50,10 +50,10 @@ use super::{
     TradeCopierTarget, TradingInstrument, TradingRetention, TrailingDrawdownMode, TrailingStopRule,
     UserRecord,
 };
-use crate::core::OrderGroup;
 use crate::core::ledger::{
     CostBasis, FillAccounting, LedgerCheckpoint, PositionCheckpoint, TradeCycle,
 };
+use crate::core::{GroupStatus, OrderGroup};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
     InstrumentMetadataProvenance, PriceGrid, SessionHours,
@@ -69,7 +69,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::{self, Write as _},
     fs,
     io::Read as _,
@@ -250,6 +250,25 @@ pub(super) struct StoredState {
     pub strategy_templates: BTreeMap<String, BracketStrategyTemplate>,
     /// Owned order groups: brackets, OCO pairs and standalone protections.
     pub order_groups: BTreeMap<String, OrderGroup>,
+    /// A live-only index, updated with every group transition so publications never scan
+    /// the durable history of completed groups.
+    pub active_group_ids: BTreeSet<String>,
+}
+
+impl StoredState {
+    pub(crate) fn put_group(&mut self, group: OrderGroup) {
+        if matches!(group.status, GroupStatus::Pending | GroupStatus::Active) {
+            self.active_group_ids.insert(group.group_id.clone());
+        } else {
+            self.active_group_ids.remove(&group.group_id);
+        }
+        self.order_groups.insert(group.group_id.clone(), group);
+    }
+
+    pub(crate) fn remove_group(&mut self, id: &str) {
+        self.active_group_ids.remove(id);
+        self.order_groups.remove(id);
+    }
 }
 
 pub(super) struct TradingStore {
@@ -491,6 +510,12 @@ impl TradingStore {
         let discipline_states = self.load_discipline_states()?;
         let trade_copiers = self.load_trade_copiers()?;
         let strategy_templates = self.load_strategy_templates()?;
+        let order_groups = self.load_order_groups()?;
+        let active_group_ids = order_groups
+            .iter()
+            .filter(|(_, group)| matches!(group.status, GroupStatus::Pending | GroupStatus::Active))
+            .map(|(id, _)| id.clone())
+            .collect();
         Ok(StoredState {
             revision,
             next_sequence,
@@ -521,7 +546,8 @@ impl TradingStore {
             discipline_states,
             trade_copiers,
             strategy_templates,
-            order_groups: self.load_order_groups()?,
+            order_groups,
+            active_group_ids,
         })
     }
 }

@@ -5,7 +5,7 @@ use super::*;
 use crate::store::create_schema_at;
 use crate::{
     HistoryQuery, MAXIMUM_HISTORY_PAGE, MAXIMUM_SUBSCRIPTIONS, SUBSCRIPTION_QUEUE_CAPACITY,
-    TradingEventCause, WORKING_SET_FILL_LIMIT,
+    TradingEventCause, WORKING_SET_EVENT_LIMIT, WORKING_SET_FILL_LIMIT,
 };
 use std::collections::BTreeSet;
 
@@ -362,6 +362,9 @@ fn working_set_and_snapshot_stay_bounded_at_50000_orders() {
     assert_eq!(working_set.fills.len(), WORKING_SET_FILL_LIMIT);
     assert_eq!(working_set.positions.len(), 1);
     assert_eq!(working_set.accounts.len(), 1);
+    assert_eq!(working_set.instruments.len(), 1);
+    assert_eq!(working_set.order_events.len(), WORKING_SET_EVENT_LIMIT);
+    assert!(working_set.round_trips.len() <= WORKING_SET_FILL_LIMIT + working_set.positions.len());
     let snapshot = service
         .snapshot()
         .expect("snapshot succeeds beyond 10,000 orders");
@@ -369,6 +372,162 @@ fn working_set_and_snapshot_stay_bounded_at_50000_orders() {
         snapshot.orders.len(),
         LOAD_TERMINAL_ORDERS + LOAD_OPEN_ORDERS
     );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn working_set_fields_match_snapshot_projection() {
+    // VAL-DSK-107: compare the same owner revision, including the transient venue and
+    // observation projections, rather than building a second state model in the client.
+    let directory = TestDirectory::new("publication-fields");
+    let (service, clock, feed) = live_feed_service(&directory);
+    let instrument = instrument();
+    service
+        .register_instrument(instrument.clone())
+        .expect("instrument");
+    bootstrap_live_feed(&feed, &instrument, market_feed::route());
+    service.status().expect("feed drains");
+    push_live_quote(&feed, &instrument, 1, 9_975, 10_000, 2);
+    service.status().expect("quote drains");
+    let mut resting = market_order("projection-order", OrderSide::Buy, 1, 2_000);
+    resting.order_type = OrderType::Limit;
+    resting.time_in_force = TimeInForce::GoodTillCancelled;
+    resting.limit_price = Some(FixedPoint::try_new(9_800, 2).expect("limit"));
+    service.place_order(resting).expect("open order");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .register_risk_profile(risk_profile_for(&account, clock.wall_unix_nanos()))
+        .expect("risk profile");
+    let subscription = service.subscribe().expect("subscribe");
+    let working = subscription.try_recv().expect("initial").event.working_set;
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(working.revision, snapshot.revision);
+    assert_eq!(
+        working.market_observation_error,
+        snapshot.market_observation_error
+    );
+    assert_eq!(working.instruments, snapshot.instruments);
+    assert_eq!(working.order_events, snapshot.order_events);
+    assert_eq!(working.round_trips, snapshot.round_trips);
+    assert_eq!(
+        working.connected_broker_accounts,
+        snapshot.connected_broker_accounts
+    );
+    assert_eq!(working.risk_profiles, snapshot.risk_profiles);
+    assert_eq!(working.risk_meters, snapshot.risk_meters);
+    assert_eq!(working.session_plans, snapshot.session_plans);
+    assert_eq!(working.managed_brackets, snapshot.managed_brackets);
+    assert_eq!(working.planned_legs, snapshot.planned_legs);
+    assert_eq!(working.protective_orders, snapshot.protective_orders);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn working_set_includes_registered_ticket_terms_without_an_order() {
+    let directory = TestDirectory::new("publication-ticket-terms");
+    let (service, _clock, _feed) = live_feed_service(&directory);
+    let instrument = instrument();
+    service
+        .register_instrument(instrument.clone())
+        .expect("terms");
+    service
+        .set_ticket_interest(vec![market_feed::route()])
+        .expect("ticket interest");
+    let subscription = service.subscribe().expect("subscribe");
+    let working = subscription.try_recv().expect("initial").event.working_set;
+    assert_eq!(working.orders.len(), 0);
+    assert_eq!(working.positions.len(), 0);
+    assert_eq!(working.instruments, vec![instrument]);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn working_set_active_bracket_and_protection_match_snapshot() {
+    let directory = TestDirectory::new("publication-group-views");
+    let instrument = instrument();
+    let (service, _clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    service
+        .register_instrument(instrument.clone())
+        .expect("instrument");
+    let mut entry = market_order("group-view-entry", OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Stop;
+    entry.stop_price = Some(price(10_100));
+    entry.quantity = quantity(2);
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("pending bracket");
+    let subscription = service.subscribe().expect("subscribe");
+    let working = subscription.try_recv().expect("initial").event.working_set;
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(working.managed_brackets.len(), 1);
+    assert!(working.planned_legs.len() >= 2);
+    assert_eq!(working.managed_brackets, snapshot.managed_brackets);
+    assert_eq!(working.planned_legs, snapshot.planned_legs);
+    for leg in &working.planned_legs {
+        assert_eq!(
+            working.protective_role(&leg.client_order_id),
+            snapshot.protective_role(&leg.client_order_id)
+        );
+    }
+    assert_eq!(
+        working.position_protection(&snapshot.accounts[0].id, &instrument.instrument_id,),
+        snapshot.position_protection(&snapshot.accounts[0].id, &instrument.instrument_id)
+    );
+    service
+        .cancel_order(ClientOrderId::try_new("group-view-entry").expect("entry id"))
+        .expect("cancel group");
+    let retired = service
+        .subscribe()
+        .expect("retired subscription")
+        .try_recv()
+        .expect("retired view")
+        .event
+        .working_set;
+    assert_eq!(retired.order_groups.len(), 0);
+    assert_eq!(retired.managed_brackets.len(), 0);
+    assert_eq!(retired.planned_legs.len(), 0);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn working_set_windows_respect_bounds() {
+    // Event and fill histories exceed their publication limits; only the newest window
+    // travels with an event while the older orders stay on the paged history reader.
+    let directory = TestDirectory::new("publication-windows");
+    write_load_fixture(
+        &config(&directory).database_path,
+        WORKING_SET_EVENT_LIMIT + 1,
+        1,
+        WORKING_SET_FILL_LIMIT + 1,
+    );
+    let service = load_service(&directory);
+    let subscription = service.subscribe().expect("subscribe");
+    let working = subscription.try_recv().expect("initial").event.working_set;
+    assert_eq!(working.order_events.len(), WORKING_SET_EVENT_LIMIT);
+    assert_eq!(working.fills.len(), WORKING_SET_FILL_LIMIT);
+    assert_eq!(
+        working.order_events.first().expect("latest").order_id,
+        service
+            .snapshot()
+            .expect("snapshot")
+            .order_events
+            .first()
+            .expect("latest")
+            .order_id
+    );
+    assert!(working.round_trips.len() <= WORKING_SET_FILL_LIMIT + working.positions.len());
     service
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
@@ -535,6 +694,70 @@ fn mark_publications_coalesce_and_carry_the_latest_unrealized() {
 }
 
 #[test]
+fn mark_only_change_keeps_non_mark_fields() {
+    let directory = TestDirectory::new("publication-mark-fields");
+    let (service, clock, feed) = live_feed_service(&directory);
+    let instrument = instrument();
+    service
+        .register_instrument(instrument.clone())
+        .expect("instrument");
+    bootstrap_live_feed(&feed, &instrument, market_feed::route());
+    service.status().expect("feed drains");
+    service
+        .place_order(market_order("mark-fields-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry");
+    push_live_quote(&feed, &instrument, 2, 9_975, 10_000, 2);
+    service.status().expect("entry fills");
+    let subscription = service.subscribe().expect("subscribe");
+    let before = subscription.try_recv().expect("initial").event.working_set;
+    push_live_quote(&feed, &instrument, 3, 10_025, 10_050, 2);
+    service.status().expect("mark drains");
+    clock.advance(Duration::from_millis(100));
+    service.status().expect("mark flush");
+    let after = subscription
+        .recv_timeout(Duration::from_secs(5))
+        .expect("mark");
+    assert_eq!(after.event.cause, TradingEventCause::Mark);
+    let after = after.event.working_set;
+    assert_eq!(before.revision, after.revision);
+    assert_ne!(
+        before.positions[0].unrealized_pnl,
+        after.positions[0].unrealized_pnl
+    );
+    assert_eq!(before.instruments, after.instruments);
+    assert_eq!(before.order_events, after.order_events);
+    assert_eq!(before.fills, after.fills);
+    assert_eq!(
+        before
+            .round_trips
+            .iter()
+            .map(|trip| (&trip.entry, &trip.exit, trip.closed))
+            .collect::<Vec<_>>(),
+        after
+            .round_trips
+            .iter()
+            .map(|trip| (&trip.entry, &trip.exit, trip.closed))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        before.connected_broker_accounts,
+        after.connected_broker_accounts
+    );
+    assert_eq!(before.risk_profiles, after.risk_profiles);
+    assert_eq!(before.session_plans, after.session_plans);
+    assert_eq!(before.managed_brackets, after.managed_brackets);
+    assert_eq!(before.planned_legs, after.planned_legs);
+    assert_eq!(before.protective_orders, after.protective_orders);
+    assert_eq!(
+        before.market_observation_error,
+        after.market_observation_error
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
 fn every_revision_changing_step_is_published() {
     // VAL-TRD-067: each revision-changing command publishes one typed event whose working set
     // reflects the change.
@@ -606,6 +829,10 @@ fn a_lagging_subscriber_resynchronizes_with_an_exact_working_set() {
         "the resync working set is exact at the current revision"
     );
     assert_eq!(resync.event.working_set.accounts, snapshot.accounts);
+    assert_eq!(
+        resync.event.working_set.risk_profiles,
+        snapshot.risk_profiles
+    );
     let mut profile = risk_profile_for(&account, wall);
     profile.version = u32::try_from(steps + 1).expect("version");
     profile.daily_loss_limit = FixedPoint::try_new(9_999, 2).expect("limit");
@@ -616,6 +843,42 @@ fn a_lagging_subscriber_resynchronizes_with_an_exact_working_set() {
         .recv_timeout(Duration::from_secs(5))
         .expect("publication resumes after resync");
     assert!(!next.lagged);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn lagged_resync_carries_new_fields() {
+    let directory = TestDirectory::new("publication-lag-fields");
+    let (service, clock, _feed) = live_feed_service(&directory);
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let subscription = service.subscribe().expect("subscribe");
+    for index in 0..=SUBSCRIPTION_QUEUE_CAPACITY {
+        let mut profile = risk_profile_for(&account, clock.wall_unix_nanos());
+        profile.version = u32::try_from(index + 1).expect("version");
+        service.register_risk_profile(profile).expect("revision");
+    }
+    let update = subscription
+        .recv_timeout(Duration::from_secs(10))
+        .expect("resync");
+    assert!(update.lagged);
+    assert_eq!(update.event.cause, TradingEventCause::Resync);
+    let snapshot = service.snapshot().expect("snapshot");
+    let working = update.event.working_set;
+    assert_eq!(working.revision, snapshot.revision);
+    assert_eq!(working.risk_profiles, snapshot.risk_profiles);
+    assert_eq!(working.risk_meters, snapshot.risk_meters);
+    assert_eq!(working.session_plans, snapshot.session_plans);
+    assert_eq!(working.instruments, snapshot.instruments);
+    assert_eq!(working.order_events, snapshot.order_events);
+    assert_eq!(working.managed_brackets, snapshot.managed_brackets);
+    assert_eq!(working.planned_legs, snapshot.planned_legs);
+    assert_eq!(working.protective_orders, snapshot.protective_orders);
+    assert_eq!(
+        working.market_observation_error,
+        snapshot.market_observation_error
+    );
     service
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
