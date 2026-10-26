@@ -2246,6 +2246,16 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 2 of 3, event-driven refresh continuation): removed the
+    250 ms pane timer, render-path trading refresh and `keep_trading_pnl_fresh`/
+    `refresh_trading_pnl`/`apply_trading_refresh`/`schedule_trading_refresh`.
+    Subscription wakes now apply the WorkingSet; pane selection changes reproject
+    from the store without reading the owner. The manual-clock idle regression and
+    unchanged `trading_projection_baseline_*` tests pass. Production trading-service
+    snapshot calls are rejected by `desktop_trading_reads_come_from_trading_store`.
+    The pane-local `TradingProjection` cache, store indexes and `pane_view`, selective
+    pane notifications, typed notices and history pages remain for Part 3; M6.10
+    stays unchecked, including GUI evidence (D13).
   - Status (2026-10-26 Part 2 of 3, desktop projection split): `TerminalApp`
     owns a subscription-backed `TradingStore` with a named, cancellable bridge,
     newest-only slot, one pending wake and revision-checked UI adoption. The
@@ -2344,6 +2354,16 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- Desktop trading-service reads come only through the subscription-backed
+  `TradingStore`; the `desktop_trading_reads_come_from_trading_store` production
+  scan rejects `service.snapshot()`, `trading_service.snapshot()` and
+  `trading().snapshot()`. Subscription wakes, not the render path or a 250 ms
+  timer, apply trading publications (M6.10 event-driven part,
+  `refactor(desktop): apply trading publications on subscription wakes`).
+- Windows workspace tests use `-- --quiet --test-threads=1` in CI. Concurrent
+  or verbose GPUI interaction tests can terminate the Windows harness with
+  `0xc0000409`; serial quiet execution runs every case without that resource failure
+  (M6.10 continuation, `refactor(desktop): apply trading publications on subscription wakes`).
 - Trading publications use the `StoredState` live group-id index, updated atomically with
   every owner group transition and seeded on recovery. Open-order and group projections
   never scan terminal order/group history; order events and fills publish at most 500 rows
@@ -2936,6 +2956,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 owner projection feat(trading): project bounded desktop working set - `working_set_fields_match_snapshot_projection`, `working_set_windows_respect_bounds`, `working_set_includes_registered_ticket_terms_without_an_order`, `working_set_active_bracket_and_protection_match_snapshot`, `mark_only_change_keeps_non_mark_fields`, `lagged_resync_carries_new_fields` and the existing idle/mark/history tests cover VAL-DSK-107 with open-only indexed groups, bounded recent windows and paged historical reads; M6.10 remains unchecked pending desktop/GUI validation.
 - 2026-10-26 M6.10 Part 1 characterization checkpoint test(desktop): lock trading projection presentation baselines. `trading_projection_baseline_chart_account_and_risk_lock`, `trading_projection_baseline_panel_rows_and_connected_broker`, `trading_projection_baseline_ticket_account_and_status_labels` and `trading_projection_baseline_fill_and_broker_rejection_news` assert today's output before the split; no runtime projection migration or new restriction landed. VAL-DSK-117 and M6.10 remain open.
 - 2026-10-26 M6.10 Part 2 feat(desktop): project trading from one subscription store. `out_of_order_revisions_keep_newest_and_lagged_replaces`, `same_revision_mark_updates_replace_the_slot_without_losing_lag`, `bridge_has_one_pending_ui_wake_and_nonblocking_drain`, `bridge_shutdown_drops_subscription_and_joins_within_receive_bound`, `lagged_working_set_reloads_history_at_the_same_revision` and the four unchanged `trading_projection_baseline_*` regressions cover the WorkingSet desktop source, UI convergence, mark-only changes, lagged history and shutdown. M6.10 remains unchecked pending Part 3 and GUI evidence.
+- 2026-10-26 M6.10 Part 2 continuation refactor(desktop): apply trading publications on subscription wakes. `idle_minute_produces_no_trading_work`, the four unchanged `trading_projection_baseline_*` tests, and three `desktop_trading_reads_come_from_trading_store_*` tests cover the idle and production-read boundary; the 250 ms timer and render-path refresh are removed. Concurrent or verbose GPUI interaction tests reproduce Windows `0xc0000409`; CI runs all cases serially with quiet output. Pane caches, per-revision indexes, selective notifies and history pages remain for Part 3; M6.10 remains unchecked.
 
 ## 7. Known gaps / deferred
 

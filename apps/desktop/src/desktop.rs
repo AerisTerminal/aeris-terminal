@@ -314,8 +314,8 @@ use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
-    WorkspaceMarketArea, WorkspaceMaximizeTransition, keep_trading_pnl_fresh, pane_chart_notice,
-    toast_host, workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
+    WorkspaceMarketArea, WorkspaceMaximizeTransition, pane_chart_notice, toast_host,
+    workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
 };
 
 fn install_platform_http_client(cx: &mut App) {
@@ -1016,14 +1016,18 @@ impl TradingProjection {
 
 /// Pane-only choices and feedback. Runtime-derived data is one projection of
 /// the shared store, never a second read from the trading owner.
+#[derive(Default)]
 struct TradingPaneState {
     projection: TradingProjection,
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     order_entry: TradingOrderEntryState,
+    applied_selection: Option<(
+        Option<String>,
+        Option<aeris_trading::TradingAccountId>,
+        ChartTradingVisibilitySettings,
+    )>,
     account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
-    refresh_pending: bool,
-    next_refresh: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1135,20 +1139,6 @@ impl TimeSalesFilter {
         }
         *self = default;
         true
-    }
-}
-
-impl Default for TradingPaneState {
-    fn default() -> Self {
-        Self {
-            projection: TradingProjection::default(),
-            feedback: None,
-            order_entry: TradingOrderEntryState::default(),
-            account_creator: None,
-            account_delete_confirmation: None,
-            refresh_pending: false,
-            next_refresh: Instant::now(),
-        }
     }
 }
 

@@ -136,7 +136,35 @@ impl Drop for TradingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_trading_runtime::clock::ManualClock;
     use aeris_trading_runtime::{TradingEvent, TradingEventCause};
+
+    #[test]
+    fn idle_minute_produces_no_trading_work() {
+        let clock = ManualClock::new(0);
+        let mut store = TradingStore::default();
+        let mut store_changes = 0;
+        let mut trading_notifies = 0;
+        let mut working_set_reads = 0;
+        let mut history_reads = 0;
+        for _ in 0..60 {
+            clock.advance(Duration::from_secs(1));
+            if store.has_pending() {
+                working_set_reads += 1;
+                if store.drain().is_some() {
+                    store_changes += 1;
+                    trading_notifies += 1;
+                }
+                if store.take_resync() {
+                    history_reads += 1;
+                }
+            }
+        }
+        assert_eq!(store_changes, 0);
+        assert_eq!(trading_notifies, 0);
+        assert_eq!(working_set_reads, 0);
+        assert_eq!(history_reads, 0);
+    }
 
     fn update(revision: u64, lagged: bool) -> SubscriptionUpdate {
         SubscriptionUpdate {

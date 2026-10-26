@@ -513,7 +513,6 @@ impl TerminalApp {
         workspace_market_area(
             WorkspaceMarketArea {
                 terminal,
-                trading_store: &self.trading_store,
                 workspace: &self.workspaces[self.active],
                 active_surface: active,
                 expanded_drawing_toolbar: self.chart_chrome.drawing_toolbar.shown().then_some(
@@ -734,7 +733,6 @@ impl TerminalApp {
             // Alt+click stays the only one shown, exactly as in the docked workspace.
             let workspace = &self.workspaces[self.active];
             let charts = workspace_pane_grid(&terminal, workspace, &self.toaster, &self.theme, cx);
-            keep_trading_pnl_fresh(&self.trading_store, &active, workspace, cx);
             return self
                 .page_root()
                 .child(

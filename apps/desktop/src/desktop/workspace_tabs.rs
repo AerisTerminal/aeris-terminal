@@ -127,6 +127,10 @@ impl TerminalApp {
     }
 
     fn wire_pane_notices(surface: &Entity<WorkspaceSurface>, cx: &mut Context<Self>) {
+        cx.observe(surface, |app, pane, cx| {
+            app.refresh_trading_pane_for_selection(&pane, cx);
+        })
+        .detach();
         cx.subscribe(surface, |app, surface, event: &PaneNoticeEvent, cx| {
             let now = Instant::now();
             match event {
@@ -3661,6 +3665,7 @@ impl TerminalApp {
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
                         if terminal.trading_store.read(terminal_cx).has_pending() {
+                            terminal.apply_trading_publication(terminal_cx);
                             terminal_cx.notify();
                         }
                         terminal.schedule_market_frame(window, terminal_cx);

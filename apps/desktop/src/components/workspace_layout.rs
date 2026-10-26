@@ -393,7 +393,6 @@ pub(super) fn workspace_pane_element(
 
 pub(super) struct WorkspaceMarketArea<'a> {
     pub(super) terminal: &'a Entity<TerminalApp>,
-    pub(super) trading_store: &'a Entity<trading_store::TradingStore>,
     pub(super) workspace: &'a WorkspaceTab,
     pub(super) active_surface: &'a Entity<WorkspaceSurface>,
     pub(super) expanded_drawing_toolbar: Option<DrawingSidebar<'a>>,
@@ -408,7 +407,6 @@ pub(super) fn workspace_market_area(
 ) -> impl IntoElement + use<> {
     let WorkspaceMarketArea {
         terminal,
-        trading_store,
         workspace,
         active_surface,
         expanded_drawing_toolbar,
@@ -417,7 +415,6 @@ pub(super) fn workspace_market_area(
         theme,
     } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
-    keep_trading_pnl_fresh(trading_store, active_surface, workspace, cx);
     let grid = workspace_pane_grid(terminal, workspace, toaster, theme, cx);
     let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
         let surface = pane.surface.read(cx);
@@ -630,135 +627,71 @@ fn project_working_order_markers(
     (working_orders, position_marker)
 }
 
-fn trading_pnl_refresh_due(
-    surface: &Entity<WorkspaceSurface>,
-    cx: &App,
-    now: std::time::Instant,
-) -> bool {
-    let state = surface.read(cx);
-    !state.trading_pnl.refresh_pending && now >= state.trading_pnl.next_refresh
-}
-
-/// Projects the one subscription-backed working set to each visible pane.
-/// The pane cache and its refresh cadence are removed in the next migration part.
-pub(super) fn keep_trading_pnl_fresh(
-    store: &Entity<trading_store::TradingStore>,
-    active: &Entity<WorkspaceSurface>,
-    workspace: &WorkspaceTab,
-    cx: &mut Context<TerminalApp>,
-) {
-    refresh_trading_pnl(
-        store,
-        active.clone(),
-        workspace
-            .panes
-            .iter()
-            .map(|pane| pane.surface.clone())
-            .collect(),
-        cx,
-    );
-}
-
-fn refresh_trading_pnl(
-    store: &Entity<trading_store::TradingStore>,
-    active: Entity<WorkspaceSurface>,
-    panes: Vec<Entity<WorkspaceSurface>>,
-    cx: &mut Context<TerminalApp>,
-) {
-    let now = std::time::Instant::now();
-    if !trading_pnl_refresh_due(&active, cx, now) {
-        return;
-    }
-    let view = store.update(cx, |store, _| {
-        store.drain();
-        store
-            .current()
-            .cloned()
-            .map(|snapshot| (snapshot, store.take_resync()))
-    });
-    let Some((snapshot, resync)) = view else {
-        return;
-    };
-    let feedback = active.read(cx).lifecycle.trading_feedback().clone();
-    active.update(cx, |state, _| {
-        state.trading_pnl.refresh_pending = true;
-        state.trading_pnl.next_refresh = now + std::time::Duration::from_millis(250);
-    });
-    cx.spawn(async move |terminal, cx| {
-        let result = Ok(snapshot);
-        if let Ok(snapshot) = &result {
-            feedback.record_venue_notices(&snapshot.venue_notices);
-        }
-        if let Ok(snapshot) = &result
-            && let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
-                if resync {
-                    terminal.bottom_panel.invalidate_trading_revision();
-                }
-                if terminal.bottom_panel.apply_snapshot(snapshot) {
-                    terminal_cx.notify();
-                }
-                terminal.announce_trading(snapshot, terminal_cx);
-            })
-            && terminal.upgrade().is_some()
-        {
-            diagnostic!("Live workspace could not receive trading snapshot: {error}");
-        }
-        let feedback = feedback.latest();
-        for surface in panes.iter().filter(|surface| *surface != &active) {
-            surface.update(cx, |state, state_cx| {
-                apply_trading_refresh(state, &result, feedback.as_ref(), state_cx);
+/// Apply only a new subscription publication, never a timer or render-path read.
+impl TerminalApp {
+    pub(super) fn refresh_trading_pane_for_selection(
+        &self,
+        pane: &Entity<WorkspaceSurface>,
+        cx: &mut Context<Self>,
+    ) {
+        let needs_refresh = {
+            let state = pane.read(cx);
+            state.trading_pnl.applied_selection.as_ref()
+                != Some(&(
+                    state
+                        .product
+                        .as_ref()
+                        .map(|product| product.instrument_id.clone()),
+                    state.trading_pnl.order_entry.selected_account_id.clone(),
+                    state.chart_trading_visibility,
+                ))
+        };
+        if needs_refresh && let Some(current) = self.trading_store.read(cx).current() {
+            // Selection is rare; the event path is the only regular WorkingSet drain.
+            let current = current.clone();
+            pane.update(cx, |state, pane_cx| {
+                apply_trading_snapshot(state, &current, pane_cx);
             });
         }
-        active.update(cx, |state, state_cx| {
-            state.trading_pnl.refresh_pending = false;
-            apply_trading_refresh(state, &result, feedback.as_ref(), state_cx);
-            schedule_trading_refresh(state_cx);
+    }
+
+    pub(super) fn apply_trading_publication(&mut self, cx: &mut Context<Self>) {
+        let view = self.trading_store.update(cx, |store, _| {
+            store
+                .drain()
+                .cloned()
+                .map(|snapshot| (snapshot, store.take_resync()))
         });
-    })
-    .detach();
-}
-
-fn apply_trading_refresh(
-    state: &mut WorkspaceSurface,
-    result: &Result<aeris_trading_runtime::WorkingSet, String>,
-    feedback: Option<&aeris_desktop::trading::TradingCommandFeedback>,
-    state_cx: &mut Context<WorkspaceSurface>,
-) {
-    if feedback.map(|feedback| feedback.revision)
-        > state
-            .trading_pnl
-            .feedback
-            .as_ref()
-            .map(|feedback| feedback.revision)
-    {
-        state.trading_pnl.feedback = feedback.cloned();
-    }
-    match result {
-        Ok(snapshot) => apply_trading_snapshot(state, snapshot, state_cx),
-        Err(error) => {
-            state.trading_pnl.market_error = Some(format!("Trading is unavailable: {error}"));
-            state_cx.notify();
+        let Some((snapshot, resync)) = view else {
+            return;
+        };
+        let feedback = self.lifecycle.trading_feedback();
+        feedback.record_venue_notices(&snapshot.venue_notices);
+        let latest = feedback.latest();
+        if resync {
+            self.bottom_panel.invalidate_trading_revision();
         }
-    }
-}
-
-/// Re-arms the bounded trading poll so fills and command outcomes appear even
-/// while no market publication is rendering the workspace.
-fn schedule_trading_refresh(cx: &mut Context<WorkspaceSurface>) {
-    let refresh = cx
-        .background_executor()
-        .timer(std::time::Duration::from_millis(250));
-    cx.spawn(async move |state, cx| {
-        refresh.await;
-        if let Err(error) = state.update(cx, |state, cx| {
-            state.trading_pnl.next_refresh = std::time::Instant::now();
+        if self.bottom_panel.apply_snapshot(&snapshot) {
             cx.notify();
-        }) && state.upgrade().is_some()
-        {
-            diagnostic!("Live pane trading refresh timer could not update: {error}");
         }
-    })
-    .detach();
+        self.announce_trading(&snapshot, cx);
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |state, state_cx| {
+                    if latest.as_ref().map(|feedback| feedback.revision)
+                        > state
+                            .trading_pnl
+                            .feedback
+                            .as_ref()
+                            .map(|feedback| feedback.revision)
+                    {
+                        state.trading_pnl.feedback.clone_from(&latest);
+                    }
+                    apply_trading_snapshot(state, &snapshot, state_cx);
+                });
+            }
+        }
+    }
 }
 
 fn apply_trading_snapshot(
@@ -766,20 +699,6 @@ fn apply_trading_snapshot(
     snapshot: &aeris_trading_runtime::WorkingSet,
     state_cx: &mut Context<WorkspaceSurface>,
 ) {
-    let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
-    let chart_snapshot = crate::desktop::chart_trading_snapshot(
-        snapshot,
-        state.product.as_ref(),
-        selected_account_id.as_ref(),
-    )
-    .map(|snapshot| apply_chart_trading_visibility(snapshot, state.chart_trading_visibility));
-    let host_overlay =
-        crate::desktop::chart_session_plan_overlay(snapshot, selected_account_id.as_ref());
-    let session_plan_levels = crate::desktop::chart_session_plan_levels(
-        snapshot,
-        state.product.as_ref(),
-        selected_account_id.as_ref(),
-    );
     if state
         .trading_pnl
         .order_entry
@@ -795,6 +714,28 @@ fn apply_trading_snapshot(
         state.trading_pnl.order_entry.selected_account_id =
             snapshot.accounts.first().map(|account| account.id.clone());
     }
+    let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
+    let chart_snapshot = crate::desktop::chart_trading_snapshot(
+        snapshot,
+        state.product.as_ref(),
+        selected_account_id.as_ref(),
+    )
+    .map(|snapshot| apply_chart_trading_visibility(snapshot, state.chart_trading_visibility));
+    let host_overlay =
+        crate::desktop::chart_session_plan_overlay(snapshot, selected_account_id.as_ref());
+    let session_plan_levels = crate::desktop::chart_session_plan_levels(
+        snapshot,
+        state.product.as_ref(),
+        selected_account_id.as_ref(),
+    );
+    state.trading_pnl.applied_selection = Some((
+        state
+            .product
+            .as_ref()
+            .map(|product| product.instrument_id.clone()),
+        selected_account_id,
+        state.chart_trading_visibility,
+    ));
     state.trading_pnl.projection = TradingProjection::from_working_set(
         snapshot,
         state.trading_pnl.order_entry.selected_account_id.as_ref(),

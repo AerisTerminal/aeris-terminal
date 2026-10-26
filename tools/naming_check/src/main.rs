@@ -280,6 +280,20 @@ fn has_process_global_desktop_trading(source: &str) -> bool {
     .any(|forbidden| production.contains(forbidden))
 }
 
+fn desktop_trading_reads_come_from_trading_store(source: &str) -> bool {
+    let production: String = production_source_prefix(source)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    [
+        "service.snapshot()",
+        "trading_service.snapshot()",
+        "trading().snapshot()",
+    ]
+    .iter()
+    .all(|call| !production.contains(call))
+}
+
 fn has_process_global_desktop_account(source: &str) -> bool {
     let production = production_source_prefix(source);
     [
@@ -691,6 +705,7 @@ fn inspect_desktop_boundaries(
                 || desktop_control_flow_does_not_match_display_text(&source)
                 || violates_fixture_market_boundary(&relative_path, &source)
                 || has_process_global_desktop_trading(&source)
+                || !desktop_trading_reads_come_from_trading_store(&source)
                 || has_process_global_desktop_account(&source)
                 || has_process_global_desktop_market(&source)
                 || has_process_global_desktop_persistence(&source)
@@ -1145,6 +1160,45 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::production_source_prefix as production_prefix;
+
+    #[test]
+    fn desktop_trading_reads_come_from_trading_store_accepts_subscription_and_test_fixtures() {
+        assert!(super::desktop_trading_reads_come_from_trading_store(
+            "fn read(store: &TradingStore) { store.current(); view.snapshot(); }"
+        ));
+        assert!(super::desktop_trading_reads_come_from_trading_store(
+            "#[cfg(test)] mod tests { fn fixture() { service.snapshot(); } }\nfn production() {}"
+        ));
+    }
+
+    #[test]
+    fn desktop_trading_reads_come_from_trading_store_rejects_production_snapshot() {
+        for call in [
+            "service.snapshot()",
+            "trading_service.snapshot()",
+            "lifecycle.trading().snapshot()",
+            "service \n . snapshot ( )",
+        ] {
+            assert!(!super::desktop_trading_reads_come_from_trading_store(
+                &format!(
+                    "#[cfg(test)] mod tests {{ fn fixture() {{ service.snapshot(); }} }}\nfn live() {{ {call}; }}"
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn desktop_trading_reads_come_from_trading_store_scans_production() {
+        for path in production_sources_under("apps/desktop/src") {
+            let relative = relative_string(&path);
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+            assert!(
+                super::desktop_trading_reads_come_from_trading_store(&source),
+                "{relative} reads a trading service snapshot instead of the TradingStore"
+            );
+        }
+    }
 
     fn provider_allowlist_matches<'a>(
         allowed: impl IntoIterator<Item = &'a str>,

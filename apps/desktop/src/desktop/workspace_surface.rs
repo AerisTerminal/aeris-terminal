@@ -5778,11 +5778,7 @@ impl WorkspaceSurface {
                 });
             }
         }
-        // Enabling either layer needs the next authoritative runtime snapshot to restore any
-        // presentation objects that were intentionally filtered out while hidden.
-        if visibility_changed {
-            self.trading_pnl.next_refresh = std::time::Instant::now();
-        }
+        // The chart is rebuilt from the store's current view when visibility changes.
         self.chart_persistence_dirty = true;
         cx.notify();
     }

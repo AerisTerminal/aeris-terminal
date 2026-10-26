@@ -252,6 +252,10 @@ violations and missing verification explicitly, and never describe them as satis
   never a scan of terminal group history. Broker connection, risk profile/meter, session plan
   and market observation error projections remain owner-owned. The compatibility `snapshot()`
   view is not bounded by stored-order count; retention bounds the live set.
+- Desktop production trading reads use the subscription-backed `TradingStore`, never
+  `service.snapshot()`, `trading_service.snapshot()` or `trading().snapshot()` on the owner.
+  `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.
+  Trading updates are applied on subscription wakes, not a render-path or 250 ms timer.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates.
@@ -492,7 +496,12 @@ independent baseline failures precisely.
 
 CI runs the same gates on GitHub-hosted runners. `.github/workflows/ci.yml` triggers on `push` and
 `pull_request` to `main` and on `workflow_dispatch`: `windows-latest` runs fmt, clippy, the workspace
-tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check. The workflow keeps
+tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check.
+Windows workspace tests use `cargo test --workspace --all-features --locked -- --quiet
+--test-threads=1`: concurrent or verbose GPUI interaction tests can terminate
+the Windows harness with `0xc0000409`; serial quiet execution runs all cases.
+Keep this bound until the GPUI test owner can
+prove higher concurrency safe. The workflow keeps
 `permissions: contents: read`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1` (hosted
 runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
 references and self-hosted runners are forbidden on the pull-request path, and any workflow that uses
