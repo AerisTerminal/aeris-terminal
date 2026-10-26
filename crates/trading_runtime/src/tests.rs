@@ -5074,6 +5074,7 @@ fn entry_and_exit_fills_form_one_round_trip_with_its_final_pnl() {
     let open = service.snapshot().expect("open snapshot");
     assert_eq!(open.round_trips.len(), 1);
     assert!(!open.round_trips[0].closed);
+    assert_eq!(open.round_trips[0].exit_fill_id, None);
     assert_eq!(open.round_trips[0].final_pnl, None);
     assert_eq!(open.round_trips[0].exit, None);
 
@@ -5085,6 +5086,7 @@ fn entry_and_exit_fills_form_one_round_trip_with_its_final_pnl() {
     };
     assert_eq!(trip.side, OrderSide::Buy);
     assert!(trip.closed);
+    assert_eq!(trip.exit_fill_id.as_ref(), Some(&snapshot.fills[0].id));
     let entry = trip.entry.expect("entry");
     let exit = trip.exit.expect("exit");
     assert_eq!(
@@ -5106,6 +5108,32 @@ fn entry_and_exit_fills_form_one_round_trip_with_its_final_pnl() {
     );
     assert_eq!(trip.open_pnl, None);
     assert_eq!(trip.current_pnl(), trip.final_pnl);
+}
+
+fn assert_exit_fill_id_matches_owner_fills(snapshot: &TradingSnapshot) {
+    assert!(
+        snapshot
+            .round_trips
+            .iter()
+            .filter(|trip| !trip.closed)
+            .all(|trip| trip.exit_fill_id.is_none()),
+        "open trades have no exit fill identity"
+    );
+    assert_eq!(
+        snapshot
+            .round_trips
+            .iter()
+            .filter(|trip| trip.closed)
+            .map(|trip| trip.exit_fill_id.as_ref())
+            .collect::<Vec<_>>(),
+        snapshot
+            .fills
+            .iter()
+            .filter(|fill| fill.side == OrderSide::Sell)
+            .map(|fill| Some(&fill.id))
+            .collect::<Vec<_>>(),
+        "each partial exit has its own durable fill identity"
+    );
 }
 
 #[test]
@@ -5142,6 +5170,7 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
             .collect::<Vec<_>>()
     };
     let open = open_trade(&snapshot.round_trips);
+    assert_exit_fill_id_matches_owner_fills(&snapshot);
     assert_eq!(open.current_pnl(), Some(price(10_000)));
     assert_eq!(open.final_pnl, None);
     assert_eq!(
@@ -5200,6 +5229,7 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
     );
     let snapshot = restarted.snapshot().expect("closed snapshot");
     assert!(snapshot.round_trips.iter().all(|trip| trip.closed));
+    assert_exit_fill_id_matches_owner_fills(&snapshot);
     assert_eq!(
         closing_pnl(&snapshot.round_trips),
         [

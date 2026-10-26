@@ -247,7 +247,9 @@ violations and missing verification explicitly, and never describe them as satis
   order history is served by the `aeris-trading-history` thread on a read-only SQLite
   connection with 500-row keyset pages. The working set projects registered terms only for
   open orders, open positions and ticket interests; its newest event and fill windows each
-  have a 500-row limit, and round trips use at most 500 fills plus open positions. Active
+  have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
+  closed round trip carries its durable exit fill ID, distinct even for partial exits of
+  one cycle; an open round trip has no exit fill ID. Active
   bracket/protection views come from a live group-id index maintained with group transitions,
   never a scan of terminal group history. Broker connection, risk profile/meter, session plan
   and market observation error projections remain owner-owned. The compatibility `snapshot()`

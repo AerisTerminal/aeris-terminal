@@ -2246,6 +2246,14 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 3 of 3, historical-trade identity checkpoint):
+    closed live round trips now carry the durable exit fill ID; open trades
+    carry none. The partial-exit/restart regression verifies distinct IDs
+    without changing P&L. VAL-DSK-119 remains open: the read-only reader
+    still pages orders, not closed trades, and the desktop still renders
+    older orders. A follow-up must project bounded historical trade pages
+    with owner P&L, replace the older-order renderer and dedupe by exit fill
+    ID. Typed notices and VAL-DSK-034/035 GUI evidence remain; leave unchecked.
   - Status (2026-10-26 Part 3 of 3, bounded order-history checkpoint): the
     bottom panel keeps the fill-based recent trade window as its live head and
     pages durable order records separately via `TradingService::history` on the
@@ -2446,6 +2454,10 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- Closed working-set round trips expose their durable exit fill ID, so partial
+  exits remain distinct and historical pages can dedupe against the live head;
+  open trades have no exit identity (M6.10 historical-trade identity checkpoint,
+  `feat(trading): identify closed round trips by exit fill`).
 - The desktop's explicit older-order history stops after four loaded 500-row
   pages (2,000 retained order records) and shows a cap message rather than
   growing with the durable store. Recent fill-based trades stay distinct from
@@ -3071,6 +3083,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 2d-1 refactor(desktop): read ticket and risk from the trading store. `ticket_hotkey_and_quantity_read_selected_store_publication`, `typed_quantities_must_be_whole_lots_within_the_order_entry_range` and the unchanged `trading_projection_baseline_ticket_account_and_status_labels` cover selected-account ticket labels/status, locked hotkey refusal and quantity bounds. Risk-increasing actions consult the current store, while Accounts and planned-leg readers remain for Part 2d-2; M6.10 stays unchecked.
 - 2026-10-26 M6.10 Part 2d-2 refactor(desktop): remove pane trading runtime cache. The four unchanged `trading_projection_baseline_*` tests cover chart account/risk, ticket, panel broker rows and fill/rejection notices; `accounts_panel_preserves_broker_visibility_and_connection_labels` pins the broker account filter and labels. Accounts reads the current WorkingSet and planned-leg intents the scoped `pane_view`; the existing order-book drag reader stays scoped. VAL-DSK-117's production cache and snapshot-read conditions close; M6.10 remains unchecked pending Part 3 and GUI evidence.
 - 2026-10-26 M6.10 Part 3 feat(desktop): page bounded order history off the UI thread. `desktop_history_pages_start_at_recent_orders_and_advance_older_without_duplicates` uses a generated 10,001-order file-backed store to verify 500-row descending keyset pages, a next cursor and disjoint order IDs; `trade_history_model_appends_pages_without_live_head_duplicates_and_stops_at_bound` checks page append, live fill overlap exclusion, the four-page cap and stale completion after resync. The existing older-order API cannot reconstruct historical round trips; its rows remain explicitly distinguished from recent trades. M6.10 stays unchecked pending that owner API, typed notices and VAL-DSK-034/035 GUI evidence.
+- 2026-10-26 M6.10 Part 3 of 3 historical-trade identity checkpoint feat(trading): identify closed round trips by exit fill. `entry_and_exit_fills_form_one_round_trip_with_its_final_pnl` and `open_round_trip_pnl_follows_live_marks_and_partial_exits` verify the durable exit ID on close, distinct partial exit IDs after restart and no ID on an open trade. VAL-DSK-119 is still open for the bounded owner trade page and desktop conversion; M6.10 remains unchecked.
 
 ## 7. Known gaps / deferred
 

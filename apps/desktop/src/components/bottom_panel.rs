@@ -1841,6 +1841,7 @@ mod tests {
             account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
             instrument_id: aeris_instruments::InstrumentId::try_new("hyperliquid:perp:BTC")
                 .expect("instrument"),
+            exit_fill_id: Some(aeris_trading::FillId::try_new("fixture-exit").expect("fill")),
             side: aeris_trading::OrderSide::Buy,
             entry: Some(leg),
             exit: Some(leg),
@@ -1853,6 +1854,7 @@ mod tests {
     fn open_round_trip(account: &str) -> aeris_trading_runtime::TradeRoundTrip {
         aeris_trading_runtime::TradeRoundTrip {
             exit: None,
+            exit_fill_id: None,
             closed: false,
             final_pnl: None,
             ..round_trip(account)

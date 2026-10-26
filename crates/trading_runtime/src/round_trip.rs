@@ -56,6 +56,9 @@ impl TradeLeg {
 pub struct TradeRoundTrip {
     pub account_id: TradingAccountId,
     pub instrument_id: InstrumentId,
+    /// Durable identity of the exit that closed this row. An open trade has no exit identity.
+    /// Partial exits of one position cycle have distinct identities.
+    pub exit_fill_id: Option<FillId>,
     /// Opening side: buy for a long trade, sell for a short one.
     pub side: OrderSide,
     /// The fills that opened or added to the trade before this exit; a closed round trip carries
@@ -165,6 +168,7 @@ impl OpenTrade {
         TradeRoundTrip {
             account_id: key.0.clone(),
             instrument_id: key.1.clone(),
+            exit_fill_id: Some(fill.id.clone()),
             side: self.side,
             entry: self
                 .entry
@@ -184,6 +188,7 @@ impl OpenTrade {
         TradeRoundTrip {
             account_id: key.0.clone(),
             instrument_id: key.1.clone(),
+            exit_fill_id: None,
             side: self.side,
             entry: self.entry.filter(|_| self.entry_known),
             exit: self.exit,
