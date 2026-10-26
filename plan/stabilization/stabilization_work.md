@@ -122,7 +122,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in 1303adbd |
 | MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | closed: M3.5 capability/presentation split and literal ban in 2f3fd729; M3.6 provider-session registry in 3d474290 |
 | MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in 0eae9355 |
-| MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
+| MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | code closed: runtime descriptors own series identity and provider attribution; VAL-DSK-114 GUI not yet validated |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | closed: trading feed in db7a572c; waitable outbox and single command queue in 866032c4 and 9f568443; desktop quote relay removed in cd54c087 |
 | MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in a00725b0 |
 | MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | closed: command fences/consumer cleanup and study wrappers in e52e72f8; order-book demand with M3.8 in db7a572c |
@@ -144,7 +144,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-12 | Low | Smaller defects and debt | M4.1, M4.2, M4.5, M4.6, M5.9, M8.10 | open; reverse is one atomic admitted operation since M5.9, and broker and practice positions share one netted ledger since the 2026-10-22 futures venue contract (V28); the order plant is no longer unused since the Rithmic venue relay, and the rest stays with M8.10 |
 | UI-01 | High | Practice venue market data is relayed through the chart UI | M3.8 (market side), M4.7 | closed in cd54c087 |
 | UI-02 | High | Symbol/interval switching is a UI-owned state machine without generations | M6.3, M6.4 | code closed by M6.3 controller-owned restore and exact fence rule (2026-10-26); VAL-DSK-014 GUI interval storm not yet validated |
-| UI-03 | High | Provider-specific identity, entitlement and wording in the desktop | M6.7, M6.8, M6.9 | open |
+| UI-03 | High | Provider-specific identity, entitlement and wording in the desktop | M6.7, M6.8, M6.9 | code closed: provider identity, login and licensing presentation come from descriptors; VAL-DSK-029/114 GUI not yet validated |
 | UI-04 | Medium | Symbol selection takes two round trips and startup catalog resolution lives in the desktop | M3.10 (runtime part), M6.5 | M3.10 closes the two-step chart pick and desktop startup catalog ownership; M6.5 retains the broader picker cleanup |
 | UI-05 | Medium | Busy-polling worker loop and duplicated slot/channel command paths | M3.9 (runtime/bridge part), M6.6 | closed: waitable coordinator outbox and bounded pane projection queue, no 2 ms polling |
 | UI-06 | Medium | Parallel message model and bespoke mailbox in the desktop | M6.1 (fixture part), M6.6 | closed: one coordinator-fenced runtime projection plus explicit local outcomes in the bounded pane queue |
@@ -2188,6 +2188,9 @@ active item (parts 1-8); M6.8-M6.12 are open.
     failure isolation. VAL-DSK-023/103 code checks pass; no finding closes
     yet because MD-10/UI-03 still include the M6.8/M6.9 provider surfaces.
     M6.7 remains unchecked: code complete; VAL-DSK-114 not yet validated.
+  - Status (2026-10-26 attribution part, D2/D13): the last production identity
+    exceptions are gone except the `assets.rs` logo mapping. MD-10/UI-03 code
+    findings close; M6.7 remains unchecked: code complete; VAL-DSK-114 not yet validated.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
   - Status (2026-10-26 Part 2): code complete for VAL-DSK-026's non-GUI
     default-selection path and VAL-DSK-028's display-text restriction. The
@@ -2236,6 +2239,12 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03's login-form route closes,
     but UI-03/MD-10 remain open for descriptor attribution. M6.9 remains unchecked:
     code complete for the form; VAL-DSK-024/106 and guarded login GUI not yet validated.
+  - Status (2026-10-26 attribution part, D2/D13): provider descriptors now
+    supply session-scoped attribution marks and About notice lines; only
+    `assets.rs` maps the logo keys to light/dark artwork. The broker ticket
+    names its registered venue's provider presentation. VAL-DSK-024/030/106
+    code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
+    code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
   - Status (2026-10-23 audit): `latest_feedback` is replaced by the `DesktopServices` feedback
     handle and `announce_fills` by snapshot diffing in `components/toaster.rs`
@@ -2325,14 +2334,19 @@ the repo root `AGENTS.md`.
 - `desktop_source_is_provider_neutral` ignores only exact test/diagnostics-gated
   fixture module paths after checking their declarations; Logarithmic and
   logarithm are non-provider words. The same identity in ungated production
-  fails, and the interim reasoned production allow-list shrinks toward the
-  sole final `assets.rs` logo mapping. Replay conversion and chart legend
+  fails; the only production exception is the `assets.rs` logo mapping.
+  Replay conversion and chart legend
   mapping require no exception after M6.7 Part 10
   (`refactor(desktop): project bound market descriptors`; scan precision updated
   in M6.7 Part 9, `fix(naming): distinguish provider identity from gated fixtures`).
   The bridge files `market_worker.rs`, `engine_market_worker.rs` and its `runtime.rs`,
   and the deleted connection shell, have no production exception after M6.7
   Part 11 (`refactor(desktop): remove dead provider bridge branches`).
+- Provider attribution and About notices come from published presentation
+  metadata only while its provider's session is held, including recovery.
+  The desktop production provider-identity allow-list has exactly the
+  `assets.rs` logo-key/artwork mapping; no other provider-specific exception
+  remains (M6.9 attribution part, `refactor(desktop): scope provider attribution to held sessions`).
 - Desktop market epoch/generation comparisons are checked by
   `desktop_market_fences_stay_in_accept`: pane acceptance belongs to
   `ChartPaneController`, while unrelated release, app-command and receipt
@@ -2878,6 +2892,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.8 Part 2 fix(desktop): request runtime default for fresh panes. `fresh_workspace_requests_runtime_default`, `fresh_workspace_has_no_persisted_instrument_or_provider_identity`, `saved_explicit_default_instrument_remains_a_ref`, `unresolved_default_reports_typed_empty_selection_without_aborting_workspace`, `no_default_instrument_shows_choose_prompt` and the display-text rule's rejection, acceptance and production-scan tests cover the new startup boundary. The `local_state.rs` provider exception is gone, and UI-10's M6.8 route closes. The box stays unchecked: VAL-DSK-027 is owned by M6.10; VAL-DSK-026 GUI and VAL-CROSS-001 await guarded GUI evidence.
 - 2026-10-26 M6.9 runtime part feat(market): publish provider-neutral vault login API. `registered_login_schema_is_provider_owned` checks the Rithmic field/secret schema and Hyperliquid Public descriptor; `neutral_login_writes_only_the_provider_vault_entry` uses only an injected vault and a scripted acceptance, checks other entries survive sign-in/forget and the saved summary omits credentials. UI-03/MD-10 remain open for the form and attribution. M6.9 stays unchecked: code complete at the runtime boundary; VAL-DSK-105 desktop scan, VAL-DSK-030/106 and guarded GUI not yet validated.
 - 2026-10-26 M6.9 desktop form part refactor(desktop): render provider login from published schema. `provider_login_form_writes_only_through_vault_seam`, `connection_list_includes_each_published_provider_in_order`, `neutral_login_writes_only_the_provider_vault_entry` and the native-vault naming test cover form dispatch, exact Accounts rows and runtime vault isolation. VAL-DSK-105/030 code checks close; UI-03's form portion closes. M6.9 stays unchecked: attribution VAL-DSK-024/106 and guarded login GUI not yet validated (D2/D13).
+- 2026-10-26 M6.7/M6.9 refactor(desktop): scope provider attribution to held sessions. `attribution_follows_held_provider_session`, `provider_notices_carry_the_requested_year_and_owners`, `broker_ticket_uses_registered_venue_display_name`, the existing light/dark asset tests and `desktop_source_is_provider_neutral` cover descriptor marks, About notices, recovery, unattributed providers and the final assets-only exception (D2). MD-10/UI-03 code findings close. M6.7 remains unchecked: code complete; VAL-DSK-114 not yet validated. M6.9 remains unchecked: code complete; VAL-DSK-029 not yet validated (D13).
 
 ## 7. Known gaps / deferred
 

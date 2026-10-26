@@ -460,6 +460,14 @@ impl AttributionMark {
             &[]
         }
     }
+    #[must_use]
+    pub fn for_key(key: &str) -> Option<Self> {
+        match key {
+            "market_data_by_rithmic" => Some(Self::MarketDataByRithmic),
+            "powered_by_omne" => Some(Self::PoweredByOmne),
+            _ => None,
+        }
+    }
     /// Logical height; the standard asset is exactly this many pixels tall.
     pub const HEIGHT: f32 = 18.0;
 

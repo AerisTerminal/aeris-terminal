@@ -468,7 +468,8 @@ impl TerminalApp {
                 terminal,
                 state: &self.bottom_panel,
                 chart: surface.chart.clone(),
-                rithmic_attribution: terminal_chrome::shows_rithmic_attribution(
+                attribution: terminal_chrome::attribution_for_session(
+                    aeris_market_runtime::built_in_provider_presentations(),
                     surface.provider,
                     surface
                         .connection_state

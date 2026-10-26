@@ -63,6 +63,16 @@ impl ProviderFeedLevel {
     }
 }
 
+/// Licensing artwork and About notices supplied by a provider, not inferred from its ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderAttribution {
+    pub market_data_mark_key: &'static str,
+    pub powered_by_mark_key: &'static str,
+    /// Lines may contain `{year}`, replaced with the current UTC year at display time.
+    pub notices: &'static [&'static str],
+    pub powered_by_notice: &'static str,
+}
+
 /// Stable provider metadata for catalog and chart presentation.// Each flag is an independent, static provider capability, not encoded state.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +83,9 @@ pub struct ProviderPresentationDescriptor {
     pub daily_bars: ProviderDailyBarCadence,
     pub search_hint: &'static str,
     pub logo_key: &'static str,
+    /// Trading venue served by this provider's broker relay, if any.
+    pub broker_venue_id: Option<&'static str>,
+    pub attribution: Option<ProviderAttribution>,
     pub catalog_symbol: ProviderCatalogSymbol,
     pub selection_entitlement_id: &'static str,
     pub catalog_refresh_on_startup: bool,

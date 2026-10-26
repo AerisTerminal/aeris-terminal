@@ -1987,15 +1987,15 @@ impl TerminalApp {
         self.updater.as_ref().map(DesktopUpdater::presentation)
     }
 
-    /// Whether any pane holds a Rithmic session, the condition Rithmic's attribution and notices
-    /// follow.
-    fn holds_rithmic_session(&self, cx: &App) -> bool {
+    /// Attribution follows any pane holding the provider's session, including recovery.
+    fn held_provider_attribution(&self, cx: &App) -> Option<aeris_contracts::ProviderAttribution> {
         self.workspaces
             .iter()
             .flat_map(|workspace| &workspace.panes)
-            .any(|pane| {
+            .find_map(|pane| {
                 let surface = pane.surface.read(cx);
-                terminal_chrome::shows_rithmic_attribution(
+                terminal_chrome::attribution_for_session(
+                    aeris_market_runtime::built_in_provider_presentations(),
                     surface.provider,
                     surface
                         .connection_state
@@ -2026,7 +2026,7 @@ impl TerminalApp {
                 update: self.update_presentation(),
                 window_frame: self.chart_chrome.window_frame,
                 drawing_toolbar_visible: self.chart_chrome.drawing_toolbar.shown(),
-                rithmic_notices: self.holds_rithmic_session(cx),
+                attribution: self.held_provider_attribution(cx),
                 now_unix_seconds: self
                     .lifecycle
                     .clock()

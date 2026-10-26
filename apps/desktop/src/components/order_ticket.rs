@@ -258,10 +258,15 @@ impl TicketBroker {
         }
     }
 
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             Self::Practice => "Practice",
-            Self::Broker => "Rithmic",
+            Self::Broker => aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .find(|descriptor| {
+                    descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
+                })
+                .map_or("Broker", |descriptor| descriptor.display_name),
         }
     }
 }
@@ -1326,6 +1331,18 @@ fn status_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_ticket_uses_registered_venue_display_name() {
+        let descriptor = aeris_market_runtime::built_in_provider_presentations()
+            .iter()
+            .find(|descriptor| {
+                descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
+            })
+            .expect("attached broker venue has a presentation");
+        assert_eq!(TicketBroker::Broker.label(), descriptor.display_name);
+        assert_eq!(TicketBroker::Practice.label(), "Practice");
+    }
 
     fn point(units: i64, scale: u8) -> aeris_trading::FixedPoint {
         aeris_trading::FixedPoint::try_new(units, scale).expect("fixed point")

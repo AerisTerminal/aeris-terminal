@@ -583,16 +583,24 @@ pub(super) fn header_controls(
         .child(time_zone)
 }
 
-/// Rithmic's market-data mark stays visible for as long as the terminal holds a
-/// Rithmic session, including while that session recovers.
-pub(super) fn shows_rithmic_attribution(provider: ProviderId, state: FeedConnectionState) -> bool {
-    provider == ProviderId("rithmic")
-        && matches!(
-            state,
-            FeedConnectionState::Authenticating
-                | FeedConnectionState::Streaming
-                | FeedConnectionState::Recovering
-        )
+/// Attribution follows the provider's held session, including recovery.
+pub(super) fn attribution_for_session(
+    presentations: &[aeris_contracts::ProviderPresentationDescriptor],
+    provider: ProviderId,
+    state: FeedConnectionState,
+) -> Option<aeris_contracts::ProviderAttribution> {
+    if !matches!(
+        state,
+        FeedConnectionState::Authenticating
+            | FeedConnectionState::Streaming
+            | FeedConnectionState::Recovering
+    ) {
+        return None;
+    }
+    presentations
+        .iter()
+        .find(|presentation| presentation.id == provider.id())
+        .and_then(|presentation| presentation.attribution)
 }
 
 /// Draws an attribution mark from the artwork pre-rendered for the window's density, at
@@ -614,20 +622,26 @@ impl RenderOnce for AttributionMarkImage {
     }
 }
 
-/// The bottom panel carries only the market-data mark; the OMNE mark and the
-/// Rithmic notices stay on the Rithmic login dialog and in About.
-pub(super) fn rithmic_attribution(theme: &AerisTheme) -> impl IntoElement + use<> {
+/// The bottom panel carries only the market-data mark; other marks and notices stay in About.
+pub(super) fn provider_attribution(
+    attribution: aeris_contracts::ProviderAttribution,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
     div()
-        .id("rithmic_attribution")
+        .id("provider_attribution")
         .h_full()
         .flex_none()
         .flex()
         .items_center()
         .px_2()
-        .child(AttributionMarkImage {
-            mark: assets::AttributionMark::MarketDataByRithmic,
-            mode: theme.mode,
-        })
+        .children(
+            assets::AttributionMark::for_key(attribution.market_data_mark_key).map(|mark| {
+                AttributionMarkImage {
+                    mark,
+                    mode: theme.mode,
+                }
+            }),
+        )
 }
 
 fn chart_link_toggle(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> AnyElement {
@@ -1576,7 +1590,7 @@ fn format_transport_rtt(transport_rtt_nanos: Option<u64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FeedConnectionState, ProviderId, bleed_edge_colors, shows_rithmic_attribution};
+    use super::{FeedConnectionState, ProviderId, attribution_for_session, bleed_edge_colors};
 
     #[test]
     fn transparent_texels_take_their_visible_neighbours_color() {
@@ -1601,21 +1615,92 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_attribution_follows_the_rithmic_session_only() {
+    fn attribution_follows_held_provider_session() {
+        let presentations = aeris_market_runtime::built_in_provider_presentations();
+        let attributed = presentations
+            .iter()
+            .find(|p| p.attribution.is_some())
+            .unwrap();
+        let public = presentations
+            .iter()
+            .find(|p| p.attribution.is_none())
+            .unwrap();
         for state in [
             FeedConnectionState::Authenticating,
             FeedConnectionState::Streaming,
             FeedConnectionState::Recovering,
         ] {
-            assert!(shows_rithmic_attribution(ProviderId("rithmic"), state));
-            assert!(!shows_rithmic_attribution(ProviderId("hyperliquid"), state));
+            let attribution =
+                attribution_for_session(presentations, ProviderId(attributed.id), state).unwrap();
+            assert_eq!(attribution.notices.len(), 3);
+            assert!(
+                super::assets::AttributionMark::for_key(attribution.market_data_mark_key).is_some()
+            );
+            assert!(
+                super::assets::AttributionMark::for_key(attribution.powered_by_mark_key).is_some()
+            );
+            assert!(attribution_for_session(presentations, ProviderId(public.id), state).is_none());
         }
         for state in [
             FeedConnectionState::Disconnected,
             FeedConnectionState::Discovering,
             FeedConnectionState::Stopped,
         ] {
-            assert!(!shows_rithmic_attribution(ProviderId("rithmic"), state));
+            assert!(
+                attribution_for_session(presentations, ProviderId(attributed.id), state).is_none()
+            );
+        }
+        let fixture = aeris_contracts::ProviderPresentationDescriptor {
+            id: "fixture",
+            attribution: None,
+            ..*attributed
+        };
+        assert!(
+            attribution_for_session(
+                &[fixture],
+                ProviderId("fixture"),
+                FeedConnectionState::Streaming
+            )
+            .is_none()
+        );
+        let fixture_attribution = aeris_contracts::ProviderAttribution {
+            market_data_mark_key: "fixture_mark",
+            powered_by_mark_key: "fixture_powered",
+            notices: &["Fixture copyright © {year}"],
+            powered_by_notice: "Fixture notice",
+        };
+        let fixture_attributed = aeris_contracts::ProviderPresentationDescriptor {
+            attribution: Some(fixture_attribution),
+            ..fixture
+        };
+        assert_eq!(
+            attribution_for_session(
+                &[fixture_attributed],
+                ProviderId("fixture"),
+                FeedConnectionState::Recovering
+            ),
+            Some(fixture_attribution)
+        );
+        for mode in [
+            aeris_design_system::ThemeMode::Light,
+            aeris_design_system::ThemeMode::Dark,
+        ] {
+            for key in [
+                attributed.attribution.unwrap().market_data_mark_key,
+                attributed.attribution.unwrap().powered_by_mark_key,
+            ] {
+                let mark = super::assets::AttributionMark::for_key(key).unwrap();
+                for density in super::assets::MarkDensity::ALL {
+                    assert!(
+                        gpui::AssetSource::load(
+                            &super::assets::AerisAssets,
+                            &mark.path(mode, density)
+                        )
+                        .unwrap()
+                        .is_some()
+                    );
+                }
+            }
         }
     }
 }

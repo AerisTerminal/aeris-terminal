@@ -32,6 +32,6 @@ pub use messages::{
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 pub use provider::{
-    ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence, ProviderFeedLevel,
-    ProviderPresentationDescriptor,
+    ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,
+    ProviderFeedLevel, ProviderPresentationDescriptor,
 };

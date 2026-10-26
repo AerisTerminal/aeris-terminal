@@ -219,6 +219,8 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             daily_bars: aeris_contracts::ProviderDailyBarCadence::FixedDay,
             search_hint: "Search fourth provider",
             logo_key: "fourth-provider",
+            broker_venue_id: None,
+            attribution: None,
             catalog_symbol: aeris_contracts::ProviderCatalogSymbol::ProviderSymbol,
             selection_entitlement_id: "fourth-provider",
             catalog_refresh_on_startup: false,

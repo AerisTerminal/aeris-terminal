@@ -143,14 +143,16 @@ violations and missing verification explicitly, and never describe them as satis
   provider identities. Exact fixture module paths compiled only under `cfg(test)` or
   `cfg(any(test, feature = "diagnostics"))` are outside the production scan, and the rule
   checks their gated declarations; moving the same identity to an ungated path fails.
-  During M6.7-M6.9, only the exact
-  reasoned file exceptions in `tools/naming_check` may retain existing provider identities;
-  an exception must be removed when its final match disappears. Do not add a new exception
-  for new desktop provider logic. Replay conversion and chart legend projection have no provider
-  identity exceptions: they use the bound instrument descriptor and published provider name.
+  The only exception is the `assets.rs` logo mapping in `tools/naming_check`;
+  no desktop provider logic may gain an exception. Replay conversion and chart legend projection
+  use the bound instrument descriptor and published provider name.
   The bridge files `market_worker.rs`, `engine_market_worker.rs` and its `runtime.rs`
   need no provider-identity exceptions after M6.7; the deleted connection shell
   has no exception either. The final production exception is the logo mapping in `assets.rs`.
+- Provider attribution marks and About notice lines come from published presentation
+  descriptors only while the matching provider session is held, including recovery.
+  Only `assets.rs` maps their logo keys to bundled light/dark artwork. Broker
+  ticket venue names come from the matching broker venue's provider presentation.
 - A fresh workspace persists one chart pane without a provider or instrument.
   The bridge sends `InstrumentRequest::Default`, adopts the runtime's resolved
   selection, and shows "Choose an instrument" without losing the workspace

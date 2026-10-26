@@ -2147,7 +2147,7 @@ fn chart_trading_snapshot(
                     .and_then(|scale| chart_decimal(units, scale))
             })
     });
-    // Fixed-point scales are storage precision (Hyperliquid stores every value at eight places),
+    // Fixed-point scales are storage precision (some feeds store every value at eight places),
     // not display precision. Leaving both unset lets the chart format trading prices with its
     // price-axis formatter and show sizes without trailing zeros.
     let instrument = ChartInstrumentMetadata {

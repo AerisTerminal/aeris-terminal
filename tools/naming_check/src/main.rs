@@ -28,43 +28,12 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
 ];
 const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md", "themes.md"];
 
-/// Temporary, file-scoped exceptions for provider presentation still being moved
-/// behind runtime descriptors in M6.7-M6.9. Each entry must disappear when its
-/// last provider identity disappears; new files cannot silently gain identities.
-const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
-    (
-        "apps/desktop/src/assets.rs",
-        "registered provider logo assets",
-    ),
-    (
-        "apps/desktop/src/components/bottom_panel.rs",
-        "legacy provider panel labels",
-    ),
-    (
-        "apps/desktop/src/components/order_ticket.rs",
-        "legacy provider ticket labels",
-    ),
-    (
-        "apps/desktop/src/components/platform_menu.rs",
-        "legacy provider menu actions",
-    ),
-    (
-        "apps/desktop/src/components/terminal_chrome.rs",
-        "legacy provider chrome",
-    ),
-    (
-        "apps/desktop/src/components/terminal_view.rs",
-        "legacy provider view",
-    ),
-    (
-        "apps/desktop/src/desktop.rs",
-        "legacy provider connection and summary routes",
-    ),
-    (
-        "apps/desktop/src/desktop/workspace_tabs.rs",
-        "legacy provider tab label",
-    ),
-];
+/// The sole provider identity exception maps published logo keys to bundled artwork.
+/// Every other desktop production source must remain provider-neutral.
+const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[(
+    "apps/desktop/src/assets.rs",
+    "registered provider logo assets",
+)];
 
 // Only these declared modules can be omitted from the production identity scan.
 // The declaration gates are checked below, so moving one into production fails.

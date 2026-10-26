@@ -2,7 +2,7 @@
 //! application-level section in a single panel: account (profile, plan and sign-in actions), Theme
 //! with a preview card per mode and a chip per palette preset, Window with frameless mode and the drawing toolbar switch, the
 //! keyboard shortcuts list, and
-//! About with version, system, validation mode, Rithmic's notices while a Rithmic session is held, and
+//! About with version, system, validation mode, provider notices while its session is held, and
 //! updates.
 
 use aeris_observability::diagnostic;
@@ -166,8 +166,8 @@ pub(super) struct PlatformMenuContent<'a> {
     pub(super) update: Option<&'a UpdatePresentation>,
     pub(super) window_frame: chart_chrome::WindowFrame,
     pub(super) drawing_toolbar_visible: bool,
-    /// Rithmic's notices appear under About only while a Rithmic session is held.
-    pub(super) rithmic_notices: bool,
+    /// Notices appear under About only while their provider's session is held.
+    pub(super) attribution: Option<aeris_contracts::ProviderAttribution>,
     pub(super) now_unix_seconds: i64,
 }
 
@@ -186,7 +186,7 @@ pub(super) fn platform_menu_layer(
         update,
         window_frame,
         drawing_toolbar_visible,
-        rithmic_notices,
+        attribution,
         now_unix_seconds,
     } = content;
     let header = identity_header(account, theme);
@@ -197,7 +197,7 @@ pub(super) fn platform_menu_layer(
         actions: actions.len(),
         error: account.error.is_some(),
         about_details: details.len(),
-        rithmic_notices,
+        attribution,
     };
     let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + PLATFORM_MENU_GAP;
     let panel_chrome = menu_panel_chrome_height(theme, MenuScale::BASE, px(ROOT_REM_PX));
@@ -262,7 +262,7 @@ pub(super) fn platform_menu_layer(
         .separator()
         .child(about_section(
             details,
-            rithmic_notices,
+            attribution,
             now_unix_seconds,
             &about_update_view(update, theme),
             &run_update,
@@ -319,7 +319,7 @@ struct PlatformMenuLayout {
     actions: usize,
     error: bool,
     about_details: usize,
-    rithmic_notices: bool,
+    attribution: Option<aeris_contracts::ProviderAttribution>,
 }
 
 impl PlatformMenuLayout {
@@ -357,12 +357,15 @@ impl PlatformMenuLayout {
             + separator
             + CHART_CONTEXT_MENU_ROW_HEIGHT
             + separator
-            + about_section_height(self.about_details, self.rithmic_notices)
+            + about_section_height(self.about_details, self.attribution)
     }
 }
 
-fn about_section_height(details: usize, rithmic_notices: bool) -> f32 {
-    let notices = if rithmic_notices {
+fn about_section_height(
+    details: usize,
+    attribution: Option<aeris_contracts::ProviderAttribution>,
+) -> f32 {
+    let notices = if attribution.is_some() {
         ABOUT_NOTICES_HEIGHT
     } else {
         0.0
@@ -934,14 +937,14 @@ fn about_details(
 
 fn about_section(
     details: Vec<(&'static str, String)>,
-    rithmic_notices: bool,
+    attribution: Option<aeris_contracts::ProviderAttribution>,
     now_unix_seconds: i64,
     update: &UpdateView,
     on_update: &UpdateActivate,
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
-    let height = about_section_height(details.len(), rithmic_notices);
+    let height = about_section_height(details.len(), attribution);
     section()
         .h(px(height))
         .pb(px(SECTION_BOTTOM_PADDING))
@@ -991,33 +994,32 @@ fn about_section(
                         .child(value),
                 )
         }))
-        .when(rithmic_notices, |about| {
-            about.child(provider_notices(utc_year(now_unix_seconds), theme))
+        .when_some(attribution, |about, attribution| {
+            about.child(provider_notices(
+                attribution,
+                utc_year(now_unix_seconds),
+                theme,
+            ))
         })
         .child(update_row(update, on_update, theme))
 }
 
-/// Copyright and trademark notices Rithmic attaches to its software, shown beside the terminal's
-/// own while a Rithmic session is held; the year follows the clock as their wording asks.
-fn provider_notice_texts(year: i64) -> [String; 3] {
-    [
-        format!(
-            "The R | Protocol API™ software is Copyright © {year} by Rithmic, LLC. \
-             All rights reserved."
-        ),
-        "Trading Platform by Rithmic™ is a trademark of Rithmic, LLC. All rights reserved."
-            .to_string(),
-        format!(
-            "The OMNE™ software is Copyright © {year} by Omnesys, LLC and Omnesys \
-             Technologies, Inc. All rights reserved."
-        ),
-    ]
+fn provider_notice_texts(
+    attribution: aeris_contracts::ProviderAttribution,
+    year: i64,
+) -> Vec<String> {
+    attribution
+        .notices
+        .iter()
+        .map(|notice| notice.replace("{year}", &year.to_string()))
+        .collect()
 }
 
-const POWERED_BY_OMNE_NOTICE: &str =
-    "is a trademark of Omnesys, LLC and Omnesys Technologies, Inc. All rights reserved.";
-
-fn provider_notices(year: i64, theme: &AerisTheme) -> impl IntoElement {
+fn provider_notices(
+    attribution: aeris_contracts::ProviderAttribution,
+    year: i64,
+    theme: &AerisTheme,
+) -> impl IntoElement {
     let muted = gpui_color(theme.colors.text_muted);
     div()
         .id("about_provider_notices")
@@ -1031,7 +1033,7 @@ fn provider_notices(year: i64, theme: &AerisTheme) -> impl IntoElement {
         .text_xs()
         .text_color(muted)
         .children(
-            provider_notice_texts(year)
+            provider_notice_texts(attribution, year)
                 .into_iter()
                 .map(|notice| div().flex_none().child(notice)),
         )
@@ -1041,11 +1043,15 @@ fn provider_notices(year: i64, theme: &AerisTheme) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .items_start()
-                .child(super::terminal_chrome::AttributionMarkImage {
-                    mark: assets::AttributionMark::PoweredByOmne,
-                    mode: theme.mode,
-                })
-                .child(POWERED_BY_OMNE_NOTICE),
+                .children(
+                    assets::AttributionMark::for_key(attribution.powered_by_mark_key).map(|mark| {
+                        super::terminal_chrome::AttributionMarkImage {
+                            mark,
+                            mode: theme.mode,
+                        }
+                    }),
+                )
+                .child(attribution.powered_by_notice),
         )
 }
 
@@ -1200,7 +1206,7 @@ mod tests {
                 .child(
                     about_section(
                         about_details(&account, None),
-                        false,
+                        None,
                         1_780_000_000,
                         &about_update_view(None, &theme),
                         &ignore_update,
@@ -1211,13 +1217,15 @@ mod tests {
                 .child(
                     about_section(
                         about_details(&account, None),
-                        true,
+                        aeris_market_runtime::built_in_provider_presentations()
+                            .iter()
+                            .find_map(|p| p.attribution),
                         1_780_000_000,
                         &about_update_view(None, &theme),
                         &ignore_update,
                         &theme,
                     )
-                    .debug_selector(|| "about_section_rithmic".into()),
+                    .debug_selector(|| "about_section_attributed".into()),
                 )
         }
     }
@@ -1233,23 +1241,26 @@ mod tests {
             let theme_bounds = cx.debug_bounds("theme_section").expect("theme section");
             let window_bounds = cx.debug_bounds("window_section").expect("window section");
             let about_bounds = cx.debug_bounds("about_section").expect("about section");
-            let rithmic_bounds = cx
-                .debug_bounds("about_section_rithmic")
-                .expect("about section with Rithmic notices");
+            let attributed_bounds = cx
+                .debug_bounds("about_section_attributed")
+                .expect("about section with provider notices");
+            let attributed = aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .find_map(|p| p.attribution);
             assert_eq!(theme_bounds.size.height, px(THEME_SECTION_HEIGHT));
             assert_eq!(window_bounds.size.height, px(WINDOW_SECTION_HEIGHT));
-            assert_eq!(about_bounds.size.height, px(about_section_height(2, false)));
+            assert_eq!(about_bounds.size.height, px(about_section_height(2, None)));
             assert_eq!(
-                rithmic_bounds.size.height,
-                px(about_section_height(2, true))
+                attributed_bounds.size.height,
+                px(about_section_height(2, attributed))
             );
             assert!(
-                (about_section_height(2, true)
-                    - about_section_height(2, false)
+                (about_section_height(2, attributed)
+                    - about_section_height(2, None)
                     - ABOUT_NOTICES_HEIGHT)
                     .abs()
                     < f32::EPSILON,
-                "without a Rithmic session the notices take no room"
+                "without a held provider session the notices take no room"
             );
         }
     }
@@ -1272,26 +1283,29 @@ mod tests {
     fn layout_height_counts_every_section_and_separator() {
         // The panel's inset plus border on both edges.
         let panel_chrome = 9.0;
+        let attributed = aeris_market_runtime::built_in_provider_presentations()
+            .iter()
+            .find_map(|p| p.attribution);
         let development = PlatformMenuLayout {
             identity: false,
             actions: 0,
             error: false,
             about_details: 2,
-            rithmic_notices: false,
+            attribution: None,
         };
         let expected = panel_chrome
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
             + CHART_CONTEXT_MENU_ROW_HEIGHT
             + 3.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
-            + about_section_height(2, false);
+            + about_section_height(2, None);
         assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
         let signed_in = PlatformMenuLayout {
             identity: true,
             actions: 2,
             error: true,
             about_details: 1,
-            rithmic_notices: true,
+            attribution: attributed,
         };
         let expected = panel_chrome
             + IDENTITY_HEIGHT
@@ -1299,7 +1313,7 @@ mod tests {
             + ACCOUNT_ERROR_HEIGHT
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
-            + about_section_height(1, true)
+            + about_section_height(1, attributed)
             + 5.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         assert!((signed_in.height(panel_chrome) - expected).abs() < f32::EPSILON);
     }
@@ -1315,11 +1329,19 @@ mod tests {
 
     #[test]
     fn provider_notices_carry_the_requested_year_and_owners() {
-        let notices = provider_notice_texts(2026);
+        let attribution = aeris_market_runtime::built_in_provider_presentations()
+            .iter()
+            .find_map(|p| p.attribution)
+            .unwrap();
+        let notices = provider_notice_texts(attribution, 2026);
         assert!(notices[0].contains("R | Protocol API™") && notices[0].contains("© 2026"));
         assert!(notices[1].starts_with("Trading Platform by Rithmic™ is a trademark"));
         assert!(notices[2].contains("OMNE™") && notices[2].contains("© 2026"));
-        assert!(POWERED_BY_OMNE_NOTICE.contains("Omnesys Technologies, Inc."));
+        assert!(
+            attribution
+                .powered_by_notice
+                .contains("Omnesys Technologies, Inc.")
+        );
     }
 
     #[test]

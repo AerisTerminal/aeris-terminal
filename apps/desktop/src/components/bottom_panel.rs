@@ -510,8 +510,8 @@ pub(super) struct BottomPanelView<'a> {
     pub(super) state: &'a BottomPanelState,
     /// The active chart formats trade times in its selected zone.
     pub(super) chart: Option<Entity<AerisChartView>>,
-    /// The active pane holds a Rithmic session, so its attribution marks show.
-    pub(super) rithmic_attribution: bool,
+    /// Attribution belonging to the active pane's held provider session.
+    pub(super) attribution: Option<aeris_contracts::ProviderAttribution>,
 }
 
 pub(super) fn bottom_panel(
@@ -523,7 +523,7 @@ pub(super) fn bottom_panel(
         terminal,
         state,
         chart,
-        rithmic_attribution,
+        attribution,
     } = view;
     let open = state.open;
     let resize_terminal = terminal.clone();
@@ -538,12 +538,7 @@ pub(super) fn bottom_panel(
         .border_t(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.surface))
-        .child(trade_history_header(
-            terminal,
-            state,
-            rithmic_attribution,
-            theme,
-        ))
+        .child(trade_history_header(terminal, state, attribution, theme))
         .when(open, |panel| {
             let panel = panel
                 .children(account_stats(state, theme))
@@ -593,7 +588,7 @@ fn trade_history_resize_handle() -> impl IntoElement {
 fn trade_history_header(
     terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
-    rithmic_attribution: bool,
+    attribution: Option<aeris_contracts::ProviderAttribution>,
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
@@ -621,8 +616,11 @@ fn trade_history_header(
                 .child(BOTTOM_PANEL_TITLE),
         )
         .child(div().flex_1())
-        .when(rithmic_attribution, |header| {
-            header.child(super::terminal_chrome::rithmic_attribution(theme))
+        .when_some(attribution, |header, attribution| {
+            header.child(super::terminal_chrome::provider_attribution(
+                attribution,
+                theme,
+            ))
         })
         // The account filter sits at the trailing edge, beside the collapse control.
         .when(open && state.history.accounts.len() > 1, |header| {
