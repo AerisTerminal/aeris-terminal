@@ -678,10 +678,12 @@ impl TerminalApp {
         if resync {
             self.bottom_panel.invalidate_trading_revision();
         }
-        if self.bottom_panel.apply_store(self.trading_store.read(cx)) {
+        let (changed, accounts_changed) =
+            self.bottom_panel.apply_store(self.trading_store.read(cx));
+        if changed {
             cx.notify();
         }
-        if resync {
+        if resync || accounts_changed {
             self.request_history_page(cx);
         }
         self.announce_trading(&snapshot, cx);

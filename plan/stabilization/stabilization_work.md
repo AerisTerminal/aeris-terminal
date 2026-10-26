@@ -2246,6 +2246,12 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 3 of 3 desktop trades): the bottom panel now requests
+    owner-projected closed-trade pages per account off the UI thread, merges selected
+    accounts newest-first, deduplicates by exit fill ID against the live head and
+    displays exact owner P&L. Four 500-trade pages remain the bound; account changes
+    and lagged resync discard stale completions. VAL-DSK-119 desktop model and owner
+    page regressions close; typed notices and guarded GUI evidence remain. M6.10 stays unchecked.
   - Status (2026-10-26 Part 3 of 3, legacy partial-exit correction):
     migrated pre-V21 partial reductions with no realized P&L or cycle-close
     flag now appear in account-scoped closed-trade pages. The V30 account/time/
@@ -2484,11 +2490,13 @@ the repo root `AGENTS.md`.
   exits remain distinct and historical pages can dedupe against the live head;
   open trades have no exit identity (M6.10 historical-trade identity checkpoint,
   `feat(trading): identify closed round trips by exit fill`).
-- The desktop's explicit older-order history stops after four loaded 500-row
-  pages (2,000 retained order records) and shows a cap message rather than
-  growing with the durable store. Recent fill-based trades stay distinct from
-  durable order records, which do not contain historical trade P&L
-  (M6.10 Part 3, `feat(desktop): page bounded order history off the UI thread`).
+- The desktop's older closed-trade history stops after four loaded 500-row
+  pages (2,000 retained trades) and shows a cap message rather than growing
+  with the durable store. Owner-projected pages per account are merged
+  newest-first and deduplicated against recent round trips by exit fill ID;
+  the owner supplies exact P&L, including unknown values. Account changes and
+  lagged resync reject stale completions
+  (M6.10 Part 3, `feat(desktop): show owner-projected historical trades`).
 - `trading_runtime/test-observability` belongs only to the desktop
   dev-dependency; its per-instance `TradingService::history` call counter
   disappears from default production builds (M6.10 Part 2c,
@@ -3112,6 +3120,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 3 of 3 historical-trade identity checkpoint feat(trading): identify closed round trips by exit fill. `entry_and_exit_fills_form_one_round_trip_with_its_final_pnl` and `open_round_trip_pnl_follows_live_marks_and_partial_exits` verify the durable exit ID on close, distinct partial exit IDs after restart and no ID on an open trade. VAL-DSK-119 is still open for the bounded owner trade page and desktop conversion; M6.10 remains unchecked.
 - 2026-10-26 M6.10 Part 3 of 3 feat(trading): page closed trades with owner pnl. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` generates 601 closed cycles on a file-backed store and checks the 500-row cap, disjoint older page, stable exit identities and exact owner P&L for every row; `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` checks tied timestamps, account isolation and unknown-P&L exits; `open_round_trip_pnl_follows_live_marks_and_partial_exits` compares historical partial-exit trades with the owner after restart. The read-only reader reuses the owner's round-trip projector. Desktop conversion and VAL-DSK-119 remain open; M6.10 stays unchecked.
 - 2026-10-26 M6.10 Part 3 of 3 fix(trading): retain migrated partial exits in trade pages. `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` seeds a pre-V21 partial reduction, opens it through the migrations and matches the owner's exact closed row with unknown P&L; `migrated_trade_history_uses_account_keyset_index` checks V29-to-V30 migration and both index query plans. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` retain their page/cursor coverage. M6.10 stays unchecked pending desktop conversion, typed notices and GUI evidence.
+- 2026-10-26 M6.10 Part 3 of 3 feat(desktop): show owner-projected historical trades - `trade_history_model_appends_trades_without_live_head_duplicates_and_stops_at_bound`, `historical_trade_pages_merge_accounts_and_reject_retired_account_completions` and `changed_accounts_reload_trade_pages_and_reject_old_completion` test cursor paging, the four-page cap, merged accounts, account-change and lagged stale completions, and owner's unchanged P&L; `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` retain owner-level exact and unknown P&L coverage. M6.10 remains unchecked for typed notices and GUI evidence.
 
 ## 7. Known gaps / deferred
 

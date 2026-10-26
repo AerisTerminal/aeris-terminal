@@ -265,11 +265,12 @@ violations and missing verification explicitly, and never describe them as satis
   `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.
   Trading updates are applied on subscription wakes, not a render-path or 250 ms timer.
 - The desktop bottom panel keeps recent fill-based round trips as its live trade head.
-  The desktop currently requests historical order records through the trading service's
-  read-only history worker on a background thread; they have no historical trade P&L and
-  must not be presented as reconstructed round trips. The owner also exposes historical
-  closed-trade pages, awaiting desktop adoption. At most four 500-order pages are retained,
-  with a visible cap, and a lagged subscription resync reloads the first page.
+  It requests owner-projected historical closed-trade pages per account through the
+  read-only history worker on a background thread, merges accounts newest-first and
+  deduplicates by exit fill ID against the live head. Historical P&L is shown as received
+  from the owner, including unknown values. At most four 500-trade pages are retained,
+  with a visible cap; account changes and lagged subscription resync fence old completions
+  and reload the first page.
 - The `trading_runtime/test-observability` feature is enabled only by the desktop's
   dev-dependency to count calls to the instance's real `TradingService::history` API
   in idle regressions. Default production builds carry no history-read counter.
