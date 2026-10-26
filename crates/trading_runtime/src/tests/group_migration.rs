@@ -8,7 +8,6 @@ use crate::clock::ManualClock;
 use crate::store::TradingStore;
 use rusqlite::Connection;
 use std::sync::{Arc, Weak, atomic::AtomicBool, mpsc};
-use std::time::Duration;
 
 fn contract_json(tick: &serde_json::Value, grid: &serde_json::Value) -> String {
     serde_json::json!({
@@ -419,7 +418,9 @@ fn v19_awaiting_brackets_convert_exactly_at_startup() {
         OrderStatus::Working,
         "an unpriceable bracket never changes its entry"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 
     assert_v19_backup(&directory);
     assert_migrated_rows(&path);
@@ -442,7 +443,7 @@ fn v19_awaiting_brackets_convert_exactly_at_startup() {
         "reopening the converted database changes nothing"
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -501,5 +502,7 @@ fn failed_awaiting_conversion_rolls_back_and_retries_on_next_start() {
         "the retry converts the bracket"
     );
     assert_eq!(snapshot.recovery_notices, []);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }

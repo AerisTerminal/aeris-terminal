@@ -11,7 +11,6 @@ use crate::{
 use aeris_trading::RejectReason;
 use aeris_trading::market::{FeedReason, FeedState, MarketFeedEvent};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
 
 const CLOCK_START: i64 = 1_000_000_000_000;
 
@@ -24,7 +23,9 @@ fn route_less_store(directory: &TestDirectory) -> TradingServiceConfig {
     service
         .register_instrument(instrument())
         .expect("instrument");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     configuration
 }
 

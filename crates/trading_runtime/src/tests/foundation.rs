@@ -35,7 +35,9 @@ fn account_routes_and_broker_identity_survive_restart() {
         service.place_order(request).unwrap_err(),
         "broker demo venue is not connected"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert!(
         restarted
@@ -45,7 +47,7 @@ fn account_routes_and_broker_identity_survive_restart() {
             .contains(&broker_account(AccountEnvironment::Demo))
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -53,7 +55,7 @@ fn account_routes_and_broker_identity_survive_restart() {
 fn broker_account_of_a_retired_venue_loads_but_never_routes() {
     let directory = TestDirectory::new("retired-venue");
     start_service(&directory)
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
     let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
     database
@@ -89,7 +91,9 @@ fn broker_account_of_a_retired_venue_loads_but_never_routes() {
         requests.try_recv().is_err(),
         "a retired venue's account is never reconciled"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -109,7 +113,9 @@ fn account_venue_environment_and_broker_reference_must_agree() {
         "trading account venue, environment and broker reference do not match"
     );
     assert_eq!(service.snapshot().expect("snapshot").accounts.len(), 1);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -139,7 +145,9 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
         service.place_order(valid).expect("at the limit").status,
         OrderStatus::Pending
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
     let longest: i64 = database
         .query_row(
@@ -242,7 +250,9 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.risk_locks, []);
     assert_eq!(snapshot.orders[0].status, OrderStatus::Working);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -281,7 +291,9 @@ fn owner_replaces_desktop_venue_identity_on_simulated_place_and_modify() {
             .venue_id,
         "aeris-sim"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -306,7 +318,9 @@ fn flatten_outcome_preserves_simulated_fills_with_no_pending_closes() {
             unpriced: vec![],
         }
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -393,7 +407,9 @@ fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
         1,
         "the broker bracket is one entry; the venue holds its levels"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -453,7 +469,9 @@ fn copier_rejects_broker_source_and_target_before_persisting() {
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.orders.len(), 0);
     assert_eq!(snapshot.copy_dispatches.len(), 0);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -508,5 +526,7 @@ fn economic_event_flatten_rejects_broker_and_preserves_simulated_rule() {
         .apply_economic_event_risk(event)
         .expect("simulated rule");
     assert_eq!(result.flattened_accounts, 1);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }

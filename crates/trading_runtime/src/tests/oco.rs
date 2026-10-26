@@ -4,7 +4,6 @@
 
 use super::*;
 use rusqlite::Connection;
-use std::time::Duration;
 
 fn oco_member(client_id: &str, side: OrderSide, stop: i64, sequence: u64, time: i64) -> PlaceOrder {
     let mut order = market_order(client_id, side, sequence, time);
@@ -67,7 +66,9 @@ fn oco_pair_rests_as_two_working_members_of_one_active_group() {
         service.place_oco(other_instrument).expect_err("one scope"),
         "OCO members share one account and instrument"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]

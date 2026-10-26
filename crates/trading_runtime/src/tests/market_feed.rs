@@ -178,12 +178,12 @@ fn day_acceptance_fixes_session_deadline_and_restores_it() {
         None
     );
     let before = service.snapshot().unwrap();
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
     let mut configuration = config(&directory);
     configuration.clock = clock;
     let restarted = TradingService::start(configuration).unwrap();
     assert_eq!(restarted.snapshot().unwrap().orders, before.orders);
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
         .modify_order(amend(TimeInForce::Day, 9_875))
         .expect("day to day");
     assert_eq!(still_day.expires_at_unix_nanos, Some(2_000_000_000_000));
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     let mut configuration = config(&directory);
     configuration.clock = clock;
@@ -263,7 +263,7 @@ fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
         aeris_trading::RejectReason::SessionUnknown.to_string()
     );
     assert_eq!(restarted.snapshot().unwrap(), before);
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn day_order_expires_on_owner_boundary_before_late_quote() {
     feed.push(MarketFeedEvent::Quote(quote(1, 2, 10_000, 10_025)))
         .expect("late quote");
     assert_eq!(service.snapshot().unwrap().fills.len(), 0);
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
     let mut configuration = config(&directory);
     configuration.clock = clock;
     let restarted = start_service_with_config(configuration);
@@ -330,7 +330,7 @@ fn day_order_expires_on_owner_boundary_before_late_quote() {
             .find(|order| order.id == accepted.id),
         Some(expired)
     );
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -353,7 +353,7 @@ fn overdue_day_order_is_expired_before_first_command_after_restart() {
     request.time_in_force = TimeInForce::Day;
     let working = service.place_order(request).unwrap();
     assert_eq!(working.status, OrderStatus::Working);
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     clock.set_wall_unix_nanos(2_000_001_000_000);
     let mut configuration = config(&directory);
@@ -400,7 +400,7 @@ fn overdue_day_order_is_expired_before_first_command_after_restart() {
             && event.kind == OrderEventKind::Expired
             && event.event_unix_nanos == 2_000_000_000_000
     }));
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -422,7 +422,7 @@ fn migrated_day_without_deadline_cannot_fill_before_calendar_recovery() {
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
     let working = service.place_order(request).unwrap();
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     let configuration = config(&directory);
     rusqlite::Connection::open(&configuration.database_path)
@@ -463,7 +463,7 @@ fn migrated_day_without_deadline_cannot_fill_before_calendar_recovery() {
                 .status,
             OrderStatus::Working
         );
-        restarted.shutdown(Duration::from_secs(5)).unwrap();
+        restarted.shutdown_after_owner_exit_for_test().unwrap();
     }
 }
 
@@ -501,7 +501,7 @@ fn migrated_always_open_day_recovers_acceptance_midnight_before_first_command() 
     request.time_in_force = TimeInForce::Day;
     let working = service.place_order(request).unwrap();
     let acceptance_midnight = working.expires_at_unix_nanos.unwrap();
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     let mut configuration = config(&directory);
     rusqlite::Connection::open(&configuration.database_path)
@@ -523,7 +523,7 @@ fn migrated_always_open_day_recovers_acceptance_midnight_before_first_command() 
     assert_eq!(order.expires_at_unix_nanos, Some(acceptance_midnight));
     assert_eq!(order.status, OrderStatus::Expired);
     assert_eq!(order.terminal_unix_nanos, Some(acceptance_midnight));
-    recovered.shutdown(Duration::from_secs(5)).unwrap();
+    recovered.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -560,7 +560,7 @@ fn route_less_legacy_day_waits_for_verified_terms_before_expiring() {
     request.time_in_force = TimeInForce::Day;
     let placed = service.place_order(request).unwrap();
     let deadline = placed.expires_at_unix_nanos.unwrap();
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     let mut configuration = config(&directory);
     let connection = rusqlite::Connection::open(&configuration.database_path).unwrap();
@@ -600,7 +600,7 @@ fn route_less_legacy_day_waits_for_verified_terms_before_expiring() {
     assert_eq!(recovered.status, OrderStatus::Expired);
     assert_eq!(recovered.expires_at_unix_nanos, Some(deadline));
     assert_eq!(recovered.terminal_unix_nanos, Some(deadline));
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -639,7 +639,7 @@ fn failed_multi_day_backfill_rolls_back_every_deadline_and_retries_on_restart() 
     let second = service.place_order(request).unwrap();
     let deadline = first.expires_at_unix_nanos.unwrap();
     assert_eq!(second.expires_at_unix_nanos, Some(deadline));
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     let mut configuration = config(&directory);
     let connection = rusqlite::Connection::open(&configuration.database_path).unwrap();
@@ -693,7 +693,7 @@ fn failed_multi_day_backfill_rolls_back_every_deadline_and_retries_on_restart() 
         assert_eq!(order.expires_at_unix_nanos, Some(deadline));
         assert_eq!(order.terminal_unix_nanos, Some(deadline));
     }
-    recovered.shutdown(Duration::from_secs(5)).unwrap();
+    recovered.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -736,7 +736,7 @@ fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
     day.client_order_id = ClientOrderId::try_new("weekly-gtc").unwrap();
     day.time_in_force = TimeInForce::GoodTillCancelled;
     let gtc = service.place_order(day).unwrap();
-    service.shutdown(Duration::from_secs(5)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
     let mut configuration = config(&directory);
     rusqlite::Connection::open(&configuration.database_path)
         .unwrap()
@@ -766,7 +766,7 @@ fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
             .status,
         OrderStatus::Working
     );
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
     // Friday closes on Nov 6, 13 and 20 all pass across the two restarts.
     clock.set_wall_unix_nanos(CLOSE + 14 * 86_400_000_000_000);
     let mut configuration = config(&directory);
@@ -782,7 +782,7 @@ fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
             .status,
         OrderStatus::Working
     );
-    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 pub(crate) fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
@@ -854,7 +854,9 @@ fn expiring_pending_bracket_cancels_every_held_leg_with_cascade() {
             aeris_trading::OrderEventReason::Cascade,
         );
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -868,7 +870,9 @@ fn repeated_identical_feed_terms_after_restart_keep_the_durable_revision() {
         .expect("verified terms");
     service.status().expect("drain terms");
     let before = service.snapshot().expect("before restart");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let feed = restarted
         .attach_market_feed(Arc::new(RecordedInterest::default()))
@@ -880,7 +884,7 @@ fn repeated_identical_feed_terms_after_restart_keep_the_durable_revision() {
     assert_eq!(after.instruments, before.instruments);
     assert_eq!(after.revision, before.revision);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -972,7 +976,9 @@ fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
             vec![OrderEventKind::Accepted, OrderEventKind::Filled]
         );
         let before = service.snapshot().expect("before restart");
-        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+        service
+            .shutdown_after_owner_exit_for_test()
+            .expect("shutdown");
         let restarted = TradingService::start(config(&directory)).expect("restart");
         let after = restarted.snapshot().expect("restored");
         assert_eq!(after.orders, before.orders);
@@ -980,7 +986,7 @@ fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
         assert_eq!(after.fills, before.fills);
         assert_eq!(after.positions, before.positions);
         restarted
-            .shutdown(Duration::from_secs(5))
+            .shutdown_after_owner_exit_for_test()
             .expect("shutdown");
     }
 }
@@ -1040,14 +1046,16 @@ fn nonmarketable_ioc_and_fok_cancel_in_the_acceptance_step() {
         );
     }
     let before = service.snapshot().expect("before restart");
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert_eq!(
         restarted.snapshot().expect("restored").orders,
         before.orders
     );
     restarted
-        .shutdown(Duration::from_secs(5))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1137,14 +1145,16 @@ fn market_without_quote_waits_five_seconds_then_cancels_or_fills() {
             .status,
         OrderStatus::Cancelled
     );
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let restored = restarted.snapshot().expect("restored");
     assert_eq!(restored.orders, filled.orders);
     assert_eq!(restored.order_events, filled.order_events);
     assert_eq!(restored.fills, filled.fills);
     restarted
-        .shutdown(Duration::from_secs(5))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1244,7 +1254,9 @@ fn stops_trigger_at_exact_and_gapped_touches_on_the_correct_side() {
         );
         assert_eq!(events[1].event_unix_nanos, 1_000_003_000_000);
         assert_eq!(events[2].event_unix_nanos, 1_000_003_000_000);
-        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+        service
+            .shutdown_after_owner_exit_for_test()
+            .expect("shutdown");
         assert_stop_restart(&directory, &snapshot);
     }
 }
@@ -1256,7 +1268,7 @@ fn assert_stop_restart(directory: &TestDirectory, snapshot: &TradingSnapshot) {
     assert_eq!(restored.order_events, snapshot.order_events);
     assert_eq!(restored.fills, snapshot.fills);
     restarted
-        .shutdown(Duration::from_secs(5))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1309,7 +1321,9 @@ fn stop_limit_gap_through_triggers_then_rests_at_limit_across_restart() {
         assert_eq!(triggered.triggered_unix_nanos, Some(1_000_002_000_000));
         assert_eq!(triggered.revision, 2);
         assert_eq!(at_gap.fills.len(), 0);
-        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+        service
+            .shutdown_after_owner_exit_for_test()
+            .expect("shutdown");
         let mut config = config(&directory);
         config.clock = clock.clone();
         let restarted = start_service_with_config(config);
@@ -1352,7 +1366,7 @@ fn stop_limit_gap_through_triggers_then_rests_at_limit_across_restart() {
             1
         );
         restarted
-            .shutdown(Duration::from_secs(5))
+            .shutdown_after_owner_exit_for_test()
             .expect("shutdown");
     }
 }
@@ -1416,7 +1430,9 @@ fn stop_limit_trigger_and_fill_on_one_quote_uses_taker_touch() {
             ]
         );
         assert_eq!(events[1].event_unix_nanos, events[2].event_unix_nanos);
-        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+        service
+            .shutdown_after_owner_exit_for_test()
+            .expect("shutdown");
     }
 }
 
@@ -1441,7 +1457,9 @@ fn waiting_market_deadline_survives_restart_without_a_feed() {
             1_000_000_000_000,
         ))
         .expect("waiting");
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     clock.advance(Duration::from_secs(5));
     let mut configuration = config(&directory);
     configuration.clock = clock;
@@ -1457,7 +1475,7 @@ fn waiting_market_deadline_survives_restart_without_a_feed() {
     assert_eq!(order.terminal_unix_nanos, Some(1_005_000_000_000));
     assert_eq!(snapshot.fills.len(), 0);
     restarted
-        .shutdown(Duration::from_secs(5))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1517,14 +1535,16 @@ fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
         );
     }
     let before = service.snapshot().expect("snapshot");
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert_eq!(
         restarted.snapshot().expect("restored").orders,
         before.orders
     );
     restarted
-        .shutdown(Duration::from_secs(5))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1594,7 +1614,9 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
             }
         }
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -1623,7 +1645,9 @@ fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
     let before = service.snapshot().expect("before");
     // A restart without a feed leaves the owner without any quote; the stale revision is
     // still rejected before the market is read.
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let mut configuration = config(&directory);
     configuration.clock = clock;
     let service = start_service_with_config(configuration);
@@ -1673,7 +1697,9 @@ fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
             .orders
             .contains(&updated)
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     assert!(
         restarted
@@ -1683,7 +1709,7 @@ fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
             .contains(&updated)
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1723,7 +1749,7 @@ fn chart_bracket_uses_verified_grid_without_fixed_tick_and_rests() {
     assert_eq!(bracket.template.targets[0].offset_ticks, 4);
     // The resting entry plus its held stop and target legs are real orders at placement.
     assert_eq!(service.snapshot().unwrap().orders.len(), 3);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -1813,7 +1839,7 @@ fn all_practice_entry_shapes_obey_provider_neutral_session_phases() {
             // entry rounds the 50% first target out, leaving a stop and one target.
             assert_eq!(after.orders.len(), 7);
         }
-        service.shutdown(Duration::from_secs(2)).unwrap();
+        service.shutdown_after_owner_exit_for_test().unwrap();
     }
 }
 
@@ -1852,7 +1878,7 @@ fn provider_families_use_the_same_verified_session_gate() {
         assert_eq!(after.revision, before.revision, "{provider}");
         assert_eq!(after.orders, before.orders, "{provider}");
         assert_eq!(after.order_events, before.order_events, "{provider}");
-        service.shutdown(Duration::from_secs(2)).unwrap();
+        service.shutdown_after_owner_exit_for_test().unwrap();
     }
 }
 
@@ -1896,7 +1922,7 @@ fn unavailable_and_stale_feeds_reject_without_durable_orders() {
         );
     }
     assert_eq!(service.snapshot().unwrap().orders, []);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -1949,7 +1975,7 @@ fn manual_clock_enforces_per_class_quote_age_on_order_admission() {
                 limit_ms + 1_000
             )
         );
-        service.shutdown(Duration::from_secs(2)).unwrap();
+        service.shutdown_after_owner_exit_for_test().unwrap();
     }
 }
 
@@ -2019,7 +2045,7 @@ fn closed_phase_updates_marks_but_holds_crossed_resting_order_until_live_open_qu
         .unwrap();
     service.status().unwrap();
     assert_eq!(service.snapshot().unwrap().fills.len(), 2);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -2053,7 +2079,7 @@ fn closed_session_rejects_practice_order_without_writing_a_row() {
     let after = service.snapshot().unwrap();
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.orders, before.orders);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -2472,7 +2498,7 @@ fn verified_terms_persist_routes_and_recovered_orders_republish_interest() {
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
     service.place_order(order).unwrap();
     service.set_ticket_interest(Vec::new()).unwrap();
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 
     let connection = rusqlite::Connection::open(config(&directory).database_path).unwrap();
     let route_json: String = connection
@@ -2504,7 +2530,7 @@ fn verified_terms_persist_routes_and_recovered_orders_republish_interest() {
     })
     .unwrap();
     restarted.status().unwrap();
-    restarted.shutdown(Duration::from_secs(2)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -2531,7 +2557,7 @@ fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_900_000_000, 8).unwrap());
     let order = service.place_order(request).expect("legacy resting order");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service.shutdown_after_owner_exit_for_test().unwrap();
     // Model the V20-migrated legacy store: the persisted verified route is absent, so the
     // resting order stays route-less until new Terms resolve it.
     null_persisted_route(&directory, &instrument);
@@ -2610,7 +2636,7 @@ fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve
         OrderStatus::Filled
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -2713,7 +2739,7 @@ fn pane_free_quotes_fill_stops_update_marks_and_survive_restart() {
         mark
     );
     assert_eq!(sink.0.lock().unwrap().last().unwrap().routes, vec![route()]);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
     clock.set_wall_unix_nanos(1_000_000_000_000 + 5_500_000);
     let mut configuration = config(&directory);
     configuration.clock = clock;
@@ -2745,7 +2771,7 @@ fn pane_free_quotes_fill_stops_update_marks_and_survive_restart() {
     assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
     assert_eq!(snapshot.fills.len(), 2);
     assert_eq!(sink.0.lock().unwrap().last().unwrap().routes, Vec::new());
-    restarted.shutdown(Duration::from_secs(2)).unwrap();
+    restarted.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -2764,7 +2790,7 @@ fn ticket_interest_is_bounded_and_unchanged_sets_are_not_republished() {
     service.set_ticket_interest(Vec::new()).unwrap();
     service.status().unwrap();
     assert_eq!(sink.0.lock().unwrap().len(), 2);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 #[test]
@@ -2868,7 +2894,7 @@ fn quote_interest_tracks_orders_held_legs_positions_tickets_and_capacity() {
 
     assert_position_interest(&service, &feed, &published, &count);
     assert_ticket_interest(&service, &published);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
     assert_group_only_interest(&directory);
     assert_sink_interest_capacity();
 }
@@ -2995,7 +3021,7 @@ fn an_inline_bracket_from_the_market_keeps_its_entry_type() {
         .unwrap();
     assert_eq!(entry.order_type, OrderType::Stop);
     assert_eq!(entry.status, OrderStatus::Working);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 fn assert_group_only_interest(directory: &TestDirectory) {
@@ -3047,7 +3073,7 @@ fn assert_group_only_interest(directory: &TestDirectory) {
         .unwrap();
     service.status().unwrap();
     assert_eq!(sent(), Vec::<MarketRoute>::new(), "the cascade releases it");
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }
 
 fn assert_sink_interest_capacity() {
@@ -3119,5 +3145,5 @@ fn assert_sink_interest_capacity() {
     assert!(history.iter().all(|interest| interest.routes.len() <= 256));
     drop(history);
     assert_eq!(service.snapshot().unwrap().orders.len(), 256);
-    service.shutdown(Duration::from_secs(2)).unwrap();
+    service.shutdown_after_owner_exit_for_test().unwrap();
 }

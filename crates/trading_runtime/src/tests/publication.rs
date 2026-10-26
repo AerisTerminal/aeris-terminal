@@ -79,7 +79,7 @@ fn write_load_fixture_with_shape(
         .register_instrument(shape.instrument.clone())
         .expect("fixture instrument");
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("boot stops");
     let instrument_id = shape.instrument.instrument_id.as_str().to_string();
     let connection = rusqlite::Connection::open(&path).expect("fixture database");
@@ -312,7 +312,9 @@ fn desktop_load_fixture_recovers_btc_position_and_working_limit() {
             .count(),
         1
     );
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -367,7 +369,9 @@ fn working_set_and_snapshot_stay_bounded_at_50000_orders() {
         snapshot.orders.len(),
         LOAD_TERMINAL_ORDERS + LOAD_OPEN_ORDERS
     );
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -433,7 +437,9 @@ fn history_pages_return_every_order_exactly_once_in_order() {
             .is_err(),
         "the reader connection is read-only"
     );
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -458,7 +464,9 @@ fn an_idle_runtime_publishes_nothing() {
             .is_none(),
         "an idle runtime publishes nothing"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -521,7 +529,9 @@ fn mark_publications_coalesce_and_carry_the_latest_unrealized() {
         last.event.working_set.positions[0].unrealized_pnl,
         "the burst moved the mark"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -561,7 +571,9 @@ fn every_revision_changing_step_is_published() {
     assert_eq!(cancelled.event.cause, TradingEventCause::Command);
     assert!(cancelled.event.revision > revision);
     assert_eq!(cancelled.event.working_set.orders.len(), 0);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -604,7 +616,9 @@ fn a_lagging_subscriber_resynchronizes_with_an_exact_working_set() {
         .recv_timeout(Duration::from_secs(5))
         .expect("publication resumes after resync");
     assert!(!next.lagged);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -626,5 +640,7 @@ fn a_ninth_subscription_is_refused() {
     drop(subscriptions);
     service.status().expect("unsubscribe drains");
     service.subscribe().expect("a freed slot subscribes again");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }

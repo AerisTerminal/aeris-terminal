@@ -93,7 +93,9 @@ fn simulated_and_broker_acceptance_have_durable_initial_lifecycle_fields() {
         assert!(order.accepted_unix_nanos > order.submitted_unix_nanos);
         assert_eq!(order.updated_unix_nanos, order.accepted_unix_nanos);
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let orders = restarted.snapshot().expect("restored orders").orders;
     for expected in [simulated, broker] {
@@ -103,7 +105,7 @@ fn simulated_and_broker_acceptance_have_durable_initial_lifecycle_fields() {
         );
     }
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -191,11 +193,13 @@ fn assert_broker_lifecycle(
 
 fn assert_broker_orders_survive_restart(directory: &TestDirectory, service: &TradingService) {
     let before = service.snapshot().expect("before restart").orders;
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(directory)).expect("restart");
     assert_eq!(restarted.snapshot().expect("restored").orders, before);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -263,7 +267,9 @@ fn full_outbound_queue_rejects_synchronously_without_pending_order() {
         service.snapshot().expect("snapshot").orders.len(),
         OUTBOUND_CAPACITY
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
     let count: i64 = database
         .query_row(
@@ -352,7 +358,9 @@ fn pending_broker_modify_preserves_revision_and_time_after_restart() {
         .expect("modify request");
     assert_eq!(pending.status, OrderStatus::PendingModify);
     assert!(pending.revision > placed.revision);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert!(
         restarted
@@ -362,7 +370,7 @@ fn pending_broker_modify_preserves_revision_and_time_after_restart() {
             .contains(&pending)
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -434,7 +442,9 @@ fn stale_broker_commands_do_not_reserve_venue_requests_or_mutate_facts() {
         receiver.recv().expect("cancel"),
         VenueRequest::Cancel { .. }
     ));
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert!(
         restarted
@@ -455,7 +465,7 @@ fn stale_broker_commands_do_not_reserve_venue_requests_or_mutate_facts() {
         }
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -512,7 +522,9 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
         order_status(&service, &order.client_order_id),
         OrderStatus::Working
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 
     let restarted = start_service(&directory);
     let (generation, receiver) = restarted
@@ -530,7 +542,7 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
         .cancel_order(order.client_order_id.clone())
         .expect("cancel after restart");
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1093,7 +1105,7 @@ fn reconcile_settles_every_open_order_and_rebases_positions_the_venue_disagrees_
     let restarted = start_service(&directory);
     assert_eq!(restarted.snapshot().expect("restored").positions, positions);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1279,7 +1291,9 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
         ))
         .expect("moved");
     assert!(service.move_bracket_level(stop(8, 7)).is_err());
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 
     // The moved level survives a restart.
     let restarted = start_service(&directory);
@@ -1312,7 +1326,7 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
             .contains("no server-side bracket")
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
     let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
     let levels: i64 = database
@@ -1986,7 +2000,9 @@ fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror(
         point(1, 0)
     );
     // The binding is durable: a replay of the deal after a restart changes nothing.
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     let (generation, _receiver) = restarted
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
@@ -2002,7 +2018,7 @@ fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror(
     assert_eq!(restored.orders.len(), 1);
     assert_eq!(restored.fills.len(), 1);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -2106,7 +2122,9 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
         .expect("flatten while blocked");
 
     // The unaccounted deal survives a restart and floors the next replay.
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     let (generation, receiver) = restarted
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
@@ -2174,7 +2192,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
         .place_order(limit_request("accounted", 9_000))
         .expect("new orders resume");
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -2267,7 +2285,9 @@ fn a_reverse_waiting_at_shutdown_is_reported_at_the_next_start_and_never_complet
     service
         .reverse_position_at(broker().id, instrument().instrument_id)
         .expect("reverse requested");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     let notices = restarted.snapshot().expect("restored").recovery_notices;
     assert_eq!(notices.len(), 1);
@@ -2276,12 +2296,14 @@ fn a_reverse_waiting_at_shutdown_is_reported_at_the_next_start_and_never_complet
         crate::RecoveryNoticeKind::InterruptedReverse
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
     let again = start_service(&directory);
     assert_eq!(
         again.snapshot().expect("reported once").recovery_notices,
         []
     );
-    again.shutdown(Duration::from_secs(2)).expect("shutdown");
+    again
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }

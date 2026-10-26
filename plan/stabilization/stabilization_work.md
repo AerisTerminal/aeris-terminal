@@ -9,7 +9,7 @@ stable; future workers and validators locate content by them.
 The mission replaces "patch on top of patch" layers with one clean design at each ownership boundary.
 It matures paper trading to the approved "solid core", hardens the platform (diagnostics, single
 instance, durable writes, SQLite hardening, CI), and trims bloat, without deleting the update pipeline
-or the dormant account runtime.
+or the account runtime (dormant at mission start; live mandatory sign-in since 2026-10-25).
 
 Layout of this directory:
 
@@ -42,6 +42,16 @@ To resume in a fresh mission:
 5. Work items in dependency order; commit each feature together with an update to this document
    (see the per-feature update rules in the repo `AGENTS.md`).
 
+Current position (2026-10-26): M1-M5 are complete (M1-M4 validated). In M6, M6.1, M6.2 and M6.4-M6.6
+are checked; M6.3 is code complete and waits only for its guarded GUI storm check, and the M6.4 and
+M6.5 guarded GUI checks are not yet validated either. M6.7 is the active code item (parts 1-8 landed),
+then M6.8-M6.12, M7 and M8. Since 2026-10-21 the maintainer has also landed product work outside the
+work items (section 6 entries marked "no stabilization item": Rithmic venue relay, saved layouts,
+symbol menu, Cognito sign-in, the 1.0.0 release, order levels); read those entries and section 5
+before changing the same code. GUI checks run only on an isolated data root and are recorded as not
+yet validated while the maintainer's own desktop is running. GitHub has no open issues, and CI runs
+on every push to `main`.
+
 Validation: the milestone gate is `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
 `cargo test --workspace --all-features --locked`, and `cargo run -p aeris_naming_check --locked`.
@@ -54,7 +64,7 @@ documents wherever they disagree.
 | # | Topic | Decision |
 |---|---|---|
 | D1 | Scope | All four tracks: paper trading maturity, market-data lifecycle rebuild, desktop decomposition + provider neutrality, platform foundations + bloat trim. |
-| D2 | Dormant code | Launcher / updater / rollout / signed lifecycle and the dormant account runtime are KEPT ("update pipeline is necessary"). Review, fix, isolate and trim them; do not delete them for being dormant. |
+| D2 | Dormant code | Launcher / updater / rollout / signed lifecycle and the dormant account runtime are KEPT ("update pipeline is necessary"). Review, fix, isolate and trim them; do not delete them for being dormant. Amended 2026-10-25: the account runtime is no longer dormant; it is the mandatory Cognito sign-in (UI-12 closed, M7.2 superseded in part, M8.4 open). |
 | D3 | Paper realism | "Solid core": correct lifecycle, market/limit/stop/stop-limit/brackets/OCO, TIF DAY/GTC/IOC/FOK, bid/ask fills, tick checks, multiplier, fees, cash ledger, restart-safe. OUT: depth-aware partial fills, slippage model, margin/buying power (hooks only). |
 | D4 | Closed market | Paper orders placed while the market is closed OR the session is unknown are REJECTED with a clear typed reason ("market closed" / "session unknown"). |
 | D5 | DAY expiry | Session close for exchange instruments; 00:00 UTC for 24/7 crypto; DAY rejected when the session is unknown. |
@@ -66,7 +76,7 @@ documents wherever they disagree.
 | D11 | Fake CLI modes | `--rithmic` and `--multi-chart` fake-instrument startup modes are removed. |
 | D12 | provider_history | Unused parts trimmed (see `architecture.md` for the exact keep/delete list). |
 | D13 | Aeris Charts | Cross-repo changes allowed: edit/test/push aeris-charts per its AGENTS.md, then bump only the `aeris_charts_*` revisions here. |
-| D14 | CI | GitHub-hosted `windows-latest` (fmt, clippy, test, naming_check) + `ubuntu-latest` (fmt, naming) on push and pull_request to main. Hosted runners lack the Rithmic kit; kit-dependent code skipped there. Later amended: the `workflow_dispatch`-only `macos.yml` and `macos_preview.yml` workflows exist, and `macos_preview.yml` is the one hosted lane that may receive the Rithmic kit (repo `AGENTS.md`). |
+| D14 | CI | GitHub-hosted `windows-latest` (fmt, clippy, test, naming_check) + `ubuntu-latest` (fmt, naming) on push and pull_request to main. Hosted runners lack the Rithmic kit; kit-dependent code skipped there. Later amended: the `workflow_dispatch`-only `macos.yml`, `macos_preview.yml` and `windows_preview.yml` workflows exist, and the two preview lanes are the only hosted lanes that may receive the Rithmic kit (repo `AGENTS.md`). |
 | D15 | plan/ | `plan/` stays in the repo. Tracking doc at `plan/stabilization/stabilization_work.md`, audit/design reports beside it. Repo AGENTS.md updated to allow `plan/stabilization/` and to record each new restriction as it lands. |
 | D16 | Git | Workers commit on `main`; orchestrator pushes each validated milestone to `origin/main` (fetch first, never force). |
 | D17 | Validation | Validators may launch the real desktop in an isolated data folder while the user keeps their own desktop closed; Hyperliquid public data may be used live; Rithmic live excluded. |
@@ -163,7 +173,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | PL-14 | Low-Medium | `contracts` mixes in-process DTOs with persisted schema | M8.9 | open |
 | PL-15 | Low | Dependency hygiene | M8.10 | open |
 | PL-16 | Low | Legacy brand migrations and tokens | M8.6 (tokens/installer); legacy migrations deferred with LC-17 | open |
-| PL-17 | Low | Hardcoded user agent version and unbounded context request wait | M8.10 | open |
+| PL-17 | Low | Hardcoded user agent version and unbounded context request wait | M8.10 | user agent closed 2026-10-25 (derived from `CARGO_PKG_VERSION`); the context `request_reply` still waits on `recv()` without a timeout |
 | PL-18 | Low | Chart chrome file is unversioned and read without bounds | M7.7 (bounds), M7.8 | open |
 | PL-19 | Low | Unused or test-only exports in platform_runtime | M8.3 (part), M8.11 | open |
 | LC-01 | High | Launcher loads the signing key before command dispatch; uninstall fails without a key | M8.2 | open |
@@ -205,8 +215,9 @@ Findings intentionally not closed by any single item (from `reports/work_items.m
   to replace the hedged broker model. Broker futures fills now share the practice net-position
   ledger (V28), so one position model remains.
 - PL-01 "delete or feature-gate" fix: superseded by D2; closed as isolation plus fixes in M8.1-M8.8.
-- PL-07 / UI-12 "cargo feature" fix: superseded by D2; the account code is isolated behind
-  `AccountGate` (M7.2) and fixed (M1.4, M8.4), not feature-gated.
+- PL-07 / UI-12 "cargo feature" fix: superseded. The account code is the live mandatory sign-in
+  since 2026-10-25 (UI-12 closed), so it is neither feature-gated nor isolated as dormant code; its
+  remaining fixes (AC-02, AC-03, AC-06) stay with M8.4.
 - 05 root causes 7 and 8 (commit rhythm, two-repo chart cost): process findings, addressed by the
   one-commit-per-item discipline and this tracking document.
 
@@ -788,7 +799,9 @@ Status: M5.1-M5.12 code and tests are complete; the in-scope M5 milestone GUI/pr
 
 ### M6 desktop bridge
 
-Status: pending
+Status: in progress. M6.1, M6.2 and M6.4-M6.6 are checked (the M6.4 and M6.5 guarded GUI checks are
+not yet validated); M6.3 is code complete with its guarded GUI storm check outstanding; M6.7 is the
+active item (parts 1-8); M6.8-M6.12 are open.
 
 - [x] M6.1 desktop-services-test-support - Inject `DesktopServices`; move `FixtureMarketWorker` to test support
   - Part 1: move the disconnected replay worker to cfg-gated `desktop/test_support/`, preserve its
@@ -2725,6 +2738,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-25 feat(release): no stabilization item. Launch release 1.0.0: the workspace version restarts at 1.0.0 and the context-source user agent now derives from `CARGO_PKG_VERSION` instead of a hardcoded `Aeris/0.2.3`. The Windows lane packages a per-user Inno Setup installer (`apps/desktop/packaging/windows/aeris_terminal.iss`: `%LOCALAPPDATA%\Programs\Aeris`, Start-menu shortcut with the notification AppUserModelID, optional desktop shortcut, uninstall that keeps user data, the lifecycle installer's AppId) and smoke-tests silent install, launch and uninstall; the desktop executable carries a Windows version resource naming it "Aeris Terminal". The macOS disk image gains an Applications link. Public files are `Aeris-Terminal-Setup-<version>.exe` and `Aeris-Terminal-<version>.dmg`. The plan id `early_access` becomes `unlimited` ("Unlimited" in the profile menu). Restriction recorded in AGENTS.md (CI and Release workflow) and `tools/naming_check`. Known gap: the signed launcher lifecycle installer (`tools/windows/aeris_setup.iss`) is still not used by any lane.
 - 2026-10-25 fix(rithmic): no stabilization item. Closes GitHub #9 and #10. Clocks (#9): Rithmic trades and DBO updates keep each clock exactly as received in its own type: the gateway `ssboe/usecs` clock (`ProviderTimestamp`, the clock history bars use), the exchange `source_ssboe/source_usecs/source_nsecs` clock (`SourceTimestamp`) and the `jop_ssboe/jop_nsecs` clock (`JopTimestamp`, evidence only); out-of-range or orphaned parts fail decode. `SourceTimestamp::unix_nanos` combines the parts only when they determine one instant. Canonical events now publish the gateway clock as `provider_unix_nanos` and only the source clock, at full nanosecond precision, as `exchange_unix_nanos`; before, the gateway clock was published as exchange time. Quotes carry no source clock, so they have no exchange time. `QualifiedTimestamp::history_clock_unix_nanos` (provider, else exchange) is the clock trade-built bars and the live-trade history request use, so live trades meet history on the clock the bars are stamped with; price alerts read exchange, then provider, then receipt time, and every other consumer already fell back the same way. Trades keep `exchange_order_id` and `aggressor_exchange_order_id`, and BBO levels keep the implicit sizes. DBO snapshots (#10): a nonzero snapshot response code decodes as a structured refusal (`DepthByOrderSnapshotOutcome::Rejected` with the numeric code, `DepthByOrderSnapshotMessage::LevelRejected`; the provider's text never leaves decode) instead of a `RejectedDataFrame` session failure. A refused snapshot no longer ends the session or stalls the subscription: the book publishes nothing from the refused image, retries within the existing resnapshot budget (3 per 60 s) and then disables order-level depth for the session while trades and quotes continue. A response cut short by a recovery drains before the fresh request goes out, so its tail never completes a new image, and an unattributed completion while several books await one disables them instead of guessing. Diagnostics name a refusal and its code apart from an inconsistent image. Live Rithmic Test `rithmic_test_smoke --mbo-only` (MNQZ6, 2026-10-25 21:07 CT): DBO subscription and covering snapshot accepted (54 unsequenced levels, 83 orders, no refused levels). All 43 live DBO frames and 5 of 6 trades carried all three clocks; every `source_nsecs` was the whole sub-second count and matched `source_usecs`; the gateway clock ran 12.1 to 14.5 ms after the exchange clock and the JOP clock 0.05 to 2.4 ms after it. 5 of 6 trades carried both order ids and all 10 BBO levels carried implicit sizes. The probe prints only sanitized counts and clock differences. Regressions: `exchange_instant_is_derived_only_from_parts_that_agree`, `trade_preserves_every_clock_and_both_exchange_order_ids`, `depth_by_order_update_preserves_source_and_jop_clocks`, `out_of_range_or_orphaned_clock_parts_fail_closed`, `quote_preserves_implied_sizes_per_side`, `rejected_depth_by_order_snapshot_terminal_keeps_only_the_numeric_code`, `exchange_clock_publishes_only_from_the_source_clock`, `exchange_nanoseconds_survive_into_published_trades_and_depth`, `refused_snapshot_retries_within_the_budget_then_disables_order_level_depth`, `refused_snapshot_level_keeps_its_image_from_becoming_authoritative`, `response_cut_short_by_a_recovery_drains_before_the_fresh_snapshot`, `unowed_completion_is_ignored_after_the_image_is_ready`, `refused_order_level_snapshot_requests_a_resnapshot_without_failing_the_session`, `unattributed_completion_with_several_owed_books_disables_them_instead_of_guessing` and `trade_built_bars_bucket_on_the_history_clock`. Restriction recorded in section 5. Known gaps in section 7.
 - 2026-10-26 feat(market): no stabilization item. Closes GitHub #8 and #12. Trades, aggregate depth (MBP) and order levels (MBO) are now separate provider-neutral streams instead of the DBO book collapsing into aggregate depth. `aeris_market_data::OrderLevelEvent` (`MarketEvent::OrderLevels`) carries snapshot images, contiguous updates and resets with each order's exchange order id, side, price, quantity, provider priority and provider sequence, numbered by image and revision; `OrderLevelBook` (at most 131,072 orders, 16,384 changes per update) checks continuity and fails closed on a revision gap, duplicate or unknown order id, empty update or bound overflow until the next covering image, and a retired provider session can neither keep nor mutate its image. The Rithmic adapter builds aggregate depth only from its price-level book (snapshot image, single-level upserts, zero size removes a level, begin/middle/end groups applied atomically, at most 4,096 levels per side; a broken group or overflow replaces the session) and publishes its DBO book as order levels; a refused, disabled or removed order-level book publishes one terminal reset, and a re-added book numbers its images above the last one published. `MarketStream::OrderLevels` is explicit demand and depth demand alone never subscribes it. The coordinator admits order-level subscriptions up to the provider's `maximum_order_level_instruments` (Rithmic 8 per session, Hyperliquid 0) and reports the rest as `BudgetExhausted` without evicting an admitted instrument; a released slot goes to the next waiting instrument. Consumers that demand order levels receive a bounded `MarketOrderLevelView` (32 prices per side, 64 listed orders per price, plus each price's full order count and quantity) inside the fenced order-book snapshot, with status `AwaitingSnapshot`, `Ready`, `Recovering`, `Unavailable`, `Stale` or `BudgetExhausted`, the image, revision, provider sequence and recovery count. Queues are present only while `Ready`, so a partial, stale or recovering image never presents as healthy. Contiguous order-level updates merge per drain round independently of depth, and feed diagnostics count order-level snapshots, updates and resets. Delivery is in-process and fenced (no IPC exists) and nothing is persisted. Desktop: the DOM gains a Queue column, offered only by a provider that streams resting orders (otherwise "Queue · not offered by this provider"), that lists up to 12 resting quantities per price front first, then "+N". Only a shown Queue column on the docked book demands order levels (`OrderBookDetail::OrderQueues`; a hidden column keeps plain depth demand), and a banner reports loading, recovering, unavailable and limit reached. Consumer dependencies (#12): footprint needs Trade; advanced DOM Trade, MBP and MBO; liquidity heatmap MBP or MBO over time (in-session only); pulling/stacking MBP deltas or MBO mutations; queue analysis MBO order id and priority; iceberg/refill Trade plus MBO inference; sweep analysis Trade plus depth or MBO ordering; book replay needs persisted streams and is unsupported (#11 stays open under the no-persistence rule). Live Rithmic Test `rithmic_test_smoke --mbp-only` (MNQZ6, 2026-10-26): 24 aggregate frames in 94 s, one snapshot image (86 bids, 9 asks) followed by 23 single-level updates (one zero-size removal); the book's best bid and offer matched BBO in 24 of 24 frames; begin/middle/end, clear and no-book frames were not observed. The probe prints only sanitized counts. Regressions: `snapshot_and_contiguous_updates_preserve_identity_priority_and_sequence`, `a_revision_gap_discards_the_image_until_a_covering_snapshot`, `unknown_duplicate_and_over_bound_changes_fail_closed`, `resets_stale_sessions_and_newer_sessions_never_present_an_old_image`, `only_exactly_next_updates_of_one_image_merge_within_the_change_bound`, `order_level_images_reach_only_demanding_consumers_with_exact_order_identity`, `depth_demand_alone_never_subscribes_order_levels`, `an_order_level_gap_fails_closed_until_the_next_covering_image`, `a_retired_provider_session_cannot_keep_or_mutate_the_order_level_image`, `order_level_budget_admits_eight_instruments_under_multi_instrument_load`, `snapshot_image_then_single_level_upserts_and_zero_size_removals`, `grouped_updates_apply_atomically_and_broken_groups_discard_the_image`, `side_level_bound_fails_closed`, `refused_order_level_subscription_publishes_one_terminal_reset`, `a_removed_order_level_book_is_released_and_re_added_above_its_image`, `crossed_order_level_image_publishes_every_resting_order`, `price_level_frames_build_the_aggregate_book_and_withhold_crossed_images`, `an_instrument_without_order_level_demand_keeps_no_order_level_book`, `exchange_nanoseconds_survive_into_published_trades_and_order_levels`, `a_drain_round_merges_contiguous_order_level_updates_independently_of_depth`, `only_a_shown_queue_demands_order_levels`, `order_level_views_reach_the_book_as_queues_only_while_current`, `queue_column_holds_order_levels_only_while_the_docked_book_shows_it`, `queue_column_is_not_offered_by_a_price_level_provider`, `queue_column_shows_only_while_its_provider_streams_resting_orders` and `queue_cells_show_only_a_ready_queue_at_the_rows_side_and_price`. Restriction recorded in section 5 and AGENTS.md. Known gaps in section 7.
+- 2026-10-26 test(trading): no stabilization item. CI on the Windows runner failed for 85dac87c: `a_filled_stop_cancels_the_target_and_a_reversal_cancels_protection` and `a_manual_lock_survives_the_session_rollover` reported "trading owner shutdown deadline expired" because their fixture shutdown raced a 2-second wall-clock deadline inside a 460-second contended suite; that commit did not touch trading code. Every `trading_runtime` fixture shutdown (228 call sites in 11 test-only files, replaced by a count-checked bulk edit) now joins the owner through `shutdown_after_owner_exit_for_test`, the helper the 2026-10-23 timing fix introduced for three fixtures. `production_shutdown_deadline_expires_while_owner_is_blocked` still proves the production deadline expires, and the property test keeps its reasoned 10-second deadline. Tracker audit in the same commit: section 1 states the current position, D2 and D14 are amended, PL-17 and the PL-07/UI-12 note are corrected, the M6 status reflects its checked items, GitHub #11 was closed as not planned, and section 7 records that CI runs on every push again.
 
 ## 7. Known gaps / deferred
 
@@ -2774,15 +2788,15 @@ From `reports/work_items.md` ("Deferred / out of scope") plus mission-accepted l
   fan-out were not measured, and the multi-instrument test checks admission and bounds only. The view
   carries exchange order ids and priority, but the desktop shows quantities only; no queue position,
   iceberg or sweep detection is derived yet. Raw-event persistence and book replay remain unsupported
-  under the no-persistence rule (#11 stays open).
+  under the no-persistence rule (#11 was closed as not planned on 2026-10-26).
 - Rithmic live qualification, production release publication,
   code-signing certificate and key custody, the AWS release endpoint, and macOS signing and
-  notarization (the manual `macos.yml` and `macos_preview.yml` workflows exist).
+  notarization (the manual `macos.yml`, `macos_preview.yml` and `windows_preview.yml` workflows exist).
 - Manual checks only the maintainer can run: logoff flush (M8.3), VM install and uninstall (M8.6),
   Rithmic login through the native vault (M6.9).
-- As checked with `gh workflow list --all` on 2026-10-13 and again on 2026-10-23, the GitHub `CI`
-  workflow (and `Live market gates`) is `disabled_manually`, so pushes get no CI run.
-  Re-enabling it requires the maintainer; no Actions setting was changed.
+- As checked with `gh workflow list --all` on 2026-10-26, the GitHub `CI` workflow is active again
+  and runs on every push to `main` (it was `disabled_manually` on 2026-10-13 and 2026-10-23);
+  `Live market gates` stays `disabled_manually`. No Actions setting was changed by an agent.
 - Resolved: the M2.4 blocked-network reconnect interval log could not be collected through an HTTP
   proxy (it also blocked the startup catalog); M3.12 (6d559cd7) added the probe-feature
   WebSocket-only fault control and recorded the live retry delays.

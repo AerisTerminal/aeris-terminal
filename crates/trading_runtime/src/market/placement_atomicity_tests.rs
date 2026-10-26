@@ -3,7 +3,6 @@ use crate::tests::{TestDirectory, config, instrument, market_order, start_servic
 use crate::{OrderSide, OrderStatus, TradingServiceConfig, clock::ManualClock};
 use aeris_trading::market::{FeedState, MarketFeedEvent};
 use std::sync::{Arc, atomic::AtomicBool, mpsc};
-use std::time::Duration;
 
 pub(super) fn open_core(configuration: &TradingServiceConfig) -> TradingCore {
     let (sender, _receiver) = mpsc::sync_channel(1);
@@ -47,7 +46,9 @@ fn failed_placement_fill_commit_keeps_acceptance_fill_and_position_absent() {
     service
         .register_instrument(instrument())
         .expect("instrument");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let mut core = open_core(&configuration);
     install_live_quote(&mut core);
     let request = market_order(

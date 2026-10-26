@@ -104,7 +104,7 @@ fn assert_stable_reopen(directory: &TestDirectory, repaired: &TradingSnapshot) {
         "a verified store reopens unchanged"
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -112,7 +112,9 @@ fn assert_stable_reopen(directory: &TestDirectory, repaired: &TradingSnapshot) {
 fn recovered_group_missing_a_leg_is_cancelled_once_with_a_notice() {
     let directory = TestDirectory::new("group-recovery-missing-leg");
     let service = start_active_bracket(&directory, "recover-entry");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     corrupt(
         &directory,
         "DELETE FROM orders WHERE id = (SELECT order_id FROM order_group_legs
@@ -164,7 +166,9 @@ fn recovered_group_missing_a_leg_is_cancelled_once_with_a_notice() {
         OrderStatus::Filled,
         "the filled entry is untouched"
     );
-    repaired.shutdown(Duration::from_secs(2)).expect("shutdown");
+    repaired
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     assert_stable_reopen(&directory, &snapshot);
 }
 
@@ -172,7 +176,9 @@ fn recovered_group_missing_a_leg_is_cancelled_once_with_a_notice() {
 fn recovered_coverage_mismatch_is_reported_and_realigned_once() {
     let directory = TestDirectory::new("group-recovery-coverage");
     let service = start_active_bracket(&directory, "coverage-entry");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     corrupt(
         &directory,
         "UPDATE orders SET quantity_units=1 WHERE id = (SELECT order_id FROM order_group_legs
@@ -212,7 +218,9 @@ fn recovered_coverage_mismatch_is_reported_and_realigned_once() {
         OrderEventKind::Resized,
         aeris_trading::OrderEventReason::CoverageGrow,
     );
-    repaired.shutdown(Duration::from_secs(2)).expect("shutdown");
+    repaired
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     assert_stable_reopen(&directory, &snapshot);
 }
 
@@ -220,7 +228,9 @@ fn recovered_coverage_mismatch_is_reported_and_realigned_once() {
 fn recovered_group_with_a_filled_stop_settles_once_with_a_notice() {
     let directory = TestDirectory::new("group-recovery-settle");
     let service = start_active_bracket(&directory, "settle-entry");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     corrupt(
         &directory,
         "UPDATE orders SET status='filled', filled_units=quantity_units,
@@ -259,7 +269,9 @@ fn recovered_group_with_a_filled_stop_settles_once_with_a_notice() {
             "the settled group's target is cancelled"
         );
     }
-    repaired.shutdown(Duration::from_secs(2)).expect("shutdown");
+    repaired
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     assert_stable_reopen(&directory, &snapshot);
 }
 
@@ -303,7 +315,9 @@ fn start_migrated_protection(
             role: ProtectionRole::StopLoss,
         })
         .expect("protective stop placed");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let mut configuration = config(&directory);
     configuration.clock = clock.clone();
     let migrated = start_service_with_config(configuration);
@@ -350,7 +364,9 @@ fn migrated_protection_group_completes_when_its_order_fills() {
         "completed",
         "the protection group retires with its fill"
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     assert_stable_reopen(&directory, &snapshot);
 }
 
@@ -368,6 +384,8 @@ fn migrated_protection_group_cancels_with_its_order() {
     );
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.recovery_notices, []);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     assert_stable_reopen(&directory, &snapshot);
 }

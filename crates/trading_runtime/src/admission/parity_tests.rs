@@ -5,7 +5,6 @@ use crate::{
 };
 use aeris_instruments::{InstrumentDecimal, PriceGrid};
 use aeris_trading::{ClientOrderId, RejectReason, venue::VenueRequest};
-use std::time::Duration;
 
 fn shared_refusals() -> Vec<(&'static str, PlaceOrder, RejectReason)> {
     let mut base = market_order("parity-base", OrderSide::Buy, 1, 1_000);
@@ -153,7 +152,9 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
         assert_eq!(service.snapshot().expect("no order fact"), locked);
         assert!(outbound.try_recv().is_err());
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -190,5 +191,7 @@ fn broker_day_entry_keeps_day_in_the_venue_request() {
         panic!("expected broker placement");
     };
     assert_eq!(sent.time_in_force, TimeInForce::Day);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }

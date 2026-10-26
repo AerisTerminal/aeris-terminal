@@ -130,7 +130,9 @@ fn simulated_currency_mismatch_is_typed_before_an_order_fact() {
         aeris_trading::RejectReason::CurrencyMismatch.to_string()
     );
     assert_eq!(service.snapshot().expect("unchanged"), before);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -191,14 +193,16 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
                 .is_some_and(|detail| detail.contains("price grid is unverified"))
         );
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert_eq!(
         restarted.snapshot().expect("restored").order_events,
         snapshot.order_events
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -269,13 +273,15 @@ fn owner_serializes_eight_submitters_and_recovers_exact_order_revisions() {
             .len(),
         1_000
     );
-    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let recovered = restarted.snapshot().expect("recovered");
     assert_eq!(recovered.revision, snapshot.revision);
     assert_eq!(recovered.orders, snapshot.orders);
     restarted
-        .shutdown(Duration::from_secs(5))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -297,7 +303,9 @@ fn idle_manual_clock_owner_does_not_run_timer_before_deadline() {
         service.status().expect("status");
     }
     assert_eq!(diagnostics().1, timer_calls);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -400,7 +408,9 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     assert_eq!(modified.revision, 2);
     assert_eq!(modified.updated_unix_nanos, 1_090_000_000_000);
     assert_eq!(modified.eligible_after_unix_nanos, 1_090_000_000_000);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let orders = restarted.snapshot().expect("restored").orders;
     assert!(orders.contains(&modified));
@@ -411,7 +421,7 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
             .all(|order| order.terminal_unix_nanos == Some(1_090_000_000_000))
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -477,7 +487,9 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
         modified.updated_unix_nanos
     );
     assert!(modified.eligible_after_unix_nanos >= accepted.eligible_after_unix_nanos);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     let before = restarted.snapshot().expect("restored");
     assert_eq!(
@@ -493,7 +505,7 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
     );
     assert_eq!(restarted.snapshot().expect("still unchanged"), before);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -551,7 +563,9 @@ fn off_grid_or_unsupported_amendments_are_rejected_without_committing_facts() {
         aeris_trading::RejectReason::TifNotSupported.to_string()
     );
     assert_eq!(service.snapshot().expect("unchanged"), before);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -609,7 +623,9 @@ fn stale_revision_after_fill_returns_the_terminal_order_without_a_new_fact() {
         }
     );
     assert_eq!(service.snapshot().expect("unchanged"), before);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -641,7 +657,9 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
     );
     assert_eq!(service.snapshot().expect("idempotent facts"), baseline);
 
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert_eq!(
         restarted.place_order(request.clone()).expect("retry"),
@@ -682,7 +700,7 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
         cancelled
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -825,7 +843,9 @@ fn significant_figure_market_quotes_do_not_require_a_fixed_tick() {
         .len(),
         1
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -1233,7 +1253,7 @@ fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
     order.quantity = FixedPoint::try_new(100_000_000, 8).expect("one contract");
     service.place_order(order).expect("whole contract accepted");
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let reopened = start_service(&directory);
     let mut fractional = market_order("fractional-after-restart", OrderSide::Buy, 2, 2_000);
@@ -1383,7 +1403,7 @@ fn practice_accounts_are_user_created_with_durable_opening_equity() {
     assert_eq!(pnl.balance, created.starting_equity);
     assert_eq!(pnl.equity, created.starting_equity);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let reopened = TradingService::start(config(&directory)).expect("service reopens");
@@ -1392,7 +1412,7 @@ fn practice_accounts_are_user_created_with_durable_opening_equity() {
         created
     );
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -1544,7 +1564,7 @@ fn scale_in_realized_pnl_uses_the_exact_cost_basis_across_a_restart() {
         Some(FixedPoint::try_new(10_002, 2).expect("display average"))
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let (service, feed) =
@@ -1798,13 +1818,15 @@ fn retention_writes_checkpoints_and_recovers_the_exact_projection() {
         before.account_pnl[0].balance.expect("balance").units(),
     );
 
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     let recovered = restarted.snapshot().expect("recovered snapshot");
     assert_eq!(recovered.positions, before.positions);
     assert_eq!(recovered.account_pnl, before.account_pnl);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -1945,7 +1967,9 @@ fn retention_never_prunes_fills_pinned_by_a_live_group() {
         .expect("position checkpoint row");
     assert_eq!(checkpointed_fills, 6, "the prunable prefix folded exactly");
 
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     let recovered = restarted.snapshot().expect("recovered snapshot");
     assert_eq!(recovered.positions, active.positions);
@@ -2024,7 +2048,9 @@ fn retention_keeps_fills_and_events_referenced_by_an_open_order() {
             "{table} rows referenced by the open order survive"
         );
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 fn equity_watch_profile() -> RiskProfile {
@@ -2147,7 +2173,9 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
 
     // The ring is rebuilt from the durable history; sampling resumes one interval after
     // open, so the immediate post-restart snapshot replays the samples unchanged.
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     // Reopen on the same clock so no session boundary passes across the restart.
     let mut configuration = config(&directory);
     configuration.clock = clock.clone();
@@ -2158,7 +2186,7 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
         .equity_samples;
     assert_eq!(recovered, before_restart);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 #[test]
@@ -2206,7 +2234,7 @@ fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
         .collect::<Vec<_>>();
     assert_eq!(fees, [-250]);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let (service, inbox) =
@@ -2422,7 +2450,7 @@ fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger
         Some(FixedPoint::try_new(10_001, 2).expect("rounded average"))
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let connection =
@@ -2469,7 +2497,7 @@ fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger
     assert_eq!(position.net_quantity.units(), 8);
     assert!(position.average_entry_price.is_some());
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -2490,7 +2518,7 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
         "entry fills"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let connection =
@@ -2556,7 +2584,7 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
             .all(|account| account.id.as_str() != "aeris-sim-1")
     );
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -2639,7 +2667,7 @@ fn confirmed_practice_account_delete_purges_open_state_and_is_durable() {
     );
 
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let reopened = TradingService::start(config(&directory)).expect("service reopens");
     assert!(
@@ -2651,7 +2679,7 @@ fn confirmed_practice_account_delete_purges_open_state_and_is_durable() {
             .all(|account| account.id != created.id)
     );
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -2730,7 +2758,9 @@ fn cancelling_a_held_leg_cancels_the_pending_entry_too() {
         cancelled.managed_brackets[0].status,
         BracketViewStatus::Cancelled
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -2782,7 +2812,9 @@ fn cancelling_pending_bracket_entry_cascades_to_every_held_leg() {
             aeris_trading::OrderEventReason::Cascade,
         );
     }
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -2878,14 +2910,14 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     assert!(complete.orders.iter().all(|order| !order.status.is_open()));
     assert_eq!(complete.positions[0].net_quantity.units(), 0);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.managed_brackets, complete.managed_brackets);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -2949,7 +2981,7 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
         "activated stop and targets must be GTC regardless of the entry's time in force"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -3003,7 +3035,9 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
             .price,
         price(10_200)
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -3036,7 +3070,9 @@ fn crossed_limits_execute_by_price_then_acceptance_sequence() {
         fills.iter().map(|fill| &fill.order_id).collect::<Vec<_>>(),
         vec![&placed[1].id, &placed[2].id, &placed[0].id]
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -3075,7 +3111,9 @@ fn crossed_stops_precede_limits_in_trigger_price_order() {
         fills.iter().map(|fill| &fill.order_id).collect::<Vec<_>>(),
         vec![&placed[2].id, &placed[1].id, &placed[0].id]
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -3138,7 +3176,9 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
                 .units(),
             expected_realized
         );
-        service.shutdown(Duration::from_secs(2)).expect("shutdown");
+        service
+            .shutdown_after_owner_exit_for_test()
+            .expect("shutdown");
     }
 }
 
@@ -3207,7 +3247,7 @@ fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved()
         aeris_trading::OrderEventReason::ParentRepriced,
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let (restarted, feed) =
@@ -3240,7 +3280,7 @@ fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved()
         aeris_trading::OrderEventReason::LocalManaged,
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -3391,13 +3431,17 @@ fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
         BracketViewStatus::Completed
     );
     assert!(settled.orders.iter().all(|order| !order.status.is_open()));
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let reopened = start_service(&directory);
     let restored = reopened.snapshot().expect("restored");
     assert_eq!(restored.orders, settled.orders);
     assert_eq!(restored.fills, settled.fills);
     assert_eq!(restored.managed_brackets, settled.managed_brackets);
-    reopened.shutdown(Duration::from_secs(2)).expect("shutdown");
+    reopened
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -3469,7 +3513,9 @@ fn active_bracket_cancellation_cascades_only_from_the_stop() {
                 OrderStatus::Working
             }
         );
-        service.shutdown(Duration::from_secs(2)).expect("shutdown");
+        service
+            .shutdown_after_owner_exit_for_test()
+            .expect("shutdown");
     }
 }
 
@@ -3534,7 +3580,9 @@ fn last_target_fill_cancels_the_resized_stop_with_typed_cascade() {
         OrderEventKind::Cancelled,
         aeris_trading::OrderEventReason::Cascade,
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -3575,7 +3623,9 @@ fn maker_bracket_entry_stop_and_fees_survive_both_restarts() {
     assert_eq!(active.fills.len(), 1);
     assert_eq!(active.fills[0].price, price(9_900));
     assert_eq!(active.managed_brackets[0].status, BracketViewStatus::Active);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let (restarted, feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     assert_eq!(
@@ -3617,7 +3667,7 @@ fn maker_bracket_entry_stop_and_fees_survive_both_restarts() {
         ]
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
     let again = start_service(&directory);
     let recovered = again.snapshot().expect("second restart");
@@ -3625,7 +3675,9 @@ fn maker_bracket_entry_stop_and_fees_survive_both_restarts() {
     assert_eq!(recovered.fills, settled.fills);
     assert_eq!(recovered.ledger_entries, settled.ledger_entries);
     assert_eq!(recovered.managed_brackets, settled.managed_brackets);
-    again.shutdown(Duration::from_secs(2)).expect("shutdown");
+    again
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 #[test]
@@ -3637,7 +3689,9 @@ fn identical_verified_terms_after_restart_do_not_advance_trading_revision() {
         .register_instrument(terms.clone())
         .expect("first terms");
     let before = service.snapshot().expect("before restart");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let restarted = start_service(&directory);
     assert_eq!(
         restarted.snapshot().expect("recovered").revision,
@@ -3652,7 +3706,7 @@ fn identical_verified_terms_after_restart_do_not_advance_trading_revision() {
         "a repeated identical Terms event is not a new durable fact"
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -3681,10 +3735,14 @@ fn bracket_off_grid_child_refuses_entry_without_writing_facts() {
         aeris_trading::RejectReason::OffGrid.to_string()
     );
     assert_eq!(service.snapshot().expect("after"), before);
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     let reopened = start_service(&directory);
     assert_eq!(reopened.snapshot().expect("restored"), before);
-    reopened.shutdown(Duration::from_secs(2)).expect("shutdown");
+    reopened
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
 
 fn place_managed_bracket(service: &TradingService, entry: PlaceOrder) {
@@ -3858,7 +3916,7 @@ fn bracket_that_cannot_be_armed_is_rejected_once_and_other_orders_still_fill() {
     assert_eq!(flat.market_observation_error, None);
     assert_eq!(flat.positions[0].net_quantity.units(), 0);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let restarted = start_service(&directory);
@@ -3969,7 +4027,7 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
         }]
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let restarted = start_service(&directory);
     assert_eq!(
@@ -3981,7 +4039,7 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
         1
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4038,7 +4096,7 @@ fn position_protection_reports_the_stop_and_target_that_trigger_first() {
         PositionProtection::default()
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4140,7 +4198,7 @@ fn protection_follows_the_position_as_it_grows_shrinks_and_closes() {
         "adding to the position grows its stop and target"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let (service, feed) =
@@ -4165,7 +4223,7 @@ fn protection_follows_the_position_as_it_grows_shrinks_and_closes() {
         "closing the position cancels its protection"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4188,7 +4246,7 @@ fn a_filled_stop_cancels_the_target_and_a_reversal_cancels_protection() {
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let directory = TestDirectory::new("protection-reversal");
@@ -4204,7 +4262,7 @@ fn a_filled_stop_cancels_the_target_and_a_reversal_cancels_protection() {
         "a sell protection cannot protect the short a reversal opened"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4262,7 +4320,7 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
         Some(FixedPoint::try_new(0, 2).expect("remaining"))
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     // Restart on the same deterministic clock: a system-clock restart would roll the risk
     // session across every boundary since the fixture epoch and reset the trailing peak.
@@ -4273,7 +4331,7 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
     assert_eq!(restored.risk_rule_states, locked.risk_rule_states);
     assert_eq!(restored.risk_locks, locked.risk_locks);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4424,7 +4482,7 @@ fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
             .contains("revision must advance")
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4508,7 +4566,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
     }
     let before_restart = service.snapshot().expect("snapshot").risk_rule_states;
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let restarted = start_service(&directory);
     assert_eq!(
@@ -4516,7 +4574,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
         before_restart
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4593,7 +4651,7 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
             .contains("session plan maximum loss")
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("snapshot");
@@ -4604,7 +4662,7 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
     );
     assert_eq!(restored.risk_locks, snapshot.risk_locks);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4655,7 +4713,7 @@ fn losing_trades_never_cap_size_or_lock_the_account() {
         .expect("a larger entry after two quick losses is accepted");
     assert_eq!(service.snapshot().expect("snapshot").risk_locks, Vec::new());
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4715,7 +4773,7 @@ fn filled_stop_produces_a_fast_reentry_warning() {
         "display text must not be a control-flow discriminator"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4820,7 +4878,7 @@ fn management_moves_the_stop_only_at_one_tick_or_more() {
         aeris_trading::OrderEventReason::Management,
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -4896,7 +4954,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     );
     replace_risk_policy_mid_trade(&service);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("open trade survives a clean shutdown");
     let (service, feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
@@ -4937,7 +4995,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .export(directory.0.join("export"))
         .expect("export succeeds");
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let restarted = start_service(&directory);
@@ -4965,7 +5023,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
             .contains("disciplined trade")
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("restarted service stops");
 }
 
@@ -5111,7 +5169,7 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
     );
 
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let (restarted, restarted_feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
@@ -5275,7 +5333,9 @@ fn v21_reversal_and_scale_out_accounting_agrees_across_views_and_restart() {
         );
     }
     let before = service.snapshot().expect("before restart");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
     assert_v21_accounting_rows(&directory);
     // Restart on the same deterministic clock: a system-clock restart would roll the risk
     // session across every boundary since the fixture epoch and re-baseline realized P&L.
@@ -5289,7 +5349,7 @@ fn v21_reversal_and_scale_out_accounting_agrees_across_views_and_restart() {
     assert_eq!(after.account_pnl, before.account_pnl);
     assert_eq!(after.risk_meters, before.risk_meters);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -5462,7 +5522,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
         .expect_err("locked account rejects order");
     assert!(locked.contains("risk-locked"));
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let restarted = start_service(&directory);
@@ -5481,7 +5541,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
         [] as [risk::RiskLock; 0]
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("restarted service stops");
 }
 
@@ -5574,7 +5634,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
         Some(flattened.updated_unix_nanos)
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let mut configuration = config(&directory);
@@ -5585,7 +5645,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
     assert_eq!(restored.fills.len(), 2);
     assert_eq!(restored.orders, snapshot.orders);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("restarted service stops");
 }
 
@@ -5651,7 +5711,7 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
             .expect("distinct event applies");
     }
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let database = rusqlite::Connection::open(&config(&directory).database_path)
         .expect("database reopens for retention assertion");
@@ -5670,7 +5730,7 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
         account_id
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -5726,7 +5786,7 @@ fn global_flatten_closes_every_registered_account() {
             .all(|position| position.net_quantity.units() == 0)
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -5757,7 +5817,7 @@ fn reverse_closes_and_reopens_the_exact_opposite_position() {
     let position = service.snapshot().expect("snapshot").positions[0].clone();
     assert_eq!(position.net_quantity.units(), -1);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -5833,7 +5893,9 @@ fn account_flatten_closes_two_positions_without_desktop_interest_in_second_instr
             .iter()
             .all(|position| position.net_quantity.units() == 0)
     );
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 
     let mut configuration = config(&directory);
     configuration.clock = clock;
@@ -5847,7 +5909,7 @@ fn account_flatten_closes_two_positions_without_desktop_interest_in_second_instr
             .all(|position| position.net_quantity.units() == 0)
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }
 
@@ -5943,7 +6005,7 @@ fn flatten_scope_isolates_one_account_instrument_pair() {
     assert_eq!(net(&account, &second.instrument_id), Some(1));
     assert_eq!(net(&secondary, &first.instrument_id), Some(1));
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6037,7 +6099,7 @@ fn flatten_keeps_and_reports_positions_without_a_verified_quote() {
             .is_some_and(|position| position.net_quantity.units() == 0)
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6119,7 +6181,7 @@ fn the_kill_switch_flattens_priced_instruments_and_keeps_stale_protection() {
         .expect_err("a locked account accepts no new order");
     assert!(refused.contains("AccountLocked"), "{refused}");
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     assert_kill_switch_replay(&directory, clock, &snapshot, &stale.instrument_id);
 }
@@ -6281,7 +6343,7 @@ fn assert_kill_switch_replay(
         "the unpriced position's protection survives the restart"
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("restarted service stops");
 }
 
@@ -6333,7 +6395,7 @@ fn reverse_rejected_by_risk_leaves_the_position_untouched() {
     assert_eq!(after.positions, before.positions);
     assert_eq!(after.revision, before.revision);
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6375,7 +6437,7 @@ fn reverse_on_a_locked_account_returns_account_locked_without_a_fill() {
         "the refused reverse leaves the position and every fact untouched"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6632,7 +6694,7 @@ fn risk_sessions_roll_over_at_the_utc_midnight_boundary() {
         .cancel_order(accepted.client_order_id)
         .expect("resting order cancels");
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6664,7 +6726,7 @@ fn a_manual_lock_survives_the_session_rollover() {
         rollover_wall_nanos("2026-10-18T00:00:00Z")
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6687,7 +6749,7 @@ fn risk_sessions_survive_restart_within_a_session_and_roll_across_one() {
         ))
         .expect("profile registers");
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("first stop");
 
     clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T18:00:00Z"));
@@ -6706,7 +6768,7 @@ fn risk_sessions_survive_restart_within_a_session_and_roll_across_one() {
         "a restart inside the session keeps the running session"
     );
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("second stop");
 
     clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-17T01:00:00Z"));
@@ -6725,7 +6787,7 @@ fn risk_sessions_survive_restart_within_a_session_and_roll_across_one() {
         "the first tick after a restart across the boundary rolls the session"
     );
     reopened
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("final stop");
 }
 
@@ -6781,7 +6843,7 @@ fn risk_sessions_roll_over_at_the_configured_chicago_close() {
         "the CST boundary rolls at 23:00Z"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6847,7 +6909,7 @@ fn a_bracket_entry_counts_its_template_stop_as_attached() {
         "the bracket entry attaches its template stop"
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 #[test]
@@ -6865,7 +6927,7 @@ fn invalid_json_never_enters_the_store() {
         .expect_err("invalid JSON rejected");
     assert!(error.contains("valid JSON"));
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 }
 
@@ -6939,7 +7001,7 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
         dispatch.target_account_id.as_str() == "aeris-sim-3" && dispatch.accepted
     }));
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let restarted = start_service(&directory);
@@ -6947,7 +7009,7 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
     assert_eq!(restored.trade_copiers.len(), 1);
     assert_eq!(restored.trade_copiers[0].targets.len(), 2);
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("restarted service stops");
 }
 
@@ -6990,7 +7052,7 @@ fn bracket_strategy_templates_are_revisioned_and_restart_safe() {
             .contains("revision must advance")
     );
     service
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
 
     let restarted = start_service(&directory);
@@ -7002,7 +7064,7 @@ fn bracket_strategy_templates_are_revisioned_and_restart_safe() {
             .contains(&template)
     );
     restarted
-        .shutdown(Duration::from_secs(2))
+        .shutdown_after_owner_exit_for_test()
         .expect("restarted service stops");
 }
 
@@ -7068,7 +7130,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
     }
     let write_elapsed = write_started.elapsed();
     service
-        .shutdown(Duration::from_secs(10))
+        .shutdown_after_owner_exit_for_test()
         .expect("service stops");
     let database_bytes = fs::metadata(&measured_config.database_path)
         .expect("database metadata")
@@ -7089,7 +7151,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
         "D3 sqlite measurement: {EXECUTIONS} executions + {USER_RECORDS} user records in {write_elapsed:?}; quick_check {quick_check_elapsed:?}; reopen {reopen_elapsed:?}; database {database_bytes} bytes"
     );
     reopened
-        .shutdown(Duration::from_secs(10))
+        .shutdown_after_owner_exit_for_test()
         .expect("reopened service stops");
 }
 
@@ -7130,5 +7192,7 @@ fn cancelling_a_protective_stop_leaves_it_cancelled() {
         .map(|order| order.client_order_id.as_str().to_string())
         .collect::<Vec<_>>();
     assert!(open.is_empty(), "open orders after cancel: {open:?}");
-    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
 }
