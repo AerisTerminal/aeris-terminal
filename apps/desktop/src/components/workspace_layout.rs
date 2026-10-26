@@ -681,6 +681,9 @@ impl TerminalApp {
         if self.bottom_panel.apply_store(self.trading_store.read(cx)) {
             cx.notify();
         }
+        if resync {
+            self.request_history_page(cx);
+        }
         self.announce_trading(&snapshot, cx);
         for workspace in &self.workspaces {
             for pane in &workspace.panes {

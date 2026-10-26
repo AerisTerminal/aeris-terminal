@@ -15,13 +15,15 @@ pub const MAXIMUM_HISTORY_PAGE: usize = 500;
 /// History requests waiting on the single reader thread.
 const HISTORY_REQUEST_CAPACITY: usize = 32;
 
-/// A paged query over the durable order history, oldest first.
+/// A paged query over the durable order history.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HistoryQuery {
     /// Restrict to one account; `None` reads every account.
     pub account_id: Option<TradingAccountId>,
-    /// Continue after this cursor; `None` starts at the oldest order.
+    /// Continue after this cursor in the selected direction.
     pub after: Option<HistoryCursor>,
+    /// Start at the newest order and page toward older orders when true.
+    pub newest_first: bool,
     /// Page size, clamped to [`MAXIMUM_HISTORY_PAGE`] (the default).
     pub limit: Option<usize>,
 }

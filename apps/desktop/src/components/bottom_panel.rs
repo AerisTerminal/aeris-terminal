@@ -3,12 +3,9 @@
 //! from that edge. The tabs live in the open panel's body, above the table they switch, so the
 //! collapsed header carries only the panel title and its expand control.
 //!
-//! The trading owner stays authoritative for fills, the round trips grouped from them and every
-//! position. This module keeps one shared presentation copy of the open positions of every
-//! account, practice and broker alike, and of the closed round trips, replaced only when the
-//! owner's snapshot revision changes, plus the viewer's tab, open, height and account-filter
-//! choices. A position leaves the positions tab when it closes and its round trip then appears
-//! in the trade history.
+//! The trading owner stays authoritative for fills, round trips and positions. The recent
+//! closed-trade window is the live head. Older durable order records are distinct: order
+//! history does not contain fills or the P&L needed to reconstruct historical round trips.
 
 use super::side_panel_dock::SIDE_PANEL_HEADER_HEIGHT;
 use super::*;
@@ -42,6 +39,8 @@ const POSITION_PRICE_WIDTH: f32 = 64.0;
 const POSITION_ACTION_WIDTH: f32 = 28.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
+/// Stop after four 500-order pages (2,000 order records). Never retain an unbounded history.
+const MAX_LOADED_HISTORY_PAGES: usize = 4;
 
 /// Drag payload for resizing the trade-history panel from its top edge.
 #[derive(Clone)]
@@ -94,11 +93,104 @@ pub(super) struct TradeHistory {
     symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
     /// Indices into `round_trips` of the closed trades that pass the current account filter.
     rows: Arc<[usize]>,
+    /// Descending durable order records, separate from fill-based trades.
+    orders: Arc<[aeris_trading::Order]>,
+    order_rows: Arc<[usize]>,
+    live_order_ids: BTreeSet<aeris_trading::OrderId>,
+    next: Option<aeris_trading_runtime::HistoryCursor>,
+    pages: usize,
+    initialized: bool,
+    loading: bool,
+    request_token: u64,
+    error: Option<String>,
     /// Totals per currency of the accounts that pass the current account filter.
     summaries: Arc<[AccountSummary]>,
 }
 
 impl TradeHistory {
+    fn reset_pages(&mut self) {
+        self.request_token = self.request_token.wrapping_add(1);
+        self.orders = Arc::from([]);
+        self.order_rows = Arc::from([]);
+        self.next = None;
+        self.pages = 0;
+        self.initialized = false;
+        self.loading = false;
+        self.error = None;
+    }
+
+    fn request_page(
+        &mut self,
+        filter: &TradeHistoryAccountFilter,
+    ) -> Option<(u64, aeris_trading_runtime::HistoryQuery)> {
+        if self.loading
+            || self.pages >= MAX_LOADED_HISTORY_PAGES
+            || (self.initialized && self.next.is_none())
+        {
+            return None;
+        }
+        self.loading = true;
+        self.error = None;
+        Some((
+            self.request_token,
+            aeris_trading_runtime::HistoryQuery {
+                account_id: match filter {
+                    TradeHistoryAccountFilter::All => None,
+                    TradeHistoryAccountFilter::Account(id) => {
+                        aeris_trading::TradingAccountId::try_new(id.clone()).ok()
+                    }
+                },
+                after: self.next,
+                newest_first: true,
+                limit: Some(aeris_trading_runtime::MAXIMUM_HISTORY_PAGE),
+            },
+        ))
+    }
+
+    fn receive_page(
+        &mut self,
+        request_token: u64,
+        result: Result<aeris_trading_runtime::HistoryPage, String>,
+        filter: &TradeHistoryAccountFilter,
+    ) -> bool {
+        if request_token != self.request_token || !self.loading {
+            return false;
+        }
+        self.loading = false;
+        match result {
+            Err(error) => self.error = Some(error),
+            Ok(page) => {
+                self.initialized = true;
+                self.pages += 1;
+                self.next = page.next;
+                let mut ids: BTreeSet<_> =
+                    self.orders.iter().map(|order| order.id.clone()).collect();
+                let mut orders = self.orders.to_vec();
+                for order in page.orders {
+                    if ids.insert(order.id.clone()) {
+                        orders.push(order);
+                    }
+                }
+                self.orders = orders.into();
+                self.refresh_order_rows(filter);
+            }
+        }
+        true
+    }
+
+    fn refresh_order_rows(&mut self, filter: &TradeHistoryAccountFilter) {
+        self.order_rows = self
+            .orders
+            .iter()
+            .enumerate()
+            .filter(|(_, order)| {
+                !self.live_order_ids.contains(&order.id) && filter.includes(&order.account_id)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+            .into();
+    }
+
     fn account_currency(&self, account_key: &str) -> &str {
         self.accounts
             .iter()
@@ -206,6 +298,7 @@ pub(super) trait PanelTradingView {
     fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument];
     fn positions(&self) -> &[aeris_trading::Position];
     fn round_trips(&self) -> &[aeris_trading_runtime::TradeRoundTrip];
+    fn fills(&self) -> &[aeris_trading::Fill];
     fn account_pnl(&self) -> &[aeris_trading::AccountPnl];
     fn connected_broker_accounts(&self) -> &BTreeSet<aeris_trading::TradingAccountId>;
     #[cfg(test)]
@@ -233,6 +326,9 @@ macro_rules! panel_trading_view {
             }
             fn round_trips(&self) -> &[aeris_trading_runtime::TradeRoundTrip] {
                 &self.round_trips
+            }
+            fn fills(&self) -> &[aeris_trading::Fill] {
+                &self.fills
             }
             fn account_pnl(&self) -> &[aeris_trading::AccountPnl] {
                 &self.account_pnl
@@ -271,6 +367,7 @@ impl BottomPanelState {
     /// even if its revision matches the last rendered view.
     pub(super) fn invalidate_trading_revision(&mut self) {
         self.history.revision = None;
+        self.history.reset_pages();
     }
 
     /// Adopts committed facts on revision changes and ephemeral marks on quote-only updates.
@@ -296,6 +393,11 @@ impl BottomPanelState {
         if facts_changed {
             self.history.revision = Some(snapshot.revision());
             self.history.round_trips = snapshot.round_trips().to_vec().into();
+            self.history.live_order_ids = snapshot
+                .fills()
+                .iter()
+                .map(|fill| fill.order_id.clone())
+                .collect();
             self.history.accounts = snapshot.accounts().to_vec().into();
             self.history.symbols = Arc::new(
                 snapshot
@@ -311,6 +413,7 @@ impl BottomPanelState {
             );
         }
         self.history.account_pnl = snapshot.account_pnl().to_vec().into();
+        self.history.refresh_order_rows(&self.filter);
         self.adopt_positions(open_positions(
             snapshot.positions(),
             snapshot.accounts(),
@@ -345,6 +448,7 @@ impl BottomPanelState {
 
     pub(super) fn set_filter(&mut self, filter: TradeHistoryAccountFilter) {
         self.filter = filter;
+        self.history.reset_pages();
         self.account_menu_open = false;
         self.refresh_rows();
     }
@@ -362,6 +466,7 @@ impl BottomPanelState {
             self.filter = TradeHistoryAccountFilter::All;
         }
         self.history.rows = trade_history_rows(&self.history.round_trips, &self.filter).into();
+        self.history.refresh_order_rows(&self.filter);
         self.history.summaries = account_summaries(&self.history.account_pnl, &self.filter).into();
         self.positions.rows = position_rows(&self.positions.positions, &self.filter).into();
     }
@@ -506,12 +611,49 @@ impl TerminalApp {
     fn toggle_bottom_panel(&mut self, cx: &mut Context<Self>) {
         self.bottom_panel.open = !self.bottom_panel.open;
         self.bottom_panel.account_menu_open = false;
+        if self.bottom_panel.open && self.bottom_panel.tab == BottomPanelTab::TradeHistory {
+            self.bottom_panel.history.reset_pages();
+            self.request_history_page(cx);
+        }
         cx.notify();
     }
 
     fn select_bottom_panel_tab(&mut self, tab: BottomPanelTab, cx: &mut Context<Self>) {
         self.bottom_panel.select_tab(tab);
+        if tab == BottomPanelTab::TradeHistory {
+            self.request_history_page(cx);
+        }
         cx.notify();
+    }
+
+    pub(super) fn request_history_page(&mut self, cx: &mut Context<Self>) {
+        if !self.bottom_panel.open || self.bottom_panel.tab != BottomPanelTab::TradeHistory {
+            return;
+        }
+        let Some((request_token, query)) = self
+            .bottom_panel
+            .history
+            .request_page(&self.bottom_panel.filter)
+        else {
+            return;
+        };
+        let service = self.lifecycle.trading().clone();
+        cx.spawn(async move |terminal, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { service.history(query) })
+                .await;
+            let _ = terminal.update(cx, |terminal, terminal_cx| {
+                if terminal.bottom_panel.history.receive_page(
+                    request_token,
+                    result,
+                    &terminal.bottom_panel.filter,
+                ) {
+                    terminal_cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn set_trade_history_height(&mut self, height: f32, cx: &mut Context<Self>) {
@@ -538,6 +680,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         self.bottom_panel.set_filter(filter);
+        self.request_history_page(cx);
         cx.notify();
     }
 
@@ -632,7 +775,8 @@ pub(super) fn bottom_panel(
                         state.shows_account_column(),
                         theme,
                     ))
-                    .child(trade_history_list(state, chart, theme)),
+                    .child(trade_history_list(state, chart, theme))
+                    .child(history_page_controls(terminal, state, theme)),
                 BottomPanelTab::Positions => panel
                     .child(position_column_header(state.shows_account_column(), theme))
                     .child(position_list(terminal, state, chart, theme)),
@@ -797,7 +941,11 @@ fn bottom_panel_tab_bar(
     let count_label = match state.tab {
         BottomPanelTab::TradeHistory => {
             let count = state.history.rows.len();
-            format!("{count} {}", if count == 1 { "trade" } else { "trades" })
+            format!(
+                "{count} {} · {} older orders",
+                if count == 1 { "trade" } else { "trades" },
+                state.history.order_rows.len()
+            )
         }
         BottomPanelTab::Positions => {
             let count = state.positions.rows.len();
@@ -987,7 +1135,7 @@ fn trade_history_list(
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    if state.history.rows.is_empty() {
+    if state.history.rows.is_empty() && state.history.order_rows.is_empty() {
         let message = if state.history.round_trips.iter().any(|trip| trip.closed) {
             "No closed trades for this account"
         } else {
@@ -1001,7 +1149,11 @@ fn trade_history_list(
             .justify_center()
             .text_sm()
             .text_color(gpui_color(colors.text_secondary))
-            .child(message)
+            .child(if state.history.loading {
+                "Loading older orders..."
+            } else {
+                message
+            })
             .into_any_element();
     }
     let history = state.history.clone();
@@ -1009,26 +1161,149 @@ fn trade_history_list(
     let list_theme = *theme;
     let list = uniform_list(
         "trade_history_rows",
-        history.rows.len(),
+        history.rows.len() + history.order_rows.len(),
         move |range, _, cx| {
             let chart = chart.as_ref().map(|chart| chart.read(cx));
             range
                 .filter_map(|index| {
-                    let trip = history.round_trips.get(*history.rows.get(index)?)?;
-                    Some(trade_history_row(
-                        index,
-                        trip,
-                        &history,
-                        chart,
-                        show_account,
-                        &list_theme,
-                    ))
+                    if index < history.rows.len() {
+                        let trip = history.round_trips.get(*history.rows.get(index)?)?;
+                        Some(
+                            trade_history_row(
+                                index,
+                                trip,
+                                &history,
+                                chart,
+                                show_account,
+                                &list_theme,
+                            )
+                            .into_any_element(),
+                        )
+                    } else {
+                        let order_index = index - history.rows.len();
+                        let order = history.orders.get(*history.order_rows.get(order_index)?)?;
+                        Some(
+                            older_order_row(
+                                index,
+                                order,
+                                &history,
+                                chart,
+                                show_account,
+                                &list_theme,
+                            )
+                            .into_any_element(),
+                        )
+                    }
                 })
                 .collect::<Vec<_>>()
         },
     )
     .track_scroll(&state.scroll);
     table_body(list, &state.scroll, theme)
+}
+
+fn history_page_controls(
+    terminal: &Entity<TerminalApp>,
+    state: &BottomPanelState,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    let history = &state.history;
+    let capped = history.pages >= MAX_LOADED_HISTORY_PAGES && history.next.is_some();
+    let message = if capped {
+        "Showing at most 2,000 older order records. Close and reopen history to start again."
+    } else if history.loading {
+        "Loading older order records..."
+    } else if history.error.is_some() {
+        "Older order history unavailable. Retry below."
+    } else if history.initialized && history.next.is_none() {
+        "End of order history"
+    } else {
+        "Older orders have no reconstructed trade P&L."
+    };
+    let load_terminal = terminal.clone();
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .text_xs()
+        .text_color(gpui_color(theme.colors.text_secondary))
+        .child(message)
+        .when(
+            !history.loading && (history.error.is_some() || (!capped && history.next.is_some())),
+            |row| {
+                row.child(
+                    Button::new("history_load_older", theme)
+                        .variant(ButtonVariant::Ghost)
+                        .button_size(ButtonSize::Sm)
+                        .child(if history.error.is_some() {
+                            "Retry"
+                        } else {
+                            "Load older"
+                        })
+                        .on_click(move |_, _, cx| {
+                            load_terminal.update(cx, TerminalApp::request_history_page);
+                        }),
+                )
+            },
+        )
+}
+
+fn older_order_row(
+    index: usize,
+    order: &aeris_trading::Order,
+    history: &TradeHistory,
+    chart: Option<&AerisChartView>,
+    show_account: bool,
+    theme: &AerisTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let (side, color) = match order.side {
+        aeris_trading::OrderSide::Buy => ("Buy", colors.text_positive),
+        aeris_trading::OrderSide::Sell => ("Sell", colors.text_negative),
+    };
+    table_row_frame(theme)
+        .id(("history_order", index))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            trade_history_time(chart, order.submitted_unix_nanos),
+            theme,
+        ))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            format!("Order {:?}", order.status),
+            theme,
+        ))
+        .when(show_account, |row| {
+            row.child(text_cell(
+                TRADE_HISTORY_ACCOUNT_WIDTH,
+                history.account_name(order.account_id.as_str()),
+                theme,
+            ))
+        })
+        .child(text_cell(
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            history.symbol(&order.instrument_id),
+            theme,
+        ))
+        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(color)))
+        .child(numeric_data_cell(
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            trade_history_decimal(order.filled_quantity),
+            theme,
+        ))
+        .child(numeric_data_cell(
+            TRADE_HISTORY_PRICE_WIDTH,
+            trade_history_text(order.limit_price.map(trade_history_decimal)),
+            theme,
+        ))
+        .child(numeric_data_cell(TRADE_HISTORY_PRICE_WIDTH, "—", theme))
+        .child(last_cell(numeric_data_cell(
+            TRADE_HISTORY_PNL_WIDTH,
+            "—",
+            theme,
+        )))
 }
 
 /// The scrolling rows below a table header, with the screener's thin scrollbar.
@@ -1457,6 +1732,103 @@ fn last_cell(cell: Div) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_order(index: usize) -> aeris_trading::Order {
+        use aeris_trading::{
+            ClientOrderId, FixedPoint, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
+            TradingAccountId, TradingProvenance,
+        };
+        let id = format!("history-{index}");
+        aeris_trading::Order {
+            id: OrderId::try_new(id.clone()).expect("order"),
+            client_order_id: ClientOrderId::try_new(id).expect("client"),
+            account_id: TradingAccountId::try_new("a").expect("account"),
+            instrument_id: aeris_instruments::InstrumentId::try_new("instrument:fixture:A")
+                .expect("instrument"),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Day,
+            quantity: FixedPoint::try_new(1, 0).expect("quantity"),
+            filled_quantity: FixedPoint::try_new(0, 0).expect("filled"),
+            limit_price: Some(FixedPoint::try_new(10, 0).expect("price")),
+            stop_price: None,
+            status: OrderStatus::Cancelled,
+            submitted_unix_nanos: i64::try_from(index).expect("fixture index") + 1,
+            revision: 1,
+            accepted_unix_nanos: 1,
+            updated_unix_nanos: 1,
+            eligible_after_unix_nanos: 1,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
+            terminal_unix_nanos: Some(1),
+            provenance: TradingProvenance {
+                venue_id: "aeris-sim".into(),
+                provider_id: "fixture".into(),
+                session_generation: 1,
+                source_sequence: 1,
+                observed_unix_nanos: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn trade_history_model_appends_pages_without_live_head_duplicates_and_stops_at_bound() {
+        use aeris_trading_runtime::{HistoryCursor, HistoryPage, MAXIMUM_HISTORY_PAGE};
+        let mut history = TradeHistory::default();
+        history.live_order_ids.insert(history_order(10_000).id);
+        let filter = TradeHistoryAccountFilter::All;
+        for page_index in 0..MAX_LOADED_HISTORY_PAGES {
+            let (request_token, query) = history.request_page(&filter).expect("next page");
+            assert_eq!(query.limit, Some(MAXIMUM_HISTORY_PAGE));
+            assert!(query.newest_first);
+            assert_eq!(
+                query.after,
+                (page_index > 0).then_some(HistoryCursor(
+                    i64::try_from(10_001 - page_index * 500).expect("fixture cursor")
+                ))
+            );
+            let start = 10_000 - page_index * 500;
+            let mut orders: Vec<_> = (start - 499..=start).rev().map(history_order).collect();
+            if page_index == 1 {
+                orders[0] = history_order(10_000);
+            }
+            assert_eq!(orders.len(), 500);
+            assert!(history.receive_page(
+                request_token,
+                Ok(HistoryPage {
+                    orders,
+                    next: Some(HistoryCursor(
+                        i64::try_from(start - 499).expect("fixture cursor")
+                    )),
+                }),
+                &filter
+            ));
+        }
+        assert_eq!(history.pages, MAX_LOADED_HISTORY_PAGES);
+        assert_eq!(
+            history.order_rows.len(),
+            1_998,
+            "live fill and repeated page order are excluded"
+        );
+        assert!(
+            history.request_page(&filter).is_none(),
+            "the bound stops further reads"
+        );
+        let old_request_token = history.request_token;
+        history.reset_pages();
+        assert!(!history.receive_page(
+            old_request_token,
+            Ok(HistoryPage {
+                orders: vec![history_order(1)],
+                next: None
+            }),
+            &filter
+        ));
+        assert!(
+            history.orders.is_empty(),
+            "lagged resync discards old pages"
+        );
+    }
 
     fn round_trip(account: &str) -> aeris_trading_runtime::TradeRoundTrip {
         let leg = aeris_trading_runtime::TradeLeg {

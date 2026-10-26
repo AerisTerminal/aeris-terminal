@@ -256,6 +256,11 @@ violations and missing verification explicitly, and never describe them as satis
   `service.snapshot()`, `trading_service.snapshot()` or `trading().snapshot()` on the owner.
   `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.
   Trading updates are applied on subscription wakes, not a render-path or 250 ms timer.
+- The desktop bottom panel keeps recent fill-based round trips as its live trade head.
+  Historical order records come from the trading service's read-only history worker through
+  background requests, newest first; order records have no historical trade P&L and must not
+  be presented as reconstructed round trips. At most four 500-order pages are retained,
+  with a visible cap, and a lagged subscription resync reloads the first page.
 - The `trading_runtime/test-observability` feature is enabled only by the desktop's
   dev-dependency to count calls to the instance's real `TradingService::history` API
   in idle regressions. Default production builds carry no history-read counter.

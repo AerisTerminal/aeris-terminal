@@ -147,12 +147,25 @@ pub(crate) fn order_history_page(
         .limit
         .unwrap_or(crate::MAXIMUM_HISTORY_PAGE)
         .clamp(1, crate::MAXIMUM_HISTORY_PAGE);
-    let after = query.after.map_or(0, |cursor| cursor.0);
+    let after = query
+        .after
+        .map_or(if query.newest_first { i64::MAX } else { 0 }, |cursor| {
+            cursor.0
+        });
     let account = query.account_id.as_ref().map(TradingAccountId::as_str);
     let fetch = i64::try_from(limit + 1).map_err(|error| error.to_string())?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, client_order_id, account_id, instrument_id, side,
+    let statement_sql = if query.newest_first {
+        "SELECT id, client_order_id, account_id, instrument_id, side,
+                order_type, time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
+                stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
+                filled_units, filled_scale, terminal_unix_nanos, revision,
+                accepted_unix_nanos, updated_unix_nanos, eligible_after_unix_nanos,
+                triggered_unix_nanos, expires_at_unix_nanos, rowid
+             FROM orders
+             WHERE (?1 IS NULL OR account_id = ?1) AND rowid < ?2
+             ORDER BY rowid DESC LIMIT ?3"
+    } else {
+        "SELECT id, client_order_id, account_id, instrument_id, side,
                 order_type, time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
                 stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
                 filled_units, filled_scale, terminal_unix_nanos, revision,
@@ -160,9 +173,9 @@ pub(crate) fn order_history_page(
                 triggered_unix_nanos, expires_at_unix_nanos, rowid
              FROM orders
              WHERE (?1 IS NULL OR account_id = ?1) AND rowid > ?2
-             ORDER BY rowid LIMIT ?3",
-        )
-        .map_err(database_error)?;
+             ORDER BY rowid LIMIT ?3"
+    };
+    let mut statement = connection.prepare(statement_sql).map_err(database_error)?;
     let rows = statement
         .query_map(params![account, after, fetch], |row| {
             Ok((order_columns(row)?, row.get::<_, i64>(25)?))

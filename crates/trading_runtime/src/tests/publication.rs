@@ -555,6 +555,7 @@ fn history_pages_return_every_order_exactly_once_in_order() {
                 account_id: None,
                 after,
                 limit: None,
+                newest_first: false,
             })
             .expect("history page");
         assert!(page.orders.len() <= MAXIMUM_HISTORY_PAGE);
@@ -582,6 +583,7 @@ fn history_pages_return_every_order_exactly_once_in_order() {
             account_id: None,
             after: None,
             limit: Some(MAXIMUM_HISTORY_PAGE + 700),
+            newest_first: false,
         })
         .expect("clamped page");
     assert_eq!(clamped.orders.len(), MAXIMUM_HISTORY_PAGE);
@@ -595,6 +597,55 @@ fn history_pages_return_every_order_exactly_once_in_order() {
             )
             .is_err(),
         "the reader connection is read-only"
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn desktop_history_pages_start_at_recent_orders_and_advance_older_without_duplicates() {
+    let directory = TestDirectory::new("desktop-history-pages");
+    write_load_fixture(&config(&directory).database_path, 10_001, 0, LOAD_FILLS);
+    let service = load_service(&directory);
+    let first = service
+        .history(HistoryQuery {
+            newest_first: true,
+            ..HistoryQuery::default()
+        })
+        .expect("first history page");
+    assert_eq!(first.orders.len(), MAXIMUM_HISTORY_PAGE);
+    assert!(
+        first.next.is_some(),
+        "10,001 orders must have an older page"
+    );
+    let second = service
+        .history(HistoryQuery {
+            newest_first: true,
+            after: first.next,
+            ..HistoryQuery::default()
+        })
+        .expect("second history page");
+    assert_eq!(second.orders.len(), MAXIMUM_HISTORY_PAGE);
+    assert!(second.next.is_some());
+    let ids = first
+        .orders
+        .iter()
+        .chain(&second.orders)
+        .map(|order| &order.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), 1_000, "pages append without duplicate orders");
+    assert!(
+        first
+            .orders
+            .last()
+            .expect("first last")
+            .submitted_unix_nanos
+            > second
+                .orders
+                .first()
+                .expect("second first")
+                .submitted_unix_nanos
     );
     service
         .shutdown_after_owner_exit_for_test()
