@@ -4,13 +4,23 @@
 //! outstanding wake bound work even when the UI is temporarily suspended.
 
 use aeris_instruments::InstrumentId;
-use aeris_trading::{Fill, Order, OrderEvent, OrderId, TradingAccountId};
+use aeris_trading::{
+    Fill, Order, OrderEvent, OrderEventKind, OrderEventReason, OrderId, TradingAccountId,
+};
 use aeris_trading_runtime::{SubscriptionUpdate, TradingSubscription, WorkingSet};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+const MAXIMUM_ANNOUNCED_TRADING_IDS: usize = 2_048;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum TradingAnnouncement {
+    Fill(Fill),
+    Order(OrderEvent),
+}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -264,6 +274,9 @@ pub(super) struct TradingStore {
     unselected_accounts_changed: bool,
     all_panes_changed: bool,
     resync_pending: bool,
+    announcements: Vec<TradingAnnouncement>,
+    announced_ids: BTreeSet<String>,
+    announced_order: VecDeque<String>,
     slot: Arc<Mutex<Slot>>,
     stop: Arc<AtomicBool>,
     bridge: Option<JoinHandle<()>>,
@@ -357,6 +370,7 @@ impl TradingStore {
         }
         self.resync_pending |= update.lagged;
         let next = *update.event.working_set;
+        self.collect_announcements(&next);
         let next_indexes = TradingIndexes::build(&next);
         self.changed_selections.clear();
         self.changed_accounts.clear();
@@ -443,6 +457,54 @@ impl TradingStore {
 
     pub(super) fn take_resync(&mut self) -> bool {
         std::mem::take(&mut self.resync_pending)
+    }
+
+    fn collect_announcements(&mut self, next: &WorkingSet) {
+        self.announcements.clear();
+        let had_current = self.current.is_some();
+        for fill in &next.fills {
+            let id = format!("fill:{}", fill.id.as_str());
+            if self.remember_announcement(id) && had_current {
+                self.announcements
+                    .push(TradingAnnouncement::Fill(fill.clone()));
+            }
+        }
+        for event in &next.order_events {
+            let relevant = event.reason == Some(OrderEventReason::RiskWarning)
+                || event.reason == Some(OrderEventReason::ProtectionNotPlaced)
+                || event.reason == Some(OrderEventReason::KillSwitch)
+                || event.kind == OrderEventKind::Rejected
+                || (event.provenance.venue_id == aeris_trading::venue::BROKER_VENUE_ID
+                    && matches!(
+                        event.kind,
+                        OrderEventKind::Cancelled | OrderEventKind::Expired
+                    )
+                    && event.reason != Some(OrderEventReason::UserCancel));
+            if relevant
+                && self.remember_announcement(format!("event:{}", event.id.as_str()))
+                && had_current
+            {
+                self.announcements
+                    .push(TradingAnnouncement::Order(event.clone()));
+            }
+        }
+    }
+
+    fn remember_announcement(&mut self, id: String) -> bool {
+        if !self.announced_ids.insert(id.clone()) {
+            return false;
+        }
+        self.announced_order.push_back(id);
+        if self.announced_order.len() > MAXIMUM_ANNOUNCED_TRADING_IDS
+            && let Some(oldest) = self.announced_order.pop_front()
+        {
+            self.announced_ids.remove(&oldest);
+        }
+        true
+    }
+
+    pub(super) fn take_announcements(&mut self) -> Vec<TradingAnnouncement> {
+        std::mem::take(&mut self.announcements)
     }
 
     pub(super) fn current(&self) -> Option<&WorkingSet> {
@@ -785,6 +847,85 @@ mod tests {
         assert!(store.slot.lock().expect("slot").offer(update(5, false)));
         store.drain().expect("empty next revision");
         assert_eq!(store.pane_view(&account, &instrument).orders().count(), 0);
+    }
+
+    #[test]
+    fn risk_warning_event_posts_one_warning_notice() {
+        use aeris_trading::{OrderEventKind, OrderEventReason};
+        let (mut publication, _, _, _) = indexed_fixture();
+        publication.event.working_set.order_events[0].kind = OrderEventKind::Accepted;
+        publication.event.working_set.order_events[0].reason = Some(OrderEventReason::RiskWarning);
+        publication.event.working_set.order_events[0].detail = Some("risk threshold".into());
+        publication.event.working_set.order_events.truncate(1);
+        publication.event.working_set.fills.clear();
+        let mut store = TradingStore::default();
+        // The initial owner view is history, not new news.
+        assert!(store.slot.lock().expect("slot").offer(update(2, false)));
+        store.drain().expect("initial");
+        assert_eq!(store.take_announcements(), []);
+        assert!(store.slot.lock().expect("slot").offer(publication.clone()));
+        store.drain().expect("warning");
+        let notices = store.take_announcements();
+        assert_eq!(notices.len(), 1);
+        assert!(matches!(
+            &notices[0],
+            TradingAnnouncement::Order(event)
+                if event.id.as_str() == "event-0"
+                    && event.reason == Some(OrderEventReason::RiskWarning)
+        ));
+        let (fills, warnings) = super::super::toaster::test_trading_toast_counts(
+            &notices,
+            store.current().expect("current"),
+            1,
+        );
+        assert_eq!(fills, 0);
+        assert_eq!(warnings, 1);
+        publication.event.revision = 4;
+        publication.event.working_set.revision = 4;
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        store.drain().expect("replay");
+        assert_eq!(store.take_announcements(), []);
+    }
+
+    #[test]
+    fn one_fill_one_change_one_toast_one_notify() {
+        let (mut publication, account, other, instrument) = indexed_fixture();
+        let mut store = TradingStore::default();
+        let mut initial = publication.clone();
+        initial.event.revision = 2;
+        initial.event.working_set.revision = 2;
+        initial.event.working_set.fills.clear();
+        assert!(store.slot.lock().expect("slot").offer(initial));
+        store.drain().expect("initial");
+        publication.event.working_set.fills.truncate(1);
+        assert!(store.slot.lock().expect("slot").offer(publication.clone()));
+        assert_eq!(store.drain().expect("fill").revision, 3);
+        let announcements = store.take_announcements();
+        assert_eq!(
+            announcements
+                .iter()
+                .filter(|item| matches!(item, TradingAnnouncement::Fill(_)))
+                .count(),
+            1
+        );
+        let (fill_toasts, notices) = super::super::toaster::test_trading_toast_counts(
+            &announcements,
+            store.current().expect("current"),
+            1,
+        );
+        assert_eq!(fill_toasts, 1);
+        assert_eq!(notices, 0);
+        let first_pane_notifies =
+            usize::from(store.pane_changed(Some(&account), Some(&instrument)));
+        let other_pane_notifies = usize::from(store.pane_changed(Some(&other), Some(&instrument)));
+        assert_eq!(first_pane_notifies, 1);
+        assert_eq!(other_pane_notifies, 0);
+        publication.event.revision = 4;
+        publication.event.working_set.revision = 4;
+        publication.lagged = true;
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        store.drain().expect("resync");
+        assert_eq!(store.take_announcements(), []);
     }
 
     #[test]

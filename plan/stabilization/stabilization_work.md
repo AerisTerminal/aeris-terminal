@@ -2246,6 +2246,15 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 typed-notice checkpoint): the subscription store derives
+    bounded, ID-deduplicated fill, broker-end, rejection, risk-warning,
+    protection-not-placed and kill-switch announcements on publication adoption.
+    The toaster no longer diffs trading snapshots; risk warnings post one
+    Warning-severity keyed notice while their chart annotation remains.
+    The four Part 1 characterization assertions are unchanged. M6.10 stays
+    unchecked: pane RequestId correlation and in-flight overflow, removal of
+    the remaining feedback polling, real-owner fill notification regression
+    and VAL-DSK-034/035 GUI evidence are not yet validated (D13).
   - Status (2026-10-26 Part 3 of 3 desktop trades): the bottom panel now requests
     owner-projected closed-trade pages per account off the UI thread, merges selected
     accounts newest-first, deduplicates by exit fill ID against the live head and
@@ -3121,6 +3130,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 3 of 3 feat(trading): page closed trades with owner pnl. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` generates 601 closed cycles on a file-backed store and checks the 500-row cap, disjoint older page, stable exit identities and exact owner P&L for every row; `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` checks tied timestamps, account isolation and unknown-P&L exits; `open_round_trip_pnl_follows_live_marks_and_partial_exits` compares historical partial-exit trades with the owner after restart. The read-only reader reuses the owner's round-trip projector. Desktop conversion and VAL-DSK-119 remain open; M6.10 stays unchecked.
 - 2026-10-26 M6.10 Part 3 of 3 fix(trading): retain migrated partial exits in trade pages. `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` seeds a pre-V21 partial reduction, opens it through the migrations and matches the owner's exact closed row with unknown P&L; `migrated_trade_history_uses_account_keyset_index` checks V29-to-V30 migration and both index query plans. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` retain their page/cursor coverage. M6.10 stays unchecked pending desktop conversion, typed notices and GUI evidence.
 - 2026-10-26 M6.10 Part 3 of 3 feat(desktop): show owner-projected historical trades - `trade_history_model_appends_trades_without_live_head_duplicates_and_stops_at_bound`, `historical_trade_pages_merge_accounts_and_reject_retired_account_completions` and `changed_accounts_reload_trade_pages_and_reject_old_completion` test cursor paging, the four-page cap, merged accounts, account-change and lagged stale completions, and owner's unchanged P&L; `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` retain owner-level exact and unknown P&L coverage. M6.10 remains unchecked for typed notices and GUI evidence.
+- 2026-10-26 M6.10 typed-notice checkpoint feat(desktop): derive trading notices on store adoption. `risk_warning_event_posts_one_warning_notice`, `risk_warning_event_has_one_keyed_warning_notice`, `one_fill_one_change_one_toast_one_notify` and the four unchanged `trading_projection_baseline_*` tests cover ID deduplication across revision replay, Warning severity and selective two-pane projection. The in-flight RequestId map, real-owner fill test and VAL-DSK-034/035 GUI evidence remain; M6.10 stays unchecked.
 
 ## 7. Known gaps / deferred
 

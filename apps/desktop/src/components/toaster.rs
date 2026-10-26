@@ -280,7 +280,8 @@ struct Swipe {
     started: Instant,
 }
 
-/// Which facts of one kind the owner has reported, so each new one is announced once.
+/// Characterization fixture for the former snapshot news behavior.
+#[cfg(test)]
 #[derive(Debug)]
 struct NewsWatch<K> {
     revision: Option<u64>,
@@ -288,6 +289,7 @@ struct NewsWatch<K> {
     seen: Option<BTreeSet<K>>,
 }
 
+#[cfg(test)]
 impl<K> Default for NewsWatch<K> {
     fn default() -> Self {
         Self {
@@ -297,6 +299,7 @@ impl<K> Default for NewsWatch<K> {
     }
 }
 
+#[cfg(test)]
 impl<K: Ord + Clone> NewsWatch<K> {
     /// The items that are news in this snapshot, oldest first by `happened`.
     fn fresh<'a, T>(
@@ -340,48 +343,9 @@ pub(super) struct Toaster {
     reduce_motion: bool,
     /// A chart condition the trader dismissed stays dismissed until it changes or clears.
     dismissed_status: BTreeMap<ToastStack, &'static str>,
-    fills: NewsWatch<aeris_trading::FillId>,
-    order_ends: NewsWatch<aeris_trading::OrderEventId>,
     /// The timer expiry a wake-up is already scheduled for.
     wake: Option<Instant>,
 }
-
-pub(super) trait TradingNewsView {
-    fn revision(&self) -> u64;
-    fn fills(&self) -> &[aeris_trading::Fill];
-    fn order_events(&self) -> &[aeris_trading::OrderEvent];
-    fn orders(&self) -> &[aeris_trading::Order];
-    fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument];
-    fn accounts(&self) -> &[aeris_trading::TradingAccount];
-}
-
-macro_rules! trading_news_view {
-    ($ty:ty) => {
-        impl TradingNewsView for $ty {
-            fn revision(&self) -> u64 {
-                self.revision
-            }
-            fn fills(&self) -> &[aeris_trading::Fill] {
-                &self.fills
-            }
-            fn order_events(&self) -> &[aeris_trading::OrderEvent] {
-                &self.order_events
-            }
-            fn orders(&self) -> &[aeris_trading::Order] {
-                &self.orders
-            }
-            fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument] {
-                &self.instruments
-            }
-            fn accounts(&self) -> &[aeris_trading::TradingAccount] {
-                &self.accounts
-            }
-        }
-    };
-}
-trading_news_view!(aeris_trading_runtime::WorkingSet);
-#[cfg(test)]
-trading_news_view!(aeris_trading_runtime::TradingSnapshot);
 
 impl Toaster {
     #[cfg(test)]
@@ -844,73 +808,87 @@ impl Toaster {
         );
     }
 
-    /// Announces the fills, broker order ends and risk-warned acceptances in a trading
-    /// snapshot that are news, on the given stack. Returns whether any toast was added.
-    fn announce_trading(
+    /// Projects the store's already deduplicated event IDs. This never compares snapshots.
+    fn post_trading_announcements(
         &mut self,
-        snapshot: &impl TradingNewsView,
+        announcements: &[trading_store::TradingAnnouncement],
+        snapshot: &aeris_trading_runtime::WorkingSet,
         host: Option<ToastStack>,
         now_unix_nanos: i64,
         now: Instant,
     ) -> bool {
-        let fills = self.fills.fresh(
-            snapshot.revision(),
-            snapshot.fills(),
-            |fill| &fill.id,
-            |fill| fill.execution_unix_nanos,
-            now_unix_nanos,
-        );
-        let ends: Vec<_> = self
-            .order_ends
-            .fresh(
-                snapshot.revision(),
-                snapshot.order_events(),
-                |event| &event.id,
-                |event| event.event_unix_nanos,
-                now_unix_nanos,
-            )
-            .into_iter()
-            .filter_map(|event| {
-                order_end_notice(
-                    event,
-                    snapshot.orders(),
-                    snapshot.instruments(),
-                    snapshot.accounts(),
-                )
-                .or_else(|| {
-                    order_warning_notice(
-                        event,
-                        snapshot.orders(),
-                        snapshot.instruments(),
-                        snapshot.accounts(),
-                    )
-                })
-            })
-            .collect();
         let Some(host) = host else {
             return false;
         };
-        for fill in &fills {
-            let (title, description) =
-                fill_notice_text(fill, snapshot.instruments(), snapshot.accounts());
-            self.push_fill(host, fill.side, title, description, now);
+        let mut posted = false;
+        for item in announcements {
+            match item {
+                trading_store::TradingAnnouncement::Fill(fill) => {
+                    if now_unix_nanos.saturating_sub(fill.execution_unix_nanos)
+                        > NEWS_FRESHNESS_NANOS
+                    {
+                        continue;
+                    }
+                    let (title, description) =
+                        fill_notice_text(fill, &snapshot.instruments, &snapshot.accounts);
+                    self.push_fill(host, fill.side, title, description, now);
+                }
+                trading_store::TradingAnnouncement::Order(event) => {
+                    if now_unix_nanos.saturating_sub(event.event_unix_nanos) > NEWS_FRESHNESS_NANOS
+                    {
+                        continue;
+                    }
+                    let (tone, title, description) = order_warning_notice(
+                        event,
+                        &snapshot.orders,
+                        &snapshot.instruments,
+                        &snapshot.accounts,
+                    )
+                    .or_else(|| {
+                        order_end_notice(
+                            event,
+                            &snapshot.orders,
+                            &snapshot.instruments,
+                            &snapshot.accounts,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let (title, tone) = match event.reason {
+                            Some(aeris_trading::OrderEventReason::ProtectionNotPlaced) => {
+                                ("Protection not placed", ToastTone::Loss)
+                            }
+                            Some(aeris_trading::OrderEventReason::KillSwitch) => {
+                                ("Risk lock", ToastTone::Warning)
+                            }
+                            _ => ("Order rejected", ToastTone::Loss),
+                        };
+                        (
+                            tone,
+                            title.to_string(),
+                            event.detail.clone().unwrap_or_default(),
+                        )
+                    });
+                    if event.reason == Some(aeris_trading::OrderEventReason::RiskWarning) {
+                        self.post_notice(host, risk_warning_user_notice(event, description), now);
+                    } else {
+                        self.push(
+                            host,
+                            ToastContent {
+                                kind: ToastKind::Notice,
+                                notice_key: None,
+                                tone,
+                                title: title.into(),
+                                description: Some(description.into()),
+                                lifetime: Some(ORDER_END_LIFETIME),
+                            },
+                            now,
+                        );
+                    }
+                }
+            }
+            posted = true;
         }
-        let announced = !fills.is_empty() || !ends.is_empty();
-        for (tone, title, description) in ends {
-            self.push(
-                host,
-                ToastContent {
-                    kind: ToastKind::Notice,
-                    notice_key: None,
-                    tone,
-                    title: title.into(),
-                    description: Some(description.into()),
-                    lifetime: Some(ORDER_END_LIFETIME),
-                },
-                now,
-            );
-        }
-        announced
+        posted
     }
 
     fn push_fill(
@@ -1076,6 +1054,25 @@ impl Toaster {
         if self.wake == Some(deadline) {
             self.wake = None;
         }
+    }
+}
+
+fn risk_warning_user_notice(event: &aeris_trading::OrderEvent, detail: String) -> UserNotice {
+    use std::hash::{Hash, Hasher};
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    event.id.as_str().hash(&mut key);
+    UserNotice {
+        key: NoticeKey {
+            scope: key.finish(),
+            kind: "trading_risk_warning",
+        },
+        severity: notification_center::NoticeSeverity::Warning,
+        tone: NoticeTone::Warning,
+        source: notification_center::NoticeSource::Workspace,
+        title: "Risk warning",
+        detail,
+        action: None,
+        lifetime: NoticeLifetime::Timed(ORDER_END_LIFETIME),
     }
 }
 
@@ -1528,13 +1525,15 @@ impl ToastHost for TerminalApp {
 }
 
 impl TerminalApp {
-    pub(super) fn announce_trading(
+    pub(super) fn post_trading_announcements(
         &mut self,
-        snapshot: &impl TradingNewsView,
+        announcements: &[trading_store::TradingAnnouncement],
+        snapshot: &aeris_trading_runtime::WorkingSet,
         cx: &mut Context<Self>,
     ) {
         let host = toast_host(&self.workspaces[self.active]);
-        if self.toaster.announce_trading(
+        if self.toaster.post_trading_announcements(
+            announcements,
             snapshot,
             host,
             self.lifecycle.clock().wall_unix_nanos(),
@@ -1606,6 +1605,31 @@ impl TerminalApp {
             .detach();
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn test_trading_toast_counts(
+    announcements: &[trading_store::TradingAnnouncement],
+    set: &aeris_trading_runtime::WorkingSet,
+    now_unix_nanos: i64,
+) -> (usize, usize) {
+    let mut toaster = Toaster::default();
+    let stack = ToastStack(EntityId::from(1));
+    toaster.post_trading_announcements(
+        announcements,
+        set,
+        Some(stack),
+        now_unix_nanos,
+        Instant::now(),
+    );
+    (
+        toaster
+            .toasts
+            .iter()
+            .filter(|toast| toast.kind == ToastKind::Fill)
+            .count(),
+        toaster.notices().len(),
+    )
 }
 
 #[cfg(test)]
@@ -1924,6 +1948,27 @@ mod tests {
             None,
             "a plain acceptance is not news"
         );
+    }
+
+    #[test]
+    fn risk_warning_event_has_one_keyed_warning_notice() {
+        let event = order_event(
+            aeris_trading::OrderEventKind::Accepted,
+            Some(aeris_trading::OrderEventReason::RiskWarning),
+            "aeris-sim",
+            "risk threshold",
+        );
+        let notice = risk_warning_user_notice(&event, "Risk threshold".into());
+        assert_eq!(
+            notice.severity,
+            notification_center::NoticeSeverity::Warning
+        );
+        let mut toaster = Toaster::default();
+        let now = Instant::now();
+        toaster.post_notice(stack(1), notice.clone(), now);
+        toaster.post_notice(stack(1), notice, now);
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.live_notice_cards(stack(1)), 1);
     }
 
     #[test]

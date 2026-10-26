@@ -667,9 +667,9 @@ impl TerminalApp {
             store
                 .drain()
                 .cloned()
-                .map(|snapshot| (snapshot, store.take_resync()))
+                .map(|snapshot| (snapshot, store.take_resync(), store.take_announcements()))
         });
-        let Some((snapshot, resync)) = view else {
+        let Some((snapshot, resync, announcements)) = view else {
             return;
         };
         let feedback = self.lifecycle.trading_feedback();
@@ -686,7 +686,7 @@ impl TerminalApp {
         if resync || accounts_changed {
             self.request_history_page(cx);
         }
-        self.announce_trading(&snapshot, cx);
+        self.post_trading_announcements(&announcements, &snapshot, cx);
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
                 let state = pane.surface.read(cx);
