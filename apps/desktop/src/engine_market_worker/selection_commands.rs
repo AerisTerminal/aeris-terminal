@@ -32,17 +32,6 @@ pub(super) fn fence_recovery_command(
     Ok(None)
 }
 
-#[cfg(test)]
-pub(super) fn initialize_catalog_endpoint(
-    market: &MarketService,
-    client_id: u64,
-    workspace_id: u64,
-    endpoint: &mut WorkerEndpoint,
-) -> Result<(), String> {
-    market.register_consumer(client_id, workspace_id, endpoint.consumer_id)?;
-    Ok(())
-}
-
 pub(super) fn initialize_market_screen_endpoint(
     market: &MarketService,
     client_id: u64,

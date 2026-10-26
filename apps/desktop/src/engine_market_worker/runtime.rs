@@ -1,7 +1,5 @@
 //! Runtime.
 
-#[cfg(test)]
-use super::initialize_catalog_endpoint;
 use super::{
     EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
     MarketWorkerCommand, PaneProjectionEvent, WorkerEndpoint, complete_pending_recovery,
@@ -384,13 +382,6 @@ fn initialize_record(
 ) -> Result<(), String> {
     match record.role {
         EndpointRole::Market => initialize_endpoint(market, client_id, record),
-        #[cfg(test)]
-        EndpointRole::RithmicCatalog => initialize_catalog_endpoint(
-            market,
-            client_id,
-            record.workspace_id,
-            &mut record.endpoint,
-        ),
         EndpointRole::MarketScreen => initialize_market_screen_endpoint(
             market,
             client_id,

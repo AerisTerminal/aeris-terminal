@@ -140,7 +140,9 @@ violations and missing verification explicitly, and never describe them as satis
   an exception must be removed when its final match disappears. Do not add a new exception
   for new desktop provider logic. Replay conversion and chart legend projection have no provider
   identity exceptions: they use the bound instrument descriptor and published provider name.
-  The final production exception is the logo mapping in `assets.rs`.
+  The bridge files `market_worker.rs`, `engine_market_worker.rs` and its `runtime.rs`
+  need no provider-identity exceptions after M6.7; the deleted connection shell
+  has no exception either. The final production exception is the logo mapping in `assets.rs`.
 - `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`; the module is
   compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
   construct fixture market publications. The diagnostic conformance command is gated likewise.

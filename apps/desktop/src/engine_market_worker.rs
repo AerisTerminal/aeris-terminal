@@ -90,9 +90,6 @@ fn chart_streams(order_book: OrderBookDetail) -> StreamRequirements {
 enum EndpointRole {
     /// Chart or market-summary demand for one instrument.
     Market,
-    /// Rithmic instrument search before any chart demand exists.
-    #[cfg(test)]
-    RithmicCatalog,
     /// Listed-market statistics screens and their selections; never demands a series.
     MarketScreen,
 }
@@ -324,7 +321,7 @@ fn start() -> Result<
     )?;
     let (startup, worker) = workers
         .pop()
-        .ok_or_else(|| "Hyperliquid engine worker group is empty".to_string())?;
+        .ok_or_else(|| "market worker group is empty".to_string())?;
     Ok((startup, worker, factory))
 }
 
@@ -886,8 +883,6 @@ use runtime::{retire_endpoint, run_workers};
 #[path = "engine_market_worker/selection_commands.rs"]
 mod selection_commands;
 #[cfg(test)]
-use selection_commands::initialize_catalog_endpoint;
-#[cfg(test)]
 use selection_commands::retain_order_book_detail;
 use selection_commands::{initialize_endpoint, initialize_market_screen_endpoint, process_command};
 
@@ -1249,9 +1244,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_only_rithmic_endpoint_defers_demand_and_starts_selection_at_one() {
+    fn market_screen_endpoint_defers_demand_and_starts_selection_at_one() {
         let placeholder = fixture_futures_contract("MNQ");
-        let (mut pane, mut record) = worker_endpoint(
+        let (pane, mut record) = worker_endpoint(
             DEFAULT_WORKSPACE_ID,
             9,
             placeholder,
@@ -1260,10 +1255,9 @@ mod tests {
             None,
             0,
         );
-        pane.startup = MarketWorkerStartup::Rithmic;
-        record.role = EndpointRole::RithmicCatalog;
+        record.role = EndpointRole::MarketScreen;
 
-        assert!(matches!(pane.startup, MarketWorkerStartup::Rithmic));
+        assert!(matches!(pane.startup, MarketWorkerStartup::Loading(_)));
         assert!(!record.role.demands_series());
         assert_eq!(record.endpoint.active_generation, 0);
 
@@ -1344,13 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_worker_startup_routes_catalog_events() {
+    fn loading_worker_startup_routes_catalog_events() {
         let product = fixture_futures_contracts().remove(0);
         let (mut pane, mut record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
-        let MarketWorkerStartup::Loading(startup) = &pane.startup else {
-            panic!("Rithmic endpoint must start in loading state");
-        };
+        let MarketWorkerStartup::Loading(startup) = &pane.startup;
         assert_eq!(startup.product, product);
         assert_eq!(startup.interval, ChartInterval::Minute5);
 

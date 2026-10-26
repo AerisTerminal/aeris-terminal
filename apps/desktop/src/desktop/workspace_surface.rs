@@ -103,7 +103,7 @@ struct WorkspaceSurfaceInitialization {
     chart_chrome: chart_chrome::ChartChromePreferences,
     restored_chart_state: Option<WorkspaceChartState>,
     retained_chart_presentation: RetainedChartPresentation,
-    restored_rithmic: Option<(ChartInterval, Option<(i64, i64)>)>,
+    restored_viewport: Option<(i64, i64)>,
     interval: ChartInterval,
     symbol_browser: SymbolBrowser,
     studies: RuntimeStudiesState,
@@ -216,7 +216,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         restore_provider_display_name: None,
         interval: init.interval,
         chart_pane_controller,
-        restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
+        restored_viewport: init.restored_viewport,
         last_persisted_viewport: None,
         observed_chart: ObservedChart::default(),
         pending_chart_context_menu: None,
@@ -375,17 +375,6 @@ pub(super) fn sync_layout_drawings<'a>(
         });
     }
     changed
-}
-
-fn restored_market_selection(
-    startup: &MarketWorkerStartup,
-) -> Option<(ChartInterval, Option<(i64, i64)>)> {
-    match startup {
-        MarketWorkerStartup::Loading(startup) => {
-            Some((startup.interval, startup.restored_viewport))
-        }
-        MarketWorkerStartup::Rithmic => None,
-    }
 }
 
 pub(super) const fn persisted_chart_legend(
@@ -2142,10 +2131,11 @@ impl WorkspaceSurface {
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
         let theme = AerisTheme::dark();
-        let restored_rithmic = restored_market_selection(&startup);
+        let MarketWorkerStartup::Loading(ref loading) = startup;
+        let interval = loading.interval;
+        let restored_viewport = loading.restored_viewport;
         let symbol_browser = SymbolBrowser::new(chart_chrome.symbol_search_scope);
-        let startup_state = terminal_startup_state(startup, cx);
-        let interval = restored_rithmic.map_or(ChartInterval::Minute1, |restored| restored.0);
+        let startup_state = terminal_startup_state(startup);
         let (studies, price_alerts, price_alert_restore_status) =
             restored_workspace_records(restored_chart_state.as_ref(), &market_worker);
         initialize_restored_chart(startup_state.chart.as_ref(), chart_chrome, cx);
@@ -2186,7 +2176,7 @@ impl WorkspaceSurface {
             chart_chrome,
             retained_chart_presentation: RetainedChartPresentation::default(),
             restored_chart_state,
-            restored_rithmic,
+            restored_viewport,
             interval,
             symbol_browser,
             studies,

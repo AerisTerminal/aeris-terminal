@@ -3833,11 +3833,11 @@ fn catalog_rejection_lane_comes_from_the_runtime_not_the_reason() {
 }
 
 #[test]
-fn first_rithmic_connection_is_not_presented_as_recovery_and_autoloads_catalog() {
-    let shell =
-        crate::desktop::rithmic_shell::RithmicShellState::local().expect("fixed Rithmic profile");
-    let discovering =
-        stabilized_connection_state(Some(shell.connection()), FeedConnectionState::Discovering);
+fn first_connection_is_not_presented_as_recovery() {
+    let discovering = stabilized_connection_state(
+        Some(FeedConnectionState::Discovering),
+        FeedConnectionState::Discovering,
+    );
     assert_eq!(discovering, FeedConnectionState::Discovering);
     let ready = stabilized_connection_state(Some(discovering), FeedConnectionState::Authenticating);
     assert_eq!(ready, FeedConnectionState::Authenticating);

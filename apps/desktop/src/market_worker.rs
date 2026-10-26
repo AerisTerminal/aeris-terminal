@@ -85,7 +85,6 @@ pub struct MarketWorkerBootstrap {
 }
 
 pub enum MarketWorkerStartup {
-    Rithmic,
     Loading(Box<EngineWorkerStartup>),
 }
 
@@ -1136,7 +1135,7 @@ impl MarketDataWorker {
             })
     }
 
-    /// Enqueues a Rithmic symbol search without blocking.
+    /// Enqueues a provider symbol search without blocking.
     ///
     /// # Errors
     /// Returns an error when the command mailbox is full or disconnected.
@@ -1170,7 +1169,7 @@ impl MarketDataWorker {
             .map_err(|_| ProviderCommandUnavailable)
     }
 
-    /// Enqueues a Rithmic selection without blocking.
+    /// Enqueues a provider selection without blocking.
     ///
     /// # Errors
     /// Returns an error when the command mailbox is full or disconnected.

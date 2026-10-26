@@ -73,8 +73,6 @@ mod price_alert_dialog;
 mod readiness_conformance;
 #[path = "components/rithmic_login.rs"]
 mod rithmic_login;
-#[path = "rithmic_shell.rs"]
-mod rithmic_shell;
 #[path = "components/side_panel_dock.rs"]
 mod side_panel_dock;
 #[path = "components/sign_in_gate.rs"]
@@ -3694,7 +3692,6 @@ fn bounded_status_detail(detail: &str, generic_label: &str) -> Option<String> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartFailure {
-    Startup,
     UnsupportedProvider,
     Market,
     WorkerStopped,
@@ -3703,7 +3700,6 @@ enum ChartFailure {
 impl ChartFailure {
     const fn detail(self) -> &'static str {
         match self {
-            Self::Startup => "Market connection could not be initialized.",
             Self::UnsupportedProvider => {
                 "This restored market provider is unavailable. Choose another market."
             }
@@ -3841,41 +3837,8 @@ struct TerminalStartupState {
     product: Option<InstallProviderInstrument>,
 }
 
-fn terminal_startup_state(
-    startup: MarketWorkerStartup,
-    cx: &mut Context<WorkspaceSurface>,
-) -> TerminalStartupState {
+fn terminal_startup_state(startup: MarketWorkerStartup) -> TerminalStartupState {
     match startup {
-        MarketWorkerStartup::Rithmic => {
-            let Ok(shell) = rithmic_shell::RithmicShellState::local() else {
-                diagnostic!("Aeris market connection shell could not be initialized");
-                let message = "Market connection could not be initialized".to_string();
-                return TerminalStartupState {
-                    chart: None,
-                    chart_state: ChartState::Error,
-                    chart_failure: Some(ChartFailure::Startup),
-                    replay_label: message.clone(),
-                    worker_label: "Market worker".to_string(),
-                    subscription_id: "Unavailable".to_string(),
-                    connection_state: Some(FeedConnectionState::Disconnected),
-                    provider: TerminalProvider::Rithmic,
-                    product: None,
-                };
-            };
-            let profile = shell.profile_label();
-            let connection = shell.connection();
-            TerminalStartupState {
-                chart: Some(cx.new(move |_| AerisChartView::empty())),
-                chart_state: ChartState::Loading,
-                chart_failure: None,
-                replay_label: profile.clone(),
-                worker_label: "Rithmic market worker".to_string(),
-                subscription_id: "Loading chart".to_string(),
-                connection_state: Some(connection),
-                provider: TerminalProvider::Rithmic,
-                product: None,
-            }
-        }
         MarketWorkerStartup::Loading(startup) => {
             let Some(provider) = known_terminal_provider(startup.product.provider.as_str()) else {
                 let message = ChartFailure::UnsupportedProvider.detail().to_string();

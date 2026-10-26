@@ -130,17 +130,20 @@ impl PaneHarness {
     fn open_with_startup(
         restore: WorkspaceSurfaceRestore,
         fill_command_queue: bool,
-        rithmic_startup: bool,
+        fixture_futures_startup: bool,
         cx: &mut TestAppContext,
     ) -> (Self, &mut VisualTestContext) {
-        let product = local_state::default_workspace().watchlist_entries[0]
-            .instrument
-            .clone()
-            .expect("fixture product");
+        let product = if fixture_futures_startup {
+            aeris_desktop::test_support::fixture_futures_contract("MNQ")
+        } else {
+            local_state::default_workspace().watchlist_entries[0]
+                .instrument
+                .clone()
+                .expect("fixture product")
+        };
         Self::open_with_product(
             restore,
             fill_command_queue,
-            rithmic_startup,
             product,
             ChartInterval::Minute1,
             cx,
@@ -150,7 +153,6 @@ impl PaneHarness {
     fn open_with_product(
         restore: WorkspaceSurfaceRestore,
         fill_command_queue: bool,
-        rithmic_startup: bool,
         product: InstallProviderInstrument,
         interval: ChartInterval,
         cx: &mut TestAppContext,
@@ -174,17 +176,13 @@ impl PaneHarness {
         }
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
-            let startup = if rithmic_startup {
-                MarketWorkerStartup::Rithmic
-            } else {
-                MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
-                    product,
-                    interval,
-                    restored_viewport: None,
-                    subscription_id: "desktop_fixture_market_bars".into(),
-                    worker_label: "disconnected fixture".into(),
-                }))
-            };
+            let startup = MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
+                product,
+                interval,
+                restored_viewport: None,
+                subscription_id: "desktop_fixture_market_bars".into(),
+                worker_label: "disconnected fixture".into(),
+            }));
             let pane = workspace_surface_entity(
                 startup,
                 worker,
@@ -315,7 +313,6 @@ fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAp
         dispatches.push(request);
         let (harness, cx) = PaneHarness::open_with_product(
             WorkspaceSurfaceRestore::default(),
-            false,
             false,
             product.clone(),
             interval,
@@ -2933,10 +2930,11 @@ fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clear
     };
     let (mut harness, cx) = PaneHarness::open_with_startup(restore, false, true, cx);
     cx.read(|cx| {
-        assert!(
-            harness.pane.read(cx).chart.is_some(),
-            "startup chart exists"
-        );
+        assert_eq!(harness.pane.read(cx).chart_state, ChartState::Loading);
+        assert!(harness.pane.read(cx).chart.is_none());
+    });
+    harness.publish_snapshot(12, cx);
+    cx.read(|cx| {
         assert!(
             !harness
                 .pane
@@ -3033,7 +3031,8 @@ fn pane_harness_secret_bearing_restore_failure_redacts_notice_and_diagnostic(
         }),
         ..WorkspaceSurfaceRestore::default()
     };
-    let (harness, cx) = PaneHarness::open_with_startup(restore, false, true, cx);
+    let (mut harness, cx) = PaneHarness::open_with_startup(restore, false, true, cx);
+    harness.publish_snapshot(12, cx);
     cx.run_until_parked();
     cx.read(|cx| {
         let notices = harness.window.read(cx).toaster.notices();
@@ -4028,7 +4027,6 @@ fn pane_harness_deferred_study_registers_on_a_selected_rithmic_market(cx: &mut T
     let (mut harness, cx) = PaneHarness::open_with_product(
         WorkspaceSurfaceRestore::default(),
         false,
-        false,
         product,
         ChartInterval::Minute1,
         cx,
@@ -4477,6 +4475,26 @@ fn pane_harness_catalog_failure_before_selection_does_not_fail_chart(cx: &mut Te
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].title, "Symbol search unavailable");
         assert!(!notices[0].detail.contains("private-catalog-detail"));
+    });
+}
+
+#[gpui::test]
+fn pane_harness_fixture_futures_startup_waits_for_runtime_snapshot(cx: &mut TestAppContext) {
+    let (mut harness, cx) =
+        PaneHarness::open_with_startup(WorkspaceSurfaceRestore::default(), false, true, cx);
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.chart_state, ChartState::Loading);
+        assert!(pane.chart.is_none(), "no chart before the runtime replies");
+        assert_eq!(
+            pane.product.as_ref().expect("selected fixture").provider,
+            "rithmic"
+        );
+    });
+    harness.publish_snapshot(12, cx);
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(pane.chart.is_some(), "runtime snapshot installs the chart");
     });
 }
 

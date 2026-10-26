@@ -80,22 +80,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "apps/desktop/src/desktop/workspace_tabs.rs",
         "legacy provider tab label",
     ),
-    (
-        "apps/desktop/src/engine_market_worker.rs",
-        "legacy provider bridge fixtures",
-    ),
-    (
-        "apps/desktop/src/engine_market_worker/runtime.rs",
-        "legacy provider selection tests",
-    ),
-    (
-        "apps/desktop/src/market_worker.rs",
-        "legacy provider worker fixtures",
-    ),
-    (
-        "apps/desktop/src/rithmic_shell.rs",
-        "legacy provider connection shell awaiting M6.9",
-    ),
 ];
 
 // Only these declared modules can be omitted from the production identity scan.
