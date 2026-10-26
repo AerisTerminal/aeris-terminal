@@ -306,14 +306,19 @@ pub(super) fn chrome_overlay_content(
         ChromeOverlay::TimeZone => {
             time_zone_overlay_content(app_state, app, theme, cx).into_any_element()
         }
-        ChromeOverlay::Accounts => accounts_panel::accounts_panel_content(
-            app_state,
-            app,
-            connections,
-            accounts_panel::accounts_panel_size(extent),
-            theme,
-        )
-        .into_any_element(),
+        ChromeOverlay::Accounts => {
+            let store = app_state.lifecycle.trading_store();
+            let working_set = store.as_ref().and_then(|store| store.read(cx).current());
+            accounts_panel::accounts_panel_content(
+                app_state,
+                app,
+                connections,
+                working_set,
+                accounts_panel::accounts_panel_size(extent),
+                theme,
+            )
+            .into_any_element()
+        }
     }
 }
 

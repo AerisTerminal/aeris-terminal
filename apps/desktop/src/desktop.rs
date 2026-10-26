@@ -1039,33 +1039,9 @@ struct ContextCredentialDialogState {
     inputs: Vec<(ContextSource, Entity<InputState>)>,
 }
 
-/// Runtime-derived pane presentation until the next part removes pane caches.
-#[derive(Default)]
-struct TradingProjection {
-    accounts: Vec<aeris_trading::TradingAccount>,
-    planned_legs: Vec<aeris_trading_runtime::PlannedLeg>,
-    /// Broker accounts the attached venue can reach now.
-    connected_broker_accounts: std::collections::BTreeSet<aeris_trading::TradingAccountId>,
-}
-
-impl TradingProjection {
-    fn from_working_set(
-        snapshot: &aeris_trading_runtime::WorkingSet,
-        _selected: Option<&aeris_trading::TradingAccountId>,
-    ) -> Self {
-        Self {
-            accounts: snapshot.accounts.clone(),
-            planned_legs: snapshot.planned_legs.clone(),
-            connected_broker_accounts: snapshot.connected_broker_accounts.clone(),
-        }
-    }
-}
-
-/// Pane-only choices and feedback. Runtime-derived data is one projection of
-/// the shared store, never a second read from the trading owner.
+/// Pane-only choices and feedback. Runtime-derived facts stay in the shared store.
 #[derive(Default)]
 struct TradingPaneState {
-    projection: TradingProjection,
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     order_entry: TradingOrderEntryState,
     applied_selection: Option<(
@@ -1186,19 +1162,6 @@ impl TimeSalesFilter {
         }
         *self = default;
         true
-    }
-}
-
-impl std::ops::Deref for TradingPaneState {
-    type Target = TradingProjection;
-    fn deref(&self) -> &Self::Target {
-        &self.projection
-    }
-}
-
-impl std::ops::DerefMut for TradingPaneState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.projection
     }
 }
 
@@ -3022,9 +2985,9 @@ fn dispatch_chart_trading_intent(
         dispatch_chart_create_protection(chart, intent, app, cx);
         return;
     }
-    if let Some(leg) = chart_intent_planned_leg(intent, app) {
+    if let Some(client_order_id) = chart_intent_planned_leg(intent, app, cx) {
         if action == ChartTradingIntentAction::ModifyOrder {
-            dispatch_chart_move_planned_leg(chart, intent, leg.client_order_id.clone(), app, cx);
+            dispatch_chart_move_planned_leg(chart, intent, client_order_id, app, cx);
         } else {
             reject_chart_intent(
                 &chart,
@@ -3066,18 +3029,23 @@ fn dispatch_chart_trading_intent(
 }
 
 /// The selected account's pending-bracket leg on the chart's instrument that `intent` acts on.
-fn chart_intent_planned_leg<'a>(
+fn chart_intent_planned_leg(
     intent: &ChartTradingIntent,
-    app: &'a WorkspaceSurface,
-) -> Option<&'a aeris_trading_runtime::PlannedLeg> {
+    app: &WorkspaceSurface,
+    cx: &App,
+) -> Option<aeris_trading::ClientOrderId> {
     let order_id = intent.order_id.as_ref()?;
     let selected_account = app.trading_pnl.order_entry.selected_account_id.as_ref()?;
     let product = app.product.as_ref()?;
-    app.trading_pnl.planned_legs.iter().find(|leg| {
-        leg.client_order_id.as_str() == order_id.as_str()
-            && &leg.account_id == selected_account
-            && leg.instrument_id.as_str() == product.instrument_id
-    })
+    let instrument =
+        aeris_instruments::InstrumentId::try_new(product.instrument_id.clone()).ok()?;
+    let store = app.lifecycle.trading_store()?;
+    store
+        .read(cx)
+        .pane_view(selected_account, &instrument)
+        .planned_legs()
+        .find(|leg| leg.client_order_id.as_str() == order_id.as_str())
+        .map(|leg| leg.client_order_id.clone())
 }
 
 fn dispatch_chart_move_planned_leg(

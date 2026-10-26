@@ -146,13 +146,14 @@ pub(super) fn accounts_panel_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     connections: ConnectionsView<'_>,
+    working_set: Option<&aeris_trading_runtime::WorkingSet>,
     panel_size: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let tab = app_state.menu_state.accounts_tab;
     let groups = match tab {
         AccountsTab::Connections => connections_groups(connections, theme),
-        AccountsTab::TradingAccounts => trading_account_groups(app_state, app, theme),
+        AccountsTab::TradingAccounts => trading_account_groups(app_state, app, working_set, theme),
     };
     div()
         .id("accounts_panel")
@@ -166,7 +167,7 @@ pub(super) fn accounts_panel_content(
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .child(panel_sidebar(app_state, app, tab, theme))
+                .child(panel_sidebar(app_state, app, tab, working_set, theme))
                 .child(
                     div()
                         .id("accounts_panel_content")
@@ -231,6 +232,7 @@ fn panel_sidebar(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     selected: AccountsTab,
+    working_set: Option<&aeris_trading_runtime::WorkingSet>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -257,7 +259,12 @@ fn panel_sidebar(
         .order_entry
         .selected_account_id
         .as_ref()
-        .and_then(|id| trading.accounts.iter().find(|account| &account.id == id));
+        .and_then(|id| {
+            working_set?
+                .accounts
+                .iter()
+                .find(|account| &account.id == id)
+        });
     div()
         .w(px(SIDEBAR_WIDTH))
         .h_full()
@@ -465,10 +472,11 @@ fn credential_group(
 fn trading_account_groups(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
+    working_set: Option<&aeris_trading_runtime::WorkingSet>,
     theme: &AerisTheme,
 ) -> Vec<AnyElement> {
-    let mut groups = vec![practice_accounts(app_state, app, theme)];
-    groups.extend(broker_accounts(app_state, app, theme));
+    let mut groups = vec![practice_accounts(app_state, app, working_set, theme)];
+    groups.extend(broker_accounts(app_state, app, working_set, theme));
     groups
 }
 
@@ -531,12 +539,13 @@ pub(super) fn environment_badge(
 fn practice_accounts(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
+    working_set: Option<&aeris_trading_runtime::WorkingSet>,
     theme: &AerisTheme,
 ) -> AnyElement {
     let trading = &app_state.trading_pnl;
     let selected = trading.order_entry.selected_account_id.as_ref();
-    let practice = trading
-        .accounts
+    let practice = working_set
+        .map_or(&[][..], |set| set.accounts.as_slice())
         .iter()
         .enumerate()
         .filter(|(_, account)| account.environment == aeris_trading::AccountEnvironment::Simulated)
@@ -609,28 +618,20 @@ fn practice_accounts(
 fn broker_accounts(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
+    working_set: Option<&aeris_trading_runtime::WorkingSet>,
     theme: &AerisTheme,
 ) -> Option<AnyElement> {
     let trading = &app_state.trading_pnl;
     let selected = trading.order_entry.selected_account_id.as_ref();
-    let rows = trading
-        .accounts
+    let rows = working_set
+        .map_or(&[][..], |set| set.accounts.as_slice())
         .iter()
         .enumerate()
-        .filter(|(_, account)| {
-            account.environment != aeris_trading::AccountEnvironment::Simulated
-                && account.venue_id == aeris_trading::venue::BROKER_VENUE_ID
-        })
+        .filter(|(_, account)| broker_account_visible(account))
         .map(|(index, account)| {
-            let detail = match account.environment {
-                aeris_trading::AccountEnvironment::Live => {
-                    "Live account · trading is disabled".to_string()
-                }
-                _ if trading.connected_broker_accounts.contains(&account.id) => {
-                    format!("Broker demo server · {}", account.currency)
-                }
-                _ => "Broker demo server · not connected".to_string(),
-            };
+            let connected =
+                working_set.is_some_and(|set| set.connected_broker_accounts.contains(&account.id));
+            let detail = broker_account_detail(account, connected);
             account_row(
                 app,
                 AccountRow {
@@ -645,6 +646,19 @@ fn broker_accounts(
         })
         .collect::<Vec<_>>();
     (!rows.is_empty()).then(|| settings_group("Broker accounts", rows, theme))
+}
+
+fn broker_account_visible(account: &aeris_trading::TradingAccount) -> bool {
+    account.environment != aeris_trading::AccountEnvironment::Simulated
+        && account.venue_id == aeris_trading::venue::BROKER_VENUE_ID
+}
+
+fn broker_account_detail(account: &aeris_trading::TradingAccount, connected: bool) -> String {
+    match account.environment {
+        aeris_trading::AccountEnvironment::Live => "Live account · trading is disabled".to_string(),
+        _ if connected => format!("Broker demo server · {}", account.currency),
+        _ => "Broker demo server · not connected".to_string(),
+    }
 }
 
 struct AccountRow<'a> {
@@ -901,5 +915,38 @@ mod provider_descriptor_tests {
             providers.last().map(|provider| provider.id()),
             Some("fixture-third")
         );
+    }
+
+    #[test]
+    fn accounts_panel_preserves_broker_visibility_and_connection_labels() {
+        let mut account = aeris_trading::TradingAccount {
+            id: aeris_trading::TradingAccountId::try_new("fixture-broker").expect("account"),
+            display_name: "Fixture broker".to_string(),
+            environment: aeris_trading::AccountEnvironment::Demo,
+            venue_id: aeris_trading::venue::BROKER_VENUE_ID.to_string(),
+            broker_ref: None,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: None,
+        };
+        assert!(broker_account_visible(&account));
+        assert_eq!(
+            broker_account_detail(&account, false),
+            "Broker demo server · not connected"
+        );
+        assert_eq!(
+            broker_account_detail(&account, true),
+            "Broker demo server · USD"
+        );
+        account.environment = aeris_trading::AccountEnvironment::Live;
+        assert_eq!(
+            broker_account_detail(&account, true),
+            "Live account · trading is disabled"
+        );
+        account.venue_id = "retired-venue".to_string();
+        assert!(!broker_account_visible(&account));
+        account.environment = aeris_trading::AccountEnvironment::Simulated;
+        account.venue_id = aeris_trading::venue::BROKER_VENUE_ID.to_string();
+        assert!(!broker_account_visible(&account));
     }
 }

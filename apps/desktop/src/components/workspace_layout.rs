@@ -776,10 +776,6 @@ fn apply_trading_snapshot(
         selected_account_id,
         state.chart_trading_visibility,
     ));
-    state.trading_pnl.projection = TradingProjection::from_working_set(
-        snapshot,
-        state.trading_pnl.order_entry.selected_account_id.as_ref(),
-    );
     let (working_orders, position_marker) = project_working_order_markers(state, store, state_cx);
     state
         .order_book
