@@ -406,9 +406,7 @@ impl TerminalApp {
                 {
                     self.active_surface().update(cx, |surface, surface_cx| {
                         surface.choose_symbol_scope(
-                            SymbolSearchScope::Provider(terminal_provider_id(
-                                TerminalProvider::Rithmic,
-                            )),
+                            SymbolSearchScope::Provider(ProviderId("rithmic").id()),
                             window,
                             surface_cx,
                         );

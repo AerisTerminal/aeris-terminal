@@ -651,6 +651,16 @@ fn violates_desktop_quote_boundary(path: &str, source: &str) -> bool {
         && production_source_prefix(source).contains("SimulatedMarketObservation")
 }
 
+fn desktop_has_fixed_provider_set(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    production.contains("enum TerminalProvider")
+        || production.contains("FALLBACK_TERMINAL_PROVIDER")
+}
+
+fn has_runtime_descriptor_test(source: &str) -> bool {
+    source.contains("fn every_registered_provider_has_a_complete_published_descriptor()")
+}
+
 // The fixture is available to the diagnostic executable and tests, never to the default
 // desktop. The only diagnostic caller is the explicitly gated conformance command.
 fn violates_fixture_market_boundary(path: &str, source: &str) -> bool {
@@ -674,6 +684,7 @@ fn inspect_desktop_boundaries(
             let relative_path = relative.to_string_lossy().replace('\\', "/");
             let source = read_source(&path)?;
             if violates_desktop_quote_boundary(&relative_path, &source)
+                || desktop_has_fixed_provider_set(&source)
                 || violates_fixture_market_boundary(&relative_path, &source)
                 || has_process_global_desktop_trading(&source)
                 || has_process_global_desktop_account(&source)
@@ -688,6 +699,10 @@ fn inspect_desktop_boundaries(
 }
 
 fn inspect_market_test_names(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
+    let descriptor_tests = root.join("crates/market_runtime/src/market_service/tests.rs");
+    if !has_runtime_descriptor_test(&read_source(&descriptor_tests)?) {
+        violations.push(relative_to(root, &descriptor_tests));
+    }
     for (path, missing) in [
         (
             "crates/market_runtime/src/market_service/tests/characterization.rs",
@@ -3256,21 +3271,36 @@ mod tests {
     }
 
     #[test]
-    fn every_runtime_provider_is_mapped_by_the_desktop_or_explicitly_hidden() {
-        // A provider id the desktop does not map must never fall back to another
-        // provider's presentation; the desktop test enumerates the runtime registry.
-        let desktop_tests = manifest("apps/desktop/src/desktop/tests.rs");
+    fn every_registered_provider_has_a_complete_published_descriptor() {
+        let runtime_tests = manifest("crates/market_runtime/src/market_service/tests.rs");
         assert!(
-            desktop_tests
-                .contains("fn every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden")
-                && desktop_tests.contains("HIDDEN_RUNTIME_PROVIDERS"),
-            "desktop lost the runtime provider mapping regression"
+            super::has_runtime_descriptor_test(&runtime_tests),
+            "runtime must verify every registration's published identity and capabilities"
         );
         let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(
-            !desktop.contains("fn terminal_provider_from_id"),
-            "unknown provider ids must not fall back to a default desktop provider"
-        );
+        assert!(!super::desktop_has_fixed_provider_set(&desktop));
+    }
+
+    #[test]
+    fn desktop_provider_set_rejects_enums_and_fallbacks_in_production() {
+        for forbidden in [
+            "enum TerminalProvider {",
+            "const FALLBACK_TERMINAL_PROVIDER: &str",
+        ] {
+            assert!(super::desktop_has_fixed_provider_set(forbidden));
+        }
+        assert!(!super::desktop_has_fixed_provider_set(
+            "struct ProviderId(&'static str);"
+        ));
+        assert!(!super::desktop_has_fixed_provider_set(
+            "#[cfg(test)]\nmod tests { enum TerminalProvider {} const FALLBACK_TERMINAL_PROVIDER: &str = \"\"; }"
+        ));
+        assert!(super::has_runtime_descriptor_test(
+            "fn every_registered_provider_has_a_complete_published_descriptor() {}"
+        ));
+        assert!(!super::has_runtime_descriptor_test(
+            "fn retired_provider_mapping_test() {}"
+        ));
     }
     #[test]
     fn in_process_market_contracts_remain_explicit_and_provider_neutral() {

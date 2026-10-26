@@ -7,12 +7,12 @@ use super::{
     ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuAction,
     InstrumentMenuEntry, InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN,
     PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
-    ProviderCatalogEvent, ProviderConnectionPresentation, SidePanel, SidePanelVisibility,
-    SymbolBrowser, SymbolInputAction, SymbolSearchFailure, SymbolSearchScope,
+    ProviderCatalogEvent, ProviderConnectionPresentation, ProviderId, SidePanel,
+    SidePanelVisibility, SymbolBrowser, SymbolInputAction, SymbolSearchFailure, SymbolSearchScope,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
-    TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter, TimeSalesSideFilter,
-    TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState,
-    WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+    TIMEFRAME_MENU_WIDTH, TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup,
+    WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand,
+    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
     WorkspaceMaximizeTransition, active_workspace_after_close, bounded_status_detail,
     caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
     chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
@@ -26,7 +26,7 @@ use super::{
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, project_provider_catalog_event,
     publication_chart_state, reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
     should_finish_chrome_overlay_close, stabilized_connection_state, symbol_input_action,
-    symbol_submit_decision, terminal_provider_id, timeframe_flyout_height, timeframe_flyout_offset,
+    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
     timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
     timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
@@ -147,9 +147,8 @@ const fn catalog_rejection_order_bookain(
 
 #[test]
 fn instrument_menu_requests_a_listing_only_when_idle_and_not_already_shown() {
-    let provider = TerminalProvider::Rithmic;
-    let mut browser =
-        SymbolBrowser::new(SymbolSearchScope::Provider(terminal_provider_id(provider)));
+    let provider = ProviderId("rithmic");
+    let mut browser = SymbolBrowser::new(SymbolSearchScope::Provider(provider.id()));
     let startup = browser
         .begin_search("")
         .expect("listing validates")
@@ -307,12 +306,11 @@ fn timeframe_menu_groups_every_catalog_interval() {
             TimeframeMenuGroup::Months,
         ]
     );
-    let rithmic_groups: Vec<TimeframeMenuGroup> =
-        super::provider_intervals(TerminalProvider::Rithmic)
-            .iter()
-            .copied()
-            .map(timeframe_interval_group)
-            .collect();
+    let rithmic_groups: Vec<TimeframeMenuGroup> = super::provider_intervals(ProviderId("rithmic"))
+        .iter()
+        .copied()
+        .map(timeframe_interval_group)
+        .collect();
     assert_eq!(
         rithmic_groups,
         [
@@ -341,11 +339,11 @@ fn timeframe_menu_groups_every_catalog_interval() {
 #[test]
 fn seconds_timeframes_are_offered_only_by_second_bar_providers() {
     assert!(
-        timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic))
+        timeframe_menu_groups(super::provider_intervals(ProviderId("rithmic")))
             .contains(&TimeframeMenuGroup::Seconds)
     );
     assert!(
-        !timeframe_menu_groups(super::provider_intervals(TerminalProvider::Hyperliquid))
+        !timeframe_menu_groups(super::provider_intervals(ProviderId("hyperliquid")))
             .contains(&TimeframeMenuGroup::Seconds)
     );
     assert_eq!(
@@ -381,7 +379,7 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
         ]
     );
     assert_eq!(
-        timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic)),
+        timeframe_menu_groups(super::provider_intervals(ProviderId("rithmic"))),
         [
             TimeframeMenuGroup::Seconds,
             TimeframeMenuGroup::Minutes,
@@ -406,14 +404,11 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
     assert_eq!(timeframe_menu_row_label(ChartInterval::Day1), "1 Day");
     assert_eq!(TimeframeMenuGroup::Minutes.label(), "Minutes");
     assert!(
-        timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic))
+        timeframe_menu_groups(super::provider_intervals(ProviderId("rithmic")))
             .into_iter()
             .all(|group| {
-                !timeframe_group_intervals(
-                    group,
-                    super::provider_intervals(TerminalProvider::Rithmic),
-                )
-                .is_empty()
+                !timeframe_group_intervals(group, super::provider_intervals(ProviderId("rithmic")))
+                    .is_empty()
             }),
         "a hovered group owns its submenu; the root list does not keep a flyout open"
     );
@@ -459,7 +454,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
     assert_eq!(chrome_typeahead_char_from("a", Some("a"), false), Some('a'));
     assert_eq!(chrome_typeahead_char_from("enter", None, false), None);
     assert_eq!(
-        super::provider_intervals(TerminalProvider::Rithmic)
+        super::provider_intervals(ProviderId("rithmic"))
             .iter()
             .copied()
             .filter(|interval| interval.matches_typeahead("1m"))
@@ -467,7 +462,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
         [ChartInterval::Minute1]
     );
     assert_eq!(
-        super::provider_intervals(TerminalProvider::Rithmic)
+        super::provider_intervals(ProviderId("rithmic"))
             .iter()
             .copied()
             .filter(|interval| interval.matches_typeahead("1M"))
@@ -699,7 +694,7 @@ mod timeframe_input {
     }
 
     #[gpui::test]
-    fn restored_chart_from_an_unavailable_provider_fails_explicitly(cx: &mut TestAppContext) {
+    fn unregistered_provider_shows_unsupported_state(cx: &mut TestAppContext) {
         let product = InstallProviderInstrument {
             provider: "retired".to_string(),
             session_generation: 1,
@@ -718,7 +713,8 @@ mod timeframe_input {
             let surface = surface.read(cx);
             // Never silently presented as another provider's market.
             assert_eq!(surface.chart_state, ChartState::Error);
-            assert_eq!(surface.provider, super::super::FALLBACK_TERMINAL_PROVIDER);
+            assert_eq!(surface.provider, super::super::ProviderId::unsupported());
+            assert!(super::super::provider_presentation(surface.provider).is_none());
             assert_eq!(
                 surface.chart_failure,
                 Some(ChartFailure::UnsupportedProvider)
@@ -3593,7 +3589,7 @@ fn instrument_menu_entry(
     action: InstrumentMenuAction,
 ) -> InstrumentMenuEntry {
     InstrumentMenuEntry {
-        provider: TerminalProvider::Rithmic,
+        provider: ProviderId("rithmic"),
         label: label.into(),
         description: None,
         detail: None,
@@ -3604,7 +3600,7 @@ fn instrument_menu_entry(
 
 const fn search_result(index: usize) -> InstrumentMenuSelection {
     InstrumentMenuSelection::SearchResult {
-        provider: TerminalProvider::Rithmic,
+        provider: ProviderId("rithmic"),
         index,
     }
 }
@@ -3637,7 +3633,7 @@ fn instrument_menu_index_follows_the_checked_live_market() {
 #[test]
 fn the_first_selectable_instrument_skips_product_rows() {
     let product = crate::desktop::symbol_browser::ProductKey {
-        provider: TerminalProvider::Rithmic,
+        provider: ProviderId("rithmic"),
         code: "NQ".into(),
         exchange: "CME".into(),
     };
@@ -3675,7 +3671,7 @@ fn hyperliquid_catalog_rejections_never_name_rithmic() {
             ProviderCatalogCommand::Search,
             ProviderCatalogCommand::Selection,
         ] {
-            let message = catalog_rejection_message(reason, command, TerminalProvider::Hyperliquid);
+            let message = catalog_rejection_message(reason, command, ProviderId("hyperliquid"));
             assert!(!message.contains("Rithmic"), "{message}");
         }
     }
@@ -3683,7 +3679,7 @@ fn hyperliquid_catalog_rejections_never_name_rithmic() {
         catalog_rejection_message(
             ProviderCatalogRejectionReason::SearchTimedOut,
             ProviderCatalogCommand::Search,
-            TerminalProvider::Rithmic,
+            ProviderId("rithmic"),
         ),
         "The Rithmic market search timed out; try again"
     );
@@ -3691,7 +3687,7 @@ fn hyperliquid_catalog_rejections_never_name_rithmic() {
         catalog_rejection_message(
             ProviderCatalogRejectionReason::SelectionTimedOut,
             ProviderCatalogCommand::Selection,
-            TerminalProvider::Rithmic,
+            ProviderId("rithmic"),
         ),
         "The Rithmic market selection timed out; try again"
     );
@@ -3707,7 +3703,7 @@ fn persisted_calendar_intervals_use_stable_chart_interval_labels() {
         aeris_market_runtime::persisted_interval(ChartInterval::Month1.label()),
         Some(ChartInterval::Month1)
     );
-    assert!(super::provider_intervals(TerminalProvider::Rithmic).contains(&ChartInterval::Month1));
+    assert!(super::provider_intervals(ProviderId("rithmic")).contains(&ChartInterval::Month1));
 }
 
 #[test]
@@ -3910,18 +3906,14 @@ fn worker_stop_preserves_a_concrete_startup_error() {
 fn connection_indicator_is_transport_only() {
     let theme = super::AerisTheme::dark();
     let colors = theme.colors;
-    let live = connection_presentation(
-        TerminalProvider::Rithmic,
-        FeedConnectionState::Streaming,
-        None,
-    );
+    let live = connection_presentation(ProviderId("rithmic"), FeedConnectionState::Streaming, None);
     assert_eq!(live.provider, "Rithmic");
     assert_eq!(live.status, "Live");
     assert_eq!(live.latency, "Measuring…");
     assert_eq!((live.color)(&theme), colors.positive);
 
     let recovering = connection_presentation(
-        TerminalProvider::Rithmic,
+        ProviderId("rithmic"),
         FeedConnectionState::Recovering,
         Some(18_000_000),
     );
@@ -3930,7 +3922,7 @@ fn connection_indicator_is_transport_only() {
     assert_eq!((recovering.color)(&theme), colors.warning);
 
     let offline = connection_presentation(
-        TerminalProvider::Rithmic,
+        ProviderId("rithmic"),
         FeedConnectionState::Disconnected,
         Some(18_000_000),
     );
@@ -3942,14 +3934,11 @@ fn connection_indicator_is_transport_only() {
         FeedConnectionState::Discovering,
         FeedConnectionState::Authenticating,
     ] {
-        let connecting = connection_presentation(TerminalProvider::Rithmic, state, None);
+        let connecting = connection_presentation(ProviderId("rithmic"), state, None);
         assert_eq!((connecting.color)(&theme), colors.warning);
     }
-    let stopped = connection_presentation(
-        TerminalProvider::Rithmic,
-        FeedConnectionState::Stopped,
-        None,
-    );
+    let stopped =
+        connection_presentation(ProviderId("rithmic"), FeedConnectionState::Stopped, None);
     assert_eq!((stopped.color)(&theme), colors.danger);
 }
 
@@ -3968,7 +3957,7 @@ fn header_market_dot_shows_session_only_while_the_feed_is_live() {
         next_open_unix_nanos: Some(1_440 * MINUTE),
     };
     let present = |state, status: &MarketSessionStatus| {
-        connection_presentation(TerminalProvider::Rithmic, state, None).with_market(
+        connection_presentation(ProviderId("rithmic"), state, None).with_market(
             state == FeedConnectionState::Streaming,
             Some(status),
             aeris_chart_integration::DEFAULT_TIME_ZONE,
@@ -4055,7 +4044,7 @@ fn reconnect_retry_states_do_not_flicker_back_to_offline() {
 #[test]
 fn header_lifecycle_values_are_truthfully_labeled() {
     let rithmic = connection_presentation(
-        TerminalProvider::Rithmic,
+        ProviderId("rithmic"),
         FeedConnectionState::Streaming,
         Some(18_400_000),
     );
@@ -4064,7 +4053,7 @@ fn header_lifecycle_values_are_truthfully_labeled() {
     assert_eq!(rithmic.latency, "18.4 ms RTT");
 
     let hyperliquid = connection_presentation(
-        TerminalProvider::Hyperliquid,
+        ProviderId("hyperliquid"),
         FeedConnectionState::Streaming,
         Some(900_000),
     );
@@ -5576,28 +5565,6 @@ fn a_pending_bracket_entry_carries_its_stop_and_target_on_the_chart() {
     fixture.finish();
 }
 
-/// Runtime providers the desktop intentionally does not offer. Empty today; a new built-in
-/// provider must be added to `TerminalProvider` or listed here, never left to a fallback.
-const HIDDEN_RUNTIME_PROVIDERS: &[&str] = &[];
-
-#[test]
-fn every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden() {
-    for descriptor in aeris_market_runtime::built_in_provider_presentations() {
-        assert!(
-            super::known_terminal_provider(descriptor.id).is_some()
-                || HIDDEN_RUNTIME_PROVIDERS.contains(&descriptor.id),
-            "runtime provider {} has no desktop provider",
-            descriptor.id
-        );
-    }
-    for provider in super::TerminalProvider::ALL {
-        assert!(
-            super::provider_presentation(provider).is_some(),
-            "{provider:?} has no runtime descriptor"
-        );
-    }
-}
-
 #[test]
 fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_only() {
     use aeris_trading::{
@@ -5691,35 +5658,25 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
 
 #[test]
 fn desktop_provider_labels_come_from_runtime_descriptors() {
-    assert_eq!(
-        super::terminal_provider_display(super::TerminalProvider::Rithmic),
-        "Rithmic"
-    );
-    assert_eq!(
-        super::terminal_provider_display(super::TerminalProvider::Hyperliquid),
-        "Hyperliquid"
-    );
+    assert_eq!(super::ProviderId("rithmic").display(), "Rithmic");
+    assert_eq!(super::ProviderId("hyperliquid").display(), "Hyperliquid");
     // Every provider id round-trips; an id the build does not expose maps to none.
-    for provider in super::TerminalProvider::ALL {
-        assert_eq!(
-            super::known_terminal_provider(super::terminal_provider_id(provider)),
-            Some(provider)
-        );
+    for descriptor in aeris_market_runtime::published_provider_descriptors() {
+        let provider = super::ProviderId(descriptor.id);
+        assert_eq!(super::ProviderId::find(provider.id()), Some(provider));
     }
-    assert_eq!(super::known_terminal_provider("binance"), None);
+    assert_eq!(super::ProviderId::find("binance"), None);
     for provider in [
-        super::TerminalProvider::Rithmic,
-        super::TerminalProvider::Hyperliquid,
+        super::ProviderId("rithmic"),
+        super::ProviderId("hyperliquid"),
     ] {
         assert!(super::provider_chart_types(provider).contains(&super::ChartType::Footprint));
     }
     assert!(
-        !super::provider_intervals(super::TerminalProvider::Rithmic)
-            .contains(&ChartInterval::Tick100)
+        !super::provider_intervals(super::ProviderId("rithmic")).contains(&ChartInterval::Tick100)
     );
     assert!(
-        super::provider_intervals(super::TerminalProvider::Hyperliquid)
-            .contains(&ChartInterval::Day3)
+        super::provider_intervals(super::ProviderId("hyperliquid")).contains(&ChartInterval::Day3)
     );
     let product = InstallProviderInstrument {
         provider_symbol: "MNQ".to_string(),
@@ -5727,23 +5684,55 @@ fn desktop_provider_labels_come_from_runtime_descriptors() {
         ..Default::default()
     };
     assert_eq!(
-        super::provider_ready_message(super::TerminalProvider::Rithmic, &product),
+        super::provider_ready_message(super::ProviderId("rithmic"), &product),
         "MNQ · Rithmic"
     );
     assert_eq!(
-        super::provider_ready_message(super::TerminalProvider::Hyperliquid, &product),
+        super::provider_ready_message(super::ProviderId("hyperliquid"), &product),
         "MNQ · Hyperliquid"
     );
 }
 
 #[test]
+fn provider_presentation_controls_chart_types_intervals_queues_and_trades() {
+    let mut fixture = aeris_market_runtime::built_in_provider_presentations()[0];
+    fixture.id = "fixture-third";
+    fixture.chart_interval_labels = &["3D"];
+    fixture.feed_level = aeris_contracts::ProviderFeedLevel::PriceLevels;
+    fixture.trades_available = false;
+    assert_eq!(
+        super::intervals_from_labels(fixture.chart_interval_labels),
+        [ChartInterval::Day3]
+    );
+    assert!(!super::presentation_order_queues_available(&fixture));
+    assert!(!fixture.trades_available);
+    assert!(
+        !super::chart_types_for_trades(fixture.trades_available)
+            .contains(&super::ChartType::Footprint)
+    );
+
+    fixture.chart_interval_labels = &["1m", "1h"];
+    fixture.feed_level = aeris_contracts::ProviderFeedLevel::OrderLevels;
+    fixture.trades_available = true;
+    assert_eq!(
+        super::intervals_from_labels(fixture.chart_interval_labels),
+        [ChartInterval::Minute1, ChartInterval::Hour1]
+    );
+    assert!(super::presentation_order_queues_available(&fixture));
+    assert!(
+        super::chart_types_for_trades(fixture.trades_available)
+            .contains(&super::ChartType::Footprint)
+    );
+}
+
+#[test]
 fn switching_a_seconds_chart_to_a_minute_bar_provider_opens_it_at_one_minute() {
-    let instrument = |provider: super::TerminalProvider| InstallProviderInstrument {
-        provider: super::terminal_provider_id(provider).to_string(),
+    let instrument = |provider: super::ProviderId| InstallProviderInstrument {
+        provider: provider.id().to_string(),
         ..Default::default()
     };
-    let hyperliquid = instrument(super::TerminalProvider::Hyperliquid);
-    let rithmic = instrument(super::TerminalProvider::Rithmic);
+    let hyperliquid = instrument(super::ProviderId("hyperliquid"));
+    let rithmic = instrument(super::ProviderId("rithmic"));
     assert_eq!(
         super::instrument_interval(&hyperliquid, ChartInterval::Second30),
         ChartInterval::Minute1

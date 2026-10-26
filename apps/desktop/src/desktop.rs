@@ -132,18 +132,17 @@ use aeris_chart_integration::{
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
-    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument, SeriesKey,
-    WorkspaceBigTradesState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
-    WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
-    WorkspaceChartStudyState, WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
-    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
-    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSavedLayoutState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState,
+    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState,
+    WorkspaceLayoutState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
@@ -664,37 +663,44 @@ const fn stabilized_connection_state(
 }
 
 fn provider_presentation(
-    provider: TerminalProvider,
+    provider: ProviderId,
 ) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
-        .find(|descriptor| descriptor.id == terminal_provider_id(provider))
+        .find(|descriptor| descriptor.id == provider.id())
 }
 
 /// Whether the provider streams every resting order at each price, which the
 /// order book's queue column shows.
-fn provider_order_queues_available(provider: TerminalProvider) -> bool {
-    provider_presentation(provider).is_some_and(|descriptor| {
-        descriptor.feed_level == aeris_contracts::ProviderFeedLevel::OrderLevels
-    })
+fn provider_order_queues_available(provider: ProviderId) -> bool {
+    provider_presentation(provider).is_some_and(presentation_order_queues_available)
+}
+
+fn presentation_order_queues_available(
+    descriptor: &aeris_contracts::ProviderPresentationDescriptor,
+) -> bool {
+    descriptor.feed_level == aeris_contracts::ProviderFeedLevel::OrderLevels
 }
 
 /// Whether the provider streams trade prints. Footprint charts, tape studies and
 /// time and sales are drawn from them, so a provider without a trade tape offers none.
-fn provider_trades_available(provider: TerminalProvider) -> bool {
-    provider_presentation(provider).is_none_or(|descriptor| descriptor.trades_available)
+fn provider_trades_available(provider: ProviderId) -> bool {
+    provider_presentation(provider).is_some_and(|descriptor| descriptor.trades_available)
 }
 
 /// The chart types a provider can draw; a footprint needs trade prints.
-fn provider_chart_types(provider: TerminalProvider) -> Vec<ChartType> {
-    let trades = provider_trades_available(provider);
+fn provider_chart_types(provider: ProviderId) -> Vec<ChartType> {
+    chart_types_for_trades(provider_trades_available(provider))
+}
+
+fn chart_types_for_trades(trades: bool) -> Vec<ChartType> {
     ChartType::ALL
         .into_iter()
         .filter(|chart_type| trades || *chart_type != ChartType::Footprint)
         .collect()
 }
 
-fn provider_intervals(provider: TerminalProvider) -> &'static [ChartInterval] {
+fn provider_intervals(provider: ProviderId) -> &'static [ChartInterval] {
     static INTERVALS: OnceLock<Vec<(&'static str, Vec<ChartInterval>)>> = OnceLock::new();
     INTERVALS
         .get_or_init(|| {
@@ -703,23 +709,26 @@ fn provider_intervals(provider: TerminalProvider) -> &'static [ChartInterval] {
                 .map(|descriptor| {
                     (
                         descriptor.id,
-                        descriptor
-                            .chart_interval_labels
-                            .iter()
-                            .filter_map(|label| {
-                                ChartInterval::ALL
-                                    .iter()
-                                    .copied()
-                                    .find(|interval| interval.label() == *label)
-                            })
-                            .collect(),
+                        intervals_from_labels(descriptor.chart_interval_labels),
                     )
                 })
                 .collect()
         })
         .iter()
-        .find(|(id, _)| *id == terminal_provider_id(provider))
+        .find(|(id, _)| *id == provider.id())
         .map_or(&[], |(_, intervals)| intervals.as_slice())
+}
+
+fn intervals_from_labels(labels: &[&str]) -> Vec<ChartInterval> {
+    labels
+        .iter()
+        .filter_map(|label| {
+            ChartInterval::ALL
+                .iter()
+                .copied()
+                .find(|interval| interval.label() == *label)
+        })
+        .collect()
 }
 
 /// The interval a chart on `interval` opens `instrument` at: the same interval when the
@@ -729,7 +738,7 @@ fn instrument_interval(
     instrument: &InstallProviderInstrument,
     interval: ChartInterval,
 ) -> ChartInterval {
-    known_terminal_provider(&instrument.provider)
+    ProviderId::find(&instrument.provider)
         .and_then(|provider| interval.nearest_offered(provider_intervals(provider)))
         .unwrap_or(interval)
 }
@@ -867,7 +876,7 @@ struct WorkspaceSurface {
     time_zone_trigger_bounds: Option<Bounds<Pixels>>,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
-    provider: TerminalProvider,
+    provider: ProviderId,
     product: Option<InstallProviderInstrument>,
     descriptor: Option<aeris_market_runtime::InstrumentDescriptor>,
     pending_descriptor: Option<(u64, aeris_market_runtime::InstrumentDescriptor)>,
@@ -1140,8 +1149,14 @@ struct DataConnections {
 
 impl DataConnections {
     /// Whether the runtime reported no stored connection for a provider that needs one.
-    fn disconnected(&self, provider: TerminalProvider) -> bool {
-        provider == TerminalProvider::Rithmic && self.rithmic.missing()
+    fn disconnected(&self, provider: ProviderId) -> bool {
+        match provider.descriptor().map(|descriptor| descriptor.connect) {
+            Some(aeris_market_runtime::ConnectMethod::Public) | None => false,
+            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { form: "rithmic" }) => {
+                self.rithmic.missing()
+            }
+            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. }) => true,
+        }
     }
 }
 
@@ -1518,7 +1533,7 @@ enum SymbolProviderMenu {
     Closed,
     Open,
     /// Open with a provider's exchange and category flyout shown beside it.
-    Flyout(TerminalProvider),
+    Flyout(ProviderId),
 }
 
 impl SymbolProviderMenu {
@@ -1526,7 +1541,7 @@ impl SymbolProviderMenu {
         !matches!(self, Self::Closed)
     }
 
-    const fn flyout_provider(self) -> Option<TerminalProvider> {
+    const fn flyout_provider(self) -> Option<ProviderId> {
         match self {
             Self::Flyout(provider) => Some(provider),
             Self::Closed | Self::Open => None,
@@ -1588,37 +1603,40 @@ struct WorkspaceScrollHandles {
     context: ScrollHandle,
 }
 
+/// A registered runtime identity. Unknown persisted ids have no desktop provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TerminalProvider {
-    Rithmic,
-    Hyperliquid,
-}
+struct ProviderId(&'static str);
 
-impl TerminalProvider {
-    const ALL: [Self; 2] = [Self::Rithmic, Self::Hyperliquid];
-}
+impl ProviderId {
+    const fn id(self) -> &'static str {
+        self.0
+    }
 
-/// The always-available public provider, presented when a stored chart names
-/// a provider this build does not expose.
-const FALLBACK_TERMINAL_PROVIDER: TerminalProvider = TerminalProvider::Hyperliquid;
+    fn descriptor(self) -> Option<&'static aeris_market_runtime::ProviderDescriptor> {
+        aeris_market_runtime::published_provider_descriptors()
+            .iter()
+            .find(|descriptor| descriptor.id == self.0)
+    }
 
-const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
-    match provider {
-        TerminalProvider::Rithmic => "rithmic",
-        TerminalProvider::Hyperliquid => "hyperliquid",
+    fn find(id: &str) -> Option<Self> {
+        aeris_market_runtime::published_provider_descriptors()
+            .iter()
+            .find(|descriptor| descriptor.id == id)
+            .map(|descriptor| Self(descriptor.id))
+    }
+
+    /// Only a terminal error state may hold this unregistered identity.
+    const fn unsupported() -> Self {
+        Self("")
+    }
+
+    fn display(self) -> &'static str {
+        self.descriptor()
+            .map_or(self.id(), |descriptor| descriptor.display_name)
     }
 }
 
-fn terminal_provider_display(provider: TerminalProvider) -> &'static str {
-    provider_presentation(provider).map_or(terminal_provider_id(provider), |descriptor| {
-        descriptor.display_name
-    })
-}
-
-fn provider_ready_message(
-    provider: TerminalProvider,
-    product: &InstallProviderInstrument,
-) -> String {
+fn provider_ready_message(provider: ProviderId, product: &InstallProviderInstrument) -> String {
     let descriptor = provider_presentation(provider);
     let symbol = match descriptor.map(|descriptor| descriptor.catalog_symbol) {
         Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
@@ -1628,19 +1646,10 @@ fn provider_ready_message(
             product.provider_symbol.as_str()
         }
     };
-    let display_name = descriptor.map_or_else(
-        || terminal_provider_id(provider),
-        |descriptor| descriptor.display_name,
-    );
+    let display_name =
+        descriptor.map_or_else(|| provider.id(), |descriptor| descriptor.display_name);
     let suffix = descriptor.map_or("", |descriptor| descriptor.ready_label_suffix);
     format!("{symbol} · {display_name}{suffix}")
-}
-
-/// Exact mapping; `None` for runtime providers the desktop does not expose yet.
-fn known_terminal_provider(provider: &str) -> Option<TerminalProvider> {
-    TerminalProvider::ALL
-        .into_iter()
-        .find(|candidate| terminal_provider_id(*candidate) == provider)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3086,7 +3095,7 @@ fn counted(count: usize, singular: &str, plural: &str) -> String {
 
 struct HeaderState {
     theme: AerisTheme,
-    provider: TerminalProvider,
+    provider: ProviderId,
     instrument_label: String,
     series_label: String,
     chart_type: ChartType,
@@ -3833,14 +3842,14 @@ struct TerminalStartupState {
     worker_label: String,
     subscription_id: String,
     connection_state: Option<FeedConnectionState>,
-    provider: TerminalProvider,
+    provider: ProviderId,
     product: Option<InstallProviderInstrument>,
 }
 
 fn terminal_startup_state(startup: MarketWorkerStartup) -> TerminalStartupState {
     match startup {
         MarketWorkerStartup::Loading(startup) => {
-            let Some(provider) = known_terminal_provider(startup.product.provider.as_str()) else {
+            let Some(provider) = ProviderId::find(startup.product.provider.as_str()) else {
                 let message = ChartFailure::UnsupportedProvider.detail().to_string();
                 return TerminalStartupState {
                     chart: None,
@@ -3850,7 +3859,7 @@ fn terminal_startup_state(startup: MarketWorkerStartup) -> TerminalStartupState 
                     worker_label: startup.worker_label,
                     subscription_id: startup.subscription_id,
                     connection_state: None,
-                    provider: FALLBACK_TERMINAL_PROVIDER,
+                    provider: ProviderId::unsupported(),
                     product: None,
                 };
             };
@@ -3892,9 +3901,9 @@ mod workspace_surface;
 fn catalog_rejection_message(
     reason: ProviderCatalogRejectionReason,
     command: ProviderCatalogCommand,
-    provider: TerminalProvider,
+    provider: ProviderId,
 ) -> String {
-    let provider_name = terminal_provider_display(provider);
+    let provider_name = provider.display();
     match reason {
         ProviderCatalogRejectionReason::SearchRejected => {
             format!("{provider_name} rejected the market search")

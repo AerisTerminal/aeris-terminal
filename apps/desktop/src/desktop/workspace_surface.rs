@@ -2781,7 +2781,7 @@ impl WorkspaceSurface {
     /// flyout, other rows close it.
     pub(super) fn set_symbol_scope_flyout(
         &mut self,
-        provider: Option<TerminalProvider>,
+        provider: Option<ProviderId>,
         cx: &mut Context<Self>,
     ) {
         let next = match (self.menu_state.symbol_provider_menu, provider) {
@@ -2914,7 +2914,7 @@ impl WorkspaceSurface {
             let Some(selection) = self.symbol_browser.select(selection) else {
                 return false;
             };
-            let provider = terminal_provider_id(selection.provider);
+            let provider = selection.provider.id();
             if target == SymbolSelectionTarget::Chart {
                 let request = aeris_desktop::market_worker::CatalogSelectionRequest {
                     sequence: 0,
@@ -5319,7 +5319,7 @@ impl WorkspaceSurface {
             self.interval = target.interval;
             if let Some(product) = target.product {
                 // Selections only come from providers the menu lists.
-                if let Some(provider) = known_terminal_provider(&product.provider)
+                if let Some(provider) = ProviderId::find(&product.provider)
                     && provider != self.provider
                 {
                     self.provider = provider;
@@ -6255,11 +6255,7 @@ impl WorkspaceSurface {
         }));
     }
 
-    fn post_symbol_selection_notice(
-        provider: TerminalProvider,
-        detail: &str,
-        cx: &mut Context<Self>,
-    ) {
+    fn post_symbol_selection_notice(provider: ProviderId, detail: &str, cx: &mut Context<Self>) {
         cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
             key: notification_center::NoticeKey {
                 scope: cx.entity_id().as_u64(),
@@ -6267,9 +6263,7 @@ impl WorkspaceSurface {
             },
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
-            source: notification_center::NoticeSource::Provider(super::terminal_provider_id(
-                provider,
-            )),
+            source: notification_center::NoticeSource::Provider(provider.id()),
             title: "Market selection unavailable",
             detail: detail.into(),
             action: None,
@@ -6349,7 +6343,7 @@ impl WorkspaceSurface {
             startup_resolve: false,
             consumer_id: 0,
             search_generation: u64::try_from(request.request_id.get()).unwrap_or(u64::MAX),
-            provider: terminal_provider_id(request.provider).to_string(),
+            provider: request.provider.id().to_string(),
             query: request.query,
             maximum_results: u32::try_from(self.symbol_browser.maximum_results())
                 .unwrap_or(u32::MAX),
@@ -6377,7 +6371,7 @@ impl WorkspaceSurface {
 
     /// A provider whose catalog became ready answers the latest query, or starts the first
     /// listing when nothing was searched yet.
-    fn search_ready_catalog(&mut self, provider: TerminalProvider, cx: &mut Context<Self>) {
+    fn search_ready_catalog(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
         if !self.symbol_browser.searched() {
             let query = self.symbol_input_query(cx);
             self.search_symbol_query(&query, cx);
@@ -6492,7 +6486,7 @@ impl WorkspaceSurface {
         if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
             self.adopt_verified_terms(instrument);
         }
-        let Some(provider) = known_terminal_provider(provider_catalog_event_provider(&event))
+        let Some(provider) = ProviderId::find(provider_catalog_event_provider(&event))
             .filter(|provider| self.symbol_browser.covers(*provider))
         else {
             return;
@@ -6552,7 +6546,7 @@ impl WorkspaceSurface {
 
     fn apply_search_completed(
         &mut self,
-        provider: TerminalProvider,
+        provider: ProviderId,
         result: ProviderInstrumentSearchResult,
         cx: &mut Context<Self>,
     ) {
@@ -6584,7 +6578,7 @@ impl WorkspaceSurface {
 
     fn apply_catalog_rejection(
         &mut self,
-        provider: TerminalProvider,
+        provider: ProviderId,
         rejection: &ProviderCatalogRejected,
         command: ProviderCatalogCommand,
         cx: &mut Context<Self>,

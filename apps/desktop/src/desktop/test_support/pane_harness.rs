@@ -3120,9 +3120,7 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
             "a failed search is not resent behind the trader's back"
         );
         pane.symbol_browser
-            .set_scope(SymbolSearchScope::Provider(terminal_provider_id(
-                pane.provider,
-            )));
+            .set_scope(SymbolSearchScope::Provider(pane.provider.id()));
         assert!(pane.search_symbol_input(cx), "retrying sends the search");
     });
     let MarketWorkerCommand::ProviderSearch(request) =
@@ -3277,9 +3275,7 @@ fn nq_contract(symbol: &str, exchange: &str, expiration: &str) -> ProviderInstru
 /// Scopes the pane's symbol search to its chart provider and starts one search there.
 fn chart_provider_search(pane: &mut WorkspaceSurface, query: &str) -> SymbolSearchRequest {
     pane.symbol_browser
-        .set_scope(SymbolSearchScope::Provider(terminal_provider_id(
-            pane.provider,
-        )));
+        .set_scope(SymbolSearchScope::Provider(pane.provider.id()));
     let mut requests = pane
         .symbol_browser
         .begin_search(query)
@@ -3344,7 +3340,7 @@ fn pane_harness_all_providers_search_shows_each_answer_as_it_arrives(cx: &mut Te
     cx.update(|window, cx| {
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(
-                pane.symbol_browser.exchanges(TerminalProvider::Hyperliquid),
+                pane.symbol_browser.exchanges(ProviderId("hyperliquid")),
                 [exchange],
                 "the exchange is learned from the provider's results"
             );

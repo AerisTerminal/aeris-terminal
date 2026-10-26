@@ -2189,6 +2189,14 @@ active item (parts 1-8); M6.8-M6.12 are open.
     yet because MD-10/UI-03 still include the M6.8/M6.9 provider surfaces.
     M6.7 remains unchecked: code complete; VAL-DSK-114 not yet validated.
 - [ ] M6.8 typed-provider-and-risk-events - Typed provider and risk events; default workspace without an instrument
+  - Status (2026-10-26 Part 1): provider-id code complete; VAL-DSK-026/027/028 and
+    VAL-CROSS-001 not yet validated. The desktop's fixed provider enum and fallback are
+    removed; symbol-menu lanes and the Accounts connection list follow published
+    descriptors, and chart capabilities follow runtime presentations. A retired stored
+    provider renders `UnsupportedProvider`. The runtime descriptor-completeness test
+    replaces the old desktop provider mapping test. UI-03's enum/fallback portion closes;
+    UI-03 remains open for M6.9's login/attribution surfaces, MD-10 remains open for
+    final neutrality, and UI-10 remains open for the display-text rule.
   - Status (2026-10-23 audit): done: the Rithmic catalog autoload check (the desktop handles
     `CatalogReady`), the display-text risk check (the desktop reads the typed
     `OrderEventReason::RiskWarning`) and the default workspace (`InstrumentRequest::Default`).
@@ -2264,6 +2272,12 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- A desktop production `enum TerminalProvider` or `FALLBACK_TERMINAL_PROVIDER` fails
+  `tools/naming_check`; the runtime registration test
+  `every_registered_provider_has_a_complete_published_descriptor` is required instead.
+  Desktop provider IDs, browser scope and presentation capabilities come from published
+  descriptors, and an unregistered persisted provider cannot fall back to another market
+  (M6.8 Part 1, `refactor(desktop): derive provider identities from runtime descriptors`).
 - `desktop_source_is_provider_neutral` ignores only exact test/diagnostics-gated
   fixture module paths after checking their declarations; Logarithmic and
   logarithm are non-provider words. The same identity in ungated production
@@ -2816,6 +2830,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.7 CI fix fix(naming): normalize CRLF at the shared naming-check source reader. Windows `core.autocrlf=true` made LF-only root/diagnostic/pane gate literals miss cfg-gated fixtures, producing stale allow-list and unlisted identity violations in runs 40283353152 and 40288631143. `desktop_fixture_gates_accept_crlf_source` checks all fixture gate variants and production/test stripping; the neutrality assertion now reports actual violation paths. Kept checkout-format tolerance instead of adding `.gitattributes`; no restrictions changed. VAL-DSK-116 requires hosted Windows and Ubuntu CI success for this commit.
 
 - 2026-10-26 M6.7 Part 11 refactor(desktop): remove dead provider bridge branches. `pane_harness_fixture_futures_startup_waits_for_runtime_snapshot`, `pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clears`, `market_screen_endpoint_defers_demand_and_starts_selection_at_one` and `loading_worker_startup_routes_catalog_events` cover the descriptor-driven Loading path; the shell and stale provider exceptions are gone. VAL-DSK-023/103 checked; MD-10/UI-03 remain open through M6.8/M6.9, and VAL-DSK-114 awaits guarded GUI evidence.
+- 2026-10-26 M6.8 Part 1 refactor(desktop): derive provider identities from runtime descriptors. `provider_set_comes_from_published_descriptors`, `connection_list_includes_each_published_provider_in_order`, `provider_presentation_controls_chart_types_intervals_queues_and_trades`, `unregistered_provider_shows_unsupported_state`, `desktop_provider_set_rejects_enums_and_fallbacks_in_production` and `every_registered_provider_has_a_complete_published_descriptor` cover published scopes, connection rows, capability projection and unknown stored ids. Existing symbol-browser fence, exchange, flat-list and bounds tests remain. UI-03's enum/fallback portion closes; M6.8 remains unchecked for VAL-DSK-026/027/028 and VAL-CROSS-001, with UI-03/MD-10/UI-10 still open as above.
 
 ## 7. Known gaps / deferred
 

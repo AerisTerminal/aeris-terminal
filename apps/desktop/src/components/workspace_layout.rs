@@ -462,7 +462,7 @@ pub(super) fn workspace_market_area(
                 filter: surface.time_sales.filter,
                 scroll: &surface.scrolls.time_sales,
                 trades_unavailable_from: (!super::provider_trades_available(surface.provider))
-                    .then(|| super::terminal_provider_display(surface.provider)),
+                    .then(|| surface.provider.display()),
             },
             watchlist,
             theme,

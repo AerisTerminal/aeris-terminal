@@ -5,7 +5,7 @@
 //! or another provider's results; replies are fenced by their search identity. The menu lists
 //! every lane's answer as one flat list in the fixed provider order.
 
-use super::{TerminalProvider, known_terminal_provider};
+use super::ProviderId;
 use aeris_contracts::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use aeris_desktop::chart_chrome::{ExchangeCode, SymbolSearchScope};
 use std::num::NonZeroUsize;
@@ -26,7 +26,7 @@ pub(crate) enum SymbolSearchLane {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SymbolSearchRequest {
-    pub(crate) provider: TerminalProvider,
+    pub(crate) provider: ProviderId,
     pub(crate) request_id: NonZeroUsize,
     pub(crate) query: String,
     pub(crate) lane: SymbolSearchLane,
@@ -37,20 +37,20 @@ pub(crate) struct SymbolSearchRequest {
 pub(crate) struct SymbolSelection {
     pub(crate) generation: NonZeroUsize,
     pub(crate) search_generation: NonZeroUsize,
-    pub(crate) provider: TerminalProvider,
+    pub(crate) provider: ProviderId,
     pub(crate) instrument: ProviderInstrumentSummary,
 }
 
 /// A product on one provider exchange; searching its code lists its contracts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProductKey {
-    pub(crate) provider: TerminalProvider,
+    pub(crate) provider: ProviderId,
     pub(crate) code: String,
     pub(crate) exchange: String,
 }
 
 impl ProductKey {
-    fn of(provider: TerminalProvider, instrument: &ProviderInstrumentSummary) -> Option<Self> {
+    fn of(provider: ProviderId, instrument: &ProviderInstrumentSummary) -> Option<Self> {
         product_code(instrument).map(|code| Self {
             provider,
             code: code.to_string(),
@@ -81,19 +81,13 @@ fn product_code(instrument: &ProviderInstrumentSummary) -> Option<&str> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InstrumentMenuSelection {
     /// An instrument of a lane's latest completed search.
-    SearchResult {
-        provider: TerminalProvider,
-        index: usize,
-    },
+    SearchResult { provider: ProviderId, index: usize },
     /// A contract of the product being opened.
-    ProductContract {
-        provider: TerminalProvider,
-        index: usize,
-    },
+    ProductContract { provider: ProviderId, index: usize },
 }
 
 impl InstrumentMenuSelection {
-    pub(crate) const fn provider(self) -> TerminalProvider {
+    pub(crate) const fn provider(self) -> ProviderId {
         match self {
             Self::SearchResult { provider, .. } | Self::ProductContract { provider, .. } => {
                 provider
@@ -114,7 +108,7 @@ pub(crate) enum InstrumentMenuAction {
 /// One instrument-menu row, derived from accepted browser state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InstrumentMenuEntry {
-    pub(crate) provider: TerminalProvider,
+    pub(crate) provider: ProviderId,
     pub(crate) label: String,
     /// Supporting text after the label, such as a product name and contract month.
     pub(crate) description: Option<String>,
@@ -214,7 +208,7 @@ struct ProductOpening {
 /// One provider's searches.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProviderLane {
-    provider: TerminalProvider,
+    provider: ProviderId,
     pending: Option<PendingSymbolSearch>,
     completed_search_id: Option<NonZeroUsize>,
     completed_query: Option<String>,
@@ -227,7 +221,7 @@ struct ProviderLane {
 }
 
 impl ProviderLane {
-    const fn new(provider: TerminalProvider) -> Self {
+    const fn new(provider: ProviderId) -> Self {
         Self {
             provider,
             pending: None,
@@ -378,7 +372,7 @@ pub(crate) struct SymbolBrowser {
     next_search_id: usize,
     /// The latest query sent to the lanes.
     query: Option<String>,
-    exchanges: Vec<(TerminalProvider, Vec<ExchangeCode>)>,
+    exchanges: Vec<(ProviderId, Vec<ExchangeCode>)>,
     selection_generation: usize,
     pending_selection: Option<SymbolSelection>,
     selected: Option<SymbolSelection>,
@@ -417,13 +411,16 @@ impl SymbolBrowser {
     }
 
     /// Whether a provider answers in the current scope.
-    pub(crate) fn covers(&self, provider: TerminalProvider) -> bool {
+    pub(crate) fn covers(&self, provider: ProviderId) -> bool {
         self.lanes.iter().any(|lane| lane.provider == provider)
     }
 
     /// The single provider in scope, when the scope names one.
-    pub(crate) fn scoped_provider(&self) -> Option<TerminalProvider> {
-        self.scope.provider().and_then(known_terminal_provider)
+    pub(crate) fn scoped_provider(&self) -> Option<ProviderId> {
+        self.scope
+            .provider()
+            .and_then(ProviderId::find)
+            .filter(|provider| self.covers(*provider))
     }
 
     fn next_request_id(&mut self) -> NonZeroUsize {
@@ -467,7 +464,7 @@ impl SymbolBrowser {
 
     /// Re-sends the latest query to a lane whose provider's catalog just became ready, when
     /// that lane has not answered it.
-    pub(crate) fn retry_lane(&mut self, provider: TerminalProvider) -> Option<SymbolSearchRequest> {
+    pub(crate) fn retry_lane(&mut self, provider: ProviderId) -> Option<SymbolSearchRequest> {
         let query = self.query.clone().unwrap_or_default();
         let exchange = self.scope.exchange();
         let lane_index = self.lanes.iter().position(|lane| {
@@ -494,7 +491,7 @@ impl SymbolBrowser {
 
     pub(crate) fn apply_results(
         &mut self,
-        provider: TerminalProvider,
+        provider: ProviderId,
         request_id: NonZeroUsize,
         mut results: Vec<ProviderInstrumentSummary>,
     ) -> bool {
@@ -641,7 +638,7 @@ impl SymbolBrowser {
     /// are cleared so they cannot select again.
     pub(crate) fn consume_completed_search(
         &mut self,
-        provider: TerminalProvider,
+        provider: ProviderId,
         search_generation: NonZeroUsize,
     ) -> bool {
         let Some(lane) = self.lanes.iter_mut().find(|lane| lane.provider == provider) else {
@@ -685,7 +682,7 @@ impl SymbolBrowser {
             .take_if(|selection| selection.generation == generation)
     }
 
-    pub(crate) fn pending_selection_provider(&self) -> Option<TerminalProvider> {
+    pub(crate) fn pending_selection_provider(&self) -> Option<ProviderId> {
         self.pending_selection
             .as_ref()
             .map(|selection| selection.provider)
@@ -695,7 +692,7 @@ impl SymbolBrowser {
     /// opening it again retries; a rejected query search records why.
     pub(crate) fn reject_search(
         &mut self,
-        provider: TerminalProvider,
+        provider: ProviderId,
         generation: NonZeroUsize,
         failure: SymbolSearchFailure,
     ) -> bool {
@@ -791,7 +788,7 @@ impl SymbolBrowser {
 
     /// Exchanges a provider's results have named, in the order they were first seen.
     #[cfg(test)]
-    pub(crate) fn exchanges(&self, provider: TerminalProvider) -> &[ExchangeCode] {
+    pub(crate) fn exchanges(&self, provider: ProviderId) -> &[ExchangeCode] {
         self.exchanges
             .iter()
             .find(|(candidate, _)| *candidate == provider)
@@ -799,7 +796,7 @@ impl SymbolBrowser {
     }
 
     /// Every provider's learned exchanges, for the scope menu.
-    pub(crate) fn learned_exchanges(&self) -> &[(TerminalProvider, Vec<ExchangeCode>)] {
+    pub(crate) fn learned_exchanges(&self) -> &[(ProviderId, Vec<ExchangeCode>)] {
         &self.exchanges
     }
 
@@ -835,16 +832,29 @@ impl SymbolBrowser {
     }
 }
 
-/// The lanes of a scope. A scope naming a provider this build does not expose has none.
+/// The lanes of a scope, in published order. Providers without a symbol browser
+/// cannot acquire a catalog-search lane, even when a persisted scope names one.
 fn scope_lanes(scope: SymbolSearchScope) -> Vec<ProviderLane> {
+    scope_lanes_from_descriptors(
+        scope,
+        aeris_market_runtime::published_provider_descriptors(),
+    )
+}
+
+fn scope_lanes_from_descriptors(
+    scope: SymbolSearchScope,
+    descriptors: &[aeris_market_runtime::ProviderDescriptor],
+) -> Vec<ProviderLane> {
     match scope.provider() {
-        None => TerminalProvider::ALL
-            .into_iter()
-            .filter(|provider| super::provider_presentation(*provider).is_some())
-            .map(ProviderLane::new)
+        None => descriptors
+            .iter()
+            .filter(|descriptor| descriptor.symbol_browser)
+            .map(|descriptor| ProviderLane::new(ProviderId(descriptor.id)))
             .collect(),
-        Some(provider) => known_terminal_provider(provider)
-            .map(ProviderLane::new)
+        Some(provider) => descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == provider && descriptor.symbol_browser)
+            .map(|descriptor| ProviderLane::new(ProviderId(descriptor.id)))
             .into_iter()
             .collect(),
     }
@@ -870,8 +880,8 @@ fn expiration_key(expiration: &str) -> Vec<u8> {
 }
 
 fn learn_exchanges(
-    learned: &mut Vec<(TerminalProvider, Vec<ExchangeCode>)>,
-    provider: TerminalProvider,
+    learned: &mut Vec<(ProviderId, Vec<ExchangeCode>)>,
+    provider: ProviderId,
     results: &[ProviderInstrumentSummary],
 ) {
     let index = learned

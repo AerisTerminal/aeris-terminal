@@ -303,35 +303,62 @@ fn panel_sidebar(
 }
 
 fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> Vec<AnyElement> {
-    vec![
-        rithmic_group(connections, theme),
-        settings_group(
-            "Hyperliquid",
-            [described_setting_row(
-                "Hyperliquid",
-                [SharedString::from(
-                    "Crypto markets from Hyperliquid's public feed",
-                )],
-                control_strip(
-                    feed_level_pill(TerminalProvider::Hyperliquid, theme)
-                        .into_iter()
-                        .chain(std::iter::once(pill(
-                            "No login needed",
-                            theme.colors.surface_secondary,
-                            theme.colors.text_secondary,
-                            Some(theme.colors.border_subtle),
-                            theme,
-                        ))),
+    connection_provider_ids(aeris_market_runtime::published_provider_descriptors())
+        .into_iter()
+        .map(|provider| {
+            let descriptor = provider.descriptor().expect("published provider");
+            match descriptor.connect {
+                aeris_market_runtime::ConnectMethod::VaultCredentials { form: "rithmic" } => {
+                    rithmic_group(connections, theme)
+                }
+                aeris_market_runtime::ConnectMethod::Public => settings_group(
+                    descriptor.display_name,
+                    [described_setting_row(
+                        descriptor.display_name,
+                        [SharedString::from(if descriptor.id == "hyperliquid" {
+                            "Crypto markets from Hyperliquid's public feed"
+                        } else {
+                            "Public market data"
+                        })],
+                        control_strip(feed_level_pill(provider, theme).into_iter().chain(
+                            std::iter::once(pill(
+                                "No login needed",
+                                theme.colors.surface_secondary,
+                                theme.colors.text_secondary,
+                                Some(theme.colors.border_subtle),
+                                theme,
+                            )),
+                        )),
+                        theme,
+                    )],
+                    theme,
                 ),
-                theme,
-            )],
-            theme,
-        ),
-    ]
+                aeris_market_runtime::ConnectMethod::VaultCredentials { .. } => settings_group(
+                    descriptor.display_name,
+                    [described_setting_row(
+                        descriptor.display_name,
+                        [SharedString::from("Credentials required")],
+                        control_strip(feed_level_pill(provider, theme)),
+                        theme,
+                    )],
+                    theme,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn connection_provider_ids(
+    descriptors: &[aeris_market_runtime::ProviderDescriptor],
+) -> Vec<ProviderId> {
+    descriptors
+        .iter()
+        .map(|descriptor| ProviderId(descriptor.id))
+        .collect()
 }
 
 /// The depth the provider's registration declares for its live feed.
-fn feed_level_pill(provider: TerminalProvider, theme: &AerisTheme) -> Option<AnyElement> {
+fn feed_level_pill(provider: ProviderId, theme: &AerisTheme) -> Option<AnyElement> {
     let label = provider_presentation(provider)?.feed_level.label()?;
     Some(pill(
         label,
@@ -393,7 +420,7 @@ fn rithmic_group(connections: ConnectionsView<'_>, theme: &AerisTheme) -> AnyEle
         "Rithmic",
         [SharedString::from(view.detail())],
         control_strip(
-            feed_level_pill(TerminalProvider::Rithmic, theme)
+            feed_level_pill(ProviderId("rithmic"), theme)
                 .into_iter()
                 .chain(std::iter::once(status))
                 .chain(action),
@@ -836,4 +863,24 @@ fn practice_account_form(
             )
             .into_any_element(),
     ]
+}
+
+#[cfg(test)]
+mod provider_descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn connection_list_includes_each_published_provider_in_order() {
+        let mut descriptors = aeris_market_runtime::published_provider_descriptors().to_vec();
+        let mut fixture = descriptors[0].clone();
+        fixture.id = "fixture-third";
+        fixture.symbol_browser = false;
+        descriptors.push(fixture);
+        let providers = connection_provider_ids(&descriptors);
+        assert_eq!(providers.len(), descriptors.len());
+        assert_eq!(
+            providers.last().map(|provider| provider.id()),
+            Some("fixture-third")
+        );
+    }
 }

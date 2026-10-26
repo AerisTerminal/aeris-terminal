@@ -585,11 +585,8 @@ pub(super) fn header_controls(
 
 /// Rithmic's market-data mark stays visible for as long as the terminal holds a
 /// Rithmic session, including while that session recovers.
-pub(super) fn shows_rithmic_attribution(
-    provider: TerminalProvider,
-    state: FeedConnectionState,
-) -> bool {
-    provider == TerminalProvider::Rithmic
+pub(super) fn shows_rithmic_attribution(provider: ProviderId, state: FeedConnectionState) -> bool {
+    provider == ProviderId("rithmic")
         && matches!(
             state,
             FeedConnectionState::Authenticating
@@ -1538,7 +1535,7 @@ pub(super) fn countdown_text(target_unix_nanos: i64, now_unix_nanos: i64) -> Str
 }
 
 pub(super) fn connection_presentation(
-    provider: TerminalProvider,
+    provider: ProviderId,
     state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
 ) -> ConnectionPresentation {
@@ -1551,7 +1548,7 @@ pub(super) fn connection_presentation(
         FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.danger),
     };
     ConnectionPresentation {
-        provider: terminal_provider_display(provider),
+        provider: provider.display(),
         status,
         latency: if state == FeedConnectionState::Streaming {
             format_transport_rtt(transport_rtt_nanos)
@@ -1579,9 +1576,7 @@ fn format_transport_rtt(transport_rtt_nanos: Option<u64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FeedConnectionState, TerminalProvider, bleed_edge_colors, shows_rithmic_attribution,
-    };
+    use super::{FeedConnectionState, ProviderId, bleed_edge_colors, shows_rithmic_attribution};
 
     #[test]
     fn transparent_texels_take_their_visible_neighbours_color() {
@@ -1612,18 +1607,15 @@ mod tests {
             FeedConnectionState::Streaming,
             FeedConnectionState::Recovering,
         ] {
-            assert!(shows_rithmic_attribution(TerminalProvider::Rithmic, state));
-            assert!(!shows_rithmic_attribution(
-                TerminalProvider::Hyperliquid,
-                state
-            ));
+            assert!(shows_rithmic_attribution(ProviderId("rithmic"), state));
+            assert!(!shows_rithmic_attribution(ProviderId("hyperliquid"), state));
         }
         for state in [
             FeedConnectionState::Disconnected,
             FeedConnectionState::Discovering,
             FeedConnectionState::Stopped,
         ] {
-            assert!(!shows_rithmic_attribution(TerminalProvider::Rithmic, state));
+            assert!(!shows_rithmic_attribution(ProviderId("rithmic"), state));
         }
     }
 }

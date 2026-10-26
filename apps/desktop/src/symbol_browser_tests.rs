@@ -2,8 +2,8 @@
 
 use super::*;
 
-const RITHMIC: TerminalProvider = TerminalProvider::Rithmic;
-const HYPERLIQUID: TerminalProvider = TerminalProvider::Hyperliquid;
+const RITHMIC: ProviderId = ProviderId("rithmic");
+const HYPERLIQUID: ProviderId = ProviderId("hyperliquid");
 
 fn search_result(index: usize) -> InstrumentMenuSelection {
     InstrumentMenuSelection::SearchResult {
@@ -85,6 +85,45 @@ fn key(code: &str) -> ProductKey {
 
 fn single() -> SymbolBrowser {
     SymbolBrowser::new(SymbolSearchScope::Provider("rithmic"))
+}
+
+#[test]
+fn provider_set_comes_from_published_descriptors() {
+    use aeris_market_runtime::{ConnectMethod, ProviderDescriptor};
+
+    let descriptors = [
+        ProviderDescriptor {
+            id: "fixture-third",
+            display_name: "Fixture Venue",
+            logo_key: "",
+            connect: ConnectMethod::Public,
+            symbol_browser: false,
+            autoload_catalog: false,
+            offered_intervals: &["1m"],
+        },
+        aeris_market_runtime::published_provider_descriptors()[0].clone(),
+    ];
+    assert!(
+        !scope_lanes_from_descriptors(SymbolSearchScope::All, &descriptors)
+            .iter()
+            .any(|lane| lane.provider.id() == "fixture-third")
+    );
+    assert_eq!(
+        scope_lanes_from_descriptors(SymbolSearchScope::Provider("fixture-third"), &descriptors)
+            .len(),
+        0
+    );
+    let mut enabled = descriptors;
+    enabled[0].symbol_browser = true;
+    let lanes = scope_lanes_from_descriptors(SymbolSearchScope::All, &enabled);
+    assert_eq!(
+        lanes.first().map(|lane| lane.provider.id()),
+        Some("fixture-third")
+    );
+    assert_eq!(
+        scope_lanes_from_descriptors(SymbolSearchScope::Provider("fixture-third"), &enabled).len(),
+        1
+    );
 }
 
 fn begin(browser: &mut SymbolBrowser, query: &str) -> SymbolSearchRequest {

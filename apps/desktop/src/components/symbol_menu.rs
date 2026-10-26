@@ -7,7 +7,7 @@ use super::chrome_menu::{
 };
 
 pub(super) fn provider_exchange_mark(
-    provider: TerminalProvider,
+    provider: ProviderId,
     size: Pixels,
     well: bool,
     colors: &aeris_design_system::ThemeColors,
@@ -33,18 +33,18 @@ fn scope_mark(
     size: Pixels,
     colors: &aeris_design_system::ThemeColors,
 ) -> AnyElement {
-    match scope.provider().and_then(known_terminal_provider) {
+    match scope.provider().and_then(ProviderId::find) {
         Some(provider) => provider_exchange_mark(provider, size, false, colors),
         None => generic_mark(size, false, colors),
     }
 }
 
-fn show_connect_prompt(provider: TerminalProvider, connection_missing: bool) -> bool {
+fn show_connect_prompt(provider: ProviderId, connection_missing: bool) -> bool {
     connection_missing
-        && super::provider_presentation(provider).is_some_and(|descriptor| {
+        && provider.descriptor().is_some_and(|descriptor| {
             matches!(
-                descriptor.connection_kind,
-                ProviderConnectionKind::Credentials
+                descriptor.connect,
+                aeris_market_runtime::ConnectMethod::VaultCredentials { .. }
             )
         })
 }
@@ -56,10 +56,7 @@ pub(super) fn instrument_selector(
 ) -> impl IntoElement {
     chrome_tooltip(
         "instrument_selector",
-        format!(
-            "Search or select a {} market",
-            terminal_provider_display(state.provider)
-        ),
+        format!("Search or select a {} market", state.provider.display()),
         Button::new("instrument_selector", theme)
             .variant(ButtonVariant::Secondary)
             .button_size(ButtonSize::Lg)
@@ -95,7 +92,7 @@ pub(super) struct InstrumentSelectorState {
     pub(super) instruments: Vec<InstrumentMenuEntry>,
     pub(super) input: Option<Entity<InputState>>,
     pub(super) availability: InstrumentSelectorAvailability,
-    pub(super) provider: TerminalProvider,
+    pub(super) provider: ProviderId,
     /// Which providers or exchange the menu searches.
     pub(super) scope: SymbolSearchScope,
     pub(super) menu: InstrumentSelectorMenu,
@@ -103,12 +100,12 @@ pub(super) struct InstrumentSelectorState {
     pub(super) target: SymbolSelectionTarget,
     /// The provider the scope names when the runtime reported no stored connection or login
     /// for it; the menu points to Accounts.
-    pub(super) connect_provider: Option<TerminalProvider>,
+    pub(super) connect_provider: Option<ProviderId>,
     /// The scope dropdown opened from the search-field logo.
     pub(super) provider_menu_open: bool,
     /// The provider whose exchange and category flyout is shown beside the dropdown.
-    pub(super) flyout_provider: Option<TerminalProvider>,
-    pub(super) learned_exchanges: Vec<(TerminalProvider, Vec<ExchangeCode>)>,
+    pub(super) flyout_provider: Option<ProviderId>,
+    pub(super) learned_exchanges: Vec<(ProviderId, Vec<ExchangeCode>)>,
     pub(super) search_categories: aeris_contracts::InstrumentSearchCategories,
 }
 
@@ -158,7 +155,7 @@ pub(super) fn instrument_dialog_content(
                 .filter(|provider| show_connect_prompt(*provider, true)),
             |menu, provider| {
                 let accounts = app.clone();
-                let provider_name = terminal_provider_display(provider).to_string();
+                let provider_name = provider.display().to_string();
                 menu.child(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_provider", theme)
@@ -200,11 +197,11 @@ pub(super) fn instrument_dialog_content(
 
 const SYMBOL_PROVIDER_MENU_WIDTH: f32 = 200.0;
 
-fn symbol_menu_providers() -> Vec<TerminalProvider> {
-    aeris_market_runtime::built_in_provider_presentations()
+fn symbol_menu_providers() -> Vec<ProviderId> {
+    aeris_market_runtime::published_provider_descriptors()
         .iter()
-        .filter_map(|descriptor| known_terminal_provider(descriptor.id))
-        .filter(|provider| super::provider_presentation(*provider).is_some())
+        .filter(|descriptor| descriptor.symbol_browser)
+        .map(|descriptor| ProviderId(descriptor.id))
         .collect()
 }
 
@@ -246,7 +243,7 @@ fn symbol_provider_menu(
     let provider_rows = providers.into_iter().enumerate().map(|(index, provider)| {
         let row_app = app.clone();
         let hover_app = app.clone();
-        let id = terminal_provider_id(provider);
+        let id = provider.id();
         let active = state.scope.provider() == Some(id);
         let opens_flyout = scope_flyout_available(state, provider);
         let mut trailing = div().flex().items_center().gap_1();
@@ -268,7 +265,7 @@ fn symbol_provider_menu(
         // its own check-and-chevron trailing content instead of `MenuRow::checked`.
         MenuRow::compact(
             ("symbol_provider_row", index + 1),
-            terminal_provider_display(provider),
+            provider.display(),
             theme,
         )
         .leading(provider_exchange_mark(provider, px(18.0), false, &colors))
@@ -310,14 +307,14 @@ fn symbol_provider_menu(
     )
 }
 
-fn provider_search_categories_available(provider: TerminalProvider) -> bool {
+fn provider_search_categories_available(provider: ProviderId) -> bool {
     super::provider_presentation(provider)
         .is_some_and(|descriptor| descriptor.search_categories_available)
 }
 
 fn learned_provider_exchanges(
     state: &InstrumentSelectorState,
-    provider: TerminalProvider,
+    provider: ProviderId,
 ) -> &[ExchangeCode] {
     state
         .learned_exchanges
@@ -326,7 +323,7 @@ fn learned_provider_exchanges(
         .map_or(&[], |(_, exchanges)| exchanges.as_slice())
 }
 
-fn scope_flyout_available(state: &InstrumentSelectorState, provider: TerminalProvider) -> bool {
+fn scope_flyout_available(state: &InstrumentSelectorState, provider: ProviderId) -> bool {
     provider_search_categories_available(provider)
         || !learned_provider_exchanges(state, provider).is_empty()
 }
@@ -338,11 +335,11 @@ fn scope_flyout_available(state: &InstrumentSelectorState, provider: TerminalPro
 fn symbol_scope_flyout(
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
-    provider: TerminalProvider,
+    provider: ProviderId,
     provider_row_index: usize,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let id = terminal_provider_id(provider);
+    let id = provider.id();
     let exchanges = learned_provider_exchanges(state, provider);
     let mut panel = MenuPanel::new("symbol_scope_flyout", MenuPlacement::InFlow, theme)
         .width(px(TIMEFRAME_FLYOUT_WIDTH))
@@ -535,9 +532,9 @@ mod tests {
 
     #[test]
     fn missing_connection_keeps_the_accounts_prompt() {
-        assert!(show_connect_prompt(TerminalProvider::Rithmic, true));
-        assert!(!show_connect_prompt(TerminalProvider::Rithmic, false));
-        assert!(!show_connect_prompt(TerminalProvider::Hyperliquid, true));
+        assert!(show_connect_prompt(ProviderId("rithmic"), true));
+        assert!(!show_connect_prompt(ProviderId("rithmic"), false));
+        assert!(!show_connect_prompt(ProviderId("hyperliquid"), true));
     }
 
     #[test]
@@ -549,7 +546,11 @@ mod tests {
                 "{provider:?} listed twice"
             );
         }
-        for provider in TerminalProvider::ALL {
+        for provider in aeris_market_runtime::published_provider_descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.symbol_browser)
+            .map(|descriptor| ProviderId(descriptor.id))
+        {
             assert!(providers.contains(&provider), "{provider:?} missing");
         }
     }
@@ -557,10 +558,10 @@ mod tests {
     #[test]
     fn only_the_menu_providers_connection_reports_disconnected() {
         let mut connections = DataConnections::default();
-        assert!(!connections.disconnected(TerminalProvider::Hyperliquid));
-        assert!(!connections.disconnected(TerminalProvider::Rithmic));
+        assert!(!connections.disconnected(ProviderId("hyperliquid")));
+        assert!(!connections.disconnected(ProviderId("rithmic")));
         connections.rithmic.saved = rithmic_login::SavedRithmicLogin::Missing;
-        assert!(connections.disconnected(TerminalProvider::Rithmic));
-        assert!(!connections.disconnected(TerminalProvider::Hyperliquid));
+        assert!(connections.disconnected(ProviderId("rithmic")));
+        assert!(!connections.disconnected(ProviderId("hyperliquid")));
     }
 }

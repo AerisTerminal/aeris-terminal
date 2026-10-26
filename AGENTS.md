@@ -130,6 +130,14 @@ violations and missing verification explicitly, and never describe them as satis
   cancellation behavior.
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
   or canonical candle state.
+- Desktop provider identities are opaque runtime IDs looked up in
+  `market_runtime::published_provider_descriptors()` and
+  `built_in_provider_presentations()`. The runtime test
+  `every_registered_provider_has_a_complete_published_descriptor` covers every registration;
+  `tools/naming_check` rejects a desktop production `enum TerminalProvider` or
+  `FALLBACK_TERMINAL_PROVIDER`. Only descriptors with `symbol_browser` enabled enter the
+  symbol menu. An unregistered stored provider shows `UnsupportedProvider`, never another
+  provider's market.
 - `desktop_source_is_provider_neutral` scans production desktop and chart-integration Rust source
   for provider names and provider-specific ID formats; `Logarithmic` and `logarithm` are not
   provider identities. Exact fixture module paths compiled only under `cfg(test)` or
