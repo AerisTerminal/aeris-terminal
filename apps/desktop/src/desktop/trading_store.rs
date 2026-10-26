@@ -12,6 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct TradingWorkCounts {
+    pub(super) received_sets: std::sync::atomic::AtomicUsize,
+    pub(super) applied_sets: std::sync::atomic::AtomicUsize,
+    pub(super) trading_wakes: std::sync::atomic::AtomicUsize,
+    pub(super) pane_notifies: std::sync::atomic::AtomicUsize,
+}
+
 #[derive(Default)]
 struct Slot {
     newest: Option<SubscriptionUpdate>,
@@ -133,6 +142,8 @@ pub(super) struct TradingStore {
     slot: Arc<Mutex<Slot>>,
     stop: Arc<AtomicBool>,
     bridge: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    counts: Option<Arc<TradingWorkCounts>>,
 }
 
 impl TradingStore {
@@ -141,16 +152,38 @@ impl TradingStore {
         subscription: TradingSubscription,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(), String> {
+        self.start_bridge(
+            subscription,
+            wake,
+            Duration::from_secs(1),
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn start_bridge(
+        &mut self,
+        subscription: TradingSubscription,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        receive_timeout: Duration,
+        #[cfg(test)] timeout_tick: Option<std::sync::mpsc::Sender<()>>,
+    ) -> Result<(), String> {
         if self.stop.load(Ordering::Acquire) {
             return Err("trading bridge is already stopping".to_string());
         }
         let slot = Arc::clone(&self.slot);
         let stop = Arc::clone(&self.stop);
+        #[cfg(test)]
+        let counts = self.counts.clone();
         let bridge = std::thread::Builder::new()
             .name("aeris-trading-desktop-bridge".into())
             .spawn(move || {
                 while !stop.load(Ordering::Acquire) {
-                    if let Some(update) = subscription.recv_timeout(Duration::from_secs(1)) {
+                    if let Some(update) = subscription.recv_timeout(receive_timeout) {
+                        #[cfg(test)]
+                        if let Some(counts) = &counts {
+                            counts.received_sets.fetch_add(1, Ordering::Relaxed);
+                        }
                         let notify = {
                             let mut state = slot
                                 .lock()
@@ -158,7 +191,16 @@ impl TradingStore {
                             state.offer(update)
                         };
                         if notify {
+                            #[cfg(test)]
+                            if let Some(counts) = &counts {
+                                counts.trading_wakes.fetch_add(1, Ordering::Relaxed);
+                            }
                             wake();
+                        }
+                    } else {
+                        #[cfg(test)]
+                        if let Some(tick) = &timeout_tick {
+                            let _ = tick.send(());
                         }
                     }
                 }
@@ -234,7 +276,19 @@ impl TradingStore {
         }
         self.current = Some(next);
         self.indexes = next_indexes;
+        #[cfg(test)]
+        if let Some(counts) = &self.counts {
+            counts.applied_sets.fetch_add(1, Ordering::Relaxed);
+        }
         self.current.as_ref()
+    }
+
+    /// Counts the actual pane-update path in desktop tests.
+    #[cfg(test)]
+    pub(super) fn note_pane_notify(&self) {
+        if let Some(counts) = &self.counts {
+            counts.pane_notifies.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn take_resync(&mut self) -> bool {
@@ -303,29 +357,69 @@ mod tests {
 
     #[test]
     fn idle_minute_produces_no_trading_work() {
-        let clock = ManualClock::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "aeris-trading-idle-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir(&root).expect("unique test root");
+        let clock = Arc::new(ManualClock::new(0));
+        let service = aeris_trading_runtime::TradingService::start(
+            aeris_trading_runtime::TradingServiceConfig {
+                database_path: root.join("trading.sqlite3"),
+                retention: aeris_trading_runtime::TradingRetention::default(),
+                clock: clock.clone(),
+                execution: aeris_trading_runtime::ExecutionPolicy::default(),
+            },
+        )
+        .expect("trading owner");
+        let counts = Arc::new(TradingWorkCounts::default());
         let mut store = TradingStore::default();
-        let mut store_changes = 0;
-        let mut trading_notifies = 0;
-        let mut working_set_reads = 0;
-        let mut history_reads = 0;
+        store.counts = Some(counts.clone());
+        let (wake, woken) = std::sync::mpsc::channel();
+        let (tick, timeout) = std::sync::mpsc::channel();
+        store
+            .start_bridge(
+                service.subscribe().expect("subscribe"),
+                Arc::new(move || {
+                    let _ = wake.send(());
+                }),
+                Duration::from_millis(1),
+                Some(tick),
+            )
+            .expect("start bridge");
+        woken
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial snapshot wake");
+        assert!(store.drain().is_some(), "initial snapshot applied");
+        assert_eq!(counts.received_sets.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.applied_sets.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.trading_wakes.load(Ordering::Relaxed), 1);
+        let initial = store.current().expect("initial working set").clone();
+        assert_eq!(service.history_read_count(), 0);
         for _ in 0..60 {
+            timeout
+                .recv_timeout(Duration::from_secs(2))
+                .expect("one real bridge receive timed out");
             clock.advance(Duration::from_secs(1));
-            if store.has_pending() {
-                working_set_reads += 1;
-                if store.drain().is_some() {
-                    store_changes += 1;
-                    trading_notifies += 1;
-                }
-                if store.take_resync() {
-                    history_reads += 1;
-                }
-            }
         }
-        assert_eq!(store_changes, 0);
-        assert_eq!(trading_notifies, 0);
-        assert_eq!(working_set_reads, 0);
-        assert_eq!(history_reads, 0);
+        assert_eq!(counts.received_sets.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.applied_sets.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.trading_wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.pane_notifies.load(Ordering::Relaxed), 0);
+        assert_eq!(service.history_read_count(), 0);
+        assert!(!store.has_pending());
+        assert!(store.drain().is_none());
+        assert_eq!(store.current(), Some(&initial));
+        // Prove the history seam counts the real service call, not a modeled
+        // resync flag or a test-local variable.
+        service
+            .history(aeris_trading_runtime::HistoryQuery::default())
+            .expect("empty history page");
+        assert_eq!(service.history_read_count(), 1);
+        store.stop().expect("bridge").join().expect("bridge joined");
+        service.shutdown(Duration::from_secs(2)).expect("shutdown");
+        std::fs::remove_dir_all(root).expect("remove test-owned root");
     }
 
     fn update(revision: u64, lagged: bool) -> SubscriptionUpdate {

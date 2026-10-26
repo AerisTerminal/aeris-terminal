@@ -681,6 +681,8 @@ pub(crate) struct TradingRuntime {
     /// The paged order-history reader on its own read-only connection; `None` for the
     /// in-memory store of tests, which has no second connection.
     history_reader: Mutex<Option<crate::history::HistoryReader>>,
+    #[cfg(feature = "test-observability")]
+    history_reads: std::sync::atomic::AtomicUsize,
 }
 
 pub(crate) struct TradingCore {
@@ -827,6 +829,8 @@ impl TradingService {
                 market_feed,
                 venue_inbox,
                 history_reader: Mutex::new(history_reader),
+                #[cfg(feature = "test-observability")]
+                history_reads: std::sync::atomic::AtomicUsize::new(0),
             }),
         })
     }
@@ -854,6 +858,8 @@ impl TradingService {
     /// Returns an error when the store is in-memory (no reader), the reader queue is full, or
     /// the read fails.
     pub fn history(&self, query: crate::HistoryQuery) -> Result<crate::HistoryPage, String> {
+        #[cfg(feature = "test-observability")]
+        self.runtime.history_reads.fetch_add(1, Ordering::Relaxed);
         let reader = self
             .runtime
             .history_reader
@@ -863,6 +869,13 @@ impl TradingService {
             .as_ref()
             .ok_or_else(|| "order history requires a file-backed store".to_string())?
             .query(query)
+    }
+
+    /// Number of real history API calls by this service instance, including failed requests.
+    #[cfg(feature = "test-observability")]
+    #[must_use]
+    pub fn history_read_count(&self) -> usize {
+        self.runtime.history_reads.load(Ordering::Relaxed)
     }
 
     /// Returns a bounded health snapshot.

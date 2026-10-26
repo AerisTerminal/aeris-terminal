@@ -695,6 +695,8 @@ impl TerminalApp {
                 if !changed && !feedback_changed {
                     continue;
                 }
+                #[cfg(test)]
+                self.trading_store.read(cx).note_pane_notify();
                 pane.surface.update(cx, |state, state_cx| {
                     if latest.as_ref().map(|feedback| feedback.revision)
                         > state

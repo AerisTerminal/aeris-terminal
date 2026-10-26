@@ -2246,6 +2246,17 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 2c of 3, idle observation): the real trading owner
+    supplies the initial subscription snapshot to the bridge; test-only
+    per-store counters observe received and applied working sets, bridge wakes
+    and trading pane updates at their call sites. The idle regression advances
+    a ManualClock through 60 seconds, synchronizing each second with a short
+    bridge receive timeout, without a minute of wall time. There is no desktop
+    `TradingService::history` call until paged history is wired in the later
+    M6.10 history part; the test reads the real service's per-instance history
+    counter and verifies that a subsequent explicit page request increments it.
+    M6.10 stays unchecked pending pane migration, paged history, typed notices
+    and GUI.
   - Status (2026-10-26 Part 2b of 3, indexed store checkpoint): each adopted
     WorkingSet rebuilds offset indexes for orders by account/instrument and
     recent fills/events by order id once. `pane_view` exposes borrowed rows;
@@ -2385,6 +2396,10 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- `trading_runtime/test-observability` belongs only to the desktop
+  dev-dependency; its per-instance `TradingService::history` call counter
+  disappears from default production builds (M6.10 Part 2c,
+  `test(desktop): observe real trading-store idle work`).
 - Desktop trading-service reads come only through the subscription-backed
   `TradingStore`; the `desktop_trading_reads_come_from_trading_store` production
   scan rejects `service.snapshot()`, `trading_service.snapshot()` and
@@ -2995,6 +3010,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 fix(desktop): release retired GPUI wake registrations. Parallel Windows abort root cause was a stale `UiWakeNotified` waker kept after task completion/cancellation and invoked by the new TradingStore bridge from a foreign thread after GPUI's test scheduler ended. Both Ready paths and Drop now unregister it; two deterministic regressions cover the late-callback cases. The serial quiet CI workaround and its AGENTS.md claim are removed; M6.10 remains open for Part 3 and GUI evidence.
 - 2026-10-26 M6.10 hosted follow-up fix(desktop): isolate GPUI fixtures from trading bridge threads. Hosted CI 40327391920 still aborted because even a live GPUI test scheduler rejects an external bridge thread's waker; the 50-seed close test reproduced it at seed 1. UI fixtures now construct an empty TradingStore, while the real subscription bridge remains covered by its dedicated owner tests. CI stays parallel; M6.10 remains open for Part 3 and GUI evidence.
 - 2026-10-26 M6.10 Part 2b refactor(desktop): index the subscription store for pane reads. `pane_view_indexes_orders_fills_and_events_by_owner_and_order` covers owner/account isolation, changed pane selection and per-revision index replacement; four unchanged `trading_projection_baseline_*` tests cover chart, ticket, bottom-panel and notice outputs. Watchlist activity now reads the store, and order-local updates skip unaffected pane notifications. The pane projection migration and VAL-DSK-032 real owner-read counters remain open.
+- 2026-10-26 M6.10 Part 2c test(desktop): observe real trading-store idle work. `idle_minute_produces_no_trading_work` now runs an actual owner and subscription bridge over one ManualClock minute, checking received/applied working sets, bridge wakes, pane notifications and per-instance calls to `TradingService::history` against the initial snapshot. An explicit history page after idle increments the counter; `bridge_shutdown_drops_subscription_and_joins_within_receive_bound` still covers production timeout and shutdown. M6.10 remains unchecked.
 
 ## 7. Known gaps / deferred
 

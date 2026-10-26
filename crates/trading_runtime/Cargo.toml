@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+test-observability = []
+
 [dependencies]
 aeris_instruments = { path = "../domain/instruments" }
 aeris_observability = { path = "../observability" }

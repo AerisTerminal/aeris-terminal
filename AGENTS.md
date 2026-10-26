@@ -256,6 +256,9 @@ violations and missing verification explicitly, and never describe them as satis
   `service.snapshot()`, `trading_service.snapshot()` or `trading().snapshot()` on the owner.
   `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.
   Trading updates are applied on subscription wakes, not a render-path or 250 ms timer.
+- The `trading_runtime/test-observability` feature is enabled only by the desktop's
+  dev-dependency to count calls to the instance's real `TradingService::history` API
+  in idle regressions. Default production builds carry no history-read counter.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates.
