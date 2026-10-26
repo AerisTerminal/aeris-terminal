@@ -2246,6 +2246,12 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 3 of 3, legacy partial-exit correction):
+    migrated pre-V21 partial reductions with no realized P&L or cycle-close
+    flag now appear in account-scoped closed-trade pages. The V30 account/time/
+    fill-ID index supports bounded, seekable keyset reads; the owner projector
+    still determines the exact row, leaving missing P&L unknown. Desktop
+    conversion, typed notices and VAL-DSK-034/035 remain; leave M6.10 unchecked.
   - Status (2026-10-26 Part 3 of 3, owner historical-trade pages):
     `TradingService::trade_history` now pages per-account closed exits newest-first
     on `aeris-trading-history` using (exit time, exit fill ID) with at most 500
@@ -2469,6 +2475,11 @@ the repo root `AGENTS.md`.
   predecessor fills projected per exit; exact per-exit P&L comes from the
   owner's shared round-trip projection, not a desktop reconstruction (M6.10
   Part 3, `feat(trading): page closed trades with owner pnl`).
+- Legacy partial exits without recorded P&L remain closed trades: the owner
+  history reader recognizes a reduction in prior signed quantity without
+  assigning P&L. V30's account/time/fill-ID index supports cursor seeks
+  without a full-table scan (M6.10 Part 3,
+  `fix(trading): retain migrated partial exits in trade pages`).
 - Closed working-set round trips expose their durable exit fill ID, so partial
   exits remain distinct and historical pages can dedupe against the live head;
   open trades have no exit identity (M6.10 historical-trade identity checkpoint,
@@ -3100,6 +3111,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 3 feat(desktop): page bounded order history off the UI thread. `desktop_history_pages_start_at_recent_orders_and_advance_older_without_duplicates` uses a generated 10,001-order file-backed store to verify 500-row descending keyset pages, a next cursor and disjoint order IDs; `trade_history_model_appends_pages_without_live_head_duplicates_and_stops_at_bound` checks page append, live fill overlap exclusion, the four-page cap and stale completion after resync. The existing older-order API cannot reconstruct historical round trips; its rows remain explicitly distinguished from recent trades. M6.10 stays unchecked pending that owner API, typed notices and VAL-DSK-034/035 GUI evidence.
 - 2026-10-26 M6.10 Part 3 of 3 historical-trade identity checkpoint feat(trading): identify closed round trips by exit fill. `entry_and_exit_fills_form_one_round_trip_with_its_final_pnl` and `open_round_trip_pnl_follows_live_marks_and_partial_exits` verify the durable exit ID on close, distinct partial exit IDs after restart and no ID on an open trade. VAL-DSK-119 is still open for the bounded owner trade page and desktop conversion; M6.10 remains unchecked.
 - 2026-10-26 M6.10 Part 3 of 3 feat(trading): page closed trades with owner pnl. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` generates 601 closed cycles on a file-backed store and checks the 500-row cap, disjoint older page, stable exit identities and exact owner P&L for every row; `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` checks tied timestamps, account isolation and unknown-P&L exits; `open_round_trip_pnl_follows_live_marks_and_partial_exits` compares historical partial-exit trades with the owner after restart. The read-only reader reuses the owner's round-trip projector. Desktop conversion and VAL-DSK-119 remain open; M6.10 stays unchecked.
+- 2026-10-26 M6.10 Part 3 of 3 fix(trading): retain migrated partial exits in trade pages. `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` seeds a pre-V21 partial reduction, opens it through the migrations and matches the owner's exact closed row with unknown P&L; `migrated_trade_history_uses_account_keyset_index` checks V29-to-V30 migration and both index query plans. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` retain their page/cursor coverage. M6.10 stays unchecked pending desktop conversion, typed notices and GUI evidence.
 
 ## 7. Known gaps / deferred
 

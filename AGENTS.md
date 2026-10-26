@@ -187,7 +187,7 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V29 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V30 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -229,6 +229,9 @@ violations and missing verification explicitly, and never describe them as satis
   recovery notice. Venue refusals arrive as `VenueUpdate::OperationFailed` and become bounded owner
   `VenueNotice`s (32) shown on the desktop feedback line; every relay command has a 30-second
   deadline, and an unanswered command forces a reconcile.
+  V30 indexes account, execution time and fill ID for read-only closed-trade
+  keyset pages; migrated exits without recorded P&L are identified by a
+  reduction of the position's prior signed quantity and keep unknown P&L.
   Old P&L tables and per-fill columns remain unread until their deferred removal migration.
   Store-open preflight scratch cleanup may remove only exact preflight directories containing
   solely the expected database copy and SQLite sidecars; preserve unknown contents and report

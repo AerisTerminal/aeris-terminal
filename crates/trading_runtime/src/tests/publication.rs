@@ -831,6 +831,126 @@ fn trade_history_ties_and_unknown_pnl_keep_every_closed_exit() {
         .expect("shutdown");
 }
 
+fn write_legacy_partial_exit_fixture(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().expect("fixture directory")).expect("directory");
+    let database = rusqlite::Connection::open(path).expect("legacy database");
+    create_schema_at(&database, 20);
+    let instrument = instrument();
+    let contract =
+        crate::store::encode_contract_for_test(&instrument.contract).expect("contract encoding");
+    database
+        .execute(
+            "INSERT INTO accounts(id, display_name, environment, currency, currency_scale,
+                starting_equity_units, starting_equity_scale)
+             VALUES ('aeris-sim-1', 'SIM legacy practice', 'simulated', 'USD', 2, 1000000, 2)",
+            [],
+        )
+        .expect("account");
+    database
+        .execute(
+            "INSERT INTO instruments(id, price_scale, quantity_scale, contract_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                instrument.instrument_id.as_str(),
+                instrument.price_scale,
+                instrument.quantity_scale,
+                contract
+            ],
+        )
+        .expect("instrument");
+    for (id, side, quantity, time) in [("entry", "buy", 2, 10_i64), ("partial", "sell", 1, 20)] {
+        database
+            .execute(
+                "INSERT INTO orders(id, client_order_id, account_id, instrument_id, side,
+                    order_type, time_in_force, quantity_units, quantity_scale, status,
+                    submitted_unix_nanos, provenance_json, filled_units, filled_scale)
+                 VALUES (?1, ?1, 'aeris-sim-1', ?2, ?3, 'market', 'gtc', ?4, 0, 'filled',
+                    ?5, ?6, ?4, 0)",
+                rusqlite::params![
+                    id,
+                    instrument.instrument_id.as_str(),
+                    side,
+                    quantity,
+                    time,
+                    FIXTURE_PROVENANCE
+                ],
+            )
+            .expect("legacy order");
+        database
+            .execute(
+                "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
+                    price_scale, quantity_units, quantity_scale, execution_unix_nanos,
+                    provenance_json)
+                 VALUES (?1, ?2, 'aeris-sim-1', ?3, ?4, 5000, 2, ?5, 0, ?6, ?7)",
+                rusqlite::params![
+                    format!("fill-{id}"),
+                    id,
+                    instrument.instrument_id.as_str(),
+                    side,
+                    quantity,
+                    time,
+                    FIXTURE_PROVENANCE
+                ],
+            )
+            .expect("legacy fill");
+    }
+    database
+        .execute(
+            "INSERT INTO positions(account_id, instrument_id, net_units, net_scale,
+                average_units, average_scale, realized_units, realized_scale,
+                unrealized_units, unrealized_scale, last_fill_unix_nanos)
+             VALUES ('aeris-sim-1', ?1, 1, 0, 5000, 2, 0, 2, 0, 2, 20)",
+            [instrument.instrument_id.as_str()],
+        )
+        .expect("legacy open position");
+    drop(database);
+}
+
+#[test]
+fn migrated_legacy_partial_exit_matches_owner_with_unknown_pnl() {
+    let directory = TestDirectory::new("legacy-partial-trade-page");
+    let path = config(&directory).database_path;
+    write_legacy_partial_exit_fixture(&path);
+    let service = load_service(&directory);
+    let migrated = rusqlite::Connection::open(&path).expect("migrated database");
+    let accounting: (Option<i64>, Option<i64>, i64) = migrated
+        .query_row(
+            "SELECT realized_gross_units, cycle_realized_units, cycle_closed
+             FROM fill_accounting WHERE fill_id = 'fill-partial'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("migrated legacy accounting");
+    assert_eq!(accounting, (None, None, 0));
+    drop(migrated);
+    let owner = service.snapshot().expect("owner projection");
+    let exit = owner
+        .round_trips
+        .iter()
+        .find(|trade| {
+            trade
+                .exit_fill_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == "fill-partial")
+        })
+        .expect("owner projects the partial exit");
+    assert!(exit.closed);
+    assert_eq!(exit.final_pnl, None);
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let page = service
+        .trade_history(crate::TradeHistoryQuery {
+            account_id,
+            after: None,
+            limit: Some(1),
+        })
+        .expect("historical partial exit");
+    assert_eq!(page.trades, vec![exit.clone()]);
+    assert!(page.next.is_none());
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
 #[test]
 fn an_idle_runtime_publishes_nothing() {
     // VAL-TRD-067: no commands and no quote changes over minutes of timer ticks means zero

@@ -18,6 +18,12 @@ use export::write_atomic;
 use orders::decode_contract;
 pub(crate) use orders::order_history_page;
 pub use schema::SCHEMA_VERSION;
+#[cfg(test)]
+pub(crate) fn encode_contract_for_test(
+    contract: &aeris_instruments::ContractMetadata,
+) -> Result<String, String> {
+    orders::encode_contract(contract)
+}
 pub(crate) use schema::preflight_existing_database;
 #[cfg(test)]
 use schema::*;
@@ -819,7 +825,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 29);
+        assert_eq!(SCHEMA_VERSION, 30);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

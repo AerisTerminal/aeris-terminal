@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 29;
+pub const SCHEMA_VERSION: u32 = 30;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -388,6 +388,10 @@ pub(super) const MIGRATION_V29: &str = "
      requested_unix_nanos INTEGER NOT NULL,
      PRIMARY KEY(account_id, instrument_id)
  ) STRICT;";
+/// Account-scoped exit-time keyset iteration without sorting or scanning every account's fills.
+pub(super) const MIGRATION_V30: &str = "
+ CREATE INDEX fills_account_trade_history
+     ON fills(account_id, execution_unix_nanos DESC, id DESC);";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -563,6 +567,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 28,
         to: 29,
         sql: MIGRATION_V29,
+    },
+    Migration {
+        from: 29,
+        to: 30,
+        sql: MIGRATION_V30,
     },
 ];
 

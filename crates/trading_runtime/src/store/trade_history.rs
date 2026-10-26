@@ -5,6 +5,36 @@ use crate::core::ledger::FillAccounting;
 use crate::history::{TradeHistoryCursor, TradeHistoryPage, TradeHistoryQuery};
 use std::collections::BTreeMap;
 
+const EXIT_SELECTION: &str = "SELECT f.id, f.execution_unix_nanos, f.rowid, a.cycle_id
+         FROM fills f INDEXED BY fills_account_trade_history
+         JOIN fill_accounting a ON a.fill_id = f.id
+         WHERE f.account_id = ?1
+           AND (a.realized_gross_units IS NOT NULL OR a.cycle_realized_units IS NOT NULL
+                OR a.cycle_closed = 1
+                OR ((
+                    SELECT SUM(CASE prior.side WHEN 'buy' THEN prior.quantity_units
+                                    ELSE -prior.quantity_units END)
+                    FROM fills prior JOIN fill_accounting previous ON previous.fill_id = prior.id
+                    WHERE prior.account_id = f.account_id
+                      AND prior.instrument_id = f.instrument_id
+                      AND previous.cycle_id = a.cycle_id
+                      AND (prior.execution_unix_nanos < f.execution_unix_nanos
+                           OR (prior.execution_unix_nanos = f.execution_unix_nanos
+                               AND prior.rowid < f.rowid)))
+                    * CASE f.side WHEN 'sell' THEN 1 ELSE -1 END > 0))";
+
+fn exit_query(has_cursor: bool) -> String {
+    let cursor = if has_cursor {
+        " AND (f.execution_unix_nanos, f.id) < (?2, ?3)"
+    } else {
+        ""
+    };
+    let limit = if has_cursor { "?4" } else { "?2" };
+    format!(
+        "{EXIT_SELECTION}{cursor} ORDER BY f.execution_unix_nanos DESC, f.id DESC LIMIT {limit}"
+    )
+}
+
 pub(crate) fn trade_history_page(
     connection: &Connection,
     query: &TradeHistoryQuery,
@@ -14,37 +44,29 @@ pub(crate) fn trade_history_page(
         .limit
         .unwrap_or(crate::MAXIMUM_HISTORY_PAGE)
         .clamp(1, crate::MAXIMUM_HISTORY_PAGE);
-    let mut statement = transaction
-        .prepare(
-            "SELECT f.id, f.execution_unix_nanos, f.rowid, a.cycle_id
-         FROM fills f JOIN fill_accounting a ON a.fill_id = f.id
-         WHERE f.account_id = ?1
-           AND (a.realized_gross_units IS NOT NULL OR a.cycle_realized_units IS NOT NULL
-                OR a.cycle_closed = 1)
-           AND (?2 IS NULL OR (f.execution_unix_nanos, f.id) < (?2, ?3))
-         ORDER BY f.execution_unix_nanos DESC, f.id DESC LIMIT ?4",
-        )
-        .map_err(database_error)?;
+    let sql = exit_query(query.after.is_some());
+    let mut statement = transaction.prepare(&sql).map_err(database_error)?;
+    let mut parameters = vec![rusqlite::types::Value::from(
+        query.account_id.as_str().to_owned(),
+    )];
+    if let Some(cursor) = &query.after {
+        parameters.push(cursor.exit_unix_nanos.into());
+        parameters.push(cursor.exit_fill_id.as_str().to_owned().into());
+    }
+    parameters.push(
+        i64::try_from(limit + 1)
+            .map_err(|error| error.to_string())?
+            .into(),
+    );
     let rows = statement
-        .query_map(
-            params![
-                query.account_id.as_str(),
-                query.after.as_ref().map(|cursor| cursor.exit_unix_nanos),
-                query
-                    .after
-                    .as_ref()
-                    .map(|cursor| cursor.exit_fill_id.as_str()),
-                i64::try_from(limit + 1).map_err(|error| error.to_string())?,
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )
+        .query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
         .map_err(database_error)?;
     let mut exits = Vec::with_capacity(limit + 1);
     for row in rows {
@@ -178,4 +200,61 @@ fn project_exit(
         .into_iter()
         .find(|trade| trade.exit_fill_id.as_ref() == Some(exit_id))
         .ok_or_else(|| "historical exit could not be projected".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{TradingRetention, TradingStore, create_schema_at};
+
+    #[test]
+    fn migrated_trade_history_uses_account_keyset_index() {
+        let connection = Connection::open_in_memory().expect("database");
+        create_schema_at(&connection, 29);
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        store.migrate(false).expect("migrate from V29");
+        store
+            .complete_post_group_migrations()
+            .expect("finish migration");
+        for has_cursor in [false, true] {
+            let query = format!("EXPLAIN QUERY PLAN {}", exit_query(has_cursor));
+            let mut statement = store.connection.prepare(&query).expect("plan");
+            let plan = if has_cursor {
+                statement
+                    .query_map(params!["account", 100, "fill", 500], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .expect("cursor plan")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("steps")
+            } else {
+                statement
+                    .query_map(params!["account", 500], |row| row.get::<_, String>(3))
+                    .expect("first page plan")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("steps")
+            };
+            assert!(
+                plan.iter().any(|step| step
+                    .contains("SEARCH f USING INDEX fills_account_trade_history (account_id=?")),
+                "account index absent: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|step| step.contains("USE TEMP B-TREE FOR ORDER BY")),
+                "page sort must use the keyset index: {plan:?}"
+            );
+            if has_cursor {
+                assert!(
+                    plan.iter()
+                        .any(|step| step.contains("execution_unix_nanos<?")),
+                    "older pages must seek into the account's time range: {plan:?}"
+                );
+            }
+        }
+    }
 }
