@@ -110,24 +110,31 @@ fn chart_prices_convert_at_eight_places_despite_float_representation() {
 #[test]
 fn selected_account_lock_is_derived_from_the_runtime_meter() {
     let account = aeris_trading::TradingAccountId::try_new("aeris-sim-2").expect("account");
-    let mut state = super::TradingPnlState::default();
-    state.order_entry.selected_account_id = Some(account.clone());
-    state.risk_locks.push(aeris_trading_runtime::RiskLock {
+    let locks = [aeris_trading_runtime::RiskLock {
         account_id: account,
         kind: aeris_trading_runtime::RiskLockKind::Manual,
         reason: "manual test lock".to_string(),
         locked_at_unix_nanos: 1,
         profile_id: None,
         profile_version: None,
-    });
+    }];
+    let selected = locks[0].account_id.clone();
 
     assert_eq!(
-        super::selected_account_lock_reason(&state),
+        super::selected_account_lock_reason(super::PaneLockView {
+            selected_account: Some(&selected),
+            locks: &locks,
+        }),
         Some("manual test lock")
     );
-    state.order_entry.selected_account_id =
-        Some(aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("other account"));
-    assert_eq!(super::selected_account_lock_reason(&state), None);
+    let other = aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("other account");
+    assert_eq!(
+        super::selected_account_lock_reason(super::PaneLockView {
+            selected_account: Some(&other),
+            locks: &locks,
+        }),
+        None
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5702,28 +5709,27 @@ fn trading_projection_baseline_chart_account_and_risk_lock() {
         .expect("selected account");
     assert_eq!(account.display_name, "SIM • Chart fixture");
     assert_eq!(account.currency, "USD");
-    let mut pane = super::TradingPnlState {
-        accounts: snapshot.accounts,
-        orders: snapshot.orders,
-        planned_legs: snapshot.planned_legs,
-        positions: snapshot.position_pnl,
-        ..super::TradingPnlState::default()
-    };
-    pane.order_entry.selected_account_id = Some(fixture.account.clone());
     assert_eq!(
-        pane.instruments_with_activity(),
+        super::instruments_with_activity(
+            &snapshot.orders,
+            &snapshot.position_pnl,
+            Some(&fixture.account),
+        ),
         std::collections::HashSet::from([fixture.instrument_id.as_str()])
     );
-    pane.risk_locks.push(aeris_trading_runtime::RiskLock {
+    let locks = [aeris_trading_runtime::RiskLock {
         account_id: fixture.account.clone(),
         kind: aeris_trading_runtime::RiskLockKind::Manual,
         reason: "manual test lock".to_string(),
         locked_at_unix_nanos: 1,
         profile_id: None,
         profile_version: None,
-    });
+    }];
     assert_eq!(
-        super::selected_account_lock_reason(&pane),
+        super::selected_account_lock_reason(super::PaneLockView {
+            selected_account: Some(&fixture.account),
+            locks: &locks,
+        }),
         Some("manual test lock")
     );
     fixture.finish();
@@ -5768,52 +5774,47 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
             observed_unix_nanos: 1,
         },
     };
-    let mut state = super::TradingPnlState {
-        orders: vec![
-            order(
-                "working",
-                &account,
-                "instrument:fixture:A",
-                OrderStatus::Working,
-            ),
-            order(
-                "cancelled",
-                &account,
-                "instrument:fixture:B",
-                OrderStatus::Cancelled,
-            ),
-            order(
-                "elsewhere",
-                &other,
-                "instrument:fixture:C",
-                OrderStatus::Working,
-            ),
-        ],
-        positions: [("instrument:fixture:D", -2), ("instrument:fixture:E", 0)]
-            .into_iter()
-            .map(|(instrument_id, net)| aeris_trading_runtime::PositionPnl {
-                position: aeris_trading::Position {
-                    account_id: account.clone(),
-                    instrument_id: instrument(instrument_id),
-                    net_quantity: point(net, 0),
-                    average_entry_price: Some(point(689_625, 2)),
-                    realized_pnl: point(0, 2),
-                    unrealized_pnl: point(0, 2),
-                    last_fill_unix_nanos: 1,
-                },
-                realized_ticks: None,
-                unrealized_ticks: None,
-                point_value: None,
-                currency_scale: 2,
-            })
-            .collect(),
-        ..super::TradingPnlState::default()
-    };
-    assert!(state.instruments_with_activity().is_empty());
+    let orders = vec![
+        order(
+            "working",
+            &account,
+            "instrument:fixture:A",
+            OrderStatus::Working,
+        ),
+        order(
+            "cancelled",
+            &account,
+            "instrument:fixture:B",
+            OrderStatus::Cancelled,
+        ),
+        order(
+            "elsewhere",
+            &other,
+            "instrument:fixture:C",
+            OrderStatus::Working,
+        ),
+    ];
+    let positions = [("instrument:fixture:D", -2), ("instrument:fixture:E", 0)]
+        .into_iter()
+        .map(|(instrument_id, net)| aeris_trading_runtime::PositionPnl {
+            position: aeris_trading::Position {
+                account_id: account.clone(),
+                instrument_id: instrument(instrument_id),
+                net_quantity: point(net, 0),
+                average_entry_price: Some(point(689_625, 2)),
+                realized_pnl: point(0, 2),
+                unrealized_pnl: point(0, 2),
+                last_fill_unix_nanos: 1,
+            },
+            realized_ticks: None,
+            unrealized_ticks: None,
+            point_value: None,
+            currency_scale: 2,
+        })
+        .collect::<Vec<_>>();
+    assert!(super::instruments_with_activity(&orders, &positions, None).is_empty());
 
-    state.order_entry.selected_account_id = Some(account);
-    let mut active = state
-        .instruments_with_activity()
+    let mut active = super::instruments_with_activity(&orders, &positions, Some(&account))
         .into_iter()
         .collect::<Vec<_>>();
     active.sort_unstable();

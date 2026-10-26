@@ -1267,43 +1267,6 @@ fn selected_account_lock_reason<'a>(state: impl Into<PaneLockView<'a>>) -> Optio
         .map(|lock| lock.reason.as_str())
 }
 
-// The characterization test predates the projection split and keeps its original
-// fixture shape. It is not a production trading source.
-#[cfg(test)]
-#[derive(Default)]
-struct TradingPnlState {
-    accounts: Vec<aeris_trading::TradingAccount>,
-    orders: Vec<aeris_trading::Order>,
-    planned_legs: Vec<aeris_trading_runtime::PlannedLeg>,
-    positions: Vec<aeris_trading_runtime::PositionPnl>,
-    risk_locks: Vec<aeris_trading_runtime::RiskLock>,
-    order_entry: TradingOrderEntryState,
-}
-
-#[cfg(test)]
-impl<'a> From<&'a TradingPnlState> for PaneLockView<'a> {
-    fn from(state: &'a TradingPnlState) -> Self {
-        Self {
-            selected_account: state.order_entry.selected_account_id.as_ref(),
-            locks: &state.risk_locks,
-        }
-    }
-}
-
-#[cfg(test)]
-impl TradingPnlState {
-    fn instruments_with_activity(&self) -> HashSet<&str> {
-        // Keep the original test fixture shape while this characterization
-        // checks the order/position projection, not account or leg membership.
-        let _ = (&self.accounts, &self.planned_legs);
-        instruments_with_activity(
-            &self.orders,
-            &self.positions,
-            self.order_entry.selected_account_id.as_ref(),
-        )
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TradingOrderEntryState {
     quantity: u64,
