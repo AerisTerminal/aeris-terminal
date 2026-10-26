@@ -134,7 +134,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-02 | High | Closed-market and stale-quote protection exists only for one broker provider | M4.8 (groundwork M3.7) | provider-neutral session, feed-generation and per-class age gates in trading owner; GUI resting-order check outstanding |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | closed: one atomic step locks, cancels non-protective orders with the kill-switch cause and flattens priced positions; unpriced positions keep protection and are reported |
 | TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | closed: FlattenScope covers every account/instrument from owner quotes; event flatten needs no observation; broker closes cover every instrument |
-| TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | runtime closed: bounded change-driven publication, paged history and the snapshot guard fix landed in M5.11; desktop snapshot consumers remain with M6.10 |
+| TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | closed: bounded change-driven publication, paged history and snapshot guard in M5.11; M6.10 desktop reads only the subscription store, with no trading poll |
 | TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | closed: checkpoint-fold retention, checkpoint repair and the seeded property identity run |
 | TR-07 | High | Position protection is built from overlapping patch layers | M5.2 (validator), M5.5 (model), M5.6 (cleanup) | closed: one group authority, legacy layers deleted in M5.6 |
 | TR-08 | Medium | Fill model gaps | M5.1 (part), M5.2 (tick checks), M5.3, M5.4 | closed: resting and placement limits fill at their stated prices, stops/stop-limits emit durable triggers before touch fills, nonmarketable IOC/FOK and five-second no-quote markets cancel with typed causes, candidates are price-prioritized through a side-aware trigger index, fill quantity/price use the single touch-only policy pair, and DAY orders expire at their acceptance session close with verified-route calendar recovery |
@@ -149,7 +149,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | UI-05 | Medium | Busy-polling worker loop and duplicated slot/channel command paths | M3.9 (runtime/bridge part), M6.6 | closed: waitable coordinator outbox and bounded pane projection queue, no 2 ms polling |
 | UI-06 | Medium | Parallel message model and bespoke mailbox in the desktop | M6.1 (fixture part), M6.6 | closed: one coordinator-fenced runtime projection plus explicit local outcomes in the bounded pane queue |
 | UI-07 | High | `WorkspaceSurface` and `TerminalApp` are god objects with no internal encapsulation | M7.3 (AerisChartView), M7.4 (WorkspaceSurface), M7.5 (TerminalApp) | open |
-| UI-08 | Medium | Trading state duplicated per pane and polled from the render path | M6.10 | open |
+| UI-08 | Medium | Trading state duplicated per pane and polled from the render path | M6.10 | closed: one subscription-backed TradingStore, no render-path trading poll or per-pane owner-state copy; pane selection remains per pane |
 | UI-09 | Medium | Persistence lacks versioning, duplicates atomic-write logic, and silently resets on corruption | M7.7 (duplication/backup), M7.8 | open |
 | UI-10 | Medium | Control flow depends on matching display strings | M5.1 (runtime part), M6.8, M6.11 | open |
 | UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | exit park closed in 3c42981b; remainder open |
@@ -2246,6 +2246,21 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 request routing checkpoint): desktop `RequestId` and a
+    64-slot bounded in-flight map reserve ticket, chart trade-bar and
+    bottom-panel instrument-close commands before the owner call. Overflow
+    rejects before dispatch with one notice; completed results wake the UI,
+    reach the issuing live pane or the notice center after pane retirement.
+    The `feedback.latest()` fanout to all panes is gone; unscoped legacy
+    command feedback and deduplicated venue notices now reach the notice
+    center, not unrelated panes. A real simulated owner with scripted Live
+    quote produces one fill, one TradingStore change, one fill toast, one
+    affected-pane notify and zero for the unrelated account/instrument pane.
+    TR-05 (desktop) and UI-08 close. Remaining M6.10 code: correlate chart
+    intents, hotkeys, ladder and broker actions to their issuing pane rather
+    than the fallback notice center. M6.10 remains unchecked; remaining
+    pane-command correlation and VAL-DSK-034/035 GUI evidence are not yet
+    validated.
   - Status (2026-10-26 typed-notice checkpoint): the subscription store derives
     bounded, ID-deduplicated fill, broker-end, rejection, risk-warning,
     protection-not-placed and kill-switch announcements on publication adoption.
@@ -2485,6 +2500,12 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- Desktop pane trading request results hold at most 64 in-flight or
+  undrained slots; overload refuses a command before its owner call and
+  posts one notice. Completed results use a pane-lifetime marker rather
+  than a reused layout ID, falling back to the notice center if the pane
+  disappeared (M6.10 request routing checkpoint,
+  `feat(desktop): route bounded pane trading feedback`).
 - Historical closed trades page per account on the existing read-only worker,
   newest-first by exit time and fill ID, at most 500 rows and at most 500
   predecessor fills projected per exit; exact per-exit P&L comes from the
@@ -3131,6 +3152,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 3 of 3 fix(trading): retain migrated partial exits in trade pages. `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` seeds a pre-V21 partial reduction, opens it through the migrations and matches the owner's exact closed row with unknown P&L; `migrated_trade_history_uses_account_keyset_index` checks V29-to-V30 migration and both index query plans. `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `trade_history_ties_and_unknown_pnl_keep_every_closed_exit` retain their page/cursor coverage. M6.10 stays unchecked pending desktop conversion, typed notices and GUI evidence.
 - 2026-10-26 M6.10 Part 3 of 3 feat(desktop): show owner-projected historical trades - `trade_history_model_appends_trades_without_live_head_duplicates_and_stops_at_bound`, `historical_trade_pages_merge_accounts_and_reject_retired_account_completions` and `changed_accounts_reload_trade_pages_and_reject_old_completion` test cursor paging, the four-page cap, merged accounts, account-change and lagged stale completions, and owner's unchanged P&L; `closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl` and `migrated_legacy_partial_exit_matches_owner_with_unknown_pnl` retain owner-level exact and unknown P&L coverage. M6.10 remains unchecked for typed notices and GUI evidence.
 - 2026-10-26 M6.10 typed-notice checkpoint feat(desktop): derive trading notices on store adoption. `risk_warning_event_posts_one_warning_notice`, `risk_warning_event_has_one_keyed_warning_notice`, `one_fill_one_change_one_toast_one_notify` and the four unchanged `trading_projection_baseline_*` tests cover ID deduplication across revision replay, Warning severity and selective two-pane projection. The in-flight RequestId map, real-owner fill test and VAL-DSK-034/035 GUI evidence remain; M6.10 stays unchecked.
+- 2026-10-26 M6.10 request routing checkpoint feat(desktop): route bounded pane trading feedback. `pane_request_overflow_rejects_without_calling_the_owner`, `pane_results_follow_the_origin_and_dead_panes_reach_the_center` and `real_owner_fill_changes_one_store_once_and_notifies_only_affected_pane` cover the 64-slot bound, one overflow notice before an owner call, retired-pane notice-center fallback and a scripted real-owner fill (one store change, one fill toast, one affected-pane notify, zero unrelated). Removed `feedback.latest()` fanout; unscoped legacy feedback now goes to the notice center. TR-05 desktop and UI-08 close; M6.10 remains unchecked because chart/hotkey/ladder/broker commands still require pane correlation and VAL-DSK-034/035 GUI evidence is not yet validated.
 
 ## 7. Known gaps / deferred
 

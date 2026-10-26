@@ -127,6 +127,7 @@ struct WorkspaceSurfaceInitialization {
 // One line per surface field; splitting the literal would only scatter the defaults.
 #[allow(clippy::too_many_lines)]
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
+    let trading_pane_token = init.lifecycle.trading_feedback().pane();
     let descriptor = init
         .startup
         .product
@@ -177,6 +178,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         market_session_status: None,
         provider_transport_rtt_nanos: None,
         trading_pnl: TradingPaneState::default(),
+        trading_pane_token,
         order_quantity: init.order_quantity,
         order_ticket: init.order_ticket,
         chart_trading_visibility: init.chart_trading_visibility,

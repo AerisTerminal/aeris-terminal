@@ -928,6 +928,230 @@ mod tests {
         assert_eq!(store.take_announcements(), []);
     }
 
+    fn real_owner_fill_fixture() -> (
+        aeris_trading_runtime::TradingService,
+        std::path::PathBuf,
+        TradingAccountId,
+        TradingAccountId,
+        InstrumentId,
+        InstrumentId,
+    ) {
+        use aeris_trading::{AccountEnvironment, FixedPoint, TradingAccount};
+        use aeris_trading_runtime::{
+            ExecutionPolicy, TradingRetention, TradingService, TradingServiceConfig,
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "aeris-real-fill-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir(&root).expect("unique test root");
+        let clock = Arc::new(ManualClock::new(1_000_000_000_000));
+        let service = TradingService::start(TradingServiceConfig {
+            database_path: root.join("trading.sqlite3"),
+            retention: TradingRetention::default(),
+            clock,
+            execution: ExecutionPolicy::default(),
+        })
+        .expect("real trading owner");
+        let account = TradingAccountId::try_new("sim-real-fill").expect("account");
+        let other_account = TradingAccountId::try_new("sim-unrelated").expect("other account");
+        let instrument = InstrumentId::try_new("instrument:fixture:real-fill").expect("instrument");
+        let other_instrument = InstrumentId::try_new("instrument:fixture:other").expect("other");
+        let price = |units| FixedPoint::try_new(units, 2).expect("price");
+        service
+            .register_account(TradingAccount {
+                id: account.clone(),
+                display_name: "Simulated test".into(),
+                environment: AccountEnvironment::Simulated,
+                venue_id: "aeris-sim".into(),
+                broker_ref: None,
+                currency: "USD".into(),
+                currency_scale: 2,
+                starting_equity: Some(price(1_000_000)),
+            })
+            .expect("account registered");
+        service
+            .register_account(TradingAccount {
+                id: other_account.clone(),
+                display_name: "SIM unrelated test".into(),
+                environment: AccountEnvironment::Simulated,
+                venue_id: "aeris-sim".into(),
+                broker_ref: None,
+                currency: "USD".into(),
+                currency_scale: 2,
+                starting_equity: Some(price(1_000_000)),
+            })
+            .expect("other account registered");
+        script_owner_quote(&service, &instrument);
+        (
+            service,
+            root,
+            account,
+            other_account,
+            instrument,
+            other_instrument,
+        )
+    }
+
+    fn script_owner_quote(
+        service: &aeris_trading_runtime::TradingService,
+        instrument: &InstrumentId,
+    ) {
+        use aeris_instruments::{
+            CalendarSourceKind, InstrumentClass, InstrumentDecimal, PriceGrid, SessionPhase,
+        };
+        use aeris_trading::FixedPoint;
+        use aeris_trading::market::{
+            FeedState, InstrumentSession, InstrumentTerms, MarketFeedError, MarketFeedEvent,
+            MarketRoute, QuoteInterest, QuoteInterestSink, TradingQuote,
+        };
+
+        struct ScriptedInterest;
+        impl QuoteInterestSink for ScriptedInterest {
+            fn set_interest(&self, _: QuoteInterest) -> Result<(), MarketFeedError> {
+                Ok(())
+            }
+        }
+        let price = |units| FixedPoint::try_new(units, 2).expect("price");
+        let feed = service
+            .attach_market_feed(Arc::new(ScriptedInterest))
+            .expect("feed");
+        feed.push(MarketFeedEvent::Terms(InstrumentTerms {
+            route: MarketRoute {
+                provider_id: "fixture".into(),
+                instrument_id: instrument.clone(),
+                provider_symbol: "REAL".into(),
+                display_symbol: "REAL".into(),
+                venue_id: "Fixture".into(),
+                entitlement_id: None,
+                price_scale: 2,
+                quantity_scale: 0,
+            },
+            instrument_class: InstrumentClass::CryptoPerpetual,
+            price_grid: PriceGrid::Fixed(InstrumentDecimal::try_new(1, 2).expect("tick")),
+            point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point")),
+            quantity_increment: Some(InstrumentDecimal::try_new(1, 0).expect("lot")),
+            currency: "USD".into(),
+            expiry: None,
+            first_notice: None,
+            last_trade: None,
+            session_hours: vec![],
+            session_generation: 1,
+        }))
+        .expect("verified terms");
+        feed.push(MarketFeedEvent::Session(InstrumentSession {
+            instrument_id: instrument.clone(),
+            provider_generation: 1,
+            phase: SessionPhase::AlwaysOpen,
+            source: CalendarSourceKind::ProviderCalendar,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        }))
+        .expect("open session");
+        feed.push(MarketFeedEvent::Feed {
+            instrument_id: instrument.clone(),
+            provider_generation: 1,
+            state: FeedState::Live,
+        })
+        .expect("live feed");
+        feed.push(MarketFeedEvent::Quote(TradingQuote {
+            instrument_id: instrument.clone(),
+            bid: price(10_000),
+            ask: price(10_025),
+            bid_size: None,
+            ask_size: None,
+            last: None,
+            provider_id: "fixture".into(),
+            provider_generation: 1,
+            source_sequence: Some(1),
+            exchange_unix_nanos: None,
+            received_unix_nanos: 1_000_000_000_000,
+        }))
+        .expect("scripted quote");
+        service.status().expect("quote adopted");
+    }
+
+    #[test]
+    fn real_owner_fill_changes_one_store_once_and_notifies_only_affected_pane() {
+        use aeris_trading::{
+            ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingProvenance,
+        };
+        use aeris_trading_runtime::PlaceOrder;
+
+        let (service, root, account, other_account, instrument, other_instrument) =
+            real_owner_fill_fixture();
+        let subscription = service.subscribe().expect("owner subscription");
+        let mut store = TradingStore::default();
+        let initial = subscription
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial view");
+        assert!(store.slot.lock().expect("slot").offer(initial));
+        store.drain().expect("initial store view");
+        assert_eq!(store.take_announcements(), []);
+        service
+            .place_order(PlaceOrder {
+                client_order_id: ClientOrderId::try_new("real-fill-order").expect("client id"),
+                account_id: account.clone(),
+                instrument_id: instrument.clone(),
+                side: OrderSide::Buy,
+                order_type: OrderType::Market,
+                time_in_force: TimeInForce::Day,
+                quantity: FixedPoint::try_new(1, 0).expect("quantity"),
+                limit_price: None,
+                stop_price: None,
+                submitted_unix_nanos: 1_000_000_000_000,
+                provenance: TradingProvenance {
+                    venue_id: "aeris-sim".into(),
+                    provider_id: "fixture".into(),
+                    session_generation: 1,
+                    source_sequence: 1,
+                    observed_unix_nanos: 1_000_000_000_000,
+                },
+            })
+            .expect("owner filled against scripted quote");
+        let publication = subscription
+            .recv_timeout(Duration::from_secs(2))
+            .expect("one fill event");
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        assert!(store.drain().is_some(), "one TradingStore change");
+        assert_eq!(store.current().expect("owner view").fills.len(), 1);
+        let announcements = store.take_announcements();
+        assert_eq!(
+            announcements
+                .iter()
+                .filter(|item| matches!(item, TradingAnnouncement::Fill(_)))
+                .count(),
+            1
+        );
+        let (toasts, _) = super::super::toaster::test_trading_toast_counts(
+            &announcements,
+            store.current().expect("view"),
+            1,
+        );
+        assert_eq!(toasts, 1, "one fill toast");
+        assert_eq!(
+            usize::from(store.pane_changed(Some(&account), Some(&instrument))),
+            1
+        );
+        assert_eq!(
+            usize::from(store.pane_changed(Some(&other_account), Some(&other_instrument))),
+            0
+        );
+        assert!(store.drain().is_none(), "no second store change");
+        assert!(
+            subscription
+                .recv_timeout(Duration::from_millis(50))
+                .is_none(),
+            "one owner publication"
+        );
+        service
+            .shutdown(Duration::from_secs(2))
+            .expect("owner shutdown");
+        std::fs::remove_dir_all(root).expect("remove test-owned root");
+    }
+
     #[test]
     fn ticket_hotkey_and_quantity_read_selected_store_publication() {
         let (mut publication, account, other, instrument) = indexed_fixture();

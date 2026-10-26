@@ -2,7 +2,7 @@
 //! the Buy / quantity / Sell bar under the chart's symbol legend, with its quantity menu. The
 //! quantity itself stays in the surface's order entry; this module only edits and shows it.
 
-use super::order_ticket::{dispatch_market, trade_variant};
+use super::order_ticket::trade_variant;
 use super::*;
 use gpui::{anchored, deferred};
 
@@ -375,13 +375,20 @@ fn trade_bar_order_button(
                 if let Some(frame) = frame.as_ref() {
                     let service = surface.read(cx).lifecycle.trading().clone();
                     let feedback = surface.read(cx).lifecycle.trading_feedback().clone();
-                    dispatch_market(
+                    let pane = surface.read(cx).trading_pane_token.clone();
+                    aeris_desktop::trading::dispatch_simulated_selected_order(
                         &service,
                         &feedback,
                         frame,
-                        account.clone(),
-                        quantity,
                         side,
+                        aeris_desktop::trading::SimulatedOrderSelection {
+                            account_key: account.clone(),
+                            quantity,
+                            order_type: aeris_trading::OrderType::Market,
+                            time_in_force: aeris_trading::TimeInForce::Day,
+                            template_id: None,
+                        },
+                        &pane,
                         cx,
                     );
                 }

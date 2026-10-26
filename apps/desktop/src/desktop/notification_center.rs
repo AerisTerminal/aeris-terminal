@@ -26,6 +26,7 @@ pub(super) enum NoticeTone {
 pub(super) enum NoticeSource {
     Pane(u64),
     Workspace,
+    Trading(aeris_desktop::trading::RequestId),
     Persistence,
     Provider(&'static str),
 }

@@ -3684,6 +3684,9 @@ impl TerminalApp {
         })
         .detach();
         let wake = self.market_frame_wake.clone();
+        self.lifecycle
+            .trading_feedback()
+            .set_request_wake(wake.callback());
         cx.spawn_in(window, async move |terminal, cx| {
             loop {
                 wake.notified().await;
@@ -3692,6 +3695,9 @@ impl TerminalApp {
                         if terminal.trading_store.read(terminal_cx).has_pending() {
                             terminal.apply_trading_publication(terminal_cx);
                             terminal_cx.notify();
+                        }
+                        if terminal.lifecycle.trading_feedback().has_request_results() {
+                            terminal.apply_trading_request_results(terminal_cx);
                         }
                         terminal.schedule_market_frame(window, terminal_cx);
                     })

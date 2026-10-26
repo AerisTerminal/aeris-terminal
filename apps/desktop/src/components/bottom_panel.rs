@@ -759,12 +759,13 @@ impl TerminalApp {
         instrument_id: &aeris_instruments::InstrumentId,
         cx: &mut Context<Self>,
     ) {
-        let frame = self
+        let quote = self
             .workspaces
             .iter()
             .flat_map(|workspace| &workspace.panes)
             .find_map(|pane| {
-                pane.surface
+                let frame = pane
+                    .surface
                     .read(cx)
                     .order_book
                     .read(cx)
@@ -774,12 +775,14 @@ impl TerminalApp {
                             && frame.best_bid.is_some()
                             && frame.best_ask.is_some()
                     })
-                    .cloned()
+                    .cloned();
+                frame.map(|frame| (frame, pane.surface.read(cx).trading_pane_token.clone()))
             });
-        if let Some(frame) = frame {
+        if let Some((frame, pane)) = quote {
             aeris_desktop::trading::flatten_simulated_account_for(
                 self.lifecycle.trading(),
                 self.lifecycle.trading_feedback(),
+                &pane,
                 &frame,
                 Some(account_key),
                 cx,

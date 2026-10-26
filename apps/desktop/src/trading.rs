@@ -5,7 +5,40 @@ use aeris_trading_runtime::clock::{Clock, SystemClock};
 use aeris_trading_runtime::{
     CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, TradeCopierConfig, TradingService,
 };
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, Weak};
+
+/// At most 64 desktop commands may await a UI result. Holding completed results in the
+/// same map also bounds a suspended window without silently dropping command outcomes.
+pub const MAXIMUM_IN_FLIGHT_TRADING_REQUESTS: usize = 64;
+const REQUEST_CAPACITY_NOTICE: &str = "Too many trading commands are waiting for a result";
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RequestId(u64);
+
+impl RequestId {
+    #[must_use]
+    pub fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// The pane owns this marker. A completion whose marker has expired belongs to the
+/// notice center, never to a replacement pane with a reused layout identifier.
+#[derive(Clone, Default)]
+pub struct TradingPaneToken(Arc<()>);
+
+impl TradingPaneToken {
+    #[must_use]
+    pub fn owns(&self, origin: &Weak<()>) -> bool {
+        Weak::ptr_eq(&Arc::downgrade(&self.0), origin)
+    }
+}
+
+struct PendingRequest {
+    origin: Weak<()>,
+    result: Option<TradingCommandFeedback>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradingCommandFeedback {
@@ -18,6 +51,10 @@ pub struct TradingCommandFeedback {
 struct TradingFeedbackState {
     revision: u64,
     latest: Option<TradingCommandFeedback>,
+    unscoped_notice: Option<TradingCommandFeedback>,
+    next_request: u64,
+    in_flight: BTreeMap<RequestId, PendingRequest>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
     /// The sequence of the newest broker venue notice already shown.
     venue_notice_seen: u64,
 }
@@ -36,6 +73,121 @@ impl Default for TradingFeedback {
 }
 
 impl TradingFeedback {
+    pub fn set_request_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wake = Some(wake);
+    }
+
+    #[must_use]
+    pub fn pane(&self) -> TradingPaneToken {
+        TradingPaneToken::default()
+    }
+
+    /// Reserve before calling the runtime. Overflow reports exactly one error and the
+    /// caller must not execute the command when this returns None.
+    #[must_use]
+    pub fn begin_request(&self, pane: &TradingPaneToken) -> Option<RequestId> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.in_flight.len() >= MAXIMUM_IN_FLIGHT_TRADING_REQUESTS {
+            drop(state);
+            self.record(Err(REQUEST_CAPACITY_NOTICE.to_string()));
+            return None;
+        }
+        state.next_request = state.next_request.checked_add(1)?;
+        let id = RequestId(state.next_request);
+        state.in_flight.insert(
+            id,
+            PendingRequest {
+                origin: Arc::downgrade(&pane.0),
+                result: None,
+            },
+        );
+        Some(id)
+    }
+
+    pub fn finish_request(&self, id: RequestId, result: Result<String, String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.revision = state.revision.saturating_add(1).max(1);
+        let revision = state.revision;
+        if let Some(request) = state.in_flight.get_mut(&id) {
+            request.result = Some(match result {
+                Ok(message) => TradingCommandFeedback {
+                    revision,
+                    message,
+                    is_error: false,
+                },
+                Err(message) => TradingCommandFeedback {
+                    revision,
+                    message,
+                    is_error: true,
+                },
+            });
+        }
+        let wake = state.wake.clone();
+        drop(state);
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    #[must_use]
+    pub fn has_request_results(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.unscoped_notice.is_some()
+            || state
+                .in_flight
+                .values()
+                .any(|request| request.result.is_some())
+    }
+
+    #[must_use]
+    pub fn take_unscoped_notice(&self) -> Option<TradingCommandFeedback> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unscoped_notice
+            .take()
+    }
+
+    /// Completed results are consumed once by the UI; unfinished reservations retain
+    /// their capacity. A dead pane's weak marker tells the caller to use the notice center.
+    #[must_use]
+    pub fn take_request_results(
+        &self,
+    ) -> Vec<(RequestId, Option<Weak<()>>, TradingCommandFeedback)> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let complete: Vec<_> = state
+            .in_flight
+            .iter()
+            .filter_map(|(id, request)| request.result.as_ref().map(|_| *id))
+            .collect();
+        complete
+            .into_iter()
+            .filter_map(|id| {
+                let request = state.in_flight.remove(&id)?;
+                Some((
+                    id,
+                    request.origin.upgrade().map(|_| request.origin),
+                    request.result?,
+                ))
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -68,6 +220,15 @@ impl TradingFeedback {
                 is_error: true,
             },
         });
+        {
+            let inner = &mut *state;
+            inner.unscoped_notice.clone_from(&inner.latest);
+        }
+        let wake = state.wake.clone();
+        drop(state);
+        if let Some(wake) = wake {
+            wake();
+        }
     }
 
     /// Shows the trading owner's venue notices this instance has not shown yet as one error
@@ -381,6 +542,7 @@ pub fn dispatch_simulated_selected_order(
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
     selection: SimulatedOrderSelection,
+    pane: &TradingPaneToken,
     cx: &mut gpui::App,
 ) {
     if order_type_requires_price(selection.order_type) {
@@ -403,6 +565,9 @@ pub fn dispatch_simulated_selected_order(
         ));
         return;
     };
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
             let result = if let Some(template_id) = selection.template_id {
@@ -414,7 +579,7 @@ pub fn dispatch_simulated_selected_order(
                     .place_order_from_market(entry, true)
                     .map(|order| order_outcome(&order, OrderOutcome::Placed))
             };
-            feedback.record(result);
+            feedback.finish_request(request_id, result);
         })
         .detach();
 }
@@ -586,6 +751,7 @@ pub struct TicketOrder {
 pub fn dispatch_ticket_order(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     frame: &aeris_market_data::OrderBookFrame,
     order: TicketOrder,
     cx: &mut gpui::App,
@@ -614,6 +780,9 @@ pub fn dispatch_ticket_order(
         (entry.limit_price, entry.stop_price) = price_fields(order.order_type, price);
     }
     let at_touch = order.price_units.is_none();
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
             let result = match order.bracket {
@@ -629,7 +798,7 @@ pub fn dispatch_ticket_order(
                     .place_order_from_market(entry, at_touch)
                     .map(|order| order_outcome(&order, OrderOutcome::Placed)),
             };
-            feedback.record(result);
+            feedback.finish_request(request_id, result);
         })
         .detach();
 }
@@ -652,6 +821,7 @@ fn bracket_outcome(placement: &aeris_trading_runtime::PlacementOutcome) -> Strin
 pub fn cancel_simulated_account(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     account_key: Option<String>,
     cx: &mut gpui::App,
 ) {
@@ -659,9 +829,13 @@ pub fn cancel_simulated_account(
     let feedback = feedback.clone();
     let account =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok());
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(
+            feedback.finish_request(
+                request_id,
                 service
                     .cancel_all(account)
                     .map(|orders| cancel_all_outcome(&orders)),
@@ -990,6 +1164,7 @@ pub fn flatten_simulated_account(
 pub fn flatten_simulated_account_for(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     frame: &aeris_market_data::OrderBookFrame,
     account_key: Option<String>,
     cx: &mut gpui::App,
@@ -1002,15 +1177,21 @@ pub fn flatten_simulated_account_for(
         ));
         return;
     };
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(flatten_feedback(
-                "Flattened",
-                service.flatten(aeris_trading_runtime::FlattenScope {
-                    account: Some(account_id),
-                    instrument: Some(instrument),
-                }),
-            ));
+            feedback.finish_request(
+                request_id,
+                flatten_feedback(
+                    "Flattened",
+                    service.flatten(aeris_trading_runtime::FlattenScope {
+                        account: Some(account_id),
+                        instrument: Some(instrument),
+                    }),
+                ),
+            );
         })
         .detach();
 }
@@ -1041,8 +1222,61 @@ pub fn prepare_flatten_for(
 #[cfg(test)]
 mod tests {
     use super::{
-        TradingFeedback, account_flatten_scope, parse_usd_equity, prepare_simulated_order,
+        MAXIMUM_IN_FLIGHT_TRADING_REQUESTS, TradingFeedback, account_flatten_scope,
+        parse_usd_equity, prepare_simulated_order,
     };
+
+    #[test]
+    fn pane_request_overflow_rejects_without_calling_the_owner() {
+        let feedback = TradingFeedback::default();
+        let pane = feedback.pane();
+        let mut owner_calls = 0;
+        let mut pending = Vec::new();
+        for _ in 0..MAXIMUM_IN_FLIGHT_TRADING_REQUESTS {
+            let request = feedback.begin_request(&pane).expect("within bound");
+            owner_calls += 1;
+            pending.push(request);
+        }
+        assert!(feedback.begin_request(&pane).is_none());
+        assert_eq!(owner_calls, MAXIMUM_IN_FLIGHT_TRADING_REQUESTS);
+        assert!(feedback.take_request_results().is_empty());
+        let overflow = feedback.latest().expect("one overflow notice");
+        assert!(overflow.is_error);
+        assert_eq!(overflow.message, super::REQUEST_CAPACITY_NOTICE);
+        assert_eq!(feedback.take_unscoped_notice(), Some(overflow));
+        assert!(
+            feedback.take_unscoped_notice().is_none(),
+            "exactly one overflow notice"
+        );
+        feedback.finish_request(pending.remove(0), Ok("accepted".into()));
+        let results = feedback.take_request_results();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_some());
+        assert_eq!(results[0].2.message, "accepted");
+        assert!(feedback.begin_request(&pane).is_some());
+    }
+
+    #[test]
+    fn pane_results_follow_the_origin_and_dead_panes_reach_the_center() {
+        let feedback = TradingFeedback::default();
+        let first = feedback.pane();
+        let unrelated = feedback.pane();
+        let request = feedback.begin_request(&first).expect("reservation");
+        feedback.finish_request(request, Err("rejected".into()));
+        let results = feedback.take_request_results();
+        assert_eq!(results.len(), 1);
+        assert!(first.owns(results[0].1.as_ref().expect("origin")));
+        assert!(!unrelated.owns(results[0].1.as_ref().expect("origin")));
+        assert_eq!(results[0].2.message, "rejected");
+        assert!(feedback.take_request_results().is_empty());
+        let retired = feedback.pane();
+        let request = feedback.begin_request(&retired).expect("reservation");
+        drop(retired);
+        feedback.finish_request(request, Ok("completed".into()));
+        let results = feedback.take_request_results();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_none(), "dead pane routes to notice center");
+    }
 
     #[test]
     fn venue_notices_show_once_on_the_feedback_line() {

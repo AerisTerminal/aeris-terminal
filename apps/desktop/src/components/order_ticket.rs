@@ -1039,6 +1039,7 @@ fn order_button(
             };
             let service = app.read(cx).lifecycle.trading().clone();
             let feedback = app.read(cx).lifecycle.trading_feedback().clone();
+            let pane = app.read(cx).trading_pane_token.clone();
             let price_units = match ticket_price(action, side, frame, settings.offset()) {
                 Ok(price_units) => price_units,
                 Err(reason) => {
@@ -1049,6 +1050,7 @@ fn order_button(
             aeris_desktop::trading::dispatch_ticket_order(
                 &service,
                 &feedback,
+                &pane,
                 frame,
                 aeris_desktop::trading::TicketOrder {
                     side,
@@ -1075,9 +1077,11 @@ fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
         .on_click(move |_, _, cx| {
             let service = app.read(cx).lifecycle.trading().clone();
             let feedback = app.read(cx).lifecycle.trading_feedback().clone();
+            let pane = app.read(cx).trading_pane_token.clone();
             aeris_desktop::trading::cancel_simulated_account(
                 &service,
                 &feedback,
+                &pane,
                 account.clone(),
                 cx,
             );
@@ -1100,9 +1104,11 @@ fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> 
             };
             let service = app.read(cx).lifecycle.trading().clone();
             let feedback = app.read(cx).lifecycle.trading_feedback().clone();
+            let pane = app.read(cx).trading_pane_token.clone();
             aeris_desktop::trading::flatten_simulated_account_for(
                 &service,
                 &feedback,
+                &pane,
                 frame,
                 account.clone(),
                 cx,
@@ -1313,31 +1319,6 @@ pub(super) const fn trade_variant(side: aeris_trading::OrderSide) -> ButtonVaria
         aeris_trading::OrderSide::Buy => ButtonVariant::Buy,
         aeris_trading::OrderSide::Sell => ButtonVariant::Sell,
     }
-}
-
-pub(super) fn dispatch_market(
-    service: &aeris_trading_runtime::TradingService,
-    feedback: &aeris_desktop::trading::TradingFeedback,
-    frame: &aeris_market_data::OrderBookFrame,
-    account: Option<String>,
-    quantity: u64,
-    side: aeris_trading::OrderSide,
-    cx: &mut App,
-) {
-    aeris_desktop::trading::dispatch_simulated_selected_order(
-        service,
-        feedback,
-        frame,
-        side,
-        aeris_desktop::trading::SimulatedOrderSelection {
-            account_key: account,
-            quantity,
-            order_type: aeris_trading::OrderType::Market,
-            time_in_force: aeris_trading::TimeInForce::Day,
-            template_id: None,
-        },
-        cx,
-    );
 }
 
 fn status_rows(

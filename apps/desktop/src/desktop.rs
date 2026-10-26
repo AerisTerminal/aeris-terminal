@@ -954,6 +954,7 @@ struct WorkspaceSurface {
     market_session_status: Option<aeris_contracts::MarketSessionStatus>,
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPaneState,
+    trading_pane_token: aeris_desktop::trading::TradingPaneToken,
     order_quantity: order_quantity::OrderQuantityControls,
     order_ticket: order_ticket::OrderTicketControls,
     chart_trading_visibility: ChartTradingVisibilitySettings,

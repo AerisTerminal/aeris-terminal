@@ -89,6 +89,11 @@ violations and missing verification explicitly, and never describe them as satis
 - Desktop trading command feedback belongs to the instance's `DesktopServices`; command
   writers and pane readers use its shared handle, never a process-global
   `TRADING_FEEDBACK` or `trading::latest_feedback()` lookup.
+- Desktop pane command feedback reserves one of 64 in-flight or undrained
+  request slots before the trading owner call. A full map refuses the command
+  with one notice and no owner call. Completed requests use a pane-lifetime
+  marker so a retired pane's result reaches the notice center, never a
+  replacement pane that inherited its layout identifier.
 - Desktop trading instruction and pane alert timestamps use the instance's
   `DesktopServices` clock; do not restore `trading::now()` or a process-global
   desktop clock.

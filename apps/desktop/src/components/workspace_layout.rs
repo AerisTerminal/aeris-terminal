@@ -636,6 +636,91 @@ fn project_working_order_markers(
 
 /// Apply only a new subscription publication, never a timer or render-path read.
 impl TerminalApp {
+    pub(super) fn apply_trading_request_results(&mut self, cx: &mut Context<Self>) {
+        for (id, origin, result) in self.lifecycle.trading_feedback().take_request_results() {
+            let pane = origin.as_ref().and_then(|origin| {
+                self.workspaces
+                    .iter()
+                    .flat_map(|workspace| &workspace.panes)
+                    .find(|pane| pane.surface.read(cx).trading_pane_token.owns(origin))
+                    .map(|pane| pane.surface.clone())
+            });
+            if let Some(pane) = pane {
+                pane.update(cx, |surface, pane_cx| {
+                    surface.trading_pnl.feedback = Some(result);
+                    pane_cx.notify();
+                });
+            } else if let Some(host) = toast_host(&self.workspaces[self.active]) {
+                self.toaster.post_notice(
+                    host,
+                    notification_center::UserNotice {
+                        key: notification_center::NoticeKey {
+                            scope: id.value(),
+                            kind: "trading_result",
+                        },
+                        severity: if result.is_error {
+                            notification_center::NoticeSeverity::Error
+                        } else {
+                            notification_center::NoticeSeverity::Warning
+                        },
+                        tone: if result.is_error {
+                            notification_center::NoticeTone::Loss
+                        } else {
+                            notification_center::NoticeTone::Warning
+                        },
+                        source: notification_center::NoticeSource::Trading(id),
+                        title: if result.is_error {
+                            "Trading command failed"
+                        } else {
+                            "Trading command completed"
+                        },
+                        detail: result.message,
+                        action: None,
+                        lifetime: notification_center::NoticeLifetime::Timed(Duration::from_secs(
+                            6,
+                        )),
+                    },
+                    Instant::now(),
+                );
+                cx.notify();
+            }
+        }
+        if let Some(result) = self.lifecycle.trading_feedback().take_unscoped_notice()
+            && let Some(host) = toast_host(&self.workspaces[self.active])
+        {
+            self.toaster.post_notice(
+                host,
+                notification_center::UserNotice {
+                    key: notification_center::NoticeKey {
+                        scope: result.revision,
+                        kind: "trading_notice",
+                    },
+                    severity: if result.is_error {
+                        notification_center::NoticeSeverity::Error
+                    } else {
+                        notification_center::NoticeSeverity::Warning
+                    },
+                    tone: if result.is_error {
+                        notification_center::NoticeTone::Loss
+                    } else {
+                        notification_center::NoticeTone::Warning
+                    },
+                    source: notification_center::NoticeSource::Workspace,
+                    title: if result.is_error {
+                        "Trading command failed"
+                    } else {
+                        "Trading command completed"
+                    },
+                    detail: result.message,
+                    action: None,
+                    lifetime: notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                },
+                Instant::now(),
+            );
+            cx.notify();
+        }
+    }
+
     pub(super) fn refresh_trading_pane_for_selection(
         &self,
         pane: &Entity<WorkspaceSurface>,
@@ -674,7 +759,6 @@ impl TerminalApp {
         };
         let feedback = self.lifecycle.trading_feedback();
         feedback.record_venue_notices(&snapshot.venue_notices);
-        let latest = feedback.latest();
         if resync {
             self.bottom_panel.invalidate_trading_revision();
         }
@@ -698,27 +782,12 @@ impl TerminalApp {
                     .trading_store
                     .read(cx)
                     .pane_changed(selected, instrument.as_ref());
-                let feedback_changed = latest.as_ref().map(|feedback| feedback.revision)
-                    > state
-                        .trading_pnl
-                        .feedback
-                        .as_ref()
-                        .map(|feedback| feedback.revision);
-                if !changed && !feedback_changed {
+                if !changed {
                     continue;
                 }
                 #[cfg(test)]
                 self.trading_store.read(cx).note_pane_notify();
                 pane.surface.update(cx, |state, state_cx| {
-                    if latest.as_ref().map(|feedback| feedback.revision)
-                        > state
-                            .trading_pnl
-                            .feedback
-                            .as_ref()
-                            .map(|feedback| feedback.revision)
-                    {
-                        state.trading_pnl.feedback.clone_from(&latest);
-                    }
                     apply_trading_snapshot(state, &self.trading_store, state_cx);
                 });
             }
