@@ -2246,6 +2246,15 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 hosted parallel follow-up): the first fix removed stale
+    wakers but CI run 40327391920 still aborted in the parallel desktop suite.
+    `ITERATIONS=50` isolated a second case: an active GPUI fixture's subscription
+    bridge woke the deterministic scheduler from a foreign thread at seed 1.
+    UI fixtures now inject an empty store instead of starting the real bridge;
+    the dedicated bridge/owner shutdown tests still exercise its live path.
+    `terminal_fixture_keeps_the_subscription_thread_off_the_gpui_scheduler`
+    asserts the fixture boundary; the previously failing 50-seed close test
+    passes. M6.10 remains unchecked pending Part 3 and GUI evidence.
   - Status (2026-10-26 parallel CI abort fix): `UiWakeNotified` retained a GPUI
     local-task waker after the listener completed or was dropped. The new
     TradingStore bridge invoked that stale waker from its named thread after a
@@ -2374,6 +2383,10 @@ the repo root `AGENTS.md`.
   cancellation, before a late trading bridge callback can reach a retired
   GPUI scheduler. CI runs workspace tests with default parallelism (M6.10
   parallel abort fix, `fix(desktop): release retired GPUI wake registrations`).
+- GPUI interaction fixtures inject an empty trading store instead of starting
+  an uncontrolled subscription bridge; owner-level bridge tests use the real
+  trading service and explicit join. Default-parallel CI is retained (M6.10
+  hosted parallel follow-up, `fix(desktop): isolate GPUI fixtures from trading bridge threads`).
 - Trading publications use the `StoredState` live group-id index, updated atomically with
   every owner group transition and seeded on recovery. Open-order and group projections
   never scan terminal order/group history; order events and fills publish at most 500 rows
@@ -2968,6 +2981,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.10 Part 2 feat(desktop): project trading from one subscription store. `out_of_order_revisions_keep_newest_and_lagged_replaces`, `same_revision_mark_updates_replace_the_slot_without_losing_lag`, `bridge_has_one_pending_ui_wake_and_nonblocking_drain`, `bridge_shutdown_drops_subscription_and_joins_within_receive_bound`, `lagged_working_set_reloads_history_at_the_same_revision` and the four unchanged `trading_projection_baseline_*` regressions cover the WorkingSet desktop source, UI convergence, mark-only changes, lagged history and shutdown. M6.10 remains unchecked pending Part 3 and GUI evidence.
 - 2026-10-26 M6.10 Part 2 continuation refactor(desktop): apply trading publications on subscription wakes. `idle_minute_produces_no_trading_work`, the four unchanged `trading_projection_baseline_*` tests, and three `desktop_trading_reads_come_from_trading_store_*` tests cover the idle and production-read boundary; the 250 ms timer and render-path refresh are removed. Concurrent or verbose GPUI interaction tests reproduce Windows `0xc0000409`; CI runs all cases serially with quiet output. Pane caches, per-revision indexes, selective notifies and history pages remain for Part 3; M6.10 remains unchecked.
 - 2026-10-26 M6.10 fix(desktop): release retired GPUI wake registrations. Parallel Windows abort root cause was a stale `UiWakeNotified` waker kept after task completion/cancellation and invoked by the new TradingStore bridge from a foreign thread after GPUI's test scheduler ended. Both Ready paths and Drop now unregister it; two deterministic regressions cover the late-callback cases. The serial quiet CI workaround and its AGENTS.md claim are removed; M6.10 remains open for Part 3 and GUI evidence.
+- 2026-10-26 M6.10 hosted follow-up fix(desktop): isolate GPUI fixtures from trading bridge threads. Hosted CI 40327391920 still aborted because even a live GPUI test scheduler rejects an external bridge thread's waker; the 50-seed close test reproduced it at seed 1. UI fixtures now construct an empty TradingStore, while the real subscription bridge remains covered by its dedicated owner tests. CI stays parallel; M6.10 remains open for Part 3 and GUI evidence.
 
 ## 7. Known gaps / deferred
 

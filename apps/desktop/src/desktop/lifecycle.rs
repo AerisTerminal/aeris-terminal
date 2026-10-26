@@ -30,6 +30,8 @@ pub(super) struct DesktopLifecycle {
     services: aeris_desktop::services::DesktopServices,
     context: Option<aeris_context_runtime::ContextService>,
     instance_lock: Option<Arc<aeris_platform_runtime::InstanceLock>>,
+    #[cfg(test)]
+    fixture_without_trading_bridge: bool,
 }
 
 impl DesktopLifecycle {
@@ -48,6 +50,8 @@ impl DesktopLifecycle {
             services,
             context: Some(context),
             instance_lock: Some(instance_lock),
+            #[cfg(test)]
+            fixture_without_trading_bridge: false,
         }
     }
 
@@ -73,7 +77,13 @@ impl DesktopLifecycle {
             ),
             context: None,
             instance_lock: None,
+            fixture_without_trading_bridge: true,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_without_trading_bridge(&self) -> bool {
+        self.fixture_without_trading_bridge
     }
 
     pub(super) fn context_view(&self) -> Option<aeris_context_runtime::ContextView> {

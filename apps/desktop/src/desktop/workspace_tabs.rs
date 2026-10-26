@@ -3588,6 +3588,13 @@ fn start_trading_store(
 ) -> Entity<trading_store::TradingStore> {
     let store = cx.new(|_| trading_store::TradingStore::default());
     lifecycle.register_trading_store(&store);
+    // GPUI's deterministic test scheduler cannot be woken from the real
+    // subscription thread. UI fixtures use an empty store; the bridge and its
+    // owner lifecycle are exercised by trading_store's dedicated tests.
+    #[cfg(test)]
+    if lifecycle.fixture_without_trading_bridge() {
+        return store;
+    }
     let service = lifecycle.trading().clone();
     let wake = wake.callback();
     let bridge_store = store.clone();

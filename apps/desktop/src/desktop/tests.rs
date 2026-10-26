@@ -1478,6 +1478,19 @@ mod timeframe_input {
         (terminal, cx)
     }
 
+    #[test]
+    fn terminal_fixture_keeps_the_subscription_thread_off_the_gpui_scheduler() {
+        let mut cx = TestAppContext::single();
+        let (terminal, visual) = terminal_harness(&mut cx);
+        let store = visual.read(|app| terminal.read(app).trading_store.clone());
+        assert!(
+            cx.update(|app| store.update(app, |store, _| store.stop()))
+                .is_none(),
+            "the deterministic UI fixture must not start an uncontrolled bridge"
+        );
+        cx.quit();
+    }
+
     #[gpui::test]
     fn no_default_instrument_shows_choose_prompt(cx: &mut TestAppContext) {
         let (terminal, cx) = terminal_harness_with_product(

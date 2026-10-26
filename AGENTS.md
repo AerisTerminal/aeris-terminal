@@ -500,7 +500,9 @@ tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check.
 Windows workspace tests use the default parallel `cargo test --workspace --all-features --locked`.
 Desktop bridge wake listeners must unregister their GPUI task waker when a notification
 completes or the listener is dropped, so a late publication cannot wake a retired test
-scheduler. The workflow keeps
+scheduler. GPUI interaction fixtures use an injected empty trading store, not a live
+subscription thread that can wake GPUI's deterministic test scheduler from outside it;
+the real subscription bridge has separate owner-level tests. The workflow keeps
 `permissions: contents: read`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1` (hosted
 runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
 references and self-hosted runners are forbidden on the pull-request path, and any workflow that uses
