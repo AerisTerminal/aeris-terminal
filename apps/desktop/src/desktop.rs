@@ -1968,6 +1968,7 @@ const fn chart_order_kind(order_type: aeris_trading::OrderType) -> ChartOrderKin
 /// The legacy variant exists only for the unchanged pre-migration chart fixture.
 enum ChartOrderSource<'a> {
     WorkingSet(&'a aeris_trading_runtime::WorkingSet),
+    Pane(&'a trading_store::PaneTradingView<'a>),
     #[cfg(test)]
     Snapshot(&'a aeris_trading_runtime::TradingSnapshot),
 }
@@ -1975,6 +1976,12 @@ enum ChartOrderSource<'a> {
 impl<'a> From<&'a aeris_trading_runtime::WorkingSet> for ChartOrderSource<'a> {
     fn from(view: &'a aeris_trading_runtime::WorkingSet) -> Self {
         Self::WorkingSet(view)
+    }
+}
+
+impl<'a> From<&'a trading_store::PaneTradingView<'a>> for ChartOrderSource<'a> {
+    fn from(view: &'a trading_store::PaneTradingView<'a>) -> Self {
+        Self::Pane(view)
     }
 }
 
@@ -1986,23 +1993,26 @@ impl<'a> From<&'a aeris_trading_runtime::TradingSnapshot> for ChartOrderSource<'
 }
 
 impl ChartOrderSource<'_> {
-    fn orders(&self) -> &[aeris_trading::Order] {
+    fn orders(&self) -> Box<dyn Iterator<Item = &aeris_trading::Order> + '_> {
         match self {
-            Self::WorkingSet(view) => &view.orders,
+            Self::WorkingSet(view) => Box::new(view.orders.iter()),
+            Self::Pane(view) => Box::new(view.orders()),
             #[cfg(test)]
-            Self::Snapshot(view) => &view.orders,
+            Self::Snapshot(view) => Box::new(view.orders.iter()),
         }
     }
-    fn planned_legs(&self) -> &[aeris_trading_runtime::PlannedLeg] {
+    fn planned_legs(&self) -> Box<dyn Iterator<Item = &aeris_trading_runtime::PlannedLeg> + '_> {
         match self {
-            Self::WorkingSet(view) => &view.planned_legs,
+            Self::WorkingSet(view) => Box::new(view.planned_legs.iter()),
+            Self::Pane(view) => Box::new(view.planned_legs()),
             #[cfg(test)]
-            Self::Snapshot(view) => &view.planned_legs,
+            Self::Snapshot(view) => Box::new(view.planned_legs.iter()),
         }
     }
     fn managed_brackets(&self) -> &[aeris_trading_runtime::BracketView] {
         match self {
             Self::WorkingSet(view) => &view.managed_brackets,
+            Self::Pane(view) => &view.working_set().managed_brackets,
             #[cfg(test)]
             Self::Snapshot(view) => &view.managed_brackets,
         }
@@ -2010,6 +2020,7 @@ impl ChartOrderSource<'_> {
     fn order_events(&self) -> &[aeris_trading::OrderEvent] {
         match self {
             Self::WorkingSet(view) => &view.order_events,
+            Self::Pane(view) => &view.working_set().order_events,
             #[cfg(test)]
             Self::Snapshot(view) => &view.order_events,
         }
@@ -2020,6 +2031,7 @@ impl ChartOrderSource<'_> {
     ) -> Option<aeris_trading_runtime::ProtectionRole> {
         match self {
             Self::WorkingSet(view) => view.protective_role(id),
+            Self::Pane(view) => view.working_set().protective_role(id),
             #[cfg(test)]
             Self::Snapshot(view) => view.protective_role(id),
         }
@@ -2035,7 +2047,6 @@ fn chart_working_orders<'a>(
     let snapshot = snapshot.into();
     snapshot
         .orders()
-        .iter()
         // The chart draws actionable lines. Cancelled, rejected and filled orders stay in the
         // runtime's history but must leave the chart, or a cancel appears to do nothing.
         .filter(|order| {
@@ -2048,7 +2059,6 @@ fn chart_working_orders<'a>(
         .filter(|order| {
             !snapshot
                 .planned_legs()
-                .iter()
                 .any(|leg| leg.client_order_id == order.client_order_id)
         })
         .filter_map(|order| {
@@ -2085,6 +2095,20 @@ fn chart_working_orders<'a>(
         .collect()
 }
 
+fn chart_working_orders_from_pane(
+    pane: &trading_store::PaneTradingView<'_>,
+    account_id: &aeris_trading::TradingAccountId,
+    instrument_id: &str,
+    price_increment: Option<f64>,
+) -> Vec<ChartWorkingOrder> {
+    chart_working_orders(
+        ChartOrderSource::Pane(pane),
+        account_id,
+        instrument_id,
+        price_increment,
+    )
+}
+
 /// A pending bracket's stop and targets, drawn as its entry's legs so the entry shows the
 /// protection it carries and each leg can be dragged before the entry fills. A leg keeps the
 /// identity of the order it becomes, so arming leaves the line in place.
@@ -2095,7 +2119,6 @@ fn chart_planned_legs<'a>(
 ) -> impl Iterator<Item = ChartWorkingOrder> + 'a {
     snapshot
         .planned_legs()
-        .iter()
         .filter(move |leg| {
             &leg.account_id == account_id && leg.instrument_id.as_str() == instrument_id
         })
@@ -2210,7 +2233,6 @@ fn managed_trigger_prices(
     let increment = price_increment.filter(|increment| increment.is_finite() && *increment > 0.0);
     let side = snapshot
         .orders()
-        .iter()
         .find(|order| order.client_order_id == bracket.entry_client_order_id)
         .map(|order| order.side);
     let signed_increment = match side {
@@ -2240,15 +2262,13 @@ fn managed_trigger_prices(
     )
 }
 
-fn chart_positions(
-    snapshot: &aeris_trading_runtime::WorkingSet,
+fn chart_positions_for<'a>(
+    positions: impl Iterator<Item = &'a aeris_trading_runtime::PositionPnl>,
     account_id: &aeris_trading::TradingAccountId,
     instrument_id: &str,
     currency: &str,
 ) -> Vec<ChartTradingPosition> {
-    snapshot
-        .position_pnl
-        .iter()
+    positions
         .filter(|position| {
             &position.position.account_id == account_id
                 && position.position.instrument_id.as_str() == instrument_id
@@ -2277,6 +2297,15 @@ fn chart_positions(
             })
         })
         .collect()
+}
+
+fn chart_positions_from_pane(
+    pane: &trading_store::PaneTradingView<'_>,
+    account_id: &aeris_trading::TradingAccountId,
+    instrument_id: &str,
+    currency: &str,
+) -> Vec<ChartTradingPosition> {
+    chart_positions_for(pane.positions(), account_id, instrument_id, currency)
 }
 
 fn chart_position_id(
@@ -2330,6 +2359,7 @@ fn chart_executions(
 
 fn chart_trading_snapshot(
     snapshot: &aeris_trading_runtime::WorkingSet,
+    pane: &trading_store::PaneTradingView<'_>,
     product: Option<&InstallProviderInstrument>,
     selected_account: Option<&aeris_trading::TradingAccountId>,
 ) -> Option<ChartTradingSnapshot> {
@@ -2367,9 +2397,9 @@ fn chart_trading_snapshot(
         currency: Some(account.currency.clone()),
     };
 
-    let orders = chart_working_orders(snapshot, account_id, instrument_id, price_increment);
+    let orders = chart_working_orders_from_pane(pane, account_id, instrument_id, price_increment);
 
-    let positions = chart_positions(snapshot, account_id, instrument_id, &account.currency);
+    let positions = chart_positions_from_pane(pane, account_id, instrument_id, &account.currency);
 
     let executions = chart_executions(snapshot, account_id, instrument_id);
 

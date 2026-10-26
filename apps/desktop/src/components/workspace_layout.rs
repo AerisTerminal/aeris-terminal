@@ -562,7 +562,8 @@ fn workspace_context_panel(
 
 fn project_working_order_markers(
     state: &WorkspaceSurface,
-    cx: &mut Context<WorkspaceSurface>,
+    store: &trading_store::TradingStore,
+    cx: &App,
 ) -> (
     Vec<aeris_terminal_ui::OrderBookWorkingOrder>,
     Option<aeris_terminal_ui::OrderBookPositionMarker>,
@@ -576,13 +577,18 @@ fn project_working_order_markers(
     else {
         return (Vec::new(), None);
     };
-    let working_orders = state
-        .trading_pnl
-        .orders
-        .iter()
+    let view = selected_account
+        .zip(aeris_instruments::InstrumentId::try_new(instrument_id.to_string()).ok())
+        .and_then(|(account, instrument)| {
+            store
+                .current()
+                .map(|_| store.pane_view(account, &instrument))
+        });
+    let working_orders = view
+        .as_ref()
+        .into_iter()
+        .flat_map(trading_store::PaneTradingView::orders)
         .filter(|order| order.status.is_open())
-        .filter(|order| selected_account.is_some_and(|account_id| &order.account_id == account_id))
-        .filter(|order| order.instrument_id.as_str() == instrument_id)
         .filter_map(|order| {
             let (side, price) = crate::desktop::order_book_row_price(order)?;
             Some(aeris_terminal_ui::OrderBookWorkingOrder {
@@ -595,11 +601,8 @@ fn project_working_order_markers(
         })
         .take(8)
         .collect();
-    let position_marker = selected_account.and_then(|account_id| {
-        let position = state.trading_pnl.positions.iter().find(|position| {
-            &position.position.account_id == account_id
-                && position.position.instrument_id.as_str() == instrument_id
-        })?;
+    let position_marker = view.as_ref().and_then(|view| {
+        let position = view.positions().next()?;
         // An average entry finer than the book's price grid has no ladder row to mark.
         let price = position
             .position
@@ -646,11 +649,11 @@ impl TerminalApp {
                     state.chart_trading_visibility,
                 ))
         };
-        if needs_refresh && let Some(current) = self.trading_store.read(cx).current() {
+        if needs_refresh && self.trading_store.read(cx).current().is_some() {
             // Selection is rare; the event path is the only regular WorkingSet drain.
-            let current = current.clone();
+            let store = self.trading_store.clone();
             pane.update(cx, |state, pane_cx| {
-                apply_trading_snapshot(state, &current, pane_cx);
+                apply_trading_snapshot(state, &store, pane_cx);
             });
         }
     }
@@ -671,7 +674,7 @@ impl TerminalApp {
         if resync {
             self.bottom_panel.invalidate_trading_revision();
         }
-        if self.bottom_panel.apply_snapshot(&snapshot) {
+        if self.bottom_panel.apply_store(self.trading_store.read(cx)) {
             cx.notify();
         }
         self.announce_trading(&snapshot, cx);
@@ -707,7 +710,7 @@ impl TerminalApp {
                     {
                         state.trading_pnl.feedback.clone_from(&latest);
                     }
-                    apply_trading_snapshot(state, &snapshot, state_cx);
+                    apply_trading_snapshot(state, &self.trading_store, state_cx);
                 });
             }
         }
@@ -716,9 +719,13 @@ impl TerminalApp {
 
 fn apply_trading_snapshot(
     state: &mut WorkspaceSurface,
-    snapshot: &aeris_trading_runtime::WorkingSet,
+    store_entity: &Entity<trading_store::TradingStore>,
     state_cx: &mut Context<WorkspaceSurface>,
 ) {
+    let store = store_entity.read(state_cx);
+    let Some(snapshot) = store.current() else {
+        return;
+    };
     if state
         .trading_pnl
         .order_entry
@@ -735,12 +742,21 @@ fn apply_trading_snapshot(
             snapshot.accounts.first().map(|account| account.id.clone());
     }
     let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
-    let chart_snapshot = crate::desktop::chart_trading_snapshot(
-        snapshot,
-        state.product.as_ref(),
-        selected_account_id.as_ref(),
-    )
-    .map(|snapshot| apply_chart_trading_visibility(snapshot, state.chart_trading_visibility));
+    let instrument = state.product.as_ref().and_then(|product| {
+        aeris_instruments::InstrumentId::try_new(product.instrument_id.clone()).ok()
+    });
+    let chart_snapshot = selected_account_id
+        .as_ref()
+        .zip(instrument.as_ref())
+        .and_then(|(account, instrument)| {
+            crate::desktop::chart_trading_snapshot(
+                snapshot,
+                &store.pane_view(account, instrument),
+                state.product.as_ref(),
+                Some(account),
+            )
+        })
+        .map(|snapshot| apply_chart_trading_visibility(snapshot, state.chart_trading_visibility));
     let host_overlay =
         crate::desktop::chart_session_plan_overlay(snapshot, selected_account_id.as_ref());
     let session_plan_levels = crate::desktop::chart_session_plan_levels(
@@ -760,7 +776,7 @@ fn apply_trading_snapshot(
         snapshot,
         state.trading_pnl.order_entry.selected_account_id.as_ref(),
     );
-    let (working_orders, position_marker) = project_working_order_markers(state, state_cx);
+    let (working_orders, position_marker) = project_working_order_markers(state, store, state_cx);
     state
         .order_book
         .update(state_cx, |order_book, order_book_cx| {

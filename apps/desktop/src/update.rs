@@ -900,6 +900,8 @@ fn system_version() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use std::io::{BufRead as _, Write as _};
     use std::{
         fs,
         process::{Child, Command, Stdio},
@@ -926,17 +928,35 @@ mod tests {
         } else {
             "; Start-Sleep -Seconds 2"
         };
-        Command::new("powershell.exe")
+        let mut child = Command::new("powershell.exe")
             .args([
                 "-NoProfile",
+                "-NonInteractive",
                 "-Command",
-                &format!("[Console]::Out.Write(\"AXIUSFLOW_UPDATE_RESTART_READY_V2`n\"){tail}"),
+                &format!(
+                    "[Console]::Error.WriteLine('READY'); $null=[Console]::In.ReadLine(); [Console]::Out.Write(\"AXIUSFLOW_UPDATE_RESTART_READY_V2`n\"){tail}"
+                ),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
-            .expect("ack fixture starts")
+            .expect("ack fixture starts");
+        // PowerShell's cold startup under a loaded Windows runner can exceed
+        // the production handshake deadline. Start that deadline only after
+        // the fixture has signalled that it is ready to write the ack.
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stderr.take().expect("fixture stderr"))
+            .read_line(&mut ready)
+            .expect("fixture startup signal");
+        assert_eq!(ready.trim(), "READY");
+        child
+            .stdin
+            .as_mut()
+            .expect("fixture stdin")
+            .write_all(b"send ack\n")
+            .expect("trigger ack");
+        child
     }
 
     #[cfg(not(target_os = "windows"))]

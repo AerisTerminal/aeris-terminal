@@ -208,6 +208,7 @@ pub(super) trait PanelTradingView {
     fn round_trips(&self) -> &[aeris_trading_runtime::TradeRoundTrip];
     fn account_pnl(&self) -> &[aeris_trading::AccountPnl];
     fn connected_broker_accounts(&self) -> &BTreeSet<aeris_trading::TradingAccountId>;
+    #[cfg(test)]
     fn position_protection(
         &self,
         account: &aeris_trading::TradingAccountId,
@@ -239,6 +240,7 @@ macro_rules! panel_trading_view {
             fn connected_broker_accounts(&self) -> &BTreeSet<aeris_trading::TradingAccountId> {
                 &self.connected_broker_accounts
             }
+            #[cfg(test)]
             fn position_protection(
                 &self,
                 account: &aeris_trading::TradingAccountId,
@@ -254,6 +256,17 @@ panel_trading_view!(aeris_trading_runtime::WorkingSet);
 panel_trading_view!(aeris_trading_runtime::TradingSnapshot);
 
 impl BottomPanelState {
+    /// The portfolio is shared by all panes, so its account filter spans the
+    /// store's publication; each position's protection uses its scoped pane view.
+    pub(super) fn apply_store(&mut self, store: &trading_store::TradingStore) -> bool {
+        let Some(snapshot) = store.current() else {
+            return false;
+        };
+        self.apply_snapshot_with_protection(snapshot, |account, instrument| {
+            store.pane_view(account, instrument).position_protection()
+        })
+    }
+
     /// An overflow delivered an authoritative resync; replace bounded history
     /// even if its revision matches the last rendered view.
     pub(super) fn invalidate_trading_revision(&mut self) {
@@ -261,7 +274,21 @@ impl BottomPanelState {
     }
 
     /// Adopts committed facts on revision changes and ephemeral marks on quote-only updates.
+    #[cfg(test)]
     pub(super) fn apply_snapshot(&mut self, snapshot: &impl PanelTradingView) -> bool {
+        self.apply_snapshot_with_protection(snapshot, |account, instrument| {
+            snapshot.position_protection(account, instrument)
+        })
+    }
+
+    fn apply_snapshot_with_protection(
+        &mut self,
+        snapshot: &impl PanelTradingView,
+        protection: impl Fn(
+            &aeris_trading::TradingAccountId,
+            &aeris_instruments::InstrumentId,
+        ) -> aeris_trading_runtime::PositionProtection,
+    ) -> bool {
         let facts_changed = self.history.revision != Some(snapshot.revision());
         if !facts_changed && self.history.account_pnl.as_ref() == snapshot.account_pnl() {
             return false;
@@ -289,7 +316,7 @@ impl BottomPanelState {
             snapshot.accounts(),
             snapshot.round_trips(),
             snapshot.connected_broker_accounts(),
-            |account_id, instrument_id| snapshot.position_protection(account_id, instrument_id),
+            protection,
         ));
         true
     }

@@ -35,6 +35,58 @@ struct TradingIndexes {
     events: BTreeMap<OrderId, Vec<usize>>,
 }
 
+fn account_rows_changed<T: PartialEq>(
+    previous: &[T],
+    next: &[T],
+    account: &TradingAccountId,
+    owner: impl Fn(&T) -> &TradingAccountId,
+) -> bool {
+    previous
+        .iter()
+        .filter(|row| owner(row) == account)
+        .ne(next.iter().filter(|row| owner(row) == account))
+}
+
+fn published_accounts(set: &WorkingSet) -> BTreeSet<TradingAccountId> {
+    let mut ids: BTreeSet<_> = set.accounts.iter().map(|row| row.id.clone()).collect();
+    ids.extend(set.account_pnl.iter().map(|row| row.account_id.clone()));
+    ids.extend(set.risk_profiles.iter().map(|row| row.account_id.clone()));
+    ids.extend(set.risk_meters.iter().map(|row| row.account_id.clone()));
+    ids.extend(set.risk_locks.iter().map(|row| row.account_id.clone()));
+    ids.extend(set.session_plans.iter().map(|row| row.account_id.clone()));
+    ids.extend(set.connected_broker_accounts.iter().cloned());
+    ids
+}
+
+fn published_selections(
+    set: &WorkingSet,
+    indexes: &TradingIndexes,
+) -> BTreeSet<(TradingAccountId, InstrumentId)> {
+    let mut keys: BTreeSet<_> = indexes.orders.keys().cloned().collect();
+    keys.extend(
+        set.positions
+            .iter()
+            .map(|row| (row.account_id.clone(), row.instrument_id.clone())),
+    );
+    keys.extend(set.position_pnl.iter().map(|row| {
+        (
+            row.position.account_id.clone(),
+            row.position.instrument_id.clone(),
+        )
+    }));
+    keys.extend(
+        set.planned_legs
+            .iter()
+            .map(|row| (row.account_id.clone(), row.instrument_id.clone())),
+    );
+    keys.extend(
+        set.fills
+            .iter()
+            .map(|row| (row.account_id.clone(), row.instrument_id.clone())),
+    );
+    keys
+}
+
 impl TradingIndexes {
     fn build(set: &WorkingSet) -> Self {
         let mut indexes = Self::default();
@@ -71,6 +123,47 @@ pub(super) struct PaneTradingView<'a> {
 }
 
 impl PaneTradingView<'_> {
+    pub(super) fn working_set(&self) -> &WorkingSet {
+        self.set
+    }
+
+    pub(super) fn account(&self) -> Option<&aeris_trading::TradingAccount> {
+        self.set
+            .accounts
+            .iter()
+            .find(|account| account.id == self.selection.0)
+    }
+
+    pub(super) fn positions(&self) -> impl Iterator<Item = &aeris_trading_runtime::PositionPnl> {
+        self.set.position_pnl.iter().filter(|position| {
+            position.position.account_id == self.selection.0
+                && position.position.instrument_id == self.selection.1
+        })
+    }
+
+    pub(super) fn position_protection(&self) -> aeris_trading_runtime::PositionProtection {
+        self.set
+            .position_protection(&self.selection.0, &self.selection.1)
+    }
+
+    pub(super) fn planned_legs(&self) -> impl Iterator<Item = &aeris_trading_runtime::PlannedLeg> {
+        self.set.planned_legs.iter().filter(|leg| {
+            leg.account_id == self.selection.0 && leg.instrument_id == self.selection.1
+        })
+    }
+
+    fn brackets(&self) -> impl Iterator<Item = &aeris_trading_runtime::BracketView> {
+        self.set.managed_brackets.iter().filter(|bracket| {
+            self.orders().any(|order| {
+                bracket.entry_client_order_id == order.client_order_id
+                    || bracket.stop_client_order_id.as_ref() == Some(&order.client_order_id)
+                    || bracket
+                        .target_client_order_ids
+                        .contains(&order.client_order_id)
+            })
+        })
+    }
+
     pub(super) fn orders(&self) -> impl Iterator<Item = &Order> {
         self.indexes
             .orders
@@ -99,6 +192,36 @@ impl PaneTradingView<'_> {
     }
 
     fn changed_from(&self, previous: &Self) -> bool {
+        if self.account() != previous.account()
+            || !self.positions().eq(previous.positions())
+            || !self.planned_legs().eq(previous.planned_legs())
+            || !self.brackets().eq(previous.brackets())
+            || self.position_protection() != previous.position_protection()
+            || self
+                .set
+                .positions
+                .iter()
+                .filter(|position| {
+                    position.account_id == self.selection.0
+                        && position.instrument_id == self.selection.1
+                })
+                .ne(previous.set.positions.iter().filter(|position| {
+                    position.account_id == self.selection.0
+                        && position.instrument_id == self.selection.1
+                }))
+            || self
+                .set
+                .fills
+                .iter()
+                .filter(|fill| {
+                    fill.account_id == self.selection.0 && fill.instrument_id == self.selection.1
+                })
+                .ne(previous.set.fills.iter().filter(|fill| {
+                    fill.account_id == self.selection.0 && fill.instrument_id == self.selection.1
+                }))
+        {
+            return true;
+        }
         if !self.orders().eq(previous.orders()) {
             return true;
         }
@@ -137,6 +260,8 @@ pub(super) struct TradingStore {
     current: Option<WorkingSet>,
     indexes: TradingIndexes,
     changed_selections: BTreeSet<(TradingAccountId, InstrumentId)>,
+    changed_accounts: BTreeSet<TradingAccountId>,
+    unselected_accounts_changed: bool,
     all_panes_changed: bool,
     resync_pending: bool,
     slot: Arc<Mutex<Slot>>,
@@ -234,31 +359,56 @@ impl TradingStore {
         let next = *update.event.working_set;
         let next_indexes = TradingIndexes::build(&next);
         self.changed_selections.clear();
+        self.changed_accounts.clear();
+        self.unselected_accounts_changed = self.current.as_ref().is_none_or(|previous| {
+            previous.accounts.first().map(|account| &account.id)
+                != next.accounts.first().map(|account| &account.id)
+        });
         self.all_panes_changed = self.current.as_ref().is_none_or(|previous| {
-            previous.accounts != next.accounts
-                || previous.instruments != next.instruments
-                || previous.order_feed_states != next.order_feed_states
-                || previous.order_groups != next.order_groups
-                || previous.positions != next.positions
-                || previous.round_trips != next.round_trips
-                || previous.connected_broker_accounts != next.connected_broker_accounts
-                || previous.position_pnl != next.position_pnl
-                || previous.account_pnl != next.account_pnl
-                || previous.risk_profiles != next.risk_profiles
-                || previous.risk_meters != next.risk_meters
-                || previous.risk_locks != next.risk_locks
-                || previous.session_plans != next.session_plans
-                || previous.managed_brackets != next.managed_brackets
-                || previous.planned_legs != next.planned_legs
-                || previous.protective_orders != next.protective_orders
-                || previous.market_observation_error != next.market_observation_error
+            previous.market_observation_error != next.market_observation_error
                 || previous.recovery_notices != next.recovery_notices
                 || previous.venue_notices != next.venue_notices
         });
         if !self.all_panes_changed
             && let Some(previous) = self.current.as_ref()
         {
-            for selection in self.indexes.orders.keys().chain(next_indexes.orders.keys()) {
+            // Account-wide facts affect every instrument of that account; rows tied to
+            // an instrument only affect the matching pane. Iterate published keys,
+            // never the Cartesian product of every account and instrument.
+            let previous_accounts = published_accounts(previous);
+            let next_accounts = published_accounts(&next);
+            for id in previous_accounts.union(&next_accounts) {
+                if account_rows_changed(&previous.accounts, &next.accounts, id, |row| &row.id)
+                    || account_rows_changed(&previous.account_pnl, &next.account_pnl, id, |row| {
+                        &row.account_id
+                    })
+                    || previous.connected_broker_accounts.contains(id)
+                        != next.connected_broker_accounts.contains(id)
+                    || account_rows_changed(
+                        &previous.risk_profiles,
+                        &next.risk_profiles,
+                        id,
+                        |row| &row.account_id,
+                    )
+                    || account_rows_changed(&previous.risk_meters, &next.risk_meters, id, |row| {
+                        &row.account_id
+                    })
+                    || account_rows_changed(&previous.risk_locks, &next.risk_locks, id, |row| {
+                        &row.account_id
+                    })
+                    || account_rows_changed(
+                        &previous.session_plans,
+                        &next.session_plans,
+                        id,
+                        |row| &row.account_id,
+                    )
+                {
+                    self.changed_accounts.insert(id.clone());
+                }
+            }
+            let old_selections = published_selections(previous, &self.indexes);
+            let next_selections = published_selections(&next, &next_indexes);
+            for selection in old_selections.union(&next_selections) {
                 let old_view = PaneTradingView {
                     set: previous,
                     indexes: &self.indexes,
@@ -321,11 +471,15 @@ impl TradingStore {
     ) -> bool {
         self.all_panes_changed
             || match (account, instrument) {
-                (Some(account), Some(instrument)) => self
-                    .changed_selections
-                    .contains(&(account.clone(), instrument.clone())),
+                (Some(account), Some(instrument)) => {
+                    self.changed_accounts.contains(account)
+                        || self
+                            .changed_selections
+                            .contains(&(account.clone(), instrument.clone()))
+                }
+                (Some(account), None) => self.changed_accounts.contains(account),
                 // An unselected account or instrument has no order-scoped view.
-                _ => false,
+                (None, _) => self.unselected_accounts_changed,
             }
     }
 
@@ -631,6 +785,134 @@ mod tests {
         assert!(store.slot.lock().expect("slot").offer(update(5, false)));
         store.drain().expect("empty next revision");
         assert_eq!(store.pane_view(&account, &instrument).orders().count(), 0);
+    }
+
+    #[test]
+    fn account_position_and_risk_updates_notify_only_changed_pane() {
+        let (first, account, other, instrument) = indexed_fixture();
+        let other_instrument =
+            InstrumentId::try_new("instrument:fixture:B").expect("other instrument");
+        let mut store = TradingStore::default();
+        assert!(store.slot.lock().expect("slot").offer(first));
+        store.drain().expect("initial");
+
+        let mut risk = store.current().expect("current").clone();
+        risk.revision += 1;
+        risk.risk_locks.push(aeris_trading_runtime::RiskLock {
+            account_id: account.clone(),
+            kind: aeris_trading_runtime::RiskLockKind::Manual,
+            reason: "account A locked".into(),
+            locked_at_unix_nanos: 1,
+            profile_id: None,
+            profile_version: None,
+        });
+        let revision = risk.revision;
+        assert!(store.slot.lock().expect("slot").offer(SubscriptionUpdate {
+            lagged: false,
+            event: TradingEvent {
+                revision,
+                cause: TradingEventCause::Command,
+                working_set: Box::new(risk),
+            },
+        }));
+        store.drain().expect("risk change");
+        assert!(store.pane_changed(Some(&account), Some(&instrument)));
+        assert!(!store.pane_changed(Some(&other), Some(&other_instrument)));
+
+        let mut position = store.current().expect("current").clone();
+        position.revision += 1;
+        let point = |units| aeris_trading::FixedPoint::try_new(units, 0).expect("point");
+        position
+            .position_pnl
+            .push(aeris_trading_runtime::PositionPnl {
+                position: aeris_trading::Position {
+                    account_id: other.clone(),
+                    instrument_id: other_instrument.clone(),
+                    net_quantity: point(1),
+                    average_entry_price: Some(point(10)),
+                    realized_pnl: point(0),
+                    unrealized_pnl: point(2),
+                    last_fill_unix_nanos: 1,
+                },
+                realized_ticks: None,
+                unrealized_ticks: None,
+                point_value: None,
+                currency_scale: 0,
+            });
+        let revision = position.revision;
+        assert!(store.slot.lock().expect("slot").offer(SubscriptionUpdate {
+            lagged: false,
+            event: TradingEvent {
+                revision,
+                cause: TradingEventCause::Command,
+                working_set: Box::new(position),
+            },
+        }));
+        store.drain().expect("position change");
+        assert!(!store.pane_changed(Some(&account), Some(&instrument)));
+        assert!(store.pane_changed(Some(&other), Some(&other_instrument)));
+
+        let mut balance = store.current().expect("current").clone();
+        balance.revision += 1;
+        balance.account_pnl.push(aeris_trading::AccountPnl {
+            account_id: account.clone(),
+            currency: "USD".into(),
+            realized: point(0),
+            unrealized: Some(point(2)),
+            balance: Some(point(100)),
+            equity: Some(point(102)),
+        });
+        let revision = balance.revision;
+        assert!(store.slot.lock().expect("slot").offer(SubscriptionUpdate {
+            lagged: false,
+            event: TradingEvent {
+                revision,
+                cause: TradingEventCause::Command,
+                working_set: Box::new(balance),
+            },
+        }));
+        store.drain().expect("account change");
+        assert!(store.pane_changed(Some(&account), Some(&instrument)));
+        assert!(!store.pane_changed(Some(&other), Some(&other_instrument)));
+    }
+
+    #[test]
+    fn chart_order_lines_read_only_selected_pane_view() {
+        let (publication, account, other, instrument) = indexed_fixture();
+        let mut store = TradingStore::default();
+        assert!(store.slot.lock().expect("slot").offer(publication));
+        store.drain().expect("working orders");
+        let first = store.pane_view(&account, &instrument);
+        let second = store.pane_view(&other, &instrument);
+        let lines = crate::desktop::chart_working_orders_from_pane(
+            &first,
+            &account,
+            instrument.as_str(),
+            None,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].id.as_str(), "first");
+        let lines = crate::desktop::chart_working_orders_from_pane(
+            &second,
+            &other,
+            instrument.as_str(),
+            None,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].id.as_str(), "elsewhere");
+        assert_eq!(
+            crate::desktop::chart_working_orders_from_pane(
+                &store.pane_view(
+                    &account,
+                    &InstrumentId::try_new("instrument:fixture:B").expect("instrument"),
+                ),
+                &account,
+                "instrument:fixture:B",
+                None,
+            )
+            .len(),
+            0
+        );
     }
 
     #[test]
