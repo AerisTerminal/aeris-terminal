@@ -200,25 +200,11 @@ pub(super) fn save_workspace_fixture(
 }
 
 pub(super) fn default_workspace() -> WorkspaceState {
-    let instrument = InstallProviderInstrument {
-        provider: "hyperliquid".to_string(),
-        session_generation: 1,
-        selection_generation: 1,
-        instrument_id: "hyperliquid:perp:BTC".to_string(),
-        provider_symbol: "BTC".to_string(),
-        display_symbol: "BTC-USDC".to_string(),
-        venue_id: "Hyperliquid".to_string(),
-        price_scale: 8,
-        quantity_scale: 8,
-        entitlement_id: "hyperliquid-public".to_string(),
-        price_increment: None,
-        ..Default::default()
-    };
     let pane = WorkspacePaneState {
         pane_id: 1,
         consumer_id: 1,
         kind: WorkspacePaneKind::Chart as i32,
-        instrument: Some(instrument.clone()),
+        instrument: None,
         series: None,
         viewport_start_unix_nanos: None,
         viewport_end_unix_nanos: None,
@@ -256,10 +242,10 @@ pub(super) fn default_workspace() -> WorkspaceState {
         instrument_drawings: Vec::new(),
     };
     WorkspaceState {
-        provider: "hyperliquid".to_string(),
-        market: "BTC-USDC".to_string(),
+        provider: String::new(),
+        market: String::new(),
         interval_seconds: 60,
-        watchlist: vec!["BTC-USDC".to_string()],
+        watchlist: Vec::new(),
         workspace_revision: 1,
         schema_revision: WORKSPACE_SCHEMA_REVISION,
         layout_generation: 1,
@@ -267,12 +253,30 @@ pub(super) fn default_workspace() -> WorkspaceState {
         workspace_tabs: vec![tab],
         chart_settings_templates: Vec::new(),
         default_chart_settings: None,
-        watchlist_entries: vec![WorkspaceWatchlistEntryState {
-            instrument: Some(instrument),
-        }],
+        watchlist_entries: Vec::new(),
         drawing_templates: Vec::new(),
         saved_layouts: vec![saved_layout],
     }
+}
+
+#[cfg(test)]
+pub(super) fn fixture_workspace() -> WorkspaceState {
+    let mut workspace = default_workspace();
+    let instrument = aeris_desktop::test_support::fixture_public_crypto();
+    workspace.provider = instrument.provider.clone();
+    workspace.market = instrument.display_symbol.clone();
+    workspace.watchlist = vec![instrument.display_symbol.clone()];
+    workspace.watchlist_entries = vec![WorkspaceWatchlistEntryState {
+        instrument: Some(instrument.clone()),
+    }];
+    workspace.workspace_tabs[0].panes[0].instrument = Some(instrument.clone());
+    workspace.saved_layouts[0]
+        .tab
+        .as_mut()
+        .expect("saved tab")
+        .panes[0]
+        .instrument = Some(instrument);
+    workspace
 }
 
 fn sanitize_side_panels(pane: &mut WorkspacePaneState, ticket_in_order_book: bool) {
@@ -694,6 +698,28 @@ fn valid_study_series(series: &SeriesKey) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn default_workspace() -> WorkspaceState {
+        super::fixture_workspace()
+    }
+
+    #[test]
+    fn fresh_workspace_has_no_persisted_instrument_or_provider_identity() {
+        let workspace = super::default_workspace();
+        assert_eq!(workspace.workspace_tabs.len(), 1);
+        assert_eq!(workspace.workspace_tabs[0].panes.len(), 1);
+        assert!(workspace.workspace_tabs[0].panes[0].instrument.is_none());
+        assert!(
+            workspace.saved_layouts[0]
+                .tab
+                .as_ref()
+                .expect("layout tab")
+                .panes[0]
+                .instrument
+                .is_none()
+        );
+        assert_eq!(workspace.watchlist_entries.len(), 0);
+        assert_eq!(workspace.provider, "");
+    }
     use aeris_contracts::{
         WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
         WorkspaceChartState, WorkspaceChartStudyState, WorkspaceCumulativeDeltaState,

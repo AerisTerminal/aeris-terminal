@@ -80,8 +80,11 @@ fn begin_endpoint_demand(
     client_id: u64,
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
-    let streams =
-        chart_demand_streams(market, &record.product.provider, record.endpoint.order_book)?;
+    let streams = if matches!(record.initial_instrument, InstrumentRequest::Default) {
+        super::chart_streams(record.endpoint.order_book)
+    } else {
+        chart_demand_streams(market, &record.product.provider, record.endpoint.order_book)?
+    };
     if let Err(error) = dispatch_initial_selection(record, streams, |request| {
         market.select_and_demand(client_id, request)
     }) {

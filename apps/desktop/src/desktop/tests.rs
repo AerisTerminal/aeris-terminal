@@ -558,7 +558,7 @@ mod timeframe_input {
         MarketProjectionSender,
         &mut VisualTestContext,
     ) {
-        let product = local_state::default_workspace().watchlist_entries[0]
+        let product = local_state::fixture_workspace().watchlist_entries[0]
             .instrument
             .clone()
             .expect("default instrument");
@@ -901,7 +901,7 @@ mod timeframe_input {
     fn interval_switch_keeps_order_flow_off_the_superseded_chart(cx: &mut TestAppContext) {
         let product = InstallProviderInstrument {
             price_increment: Some(1),
-            ..local_state::default_workspace().watchlist_entries[0]
+            ..local_state::fixture_workspace().watchlist_entries[0]
                 .instrument
                 .clone()
                 .expect("default instrument")
@@ -1429,10 +1429,19 @@ mod timeframe_input {
         lifecycle: DesktopLifecycle,
         factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     ) -> (Entity<TerminalApp>, &mut VisualTestContext) {
-        let product = local_state::default_workspace().watchlist_entries[0]
+        let product = local_state::fixture_workspace().watchlist_entries[0]
             .instrument
             .clone()
             .expect("default instrument");
+        terminal_harness_with_product(cx, lifecycle, factory, product)
+    }
+
+    fn terminal_harness_with_product(
+        cx: &mut TestAppContext,
+        lifecycle: DesktopLifecycle,
+        factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+        product: InstallProviderInstrument,
+    ) -> (Entity<TerminalApp>, &mut VisualTestContext) {
         let (commands, _requests) = mpsc::sync_channel(64);
         let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
         let (_, shutdown) = mpsc::sync_channel(1);
@@ -1467,6 +1476,46 @@ mod timeframe_input {
         let terminal = cx.read(|cx| view.read(cx).0.clone());
         cx.run_until_parked();
         (terminal, cx)
+    }
+
+    #[gpui::test]
+    fn no_default_instrument_shows_choose_prompt(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness_with_product(
+            cx,
+            DesktopLifecycle::new_for_test(),
+            None,
+            InstallProviderInstrument::default(),
+        );
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        cx.update(|_, cx| {
+            surface.update(cx, |pane, cx| {
+                pane.apply_local_command_outcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::DefaultUnavailable {
+                        generation: 1,
+                    },
+                    cx,
+                );
+            });
+        });
+        let notice = cx
+            .read(|cx| {
+                let pane = surface.read(cx);
+                chart_surface_notice(
+                    pane.chart_state,
+                    pane.chart.is_some(),
+                    false,
+                    &chart_status_detail(
+                        pane.chart_state,
+                        pane.connection_state
+                            .unwrap_or(FeedConnectionState::Disconnected),
+                        pane.chart_failure,
+                        pane.chart_pane_controller.pending_interval(),
+                    ),
+                )
+            })
+            .expect("workspace reached its chart pane");
+        assert_eq!(notice.detail.as_deref(), Some("Choose an instrument"));
+        assert_eq!(notice.placement, ChartNoticePlacement::Center);
     }
 
     #[gpui::test]
@@ -3241,7 +3290,7 @@ fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
 }
 
 fn saved_workspace_boot_fixture() -> WorkspaceState {
-    let mut workspace: WorkspaceState = super::local_state::default_workspace();
+    let mut workspace: WorkspaceState = super::local_state::fixture_workspace();
     workspace.active_workspace_id = 42;
     workspace.workspace_revision = 9;
     workspace.layout_generation = 17;
@@ -3355,8 +3404,14 @@ fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
     assert_eq!(eth.workspace_id, 42);
     assert_eq!(eth.pane_id, 7);
     assert_eq!(eth.consumer_id, 17);
-    assert_eq!(eth.instrument.instrument_id, "hyperliquid:perp:ETH");
-    assert_eq!(eth.instrument.display_symbol, "ETH-USDC");
+    assert_eq!(
+        eth.instrument.as_ref().expect("ETH").instrument_id,
+        "hyperliquid:perp:ETH"
+    );
+    assert_eq!(
+        eth.instrument.as_ref().expect("ETH").display_symbol,
+        "ETH-USDC"
+    );
     assert_eq!(eth.interval, ChartInterval::Minute5);
     assert_eq!(eth.restored_viewport, Some((100, 200)));
     assert_eq!(eth.generation, 6);
@@ -3365,8 +3420,14 @@ fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
     assert_eq!(sol.workspace_id, 42);
     assert_eq!(sol.pane_id, 8);
     assert_eq!(sol.consumer_id, 18);
-    assert_eq!(sol.instrument.instrument_id, "hyperliquid:perp:SOL");
-    assert_eq!(sol.instrument.display_symbol, "SOL-USDC");
+    assert_eq!(
+        sol.instrument.as_ref().expect("SOL").instrument_id,
+        "hyperliquid:perp:SOL"
+    );
+    assert_eq!(
+        sol.instrument.as_ref().expect("SOL").display_symbol,
+        "SOL-USDC"
+    );
     assert_eq!(sol.interval, ChartInterval::Hour1);
     assert_eq!(sol.restored_viewport, Some((300, 400)));
     assert_eq!(sol.generation, 6);
@@ -4502,7 +4563,7 @@ fn market_price_presentation_trims_storage_padding_without_losing_precision() {
 }
 
 fn tick_grid_instrument(price_increment: i64) -> InstallProviderInstrument {
-    let mut instrument = super::local_state::default_workspace().watchlist_entries[0]
+    let mut instrument = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("default watchlist instrument");
@@ -4539,7 +4600,7 @@ fn watchlist_prices_keep_the_tick_grid_precision() {
         "+33.75"
     );
 
-    let ungridded = super::local_state::default_workspace().watchlist_entries[0]
+    let ungridded = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("default watchlist instrument");
@@ -4595,7 +4656,7 @@ fn watchlist_tick_reference_ignores_sub_grid_prints() {
 
 #[test]
 fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
-    let instrument = super::local_state::default_workspace().watchlist_entries[0]
+    let instrument = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("default watchlist instrument");
@@ -4645,7 +4706,7 @@ fn market_summary_accepts_only_current_fenced_canonical_bars() {
     use aeris_desktop::test_support::{FixtureMarketEvents, FixtureSeries};
     use aeris_market_runtime::SeriesTailOperation;
 
-    let instrument = super::local_state::default_workspace().watchlist_entries[0]
+    let instrument = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("default watchlist instrument");
@@ -4708,7 +4769,7 @@ fn market_summary_accepts_only_current_fenced_canonical_bars() {
 
 #[test]
 fn tab_and_watchlist_share_one_daily_summary_requirement() {
-    let instrument = super::local_state::default_workspace().watchlist_entries[0]
+    let instrument = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("default watchlist instrument");
@@ -4753,7 +4814,7 @@ fn tab_and_watchlist_share_one_daily_summary_requirement() {
 
 #[test]
 fn pending_market_switch_keeps_the_committed_summary_until_the_marker_arrives() {
-    let current = super::local_state::default_workspace().watchlist_entries[0]
+    let current = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("default watchlist instrument");

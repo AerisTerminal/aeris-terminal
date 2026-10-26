@@ -419,7 +419,7 @@ mod tests {
         };
 
         let watchlist_entry = WorkspaceWatchlistEntryState {
-            instrument: local_state::default_workspace().watchlist_entries[0]
+            instrument: local_state::fixture_workspace().watchlist_entries[0]
                 .instrument
                 .clone(),
         };

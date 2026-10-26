@@ -69,10 +69,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider connection and summary routes",
     ),
     (
-        "apps/desktop/src/desktop/local_state.rs",
-        "legacy provider workspace fixture",
-    ),
-    (
         "apps/desktop/src/desktop/workspace_surface.rs",
         "legacy provider pane controls",
     ),
@@ -657,6 +653,56 @@ fn desktop_has_fixed_provider_set(source: &str) -> bool {
         || production.contains("FALLBACK_TERMINAL_PROVIDER")
 }
 
+/// These are displayed notices, never protocol or command identities. Keep the
+/// list narrow so command-line flags, CSS property names and fixture data do
+/// not turn ordinary string comparisons into false positives.
+const DESKTOP_DISPLAY_TEXT_IDENTITIES: &[&str] = &[
+    "CATALOG_READY_MESSAGE",
+    "RITHMIC_CATALOG_READY_MESSAGE",
+    "\"RISK WARNING",
+    "\"Catalog ready",
+    "\"Choose an instrument\"",
+    "\"Market history could not start.",
+];
+
+fn desktop_control_flow_does_not_match_display_text(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    let mut condition = String::new();
+    for line in production.lines() {
+        let line = line.split_once("//").map_or(line, |(code, _)| code).trim();
+        let begins_condition = line.starts_with("if ")
+            || line.starts_with("else if ")
+            || line.starts_with("match ")
+            || line.contains(" if ");
+        if begins_condition {
+            condition.clear();
+        }
+        if !begins_condition && condition.is_empty() {
+            continue;
+        }
+        let fragment = if line.contains(" if ") {
+            line
+        } else {
+            line.split_once('{').map_or(line, |(head, _)| head)
+        };
+        condition.push_str(fragment);
+        condition.push(' ');
+        if (condition.contains(".starts_with(")
+            || condition.contains(".contains(")
+            || condition.contains("=="))
+            && DESKTOP_DISPLAY_TEXT_IDENTITIES
+                .iter()
+                .any(|text| condition.contains(text))
+        {
+            return true;
+        }
+        if line.contains('{') || line.contains("=>") {
+            condition.clear();
+        }
+    }
+    false
+}
+
 fn has_runtime_descriptor_test(source: &str) -> bool {
     source.contains("fn every_registered_provider_has_a_complete_published_descriptor()")
 }
@@ -685,6 +731,7 @@ fn inspect_desktop_boundaries(
             let source = read_source(&path)?;
             if violates_desktop_quote_boundary(&relative_path, &source)
                 || desktop_has_fixed_provider_set(&source)
+                || desktop_control_flow_does_not_match_display_text(&source)
                 || violates_fixture_market_boundary(&relative_path, &source)
                 || has_process_global_desktop_trading(&source)
                 || has_process_global_desktop_account(&source)
@@ -3301,6 +3348,56 @@ mod tests {
         assert!(!super::has_runtime_descriptor_test(
             "fn retired_provider_mapping_test() {}"
         ));
+    }
+
+    #[test]
+    fn desktop_control_flow_does_not_match_display_text_rejects_message_conditions() {
+        for source in [
+            "if message.starts_with(\"RISK WARNING\") { notify(); }",
+            "if message.contains(\"Choose an instrument\") { decide(); }",
+            "match state { _ if message == CATALOG_READY_MESSAGE => ready(), _ => () }",
+            "if message == \"Catalog ready\" { ready(); }",
+            "if message\n    .starts_with(\"RISK WARNING\") { warn(); }",
+            "match state {\n  _ if message ==\n    CATALOG_READY_MESSAGE => ready(),\n  _ => ()\n}",
+        ] {
+            assert!(
+                super::desktop_control_flow_does_not_match_display_text(source),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_control_flow_does_not_match_display_text_allows_typed_events_and_rendering() {
+        for source in [
+            "if matches!(event.reason, OrderEventReason::RiskWarning) { warn(); }",
+            "if key == \"escape\" { close(); }",
+            "let label = \"RISK WARNING\";",
+            "assert!(message.contains(\"RISK WARNING\"));",
+            "// if message.starts_with(\"RISK WARNING\") { }\nfn render() {}",
+            "#[cfg(test)] mod tests { fn fixture() { if message.contains(\"RISK WARNING\") {} } }",
+        ] {
+            assert!(
+                !super::desktop_control_flow_does_not_match_display_text(source),
+                "{source}"
+            );
+        }
+        assert!(super::desktop_control_flow_does_not_match_display_text(
+            "#[cfg(test)] mod tests { fn fixture() { if message.contains(\"RISK WARNING\") {} } }\n\
+             if message.contains(\"RISK WARNING\") { warn(); }"
+        ));
+    }
+
+    #[test]
+    fn desktop_control_flow_does_not_match_display_text_scans_production() {
+        let mut violations = Vec::new();
+        super::inspect_desktop_boundaries(
+            repository_root(),
+            &repository_root().join("apps/desktop/src"),
+            &mut violations,
+        )
+        .expect("desktop source");
+        assert!(violations.is_empty(), "{violations:?}");
     }
     #[test]
     fn in_process_market_contracts_remain_explicit_and_provider_neutral() {

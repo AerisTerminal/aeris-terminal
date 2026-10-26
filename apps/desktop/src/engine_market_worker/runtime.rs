@@ -895,6 +895,20 @@ pub(super) fn apply_selection_outcome(
             if selection_matches_request(record, generation.0.get()) {
                 if record.pending_selection.is_none() {
                     record.initial_selection_pending = false;
+                    if matches!(
+                        record.initial_instrument,
+                        aeris_market_runtime::InstrumentRequest::Default
+                    ) && matches!(
+                        error,
+                        aeris_market_runtime::SelectionError::InstrumentUnavailable
+                    ) {
+                        record.endpoint.messages.send(PaneProjectionEvent::LocalCommandOutcome(
+                            aeris_desktop::market_worker::LocalCommandOutcome::DefaultUnavailable {
+                                generation: generation.0.get(),
+                            },
+                        )).map_err(|send| send.to_string())?;
+                        return Ok(());
+                    }
                     report_failure(
                         &record.endpoint.messages,
                         Some(generation.0.get()),
@@ -1337,6 +1351,40 @@ mod tests {
             assert_eq!(record.endpoint.active_generation, 7);
             assert!(pane.worker.drain_messages().0.is_empty());
         }
+    }
+
+    #[test]
+    fn unresolved_default_reports_typed_empty_selection_without_aborting_workspace() {
+        use aeris_market_runtime::{
+            InstrumentRequest, MarketGenerationId, SelectionError, SelectionOutcome,
+        };
+        let (mut pane, mut record) = super::super::worker_endpoint(
+            1,
+            1,
+            aeris_contracts::InstallProviderInstrument::default(),
+            1,
+            aeris_market_data::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        record.initial_instrument = InstrumentRequest::Default;
+        apply_selection_outcome(
+            &mut record,
+            SelectionOutcome::Failed {
+                generation: MarketGenerationId(NonZeroU64::new(1).expect("generation")),
+                error: SelectionError::InstrumentUnavailable,
+            },
+        )
+        .expect("no default does not abort workspace");
+        assert!(!record.initial_selection_pending);
+        assert!(matches!(
+            pane.worker.drain_messages().0.as_slice(),
+            [PaneProjectionEvent::LocalCommandOutcome(
+                aeris_desktop::market_worker::LocalCommandOutcome::DefaultUnavailable {
+                    generation: 1
+                }
+            )]
+        ));
     }
 
     #[test]

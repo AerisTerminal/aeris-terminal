@@ -4086,13 +4086,24 @@ impl WorkspaceSurface {
         }
     }
 
-    fn apply_local_command_outcome(
+    pub(super) fn apply_local_command_outcome(
         &mut self,
         outcome: aeris_desktop::market_worker::LocalCommandOutcome,
         cx: &mut Context<Self>,
     ) {
         use aeris_desktop::market_worker::LocalCommandOutcome;
         match outcome {
+            LocalCommandOutcome::DefaultUnavailable { generation } => {
+                if self.product.is_none()
+                    && self
+                        .chart_pane_controller
+                        .accept_initial_instrument(generation)
+                {
+                    self.chart_failure = Some(ChartFailure::NoDefault);
+                    self.chart_state = ChartState::Error;
+                    cx.notify();
+                }
+            }
             LocalCommandOutcome::BoundDescriptor {
                 generation,
                 descriptor,
@@ -4267,13 +4278,15 @@ impl WorkspaceSurface {
         generation: u64,
         instrument: InstallProviderInstrument,
     ) {
-        if self.product.as_ref().is_some_and(|product| {
+        if self.product.as_ref().is_none_or(|product| {
             product.provider == instrument.provider
                 && product.instrument_id == instrument.instrument_id
         }) && self
             .chart_pane_controller
             .adopt_initial_instrument(generation)
         {
+            self.provider =
+                ProviderId::find(&instrument.provider).unwrap_or_else(ProviderId::unsupported);
             self.product = Some(instrument);
             if self
                 .pending_descriptor

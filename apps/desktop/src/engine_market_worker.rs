@@ -328,7 +328,6 @@ fn start() -> Result<
 pub(super) fn start_workspace_tabs(
     market: &MarketService,
     workspace: &WorkspaceState,
-    restored: bool,
     trading: aeris_trading_runtime::TradingService,
     clock: Arc<dyn Clock>,
 ) -> Result<WorkspaceMarketGroup, String> {
@@ -341,16 +340,20 @@ pub(super) fn start_workspace_tabs(
     }
     let restore_notices = plan.notices.clone();
     for pane in plan.panes {
+        let initial_instrument = pane.instrument.as_ref().map_or(
+            aeris_market_runtime::InstrumentRequest::Default,
+            aeris_market_runtime::InstrumentRequest::restored,
+        );
         let (worker, mut endpoint) = worker_endpoint_for_market(
             market,
             pane.workspace_id,
             pane.pane_id,
-            pane.instrument,
+            pane.instrument.unwrap_or_default(),
             pane.consumer_id,
             pane.interval,
             (pane.restored_viewport, pane.generation),
         );
-        endpoint.initial_instrument = workspace_initial_instrument(&endpoint.product, restored);
+        endpoint.initial_instrument = initial_instrument;
         initial.push(worker);
         endpoints.push(endpoint);
     }
@@ -378,22 +381,11 @@ pub(super) fn start_workspace_tabs(
     })
 }
 
-fn workspace_initial_instrument(
-    product: &InstallProviderInstrument,
-    restored: bool,
-) -> aeris_market_runtime::InstrumentRequest {
-    if restored {
-        aeris_market_runtime::InstrumentRequest::restored(product)
-    } else {
-        aeris_market_runtime::InstrumentRequest::startup(product)
-    }
-}
-
 pub(super) struct RestoredWorkspacePaneSpec {
     pub(super) workspace_id: u64,
     pub(super) pane_id: u64,
     pub(super) consumer_id: u64,
-    pub(super) instrument: InstallProviderInstrument,
+    pub(super) instrument: Option<InstallProviderInstrument>,
     pub(super) interval: ChartInterval,
     pub(super) restored_viewport: Option<(i64, i64)>,
     pub(super) generation: u64,
@@ -432,20 +424,17 @@ fn restored_workspace_pane_specs(
             if WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart) {
                 continue;
             }
-            let Some(instrument) = pane.instrument.clone() else {
-                notices.push(format!(
-                    "Pane {} was skipped because its instrument is missing",
-                    pane.pane_id
-                ));
-                continue;
-            };
-            let Some(presentation) = provider_presentation(&instrument.provider) else {
+            let instrument = pane.instrument.clone();
+            let presentation = instrument
+                .as_ref()
+                .and_then(|instrument| provider_presentation(&instrument.provider));
+            if instrument.is_some() && presentation.is_none() {
                 notices.push(format!(
                     "Pane {} was skipped because its provider is unavailable",
                     pane.pane_id
                 ));
                 continue;
-            };
+            }
             let requested =
                 aeris_market_runtime::persisted_interval(&pane.interval).or_else(|| {
                     pane.series
@@ -454,18 +443,30 @@ fn restored_workspace_pane_specs(
                 });
             let interval = requested
                 .filter(|interval| {
-                    aeris_market_runtime::resolve_series_key(&instrument, *interval, presentation)
-                        .is_ok()
+                    instrument.as_ref().zip(presentation).is_none_or(
+                        |(instrument, presentation)| {
+                            aeris_market_runtime::resolve_series_key(
+                                instrument,
+                                *interval,
+                                presentation,
+                            )
+                            .is_ok()
+                        },
+                    )
                 })
                 .or_else(|| {
                     let offered = presentation
-                        .chart_interval_labels
-                        .iter()
+                        .into_iter()
+                        .flat_map(|presentation| presentation.chart_interval_labels.iter())
                         .filter_map(|label| aeris_market_runtime::persisted_interval(label))
                         .collect::<Vec<_>>();
-                    requested
-                        .unwrap_or(ChartInterval::Minute1)
-                        .nearest_offered(&offered)
+                    if instrument.is_none() || presentation.is_none() {
+                        Some(requested.unwrap_or(ChartInterval::Minute1))
+                    } else {
+                        requested
+                            .unwrap_or(ChartInterval::Minute1)
+                            .nearest_offered(&offered)
+                    }
                 });
             let Some(interval) = interval else {
                 notices.push(format!(
@@ -711,7 +712,7 @@ pub(super) fn restored_selection_for_pane_harness(
     consumer_id: u64,
 ) -> aeris_market_runtime::SelectionRequest {
     let (_, mut record) = worker_endpoint(1, consumer_id, product, consumer_id, interval, None, 1);
-    record.initial_instrument = workspace_initial_instrument(&record.product, true);
+    record.initial_instrument = aeris_market_runtime::InstrumentRequest::restored(&record.product);
     let mut requests = Vec::new();
     selection_commands::dispatch_initial_selection(&record, StreamRequirements::BARS, |request| {
         requests.push(request);
@@ -1519,13 +1520,14 @@ mod tests {
             let (worker, mut record) = worker_endpoint(
                 pane.workspace_id,
                 pane.pane_id,
-                pane.instrument.clone(),
+                pane.instrument.clone().expect("saved pane instrument"),
                 pane.consumer_id,
                 pane.interval,
                 pane.restored_viewport,
                 pane.generation,
             );
-            record.initial_instrument = workspace_initial_instrument(&record.product, true);
+            record.initial_instrument =
+                aeris_market_runtime::InstrumentRequest::restored(&record.product);
             assert_eq!(
                 record.initial_instrument,
                 InstrumentRequest::Ref(InstrumentRef {
@@ -1541,10 +1543,57 @@ mod tests {
             ));
         }
         assert_eq!(requests.len(), 4, "one initial command for each saved pane");
-        assert!(matches!(
-            workspace_initial_instrument(&instruments[0], false),
-            InstrumentRequest::Default
-        ));
+    }
+
+    #[test]
+    fn fresh_workspace_requests_runtime_default() {
+        use aeris_market_runtime::InstrumentRequest;
+        let workspace = crate::desktop::default_workspace_for_test();
+        let plan = restored_workspace_boot_plan(&workspace).expect("one fresh chart pane");
+        assert_eq!(plan.panes.len(), 1);
+        let pane = &plan.panes[0];
+        assert!(pane.instrument.is_none());
+        let (worker, mut record) = worker_endpoint(
+            pane.workspace_id,
+            pane.pane_id,
+            pane.instrument.clone().unwrap_or_default(),
+            pane.consumer_id,
+            pane.interval,
+            pane.restored_viewport,
+            pane.generation,
+        );
+        record.initial_instrument = pane
+            .instrument
+            .as_ref()
+            .map_or(InstrumentRequest::Default, InstrumentRequest::restored);
+        assert!(matches!(worker.startup, MarketWorkerStartup::Loading(_)));
+        let mut requests = Vec::new();
+        selection_commands::dispatch_initial_selection(
+            &record,
+            StreamRequirements::BARS,
+            |request| {
+                requests.push(request);
+                Ok(())
+            },
+        )
+        .expect("initial select_and_demand");
+        let [request] = requests.as_slice() else {
+            panic!("exactly one select_and_demand")
+        };
+        assert_eq!(request.instrument, InstrumentRequest::Default);
+        assert_eq!(request.consumer_id, pane.consumer_id);
+    }
+
+    #[test]
+    fn saved_explicit_default_instrument_remains_a_ref() {
+        use aeris_market_runtime::InstrumentRequest;
+        let mut workspace = crate::desktop::default_workspace_for_test();
+        workspace.workspace_tabs[0].panes[0].instrument = Some(fixture_public_crypto());
+        let plan = restored_workspace_boot_plan(&workspace).expect("saved BTC pane");
+        let instrument = plan.panes[0].instrument.as_ref().expect("saved instrument");
+        assert_eq!(instrument.instrument_id, "hyperliquid:perp:BTC");
+        assert!(matches!(InstrumentRequest::restored(instrument),
+            InstrumentRequest::Ref(reference) if reference.instrument_id == "hyperliquid:perp:BTC"));
     }
 
     fn assert_restored_pane_dispatch_and_reply(

@@ -212,6 +212,10 @@ pub enum LocalFailureScope {
 /// Results of local pane commands, fenced by the request sequence or study identity
 /// at the GPUI owner rather than projected as coordinator publications.
 pub enum LocalCommandOutcome {
+    /// The runtime has no instrument for a fresh pane; keep the workspace open.
+    DefaultUnavailable {
+        generation: u64,
+    },
     /// Selected catalog metadata for the exact binding, before its selection reply.
     BoundDescriptor {
         generation: u64,

@@ -1675,7 +1675,7 @@ mod instrument_drawings {
     }
 
     fn instrument(instrument_id: &str) -> InstallProviderInstrument {
-        let mut instrument = local_state::default_workspace().watchlist_entries[0]
+        let mut instrument = local_state::fixture_workspace().watchlist_entries[0]
             .instrument
             .clone()
             .expect("default instrument");

@@ -151,6 +151,15 @@ violations and missing verification explicitly, and never describe them as satis
   The bridge files `market_worker.rs`, `engine_market_worker.rs` and its `runtime.rs`
   need no provider-identity exceptions after M6.7; the deleted connection shell
   has no exception either. The final production exception is the logo mapping in `assets.rs`.
+- A fresh workspace persists one chart pane without a provider or instrument.
+  The bridge sends `InstrumentRequest::Default`, adopts the runtime's resolved
+  selection, and shows "Choose an instrument" without losing the workspace
+  when the runtime has no default. Explicit saved instruments restore as
+  `InstrumentRequest::Ref`; wire fields retain their existing numbers.
+  `desktop_control_flow_does_not_match_display_text` rejects desktop
+  production `if`/`match` conditions comparing known notice literals and
+  message constants with `starts_with`, `contains` or `==`. Use typed outcomes
+  rather than branching on display text.
 - `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`; the module is
   compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
   construct fixture market publications. The diagnostic conformance command is gated likewise.

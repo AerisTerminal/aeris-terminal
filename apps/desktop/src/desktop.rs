@@ -46,6 +46,10 @@ mod keyboard_shortcuts;
 mod layouts_view;
 #[path = "desktop/local_state.rs"]
 mod local_state;
+#[cfg(test)]
+pub(super) fn default_workspace_for_test() -> WorkspaceState {
+    local_state::default_workspace()
+}
 #[path = "desktop/market_screener.rs"]
 mod market_screener;
 #[path = "components/market_screener_view.rs"]
@@ -3702,6 +3706,7 @@ fn bounded_status_detail(detail: &str, generic_label: &str) -> Option<String> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartFailure {
     UnsupportedProvider,
+    NoDefault,
     Market,
     WorkerStopped,
 }
@@ -3709,6 +3714,7 @@ enum ChartFailure {
 impl ChartFailure {
     const fn detail(self) -> &'static str {
         match self {
+            Self::NoDefault => "Choose an instrument",
             Self::UnsupportedProvider => {
                 "This restored market provider is unavailable. Choose another market."
             }
@@ -3849,6 +3855,19 @@ struct TerminalStartupState {
 fn terminal_startup_state(startup: MarketWorkerStartup) -> TerminalStartupState {
     match startup {
         MarketWorkerStartup::Loading(startup) => {
+            if startup.product.provider.is_empty() {
+                return TerminalStartupState {
+                    chart: None,
+                    chart_state: ChartState::Loading,
+                    chart_failure: None,
+                    replay_label: "waiting for the runtime default".to_string(),
+                    worker_label: startup.worker_label,
+                    subscription_id: startup.subscription_id,
+                    connection_state: Some(FeedConnectionState::Discovering),
+                    provider: ProviderId::unsupported(),
+                    product: None,
+                };
+            }
             let Some(provider) = ProviderId::find(startup.product.provider.as_str()) else {
                 let message = ChartFailure::UnsupportedProvider.detail().to_string();
                 return TerminalStartupState {
@@ -5657,17 +5676,13 @@ enum DesktopLayout {
 
 struct ConfiguredLifecycle {
     workspace: WorkspaceState,
-    restored_workspace: bool,
 }
 
 fn configure_desktop_state(
     services: &aeris_desktop::services::DesktopServices,
 ) -> ConfiguredLifecycle {
-    let (workspace, restored_workspace) =
-        local_state::load_workspace_with_origin(&services.persistence.workspace_path());
     ConfiguredLifecycle {
-        workspace,
-        restored_workspace,
+        workspace: local_state::load_workspace(&services.persistence.workspace_path()),
     }
 }
 
@@ -5700,7 +5715,6 @@ fn configured_market_workers(
                 let group = engine_market_worker::start_workspace_tabs(
                     &services.market,
                     &lifecycle.workspace,
-                    lifecycle.restored_workspace,
                     services.trading.clone(),
                     Arc::clone(&services.clock),
                 )?;
@@ -5720,7 +5734,6 @@ fn configured_market_workers(
             let group = engine_market_worker::start_workspace_tabs(
                 &services.market,
                 &lifecycle.workspace,
-                lifecycle.restored_workspace,
                 services.trading.clone(),
                 Arc::clone(&services.clock),
             )?;

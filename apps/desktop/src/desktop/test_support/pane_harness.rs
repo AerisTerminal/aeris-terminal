@@ -136,7 +136,7 @@ impl PaneHarness {
         let product = if fixture_futures_startup {
             aeris_desktop::test_support::fixture_futures_contract("MNQ")
         } else {
-            local_state::default_workspace().watchlist_entries[0]
+            local_state::fixture_workspace().watchlist_entries[0]
                 .instrument
                 .clone()
                 .expect("fixture product")
@@ -277,7 +277,7 @@ impl PaneHarness {
 
 #[gpui::test]
 fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAppContext) {
-    let saved_instrument = local_state::default_workspace().watchlist_entries[0]
+    let saved_instrument = local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("fixture product");
@@ -3459,7 +3459,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     let (harness, cx) = PaneHarness::open(cx);
     let commands = harness.commands.as_ref().expect("command receiver");
     while commands.try_recv().is_ok() {}
-    let instrument = local_state::default_workspace().watchlist_entries[0]
+    let instrument = local_state::fixture_workspace().watchlist_entries[0]
         .instrument
         .clone()
         .expect("fixture product");
