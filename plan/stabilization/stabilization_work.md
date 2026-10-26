@@ -2227,6 +2227,15 @@ active item (parts 1-8); M6.8-M6.12 are open.
     but remains provider-specific until the M6.9 form/attribution part. UI-03 and MD-10 remain
     open. VAL-DSK-105 not yet validated (desktop provider-specific names remain); VAL-DSK-030,
     VAL-DSK-106 and guarded login GUI clauses are also pending.
+  - Status (2026-10-26 desktop form part): code complete for the connect/login form:
+    `ConnectProvider(ProviderId)` and provider-keyed disconnect replace the named actions;
+    the Accounts panel lists every published provider once and renders its credential fields
+    from the schema. Server/system discovery, saved check, sign-in, forget and cancel use only
+    the neutral market-runtime API. The old form and the two production identity exceptions
+    and the now-stale workspace-surface exception are gone; VAL-DSK-105 and VAL-DSK-030
+    code checks close. UI-03's login-form route closes,
+    but UI-03/MD-10 remain open for descriptor attribution. M6.9 remains unchecked:
+    code complete for the form; VAL-DSK-024/106 and guarded login GUI not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
   - Status (2026-10-23 audit): `latest_feedback` is replaced by the `DesktopServices` feedback
     handle and `announce_fills` by snapshot diffing in `components/toaster.rs`
@@ -2296,6 +2305,11 @@ the repo root `AGENTS.md`.
   provider-id-keyed API dispatches Rithmic login checks and credential storage only through
   its native vault entry. Secret field values have no `Debug`, and summary/server discovery
   contains no user ID or password (M6.9 runtime part, `feat(market): publish provider-neutral vault login API`).
+- The desktop Accounts connection groups enumerate published provider descriptors; the
+  `provider_login.rs` form uses only the descriptor's fields and provider-keyed runtime
+  commands. The native-vault and desktop-rendering tests target that component, and no
+  Accounts-panel/form/workspace-surface provider-identity exception remains (M6.9 desktop form part,
+  `refactor(desktop): render provider login from published schema`).
 - A desktop production `enum TerminalProvider` or `FALLBACK_TERMINAL_PROVIDER` fails
   `tools/naming_check`; the runtime registration test
   `every_registered_provider_has_a_complete_published_descriptor` is required instead.
@@ -2863,6 +2877,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.8 Part 1 refactor(desktop): derive provider identities from runtime descriptors. `provider_set_comes_from_published_descriptors`, `connection_list_includes_each_published_provider_in_order`, `provider_presentation_controls_chart_types_intervals_queues_and_trades`, `unregistered_provider_shows_unsupported_state`, `desktop_provider_set_rejects_enums_and_fallbacks_in_production` and `every_registered_provider_has_a_complete_published_descriptor` cover published scopes, connection rows, capability projection and unknown stored ids. Existing symbol-browser fence, exchange, flat-list and bounds tests remain. UI-03's enum/fallback portion closes; M6.8 remains unchecked for VAL-DSK-026/027/028 and VAL-CROSS-001, with UI-03/MD-10/UI-10 still open as above.
 - 2026-10-26 M6.8 Part 2 fix(desktop): request runtime default for fresh panes. `fresh_workspace_requests_runtime_default`, `fresh_workspace_has_no_persisted_instrument_or_provider_identity`, `saved_explicit_default_instrument_remains_a_ref`, `unresolved_default_reports_typed_empty_selection_without_aborting_workspace`, `no_default_instrument_shows_choose_prompt` and the display-text rule's rejection, acceptance and production-scan tests cover the new startup boundary. The `local_state.rs` provider exception is gone, and UI-10's M6.8 route closes. The box stays unchecked: VAL-DSK-027 is owned by M6.10; VAL-DSK-026 GUI and VAL-CROSS-001 await guarded GUI evidence.
 - 2026-10-26 M6.9 runtime part feat(market): publish provider-neutral vault login API. `registered_login_schema_is_provider_owned` checks the Rithmic field/secret schema and Hyperliquid Public descriptor; `neutral_login_writes_only_the_provider_vault_entry` uses only an injected vault and a scripted acceptance, checks other entries survive sign-in/forget and the saved summary omits credentials. UI-03/MD-10 remain open for the form and attribution. M6.9 stays unchecked: code complete at the runtime boundary; VAL-DSK-105 desktop scan, VAL-DSK-030/106 and guarded GUI not yet validated.
+- 2026-10-26 M6.9 desktop form part refactor(desktop): render provider login from published schema. `provider_login_form_writes_only_through_vault_seam`, `connection_list_includes_each_published_provider_in_order`, `neutral_login_writes_only_the_provider_vault_entry` and the native-vault naming test cover form dispatch, exact Accounts rows and runtime vault isolation. VAL-DSK-105/030 code checks close; UI-03's form portion closes. M6.9 stays unchecked: attribution VAL-DSK-024/106 and guarded login GUI not yet validated (D2/D13).
 
 ## 7. Known gaps / deferred
 

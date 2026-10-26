@@ -3,7 +3,7 @@
 //! settings panel. Connecting a provider, creating a practice account and confirming a deletion
 //! all happen inline in the panel; nothing opens a second dialog over it.
 //!
-//! Presentation only. The market runtime owns the saved Rithmic login and its credentials;
+//! Presentation only. The market runtime owns saved provider logins and their credentials;
 //! `trading_runtime` owns practice accounts. This panel dispatches their commands and shows the
 //! last observed state.
 
@@ -49,7 +49,7 @@ impl AccountsTab {
 pub(super) struct ConnectionsView<'a> {
     pub(super) terminal: &'a Entity<TerminalApp>,
     pub(super) data: &'a DataConnections,
-    pub(super) rithmic_login: &'a rithmic_login::RithmicLoginFlow,
+    pub(super) provider_login: &'a provider_login::ProviderLoginFlow,
 }
 
 /// Drag payload for moving the Accounts panel by its title bar.
@@ -94,7 +94,7 @@ impl WorkspaceSurface {
         self.menu_state.accounts_tab = tab;
         self.trading_pnl.account_creator = None;
         self.trading_pnl.account_delete_confirmation = None;
-        window.dispatch_action(Box::new(CancelRithmicLogin), cx);
+        window.dispatch_action(Box::new(CancelProviderLogin), cx);
         self.chrome_focus.focus(window, cx);
         cx.notify();
     }
@@ -305,23 +305,18 @@ fn panel_sidebar(
 fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> Vec<AnyElement> {
     connection_provider_ids(aeris_market_runtime::published_provider_descriptors())
         .into_iter()
-        .map(|provider| {
+        .enumerate()
+        .map(|(index, provider)| {
             let descriptor = provider.descriptor().expect("published provider");
             match descriptor.connect {
-                aeris_market_runtime::ConnectMethod::VaultCredentials { .. }
-                    if provider.id() == "rithmic" =>
-                {
-                    rithmic_group(connections, theme)
+                aeris_market_runtime::ConnectMethod::VaultCredentials { .. } => {
+                    credential_group(connections, provider, index, theme)
                 }
                 aeris_market_runtime::ConnectMethod::Public => settings_group(
                     descriptor.display_name,
                     [described_setting_row(
                         descriptor.display_name,
-                        [SharedString::from(if descriptor.id == "hyperliquid" {
-                            "Crypto markets from Hyperliquid's public feed"
-                        } else {
-                            "Public market data"
-                        })],
+                        [SharedString::from("Public market data")],
                         control_strip(feed_level_pill(provider, theme).into_iter().chain(
                             std::iter::once(pill(
                                 "No login needed",
@@ -331,16 +326,6 @@ fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> V
                                 theme,
                             )),
                         )),
-                        theme,
-                    )],
-                    theme,
-                ),
-                aeris_market_runtime::ConnectMethod::VaultCredentials { .. } => settings_group(
-                    descriptor.display_name,
-                    [described_setting_row(
-                        descriptor.display_name,
-                        [SharedString::from("Credentials required")],
-                        control_strip(feed_level_pill(provider, theme)),
                         theme,
                     )],
                     theme,
@@ -371,30 +356,36 @@ fn feed_level_pill(provider: ProviderId, theme: &AerisTheme) -> Option<AnyElemen
     ))
 }
 
-/// The Rithmic connection. Connect opens the login form in place; the connection row keeps
+/// A credential connection. Connect opens the login form in place; the connection row keeps
 /// its status while the form is open.
-fn rithmic_group(connections: ConnectionsView<'_>, theme: &AerisTheme) -> AnyElement {
+fn credential_group(
+    connections: ConnectionsView<'_>,
+    provider: ProviderId,
+    index: usize,
+    theme: &AerisTheme,
+) -> AnyElement {
     let colors = theme.colors;
-    let view = &connections.data.rithmic;
+    let descriptor = provider.descriptor().expect("published provider");
+    let view = connections.data.view(provider).cloned().unwrap_or_default();
     let connected = view.connected();
     let busy = view.busy();
-    let form_open = rithmic_login::rithmic_login_form_open(connections.rithmic_login);
+    let form_open = provider_login::provider_login_form_open(connections.provider_login, provider);
     // A different login is a disconnect followed by a new connection, so a connected row
     // offers only Disconnect.
     let action = (!form_open).then(|| {
         if connected {
-            Button::new("accounts_rithmic_disconnect", theme)
+            Button::new(("accounts_provider_disconnect", index), theme)
                 .variant(ButtonVariant::Secondary)
                 .label("Disconnect")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(DisconnectRithmic), cx);
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(DisconnectProvider(provider)), cx);
                 })
         } else {
-            Button::new("accounts_rithmic_connect", theme)
+            Button::new(("accounts_provider_connect", index), theme)
                 .variant(ButtonVariant::Default)
                 .label("Connect")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(ConnectRithmic), cx);
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(ConnectProvider(provider)), cx);
                 })
         }
         .loading(busy)
@@ -419,10 +410,10 @@ fn rithmic_group(connections: ConnectionsView<'_>, theme: &AerisTheme) -> AnyEle
         )
     };
     let mut rows = vec![described_setting_row(
-        "Rithmic",
+        descriptor.display_name,
         [SharedString::from(view.detail())],
         control_strip(
-            feed_level_pill(ProviderId("rithmic"), theme)
+            feed_level_pill(provider, theme)
                 .into_iter()
                 .chain(std::iter::once(status))
                 .chain(action),
@@ -441,19 +432,34 @@ fn rithmic_group(connections: ConnectionsView<'_>, theme: &AerisTheme) -> AnyEle
             .child(message.clone())
             .into_any_element()
     }));
-    rows.extend(rithmic_login::rithmic_login_form(
+    rows.extend(provider_login::provider_login_form(
         connections.terminal,
-        connections.rithmic_login,
-        view,
+        connections.provider_login,
+        provider,
+        &view,
         theme,
     ));
-    rows.push(
-        div()
-            .pt_2()
-            .child(rithmic_login::rithmic_marks(theme))
-            .into_any_element(),
-    );
-    settings_group("Rithmic · CME Group futures", rows, theme)
+    let marks = assets::AttributionMark::for_provider_logo_key(descriptor.logo_key);
+    if !marks.is_empty() {
+        rows.push(
+            div()
+                .pt_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(
+                    marks
+                        .iter()
+                        .copied()
+                        .map(|mark| terminal_chrome::AttributionMarkImage {
+                            mark,
+                            mode: theme.mode,
+                        }),
+                )
+                .into_any_element(),
+        );
+    }
+    settings_group(descriptor.display_name, rows, theme)
 }
 
 fn trading_account_groups(
@@ -873,7 +879,18 @@ mod provider_descriptor_tests {
 
     #[test]
     fn connection_list_includes_each_published_provider_in_order() {
-        let mut descriptors = aeris_market_runtime::published_provider_descriptors().to_vec();
+        let published = aeris_market_runtime::published_provider_descriptors();
+        assert_eq!(
+            connection_provider_ids(published)
+                .iter()
+                .map(|provider| provider.id())
+                .collect::<Vec<_>>(),
+            published
+                .iter()
+                .map(|descriptor| descriptor.id)
+                .collect::<Vec<_>>()
+        );
+        let mut descriptors = published.to_vec();
         let mut fixture = descriptors[0].clone();
         fixture.id = "fixture-third";
         fixture.symbol_browser = false;

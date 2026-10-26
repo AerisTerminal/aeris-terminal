@@ -129,7 +129,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.check_rithmic_login(window, cx);
+        self.check_provider_logins(window, cx);
     }
 
     fn open_command_palette(
@@ -493,7 +493,7 @@ impl TerminalApp {
             accounts_panel::ConnectionsView {
                 terminal,
                 data: &self.data_connections,
-                rithmic_login: &self.rithmic_login,
+                provider_login: &self.provider_login,
             },
             &self.theme,
             chart_chrome::CHART_CHROME_HEIGHT + title_bar_row_height,
@@ -606,9 +606,9 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::trading_flatten_account))
             .on_action(cx.listener(Self::trading_kill_switch))
             .on_action(cx.listener(Self::open_command_palette))
-            .on_action(cx.listener(Self::connect_rithmic))
-            .on_action(cx.listener(Self::cancel_rithmic_login))
-            .on_action(cx.listener(Self::disconnect_rithmic))
+            .on_action(cx.listener(Self::connect_provider))
+            .on_action(cx.listener(Self::cancel_provider_login))
+            .on_action(cx.listener(Self::disconnect_provider))
             .on_action(cx.listener(Self::refresh_broker_connections))
             .into_any_element()
     }

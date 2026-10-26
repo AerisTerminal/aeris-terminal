@@ -344,6 +344,12 @@ the check.
   forget and server/system discovery; the Rithmic implementation alone verifies and writes its
   native-vault entry. Submitted field values never derive `Debug`. Live/test provider sessions must
   respect provider concurrency limits.
+- Desktop connection rows come from `published_provider_descriptors()` exactly once per registered
+  provider. `components/provider_login.rs` renders the published vault-login field schema and
+  calls only provider-id-keyed market-runtime login methods; the desktop never imports a
+  provider-specific login summary/server or writes a credential outside the runtime's vault seam.
+  `tools/naming_check` keeps this component in the native-vault and rendering-boundary checks;
+  its former Accounts-panel, login-form and workspace-surface identity exceptions are removed.
 - Broker orders reach Rithmic only through the venue relay in `market_runtime::rithmic_venue`, started
   once by `MarketService::attach_broker_venue` on its `aeris-broker-venue` worker. It reads the same
   vault login, routes only demo logins (the Rithmic Test gateway and Rithmic Paper Trading) and refuses a

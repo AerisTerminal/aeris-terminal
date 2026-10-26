@@ -37,10 +37,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "registered provider logo assets",
     ),
     (
-        "apps/desktop/src/components/accounts_panel.rs",
-        "legacy provider account labels",
-    ),
-    (
         "apps/desktop/src/components/bottom_panel.rs",
         "legacy provider panel labels",
     ),
@@ -53,10 +49,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
         "legacy provider menu actions",
     ),
     (
-        "apps/desktop/src/components/rithmic_login.rs",
-        "legacy credential form awaiting M6.9",
-    ),
-    (
         "apps/desktop/src/components/terminal_chrome.rs",
         "legacy provider chrome",
     ),
@@ -67,10 +59,6 @@ const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[
     (
         "apps/desktop/src/desktop.rs",
         "legacy provider connection and summary routes",
-    ),
-    (
-        "apps/desktop/src/desktop/workspace_surface.rs",
-        "legacy provider pane controls",
     ),
     (
         "apps/desktop/src/desktop/workspace_tabs.rs",
@@ -2614,6 +2602,7 @@ mod tests {
             "apps/desktop/src/components/chrome_menu.rs",
             "apps/desktop/src/components/drawing_toolbar.rs",
             "apps/desktop/src/components/indicator_menu.rs",
+            "apps/desktop/src/components/provider_login.rs",
             "apps/desktop/src/components/symbol_menu.rs",
             "apps/desktop/src/components/terminal_chrome.rs",
             "apps/desktop/src/components/terminal_view.rs",
@@ -4817,7 +4806,7 @@ jobs:
         }
         for path in readers
             .into_iter()
-            .chain(["apps/desktop/src/components/rithmic_login.rs"])
+            .chain(["apps/desktop/src/components/provider_login.rs"])
             .chain([".github/workflows/live_market_gates.yml"])
         {
             let content = manifest(path);
@@ -4837,7 +4826,7 @@ jobs:
         }
         // The desktop hands a login to the market runtime and never opens the
         // vault or the adapter itself.
-        let desktop = manifest("apps/desktop/src/components/rithmic_login.rs");
+        let desktop = manifest("apps/desktop/src/components/provider_login.rs");
         for forbidden in ["NativeCredentialVault", "aeris_rithmic_protocol_adapter"] {
             assert!(
                 !desktop.contains(forbidden),

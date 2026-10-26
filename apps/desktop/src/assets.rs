@@ -451,6 +451,15 @@ impl MarkDensity {
 
 impl AttributionMark {
     pub const ALL: [Self; 2] = [Self::MarketDataByRithmic, Self::PoweredByOmne];
+    /// Existing connection artwork, resolved at the asset boundary by the published logo key.
+    #[must_use]
+    pub fn for_provider_logo_key(logo_key: &str) -> &'static [Self] {
+        if ExchangeLogo::for_logo_key(logo_key) == Some(ExchangeLogo::Rithmic) {
+            &Self::ALL
+        } else {
+            &[]
+        }
+    }
     /// Logical height; the standard asset is exactly this many pixels tall.
     pub const HEIGHT: f32 = 18.0;
 

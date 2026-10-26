@@ -72,11 +72,11 @@ mod order_ticket;
 mod platform_menu;
 #[path = "components/price_alert_dialog.rs"]
 mod price_alert_dialog;
+#[path = "components/provider_login.rs"]
+mod provider_login;
 #[cfg(any(test, feature = "diagnostics"))]
 #[path = "readiness_conformance.rs"]
 mod readiness_conformance;
-#[path = "components/rithmic_login.rs"]
-mod rithmic_login;
 #[path = "components/side_panel_dock.rs"]
 mod side_panel_dock;
 #[path = "components/sign_in_gate.rs"]
@@ -591,12 +591,48 @@ actions!(
         TradingFlattenAccount,
         TradingKillSwitch,
         OpenCommandPalette,
-        ConnectRithmic,
-        CancelRithmicLogin,
-        DisconnectRithmic,
+        CancelProviderLogin,
         RefreshBrokerConnections,
     ]
 );
+
+#[derive(Clone, PartialEq)]
+struct ConnectProvider(ProviderId);
+
+#[derive(Clone, PartialEq)]
+struct DisconnectProvider(ProviderId);
+
+macro_rules! provider_action {
+    ($name:ident) => {
+        impl gpui::Action for $name {
+            fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+                Box::new(self.clone())
+            }
+            fn partial_eq(&self, other: &dyn gpui::Action) -> bool {
+                other.as_any().downcast_ref::<Self>() == Some(self)
+            }
+            fn name(&self) -> &'static str {
+                Self::name_for_type()
+            }
+            fn name_for_type() -> &'static str {
+                concat!("aeris::", stringify!($name))
+            }
+            fn build(value: serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+                let id = value
+                    .as_str()
+                    .ok_or_else(|| gpui::private::anyhow::anyhow!("Expected a provider ID"))?;
+                let descriptor = aeris_market_runtime::published_provider_descriptors()
+                    .iter()
+                    .find(|descriptor| descriptor.id == id)
+                    .ok_or_else(|| gpui::private::anyhow::anyhow!("Unknown provider ID"))?;
+                Ok(Box::new(Self(ProviderId(descriptor.id))))
+            }
+        }
+        gpui::register_action!($name);
+    };
+}
+provider_action!(ConnectProvider);
+provider_action!(DisconnectProvider);
 
 fn generation_status(
     worker_label: &str,
@@ -1148,20 +1184,25 @@ struct PracticeAccountFormState {
 /// Every market-data connection the Accounts panel presents.
 #[derive(Clone, Default)]
 struct DataConnections {
-    rithmic: rithmic_login::RithmicLoginView,
+    providers: std::collections::BTreeMap<&'static str, provider_login::ProviderLoginView>,
 }
 
 impl DataConnections {
+    fn view(&self, provider: ProviderId) -> Option<&provider_login::ProviderLoginView> {
+        self.providers.get(provider.id())
+    }
+
+    fn view_mut(&mut self, provider: ProviderId) -> &mut provider_login::ProviderLoginView {
+        self.providers.entry(provider.id()).or_default()
+    }
+
     /// Whether the runtime reported no stored connection for a provider that needs one.
     fn disconnected(&self, provider: ProviderId) -> bool {
         match provider.descriptor().map(|descriptor| descriptor.connect) {
             Some(aeris_market_runtime::ConnectMethod::Public) | None => false,
-            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. })
-                if provider.id() == "rithmic" =>
-            {
-                self.rithmic.missing()
-            }
-            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. }) => true,
+            Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. }) => self
+                .view(provider)
+                .is_some_and(provider_login::ProviderLoginView::missing),
         }
     }
 }
@@ -5372,7 +5413,7 @@ struct TerminalApp {
     keyboard_trading: trading_hotkeys::KeyboardTrading,
     keyboard_shortcuts_open: bool,
     data_connections: DataConnections,
-    rithmic_login: rithmic_login::RithmicLoginFlow,
+    provider_login: provider_login::ProviderLoginFlow,
     linked_sync_revisions: BTreeMap<String, u64>,
     event_risk_dispatches: BTreeMap<String, i64>,
     next_event_risk_check: Instant,

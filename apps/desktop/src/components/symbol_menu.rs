@@ -560,7 +560,9 @@ mod tests {
         let mut connections = DataConnections::default();
         assert!(!connections.disconnected(ProviderId("hyperliquid")));
         assert!(!connections.disconnected(ProviderId("rithmic")));
-        connections.rithmic.saved = rithmic_login::SavedRithmicLogin::Missing;
+        // The saved-login check has not answered yet; never hide a valid saved
+        // provider's catalog while its vault summary is still loading.
+        connections.view_mut(ProviderId("rithmic")).saved = provider_login::SavedLogin::Missing;
         assert!(connections.disconnected(ProviderId("rithmic")));
         assert!(!connections.disconnected(ProviderId("hyperliquid")));
     }

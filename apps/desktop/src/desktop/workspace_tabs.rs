@@ -250,7 +250,7 @@ impl TerminalApp {
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
             keyboard_shortcuts_open: false,
             data_connections: DataConnections::default(),
-            rithmic_login: rithmic_login::RithmicLoginFlow::default(),
+            provider_login: provider_login::ProviderLoginFlow::default(),
             linked_sync_revisions: BTreeMap::new(),
             event_risk_dispatches: BTreeMap::new(),
             next_event_risk_check: Instant::now(),
