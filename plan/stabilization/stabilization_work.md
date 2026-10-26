@@ -2246,6 +2246,19 @@ active item (parts 1-8); M6.8-M6.12 are open.
     code checks close. UI-03/MD-10 code findings close. M6.9 remains unchecked:
     code complete; VAL-DSK-029 not yet validated.
 - [ ] M6.10 trading-store - One workspace `TradingStore` fed by the change stream
+  - Status (2026-10-26 Part 2 of 3, desktop projection split): `TerminalApp`
+    owns a subscription-backed `TradingStore` with a named, cancellable bridge,
+    newest-only slot, one pending wake and revision-checked UI adoption. The
+    existing pane refresh now reads that working set instead of calling the
+    trading service's unbounded snapshot; chart, bottom-panel and toast views
+    use the projected fields. Pane-local ticket, account dialogs and feedback
+    are separated from one `TradingProjection::from_working_set` constructor.
+    The four Part 1 characterization tests pass unchanged. VAL-DSK-108 bridge
+    convergence, same-revision marks, lagged history reload, wake and shutdown
+    tests pass. M6.10 remains unchecked:
+    Part 3 must remove the interim per-pane runtime projection caches and
+    250 ms trading refresh timer, wire typed notices/history pages and complete
+    the remaining M6.10 assertions and guarded GUI evidence.
   - Status (2026-10-26 Part 1 of 3, characterization checkpoint): four fixture
     tests pin the existing chart order/stop/target lines, pane activity and
     risk-lock reason, ticket/account labels, bottom-panel practice and connected
@@ -2922,6 +2935,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-26 M6.7/M6.9 refactor(desktop): scope provider attribution to held sessions. `attribution_follows_held_provider_session`, `provider_notices_carry_the_requested_year_and_owners`, `broker_ticket_uses_registered_venue_display_name`, the existing light/dark asset tests and `desktop_source_is_provider_neutral` cover descriptor marks, About notices, recovery, unattributed providers and the final assets-only exception (D2). MD-10/UI-03 code findings close. M6.7 remains unchecked: code complete; VAL-DSK-114 not yet validated. M6.9 remains unchecked: code complete; VAL-DSK-029 not yet validated (D13).
 - 2026-10-26 M6.10 owner projection feat(trading): project bounded desktop working set - `working_set_fields_match_snapshot_projection`, `working_set_windows_respect_bounds`, `working_set_includes_registered_ticket_terms_without_an_order`, `working_set_active_bracket_and_protection_match_snapshot`, `mark_only_change_keeps_non_mark_fields`, `lagged_resync_carries_new_fields` and the existing idle/mark/history tests cover VAL-DSK-107 with open-only indexed groups, bounded recent windows and paged historical reads; M6.10 remains unchecked pending desktop/GUI validation.
 - 2026-10-26 M6.10 Part 1 characterization checkpoint test(desktop): lock trading projection presentation baselines. `trading_projection_baseline_chart_account_and_risk_lock`, `trading_projection_baseline_panel_rows_and_connected_broker`, `trading_projection_baseline_ticket_account_and_status_labels` and `trading_projection_baseline_fill_and_broker_rejection_news` assert today's output before the split; no runtime projection migration or new restriction landed. VAL-DSK-117 and M6.10 remain open.
+- 2026-10-26 M6.10 Part 2 feat(desktop): project trading from one subscription store. `out_of_order_revisions_keep_newest_and_lagged_replaces`, `same_revision_mark_updates_replace_the_slot_without_losing_lag`, `bridge_has_one_pending_ui_wake_and_nonblocking_drain`, `bridge_shutdown_drops_subscription_and_joins_within_receive_bound`, `lagged_working_set_reloads_history_at_the_same_revision` and the four unchanged `trading_projection_baseline_*` regressions cover the WorkingSet desktop source, UI convergence, mark-only changes, lagged history and shutdown. M6.10 remains unchecked pending Part 3 and GUI evidence.
 
 ## 7. Known gaps / deferred
 

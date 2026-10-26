@@ -193,6 +193,7 @@ impl TerminalApp {
         );
         let persisted_layout = workspace_layout_tabs(&workspaces, cx);
         let persisted_active_workspace_id = workspaces[active].id;
+        let trading_store = start_trading_store(&lifecycle, &market_frame_wake, cx);
         Self {
             workspaces,
             active,
@@ -205,6 +206,7 @@ impl TerminalApp {
             market_wake_listener_started: None,
             chrome_focus: cx.focus_handle().tab_stop(true),
             lifecycle,
+            trading_store: trading_store.clone(),
             workspace_factory: init.workspace_factory,
             watchlist,
             market_summaries: BTreeMap::new(),
@@ -3575,6 +3577,33 @@ impl TerminalApp {
     }
 }
 
+fn start_trading_store(
+    lifecycle: &DesktopLifecycle,
+    wake: &UiWake,
+    cx: &mut Context<TerminalApp>,
+) -> Entity<trading_store::TradingStore> {
+    let store = cx.new(|_| trading_store::TradingStore::default());
+    lifecycle.register_trading_store(&store);
+    let service = lifecycle.trading().clone();
+    let wake = wake.callback();
+    let bridge_store = store.clone();
+    let subscription = cx
+        .background_executor()
+        .spawn(async move { service.subscribe() });
+    cx.spawn(async move |_, cx| match subscription.await {
+        Ok(subscription) => {
+            bridge_store.update(cx, |store, _| {
+                if let Err(error) = store.start(subscription, wake) {
+                    diagnostic!("Trading view bridge unavailable: {error}");
+                }
+            });
+        }
+        Err(error) => diagnostic!("Trading view subscription unavailable: {error}"),
+    })
+    .detach();
+    store
+}
+
 impl TerminalApp {
     pub(super) fn start_market_wake_listener(
         &mut self,
@@ -3631,6 +3660,9 @@ impl TerminalApp {
                 wake.notified().await;
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
+                        if terminal.trading_store.read(terminal_cx).has_pending() {
+                            terminal_cx.notify();
+                        }
                         terminal.schedule_market_frame(window, terminal_cx);
                     })
                     .is_err()

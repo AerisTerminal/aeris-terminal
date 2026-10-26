@@ -276,7 +276,7 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) app: &'a Entity<WorkspaceSurface>,
     pub(super) frame: Option<&'a aeris_market_data::OrderBookFrame>,
     pub(super) product: Option<&'a InstallProviderInstrument>,
-    pub(super) trading: &'a super::TradingPnlState,
+    pub(super) trading: &'a super::TradingPaneState,
     pub(super) quantity: &'a super::order_quantity::OrderQuantityControls,
     pub(super) controls: &'a OrderTicketControls,
     pub(super) theme: &'a AerisTheme,
@@ -724,7 +724,7 @@ fn broker_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) ->
 /// The account a broker choice switches to: a connected broker account before one whose
 /// venue is unreachable.
 fn first_account(
-    trading: &super::TradingPnlState,
+    trading: &super::TradingPaneState,
     broker: TicketBroker,
 ) -> Option<&aeris_trading::TradingAccount> {
     let mut accounts = trading

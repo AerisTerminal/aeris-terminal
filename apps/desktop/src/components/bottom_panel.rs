@@ -200,23 +200,79 @@ impl Default for BottomPanelState {
     }
 }
 
+pub(super) trait PanelTradingView {
+    fn revision(&self) -> u64;
+    fn accounts(&self) -> &[aeris_trading::TradingAccount];
+    fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument];
+    fn positions(&self) -> &[aeris_trading::Position];
+    fn round_trips(&self) -> &[aeris_trading_runtime::TradeRoundTrip];
+    fn account_pnl(&self) -> &[aeris_trading::AccountPnl];
+    fn connected_broker_accounts(&self) -> &BTreeSet<aeris_trading::TradingAccountId>;
+    fn position_protection(
+        &self,
+        account: &aeris_trading::TradingAccountId,
+        instrument: &aeris_instruments::InstrumentId,
+    ) -> aeris_trading_runtime::PositionProtection;
+}
+
+macro_rules! panel_trading_view {
+    ($ty:ty) => {
+        impl PanelTradingView for $ty {
+            fn revision(&self) -> u64 {
+                self.revision
+            }
+            fn accounts(&self) -> &[aeris_trading::TradingAccount] {
+                &self.accounts
+            }
+            fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument] {
+                &self.instruments
+            }
+            fn positions(&self) -> &[aeris_trading::Position] {
+                &self.positions
+            }
+            fn round_trips(&self) -> &[aeris_trading_runtime::TradeRoundTrip] {
+                &self.round_trips
+            }
+            fn account_pnl(&self) -> &[aeris_trading::AccountPnl] {
+                &self.account_pnl
+            }
+            fn connected_broker_accounts(&self) -> &BTreeSet<aeris_trading::TradingAccountId> {
+                &self.connected_broker_accounts
+            }
+            fn position_protection(
+                &self,
+                account: &aeris_trading::TradingAccountId,
+                instrument: &aeris_instruments::InstrumentId,
+            ) -> aeris_trading_runtime::PositionProtection {
+                self.position_protection(account, instrument)
+            }
+        }
+    };
+}
+panel_trading_view!(aeris_trading_runtime::WorkingSet);
+#[cfg(test)]
+panel_trading_view!(aeris_trading_runtime::TradingSnapshot);
+
 impl BottomPanelState {
+    /// An overflow delivered an authoritative resync; replace bounded history
+    /// even if its revision matches the last rendered view.
+    pub(super) fn invalidate_trading_revision(&mut self) {
+        self.history.revision = None;
+    }
+
     /// Adopts committed facts on revision changes and ephemeral marks on quote-only updates.
-    pub(super) fn apply_snapshot(
-        &mut self,
-        snapshot: &aeris_trading_runtime::TradingSnapshot,
-    ) -> bool {
-        let facts_changed = self.history.revision != Some(snapshot.revision);
-        if !facts_changed && self.history.account_pnl.as_ref() == snapshot.account_pnl.as_slice() {
+    pub(super) fn apply_snapshot(&mut self, snapshot: &impl PanelTradingView) -> bool {
+        let facts_changed = self.history.revision != Some(snapshot.revision());
+        if !facts_changed && self.history.account_pnl.as_ref() == snapshot.account_pnl() {
             return false;
         }
         if facts_changed {
-            self.history.revision = Some(snapshot.revision);
-            self.history.round_trips = snapshot.round_trips.clone().into();
-            self.history.accounts = snapshot.accounts.clone().into();
+            self.history.revision = Some(snapshot.revision());
+            self.history.round_trips = snapshot.round_trips().to_vec().into();
+            self.history.accounts = snapshot.accounts().to_vec().into();
             self.history.symbols = Arc::new(
                 snapshot
-                    .instruments
+                    .instruments()
                     .iter()
                     .map(|instrument| {
                         (
@@ -227,12 +283,12 @@ impl BottomPanelState {
                     .collect(),
             );
         }
-        self.history.account_pnl = snapshot.account_pnl.clone().into();
+        self.history.account_pnl = snapshot.account_pnl().to_vec().into();
         self.adopt_positions(open_positions(
-            &snapshot.positions,
-            &snapshot.accounts,
-            &snapshot.round_trips,
-            &snapshot.connected_broker_accounts,
+            snapshot.positions(),
+            snapshot.accounts(),
+            snapshot.round_trips(),
+            snapshot.connected_broker_accounts(),
             |account_id, instrument_id| snapshot.position_protection(account_id, instrument_id),
         ));
         true
@@ -1645,6 +1701,18 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&frozen_history, &panel.history.round_trips));
         assert!(!panel.apply_snapshot(&second));
+    }
+
+    #[test]
+    fn lagged_working_set_reloads_history_at_the_same_revision() {
+        let mut panel = BottomPanelState::default();
+        let view = marked_snapshot(100);
+        assert!(panel.apply_snapshot(&view));
+        let old_rows = panel.history.round_trips.clone();
+        assert!(!panel.apply_snapshot(&view));
+        panel.invalidate_trading_revision();
+        assert!(panel.apply_snapshot(&view));
+        assert!(!Arc::ptr_eq(&old_rows, &panel.history.round_trips));
     }
 
     #[test]

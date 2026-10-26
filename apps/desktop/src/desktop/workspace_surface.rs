@@ -176,7 +176,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         connection_state: init.startup.connection_state,
         market_session_status: None,
         provider_transport_rtt_nanos: None,
-        trading_pnl: TradingPnlState::default(),
+        trading_pnl: TradingPaneState::default(),
         order_quantity: init.order_quantity,
         order_ticket: init.order_ticket,
         chart_trading_visibility: init.chart_trading_visibility,

@@ -138,8 +138,12 @@ mod tests {
         assert!(
             first
                 .trading
-                .snapshot()
-                .expect("first snapshot")
+                .subscribe()
+                .expect("first subscription")
+                .try_recv()
+                .expect("initial working set")
+                .event
+                .working_set
                 .accounts
                 .iter()
                 .any(|account| account.id == created.id)
@@ -147,8 +151,12 @@ mod tests {
         assert!(
             !second
                 .trading
-                .snapshot()
-                .expect("second snapshot")
+                .subscribe()
+                .expect("second subscription")
+                .try_recv()
+                .expect("initial working set")
+                .event
+                .working_set
                 .accounts
                 .iter()
                 .any(|account| account.id == created.id)

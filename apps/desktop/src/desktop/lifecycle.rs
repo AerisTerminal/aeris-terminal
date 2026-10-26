@@ -25,6 +25,7 @@ pub(super) struct DesktopLifecycle {
     retirements: Rc<RefCell<Vec<Task<bool>>>>,
     workspace_persistence: Rc<RefCell<Vec<WorkspaceLayoutShutdownWait>>>,
     terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
+    trading_stores: Rc<RefCell<Vec<WeakEntity<trading_store::TradingStore>>>>,
     shutdown_started: Rc<Cell<bool>>,
     services: aeris_desktop::services::DesktopServices,
     context: Option<aeris_context_runtime::ContextService>,
@@ -42,6 +43,7 @@ impl DesktopLifecycle {
             retirements: Rc::new(RefCell::new(Vec::new())),
             workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
+            trading_stores: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
             services,
             context: Some(context),
@@ -55,6 +57,7 @@ impl DesktopLifecycle {
             retirements: Rc::new(RefCell::new(Vec::new())),
             workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
+            trading_stores: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
             services: aeris_desktop::services::DesktopServices::new(
                 aeris_market_runtime::MarketService::start().expect("test market owner"),
@@ -121,6 +124,10 @@ impl DesktopLifecycle {
         self.terminals.borrow_mut().push(terminal.downgrade());
     }
 
+    pub(super) fn register_trading_store(&self, store: &Entity<trading_store::TradingStore>) {
+        self.trading_stores.borrow_mut().push(store.downgrade());
+    }
+
     pub(super) fn retire_market_worker(&self, retirement: MarketWorkerRetirement, cx: &App) {
         self.retirements.borrow_mut().push(
             cx.background_executor()
@@ -139,6 +146,12 @@ impl DesktopLifecycle {
         if self.shutdown_started.replace(true) {
             return None;
         }
+        let trading_bridges = self
+            .trading_stores
+            .borrow_mut()
+            .drain(..)
+            .filter_map(|store| store.update(cx, |store, _| store.stop()).ok().flatten())
+            .collect::<Vec<_>>();
         let account_refresh = self.account_service().begin_refresh_quiesce();
         let terminals = self.terminals.borrow_mut().drain(..).collect::<Vec<_>>();
         for terminal in terminals {
@@ -163,6 +176,11 @@ impl DesktopLifecycle {
         Some(cx.background_executor().spawn(async move {
             let mut account_failure = None;
             let mut failure = None;
+            for bridge in trading_bridges {
+                if bridge.join().is_err() {
+                    failure = Some("desktop trading bridge stopped unexpectedly".to_string());
+                }
+            }
             if let Err(error) =
                 retain_account_refresh_quiesce_for_exit(account_refresh, "desktop exit")
             {

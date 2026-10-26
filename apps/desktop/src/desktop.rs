@@ -885,7 +885,7 @@ struct WorkspaceSurface {
     connection_state: Option<FeedConnectionState>,
     market_session_status: Option<aeris_contracts::MarketSessionStatus>,
     provider_transport_rtt_nanos: Option<u64>,
-    trading_pnl: TradingPnlState,
+    trading_pnl: TradingPaneState,
     order_quantity: order_quantity::OrderQuantityControls,
     order_ticket: order_ticket::OrderTicketControls,
     chart_trading_visibility: ChartTradingVisibilitySettings,
@@ -971,7 +971,9 @@ struct ContextCredentialDialogState {
     inputs: Vec<(ContextSource, Entity<InputState>)>,
 }
 
-struct TradingPnlState {
+/// Runtime-derived pane presentation until the next part removes pane caches.
+#[derive(Default)]
+struct TradingProjection {
     current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
     orders: Vec<aeris_trading::Order>,
@@ -982,8 +984,41 @@ struct TradingPnlState {
     risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
     risk_locks: Vec<aeris_trading_runtime::RiskLock>,
     risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
-    feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     market_error: Option<String>,
+}
+
+impl TradingProjection {
+    fn from_working_set(
+        snapshot: &aeris_trading_runtime::WorkingSet,
+        selected: Option<&aeris_trading::TradingAccountId>,
+    ) -> Self {
+        Self {
+            current: snapshot
+                .account_pnl
+                .iter()
+                .find(|pnl| selected.is_none_or(|account| account == &pnl.account_id))
+                .cloned(),
+            accounts: snapshot.accounts.clone(),
+            orders: snapshot.orders.clone(),
+            planned_legs: snapshot.planned_legs.clone(),
+            positions: snapshot.position_pnl.clone(),
+            connected_broker_accounts: snapshot.connected_broker_accounts.clone(),
+            risk_profiles: snapshot.risk_profiles.clone(),
+            risk_locks: snapshot.risk_locks.clone(),
+            risk_meters: snapshot.risk_meters.clone(),
+            market_error: snapshot
+                .market_observation_error
+                .as_ref()
+                .map(|error| format!("Trading market update failed: {error}")),
+        }
+    }
+}
+
+/// Pane-only choices and feedback. Runtime-derived data is one projection of
+/// the shared store, never a second read from the trading owner.
+struct TradingPaneState {
+    projection: TradingProjection,
+    feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     order_entry: TradingOrderEntryState,
     account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
@@ -1103,20 +1138,11 @@ impl TimeSalesFilter {
     }
 }
 
-impl Default for TradingPnlState {
+impl Default for TradingPaneState {
     fn default() -> Self {
         Self {
-            current: None,
-            accounts: Vec::new(),
-            orders: Vec::new(),
-            planned_legs: Vec::new(),
-            positions: Vec::new(),
-            connected_broker_accounts: std::collections::BTreeSet::new(),
-            risk_profiles: Vec::new(),
-            risk_locks: Vec::new(),
-            risk_meters: Vec::new(),
+            projection: TradingProjection::default(),
             feedback: None,
-            market_error: None,
             order_entry: TradingOrderEntryState::default(),
             account_creator: None,
             account_delete_confirmation: None,
@@ -1126,36 +1152,108 @@ impl Default for TradingPnlState {
     }
 }
 
-impl TradingPnlState {
-    /// Instruments where the selected account has a working order or an open position.
-    fn instruments_with_activity(&self) -> HashSet<&str> {
-        let Some(account_id) = self.order_entry.selected_account_id.as_ref() else {
-            return HashSet::new();
-        };
-        let orders = self
-            .orders
-            .iter()
-            .filter(|order| order.status.is_open() && &order.account_id == account_id)
-            .map(|order| order.instrument_id.as_str());
-        let positions = self
-            .positions
-            .iter()
-            .map(|position| &position.position)
-            .filter(|position| {
-                &position.account_id == account_id && position.net_quantity.units() != 0
-            })
-            .map(|position| position.instrument_id.as_str());
-        orders.chain(positions).collect()
+impl std::ops::Deref for TradingPaneState {
+    type Target = TradingProjection;
+    fn deref(&self) -> &Self::Target {
+        &self.projection
     }
 }
 
-fn selected_account_lock_reason(state: &TradingPnlState) -> Option<&str> {
-    let account_id = state.order_entry.selected_account_id.as_ref()?;
-    state
-        .risk_locks
+impl std::ops::DerefMut for TradingPaneState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.projection
+    }
+}
+
+impl TradingPaneState {
+    /// Instruments where the selected account has a working order or an open position.
+    fn instruments_with_activity(&self) -> HashSet<&str> {
+        instruments_with_activity(
+            &self.orders,
+            &self.positions,
+            self.order_entry.selected_account_id.as_ref(),
+        )
+    }
+}
+
+fn instruments_with_activity<'a>(
+    orders: &'a [aeris_trading::Order],
+    positions: &'a [aeris_trading_runtime::PositionPnl],
+    selected: Option<&aeris_trading::TradingAccountId>,
+) -> HashSet<&'a str> {
+    let Some(account_id) = selected else {
+        return HashSet::new();
+    };
+    let orders = orders
+        .iter()
+        .filter(|order| order.status.is_open() && &order.account_id == account_id)
+        .map(|order| order.instrument_id.as_str());
+    let positions = positions
+        .iter()
+        .map(|position| &position.position)
+        .filter(|position| &position.account_id == account_id && position.net_quantity.units() != 0)
+        .map(|position| position.instrument_id.as_str());
+    orders.chain(positions).collect()
+}
+
+struct PaneLockView<'a> {
+    selected_account: Option<&'a aeris_trading::TradingAccountId>,
+    locks: &'a [aeris_trading_runtime::RiskLock],
+}
+
+impl<'a> From<&'a TradingPaneState> for PaneLockView<'a> {
+    fn from(state: &'a TradingPaneState) -> Self {
+        Self {
+            selected_account: state.order_entry.selected_account_id.as_ref(),
+            locks: &state.risk_locks,
+        }
+    }
+}
+
+fn selected_account_lock_reason<'a>(state: impl Into<PaneLockView<'a>>) -> Option<&'a str> {
+    let view = state.into();
+    let account_id = view.selected_account?;
+    view.locks
         .iter()
         .find(|lock| &lock.account_id == account_id)
         .map(|lock| lock.reason.as_str())
+}
+
+// The characterization test predates the projection split and keeps its original
+// fixture shape. It is not a production trading source.
+#[cfg(test)]
+#[derive(Default)]
+struct TradingPnlState {
+    accounts: Vec<aeris_trading::TradingAccount>,
+    orders: Vec<aeris_trading::Order>,
+    planned_legs: Vec<aeris_trading_runtime::PlannedLeg>,
+    positions: Vec<aeris_trading_runtime::PositionPnl>,
+    risk_locks: Vec<aeris_trading_runtime::RiskLock>,
+    order_entry: TradingOrderEntryState,
+}
+
+#[cfg(test)]
+impl<'a> From<&'a TradingPnlState> for PaneLockView<'a> {
+    fn from(state: &'a TradingPnlState) -> Self {
+        Self {
+            selected_account: state.order_entry.selected_account_id.as_ref(),
+            locks: &state.risk_locks,
+        }
+    }
+}
+
+#[cfg(test)]
+impl TradingPnlState {
+    fn instruments_with_activity(&self) -> HashSet<&str> {
+        // Keep the original test fixture shape while this characterization
+        // checks the order/position projection, not account or leg membership.
+        let _ = (&self.accounts, &self.planned_legs);
+        instruments_with_activity(
+            &self.orders,
+            &self.positions,
+            self.order_entry.selected_account_id.as_ref(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1819,14 +1917,76 @@ const fn chart_order_kind(order_type: aeris_trading::OrderType) -> ChartOrderKin
     }
 }
 
-fn chart_working_orders(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+/// The legacy variant exists only for the unchanged pre-migration chart fixture.
+enum ChartOrderSource<'a> {
+    WorkingSet(&'a aeris_trading_runtime::WorkingSet),
+    #[cfg(test)]
+    Snapshot(&'a aeris_trading_runtime::TradingSnapshot),
+}
+
+impl<'a> From<&'a aeris_trading_runtime::WorkingSet> for ChartOrderSource<'a> {
+    fn from(view: &'a aeris_trading_runtime::WorkingSet) -> Self {
+        Self::WorkingSet(view)
+    }
+}
+
+#[cfg(test)]
+impl<'a> From<&'a aeris_trading_runtime::TradingSnapshot> for ChartOrderSource<'a> {
+    fn from(view: &'a aeris_trading_runtime::TradingSnapshot) -> Self {
+        Self::Snapshot(view)
+    }
+}
+
+impl ChartOrderSource<'_> {
+    fn orders(&self) -> &[aeris_trading::Order] {
+        match self {
+            Self::WorkingSet(view) => &view.orders,
+            #[cfg(test)]
+            Self::Snapshot(view) => &view.orders,
+        }
+    }
+    fn planned_legs(&self) -> &[aeris_trading_runtime::PlannedLeg] {
+        match self {
+            Self::WorkingSet(view) => &view.planned_legs,
+            #[cfg(test)]
+            Self::Snapshot(view) => &view.planned_legs,
+        }
+    }
+    fn managed_brackets(&self) -> &[aeris_trading_runtime::BracketView] {
+        match self {
+            Self::WorkingSet(view) => &view.managed_brackets,
+            #[cfg(test)]
+            Self::Snapshot(view) => &view.managed_brackets,
+        }
+    }
+    fn order_events(&self) -> &[aeris_trading::OrderEvent] {
+        match self {
+            Self::WorkingSet(view) => &view.order_events,
+            #[cfg(test)]
+            Self::Snapshot(view) => &view.order_events,
+        }
+    }
+    fn protective_role(
+        &self,
+        id: &aeris_trading::ClientOrderId,
+    ) -> Option<aeris_trading_runtime::ProtectionRole> {
+        match self {
+            Self::WorkingSet(view) => view.protective_role(id),
+            #[cfg(test)]
+            Self::Snapshot(view) => view.protective_role(id),
+        }
+    }
+}
+
+fn chart_working_orders<'a>(
+    snapshot: impl Into<ChartOrderSource<'a>>,
     account_id: &aeris_trading::TradingAccountId,
     instrument_id: &str,
     price_increment: Option<f64>,
 ) -> Vec<ChartWorkingOrder> {
+    let snapshot = snapshot.into();
     snapshot
-        .orders
+        .orders()
         .iter()
         // The chart draws actionable lines. Cancelled, rejected and filled orders stay in the
         // runtime's history but must leave the chart, or a cancel appears to do nothing.
@@ -1839,7 +1999,7 @@ fn chart_working_orders(
         // role and entry; drawing the bare orders here as well would double every leg line.
         .filter(|order| {
             !snapshot
-                .planned_legs
+                .planned_legs()
                 .iter()
                 .any(|leg| leg.client_order_id == order.client_order_id)
         })
@@ -1849,7 +2009,7 @@ fn chart_working_orders(
             let side = chart_order_side(order.side);
             let kind = chart_order_kind(order.order_type);
             let status = aeris_chart_integration::chart_order_status(order.status);
-            let semantics = chart_order_semantics(snapshot, order, price_increment);
+            let semantics = chart_order_semantics(&snapshot, order, price_increment);
             Some(ChartWorkingOrder {
                 id,
                 account_id: None,
@@ -1873,7 +2033,7 @@ fn chart_working_orders(
                 annotations: semantics.annotations,
             })
         })
-        .chain(chart_planned_legs(snapshot, account_id, instrument_id))
+        .chain(chart_planned_legs(&snapshot, account_id, instrument_id))
         .collect()
 }
 
@@ -1881,12 +2041,12 @@ fn chart_working_orders(
 /// protection it carries and each leg can be dragged before the entry fills. A leg keeps the
 /// identity of the order it becomes, so arming leaves the line in place.
 fn chart_planned_legs<'a>(
-    snapshot: &'a aeris_trading_runtime::TradingSnapshot,
+    snapshot: &'a ChartOrderSource<'_>,
     account_id: &'a aeris_trading::TradingAccountId,
     instrument_id: &'a str,
 ) -> impl Iterator<Item = ChartWorkingOrder> + 'a {
     snapshot
-        .planned_legs
+        .planned_legs()
         .iter()
         .filter(move |leg| {
             &leg.account_id == account_id && leg.instrument_id.as_str() == instrument_id
@@ -1933,11 +2093,11 @@ struct ChartOrderSemantics {
 }
 
 fn chart_order_semantics(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &ChartOrderSource<'_>,
     order: &aeris_trading::Order,
     price_increment: Option<f64>,
 ) -> ChartOrderSemantics {
-    let managed = snapshot.managed_brackets.iter().find(|bracket| {
+    let managed = snapshot.managed_brackets().iter().find(|bracket| {
         bracket.stop_client_order_id.as_ref() == Some(&order.client_order_id)
             || bracket
                 .target_client_order_ids
@@ -1964,7 +2124,7 @@ fn chart_order_semantics(
     // Every practice protection is locally managed, so a chip saying so carries no information
     // and an inline chip would cover the marker's quantity, drag surface and cursor.
     let mut annotations = Vec::new();
-    if let Some(warning) = snapshot.order_events.iter().find_map(|event| {
+    if let Some(warning) = snapshot.order_events().iter().find_map(|event| {
         (event.order_id == order.id
             && event.kind == aeris_trading::OrderEventKind::Accepted
             && event.reason == Some(aeris_trading::OrderEventReason::RiskWarning))
@@ -1992,7 +2152,7 @@ fn chart_order_semantics(
 }
 
 fn managed_trigger_prices(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &ChartOrderSource<'_>,
     bracket: &aeris_trading_runtime::BracketView,
     price_increment: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
@@ -2001,7 +2161,7 @@ fn managed_trigger_prices(
         .and_then(|price| chart_price(Some(price)));
     let increment = price_increment.filter(|increment| increment.is_finite() && *increment > 0.0);
     let side = snapshot
-        .orders
+        .orders()
         .iter()
         .find(|order| order.client_order_id == bracket.entry_client_order_id)
         .map(|order| order.side);
@@ -2033,7 +2193,7 @@ fn managed_trigger_prices(
 }
 
 fn chart_positions(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &aeris_trading_runtime::WorkingSet,
     account_id: &aeris_trading::TradingAccountId,
     instrument_id: &str,
     currency: &str,
@@ -2083,7 +2243,7 @@ fn chart_time_seconds_from_unix_nanos(unix_nanos: i64) -> i64 {
 }
 
 fn chart_executions(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &aeris_trading_runtime::WorkingSet,
     account_id: &aeris_trading::TradingAccountId,
     instrument_id: &str,
 ) -> Vec<ChartTradingExecution> {
@@ -2121,7 +2281,7 @@ fn chart_executions(
 }
 
 fn chart_trading_snapshot(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &aeris_trading_runtime::WorkingSet,
     product: Option<&InstallProviderInstrument>,
     selected_account: Option<&aeris_trading::TradingAccountId>,
 ) -> Option<ChartTradingSnapshot> {
@@ -2175,7 +2335,7 @@ fn chart_trading_snapshot(
 }
 
 fn chart_session_plan_overlay(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &aeris_trading_runtime::WorkingSet,
     selected_account: Option<&aeris_trading::TradingAccountId>,
 ) -> ChartHostOverlaySnapshot {
     let Some(plan) = selected_account.and_then(|account_id| {
@@ -2223,7 +2383,7 @@ fn chart_session_plan_overlay(
 }
 
 fn chart_session_plan_levels(
-    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    snapshot: &aeris_trading_runtime::WorkingSet,
     product: Option<&InstallProviderInstrument>,
     selected_account: Option<&aeris_trading::TradingAccountId>,
 ) -> Vec<(f64, String)> {
@@ -3958,6 +4118,7 @@ fn initialize_chart_chrome(
 }
 
 mod catalog_projection;
+mod trading_store;
 mod workspace_surface;
 
 fn catalog_rejection_message(
@@ -5362,6 +5523,7 @@ struct TerminalApp {
     market_wake_listener_started: Option<()>,
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
+    trading_store: Entity<trading_store::TradingStore>,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     watchlist: Vec<InstallProviderInstrument>,
     market_summaries: BTreeMap<MarketSummaryKey, MarketSummaryEntry>,

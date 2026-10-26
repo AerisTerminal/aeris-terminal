@@ -346,6 +346,43 @@ pub(super) struct Toaster {
     wake: Option<Instant>,
 }
 
+pub(super) trait TradingNewsView {
+    fn revision(&self) -> u64;
+    fn fills(&self) -> &[aeris_trading::Fill];
+    fn order_events(&self) -> &[aeris_trading::OrderEvent];
+    fn orders(&self) -> &[aeris_trading::Order];
+    fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument];
+    fn accounts(&self) -> &[aeris_trading::TradingAccount];
+}
+
+macro_rules! trading_news_view {
+    ($ty:ty) => {
+        impl TradingNewsView for $ty {
+            fn revision(&self) -> u64 {
+                self.revision
+            }
+            fn fills(&self) -> &[aeris_trading::Fill] {
+                &self.fills
+            }
+            fn order_events(&self) -> &[aeris_trading::OrderEvent] {
+                &self.order_events
+            }
+            fn orders(&self) -> &[aeris_trading::Order] {
+                &self.orders
+            }
+            fn instruments(&self) -> &[aeris_trading_runtime::TradingInstrument] {
+                &self.instruments
+            }
+            fn accounts(&self) -> &[aeris_trading::TradingAccount] {
+                &self.accounts
+            }
+        }
+    };
+}
+trading_news_view!(aeris_trading_runtime::WorkingSet);
+#[cfg(test)]
+trading_news_view!(aeris_trading_runtime::TradingSnapshot);
+
 impl Toaster {
     #[cfg(test)]
     pub(super) fn notices(&self) -> &[UserNotice] {
@@ -811,14 +848,14 @@ impl Toaster {
     /// snapshot that are news, on the given stack. Returns whether any toast was added.
     fn announce_trading(
         &mut self,
-        snapshot: &aeris_trading_runtime::TradingSnapshot,
+        snapshot: &impl TradingNewsView,
         host: Option<ToastStack>,
         now_unix_nanos: i64,
         now: Instant,
     ) -> bool {
         let fills = self.fills.fresh(
-            snapshot.revision,
-            &snapshot.fills,
+            snapshot.revision(),
+            snapshot.fills(),
             |fill| &fill.id,
             |fill| fill.execution_unix_nanos,
             now_unix_nanos,
@@ -826,8 +863,8 @@ impl Toaster {
         let ends: Vec<_> = self
             .order_ends
             .fresh(
-                snapshot.revision,
-                &snapshot.order_events,
+                snapshot.revision(),
+                snapshot.order_events(),
                 |event| &event.id,
                 |event| event.event_unix_nanos,
                 now_unix_nanos,
@@ -836,16 +873,16 @@ impl Toaster {
             .filter_map(|event| {
                 order_end_notice(
                     event,
-                    &snapshot.orders,
-                    &snapshot.instruments,
-                    &snapshot.accounts,
+                    snapshot.orders(),
+                    snapshot.instruments(),
+                    snapshot.accounts(),
                 )
                 .or_else(|| {
                     order_warning_notice(
                         event,
-                        &snapshot.orders,
-                        &snapshot.instruments,
-                        &snapshot.accounts,
+                        snapshot.orders(),
+                        snapshot.instruments(),
+                        snapshot.accounts(),
                     )
                 })
             })
@@ -855,7 +892,7 @@ impl Toaster {
         };
         for fill in &fills {
             let (title, description) =
-                fill_notice_text(fill, &snapshot.instruments, &snapshot.accounts);
+                fill_notice_text(fill, snapshot.instruments(), snapshot.accounts());
             self.push_fill(host, fill.side, title, description, now);
         }
         let announced = !fills.is_empty() || !ends.is_empty();
@@ -1493,7 +1530,7 @@ impl ToastHost for TerminalApp {
 impl TerminalApp {
     pub(super) fn announce_trading(
         &mut self,
-        snapshot: &aeris_trading_runtime::TradingSnapshot,
+        snapshot: &impl TradingNewsView,
         cx: &mut Context<Self>,
     ) {
         let host = toast_host(&self.workspaces[self.active]);
