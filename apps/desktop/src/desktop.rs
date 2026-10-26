@@ -451,6 +451,11 @@ impl std::future::Future for UiWakeNotified {
 
     fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<()> {
         if self.state.pending.swap(false, Ordering::AcqRel) {
+            self.state
+                .waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             return Poll::Ready(());
         }
         *self
@@ -459,10 +464,73 @@ impl std::future::Future for UiWakeNotified {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cx.waker().clone());
         if self.state.pending.swap(false, Ordering::AcqRel) {
+            self.state
+                .waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             Poll::Ready(())
         } else {
             Poll::Pending
         }
+    }
+}
+
+impl Drop for UiWakeNotified {
+    fn drop(&mut self) {
+        self.state
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+#[cfg(test)]
+mod ui_wake_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Wake, Waker};
+
+    struct CountingWake(AtomicUsize);
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn retired_ui_listener_cannot_be_woken_by_a_late_trading_publication() {
+        let wake = UiWake::default();
+        let callback = wake.callback();
+        let count = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut task = TaskContext::from_waker(&waker);
+        let mut listener = wake.notified();
+        assert!(Pin::new(&mut listener).poll(&mut task).is_pending());
+        drop(listener);
+        std::thread::spawn(move || callback())
+            .join()
+            .expect("late bridge publication");
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn completed_ui_listener_does_not_keep_a_stale_waker() {
+        let wake = UiWake::default();
+        let callback = wake.callback();
+        let count = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut task = TaskContext::from_waker(&waker);
+        let mut listener = wake.notified();
+        assert!(Pin::new(&mut listener).poll(&mut task).is_pending());
+        wake.state.pending.store(true, Ordering::Release);
+        assert!(Pin::new(&mut listener).poll(&mut task).is_ready());
+        std::thread::spawn(move || callback())
+            .join()
+            .expect("publication after completion");
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
     }
 }
 

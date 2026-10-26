@@ -43,9 +43,7 @@ jobs:
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test workspace
-        # Concurrent, verbose GPUI tests can terminate Windows with 0xc0000409;
-        # serial quiet output retains all cases and makes failures visible.
-        run: cargo test --workspace --all-features --locked -- --quiet --test-threads=1
+        run: cargo test --workspace --all-features --locked
       - name: Check naming and architecture assertions
         run: cargo run -p aeris_naming_check --locked
 

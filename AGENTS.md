@@ -497,11 +497,10 @@ independent baseline failures precisely.
 CI runs the same gates on GitHub-hosted runners. `.github/workflows/ci.yml` triggers on `push` and
 `pull_request` to `main` and on `workflow_dispatch`: `windows-latest` runs fmt, clippy, the workspace
 tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check.
-Windows workspace tests use `cargo test --workspace --all-features --locked -- --quiet
---test-threads=1`: concurrent or verbose GPUI interaction tests can terminate
-the Windows harness with `0xc0000409`; serial quiet execution runs all cases.
-Keep this bound until the GPUI test owner can
-prove higher concurrency safe. The workflow keeps
+Windows workspace tests use the default parallel `cargo test --workspace --all-features --locked`.
+Desktop bridge wake listeners must unregister their GPUI task waker when a notification
+completes or the listener is dropped, so a late publication cannot wake a retired test
+scheduler. The workflow keeps
 `permissions: contents: read`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1` (hosted
 runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
 references and self-hosted runners are forbidden on the pull-request path, and any workflow that uses
