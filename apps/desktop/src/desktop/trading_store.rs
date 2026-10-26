@@ -386,8 +386,9 @@ impl TradingStore {
         if !self.all_panes_changed
             && let Some(previous) = self.current.as_ref()
         {
-            // Account-wide facts affect every instrument of that account; rows tied to
-            // an instrument only affect the matching pane. Iterate published keys,
+            // Account-level displayed fields (balance, P&L and risk) affect every pane
+            // selecting that account, including other instruments. Instrument-level
+            // rows affect only the matching selection. Iterate published keys,
             // never the Cartesian product of every account and instrument.
             let previous_accounts = published_accounts(previous);
             let next_accounts = published_accounts(&next);
@@ -531,13 +532,16 @@ impl TradingStore {
         account: Option<&TradingAccountId>,
         instrument: Option<&InstrumentId>,
     ) -> bool {
+        // D17: account-level fields appear on all instruments of a selected account;
+        // instrument-level rows appear only on the matching account/instrument pane.
         self.all_panes_changed
             || match (account, instrument) {
                 (Some(account), Some(instrument)) => {
-                    self.changed_accounts.contains(account)
-                        || self
-                            .changed_selections
-                            .contains(&(account.clone(), instrument.clone()))
+                    let account_level_changed = self.changed_accounts.contains(account);
+                    let instrument_level_changed = self
+                        .changed_selections
+                        .contains(&(account.clone(), instrument.clone()));
+                    account_level_changed || instrument_level_changed
                 }
                 (Some(account), None) => self.changed_accounts.contains(account),
                 // An unselected account or instrument has no order-scoped view.
@@ -1136,8 +1140,14 @@ mod tests {
             1
         );
         assert_eq!(
+            usize::from(store.pane_changed(Some(&account), Some(&other_instrument))),
+            1,
+            "the same account's balance and P&L changed on another instrument"
+        );
+        assert_eq!(
             usize::from(store.pane_changed(Some(&other_account), Some(&other_instrument))),
-            0
+            0,
+            "a different account is unaffected"
         );
         assert!(store.drain().is_none(), "no second store change");
         assert!(

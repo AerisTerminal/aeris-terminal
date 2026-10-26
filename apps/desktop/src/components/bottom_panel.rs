@@ -1596,9 +1596,16 @@ fn position_close_button(
             button.disabled(!connected).on_click(move |_, _, cx| {
                 let service = terminal.read(cx).lifecycle.trading().clone();
                 let feedback = terminal.read(cx).lifecycle.trading_feedback().clone();
+                let pane = terminal
+                    .read(cx)
+                    .active_surface()
+                    .read(cx)
+                    .trading_pane_token
+                    .clone();
                 aeris_desktop::trading::close_broker_position(
                     &service,
                     &feedback,
+                    &pane,
                     account_id.clone(),
                     instrument_id.clone(),
                     cx,

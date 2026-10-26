@@ -5,13 +5,15 @@ use aeris_trading_runtime::clock::{Clock, SystemClock};
 use aeris_trading_runtime::{
     CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, TradeCopierConfig, TradingService,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
 /// At most 64 desktop commands may await a UI result. Holding completed results in the
 /// same map also bounds a suspended window without silently dropping command outcomes.
 pub const MAXIMUM_IN_FLIGHT_TRADING_REQUESTS: usize = 64;
 const REQUEST_CAPACITY_NOTICE: &str = "Too many trading commands are waiting for a result";
+/// Allows a burst of global commands and venue notices between UI wakes without loss.
+pub const MAXIMUM_UNSCOPED_NOTICES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(u64);
@@ -51,7 +53,8 @@ pub struct TradingCommandFeedback {
 struct TradingFeedbackState {
     revision: u64,
     latest: Option<TradingCommandFeedback>,
-    unscoped_notice: Option<TradingCommandFeedback>,
+    unscoped_notices: VecDeque<TradingCommandFeedback>,
+    dropped_unscoped_notices: usize,
     next_request: u64,
     in_flight: BTreeMap<RequestId, PendingRequest>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -138,13 +141,29 @@ impl TradingFeedback {
         }
     }
 
+    /// Local pane refusal follows the same route as an owner result.
+    pub fn record_for_pane(&self, pane: &TradingPaneToken, result: Result<String, String>) {
+        if let Some(id) = self.begin_request(pane) {
+            self.finish_request(id, result);
+        }
+    }
+
+    /// Reports acceptance to chart intent resolution without sending a global notice.
+    #[must_use]
+    pub fn finish_pane_result(&self, id: RequestId, result: Result<String, String>) -> bool {
+        let accepted = result.is_ok();
+        self.finish_request(id, result);
+        accepted
+    }
+
     #[must_use]
     pub fn has_request_results(&self) -> bool {
         let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.unscoped_notice.is_some()
+        !state.unscoped_notices.is_empty()
+            || state.dropped_unscoped_notices != 0
             || state
                 .in_flight
                 .values()
@@ -153,11 +172,19 @@ impl TradingFeedback {
 
     #[must_use]
     pub fn take_unscoped_notice(&self) -> Option<TradingCommandFeedback> {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .unscoped_notice
-            .take()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.dropped_unscoped_notices != 0 {
+            let count = std::mem::take(&mut state.dropped_unscoped_notices);
+            return Some(TradingCommandFeedback {
+                revision: state.revision,
+                message: format!("{count} notices dropped"),
+                is_error: true,
+            });
+        }
+        state.unscoped_notices.pop_front()
     }
 
     /// Completed results are consumed once by the UI; unfinished reservations retain
@@ -220,9 +247,12 @@ impl TradingFeedback {
                 is_error: true,
             },
         });
-        {
-            let inner = &mut *state;
-            inner.unscoped_notice.clone_from(&inner.latest);
+        if state.unscoped_notices.len() == MAXIMUM_UNSCOPED_NOTICES {
+            state.unscoped_notices.pop_front();
+            state.dropped_unscoped_notices = state.dropped_unscoped_notices.saturating_add(1);
+        }
+        if let Some(notice) = state.latest.clone() {
+            state.unscoped_notices.push_back(notice);
         }
         let wake = state.wake.clone();
         drop(state);
@@ -463,41 +493,18 @@ fn parse_usd_equity(value: &str) -> Result<aeris_trading::FixedPoint, String> {
     aeris_trading::FixedPoint::try_new(units, 2).map_err(|error| error.to_string())
 }
 
-/// Dispatches a market order through the owner quote book off the UI thread.
-pub fn dispatch_simulated_market_order(
-    service: &TradingService,
-    feedback: &TradingFeedback,
-    frame: &aeris_market_data::OrderBookFrame,
-    side: aeris_trading::OrderSide,
-    cx: &mut gpui::App,
-) {
-    dispatch_simulated_order(
-        service,
-        feedback,
-        frame,
-        side,
-        SimulatedOrderSelection {
-            account_key: None,
-            quantity: 1,
-            order_type: aeris_trading::OrderType::Market,
-            time_in_force: aeris_trading::TimeInForce::Day,
-            template_id: None,
-        },
-        cx,
-    );
-}
-
 /// Dispatches the selected simulated order-entry instruction off the UI thread.
 pub fn dispatch_simulated_order(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
     selection: SimulatedOrderSelection,
     cx: &mut gpui::App,
 ) {
     if order_type_requires_price(selection.order_type) {
-        feedback.record(Err(STOP_PRICE_REQUIRED.to_string()));
+        feedback.record_for_pane(pane, Err(STOP_PRICE_REQUIRED.to_string()));
         return;
     }
     let service = service.clone();
@@ -511,9 +518,13 @@ pub fn dispatch_simulated_order(
         selection.order_type,
         selection.time_in_force,
     ) else {
-        feedback.record(Err(
-            "Order requires a current bid, ask, and valid instrument".to_string(),
-        ));
+        feedback.record_for_pane(
+            pane,
+            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+        );
+        return;
+    };
+    let Some(request_id) = feedback.begin_request(pane) else {
         return;
     };
     cx.background_executor()
@@ -521,7 +532,7 @@ pub fn dispatch_simulated_order(
             let result = service
                 .place_order_from_market(command, true)
                 .map(|order| order_outcome(&order, OrderOutcome::Placed));
-            feedback.record(result);
+            feedback.finish_request(request_id, result);
         })
         .detach();
 }
@@ -546,7 +557,7 @@ pub fn dispatch_simulated_selected_order(
     cx: &mut gpui::App,
 ) {
     if order_type_requires_price(selection.order_type) {
-        feedback.record(Err(STOP_PRICE_REQUIRED.to_string()));
+        feedback.record_for_pane(pane, Err(STOP_PRICE_REQUIRED.to_string()));
         return;
     }
     let service = service.clone();
@@ -560,9 +571,10 @@ pub fn dispatch_simulated_selected_order(
         selection.order_type,
         selection.time_in_force,
     ) else {
-        feedback.record(Err(
-            "Order requires a current bid, ask, and valid instrument".to_string(),
-        ));
+        feedback.record_for_pane(
+            pane,
+            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+        );
         return;
     };
     let Some(request_id) = feedback.begin_request(pane) else {
@@ -676,6 +688,7 @@ pub struct SimulatedPricedOrder {
 pub fn dispatch_simulated_order_at_price(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     frame: &aeris_market_data::OrderBookFrame,
     order: SimulatedPricedOrder,
     cx: &mut gpui::App,
@@ -691,22 +704,26 @@ pub fn dispatch_simulated_order_at_price(
         order.order_type,
         order.time_in_force,
     ) else {
-        feedback.record(Err(
-            "Order requires a current bid, ask, and valid instrument".to_string(),
-        ));
+        feedback.record_for_pane(
+            pane,
+            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+        );
         return;
     };
     let Ok(price) = aeris_trading::FixedPoint::try_new(order.price_units, frame.price_scale) else {
-        feedback.record(Err("Order price is invalid".to_string()));
+        feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
         return;
     };
     (command.limit_price, command.stop_price) = price_fields(order.order_type, price);
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
             let result = service
                 .place_order_from_market(command, false)
                 .map(|order| order_outcome(&order, OrderOutcome::Placed));
-            feedback.record(result);
+            feedback.finish_request(request_id, result);
         })
         .detach();
 }
@@ -767,14 +784,15 @@ pub fn dispatch_ticket_order(
         order.order_type,
         aeris_trading::TimeInForce::Day,
     ) else {
-        feedback.record(Err(
-            "Order requires a current bid, ask, and valid instrument".to_string(),
-        ));
+        feedback.record_for_pane(
+            pane,
+            Err("Order requires a current bid, ask, and valid instrument".to_string()),
+        );
         return;
     };
     if let Some(price_units) = order.price_units {
         let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, frame.price_scale) else {
-            feedback.record(Err("Order price is invalid".to_string()));
+            feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
             return;
         };
         (entry.limit_price, entry.stop_price) = price_fields(order.order_type, price);
@@ -844,50 +862,33 @@ pub fn cancel_simulated_account(
         .detach();
 }
 
-/// Cancels one working simulated order off the UI thread.
-pub fn cancel_simulated_order(
-    service: &TradingService,
-    feedback: &TradingFeedback,
-    client_order_key: String,
-    cx: &mut gpui::App,
-) {
-    let service = service.clone();
-    let feedback = feedback.clone();
-    let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
-        feedback.record(Err("Order identifier is invalid".to_string()));
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            feedback.record(
-                service
-                    .cancel_order(client_order_id)
-                    .map(|order| order_outcome(&order, OrderOutcome::Cancelled)),
-            );
-        })
-        .detach();
-}
-
 /// Requests the exit of one broker account's whole position on an instrument off the UI
 /// thread. The position stays open until the broker reports the exit fills.
 pub fn close_broker_position(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     account_id: aeris_trading::TradingAccountId,
     instrument_id: InstrumentId,
     cx: &mut gpui::App,
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(flatten_feedback(
-                "Closing position",
-                service.flatten(aeris_trading_runtime::FlattenScope {
-                    account: Some(account_id),
-                    instrument: Some(instrument_id),
-                }),
-            ));
+            feedback.finish_request(
+                request_id,
+                flatten_feedback(
+                    "Closing position",
+                    service.flatten(aeris_trading_runtime::FlattenScope {
+                        account: Some(account_id),
+                        instrument: Some(instrument_id),
+                    }),
+                ),
+            );
         })
         .detach();
 }
@@ -904,6 +905,7 @@ pub struct SimulatedOrderModification {
 pub fn modify_simulated_order_at_price(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     modification: SimulatedOrderModification,
     frame: &aeris_market_data::OrderBookFrame,
     cx: &mut gpui::App,
@@ -916,7 +918,10 @@ pub fn modify_simulated_order_at_price(
         price,
     } = modification;
     if order_type == aeris_trading::OrderType::Market {
-        feedback.record(Err("Market orders have no price to modify".to_string()));
+        feedback.record_for_pane(
+            pane,
+            Err("Market orders have no price to modify".to_string()),
+        );
         return;
     }
     let service = service.clone();
@@ -938,9 +943,13 @@ pub fn modify_simulated_order_at_price(
         modified_unix_nanos,
         provenance,
     };
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(
+            feedback.finish_request(
+                request_id,
                 service
                     .modify_order_from_market_checked(
                         aeris_trading_runtime::RevisionedModifyOrder {
@@ -959,13 +968,18 @@ pub fn modify_simulated_order_at_price(
 pub fn cancel_simulated_accounts(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     cx: &mut gpui::App,
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(
+            feedback.finish_request(
+                request_id,
                 service
                     .cancel_all(None)
                     .map(|orders| cancel_all_outcome(&orders)),
@@ -1026,17 +1040,24 @@ pub fn unlock_simulated_account(
 pub fn kill_simulated_accounts(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     cx: &mut gpui::App,
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
     let locked_at = feedback.now();
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(kill_feedback(
-                "Global kill switch",
-                service.kill_switch(None, "manual global kill switch".to_string(), locked_at),
-            ));
+            feedback.finish_request(
+                request_id,
+                kill_feedback(
+                    "Global kill switch",
+                    service.kill_switch(None, "manual global kill switch".to_string(), locked_at),
+                ),
+            );
         })
         .detach();
 }
@@ -1144,18 +1165,25 @@ fn display_quantity_units(quantity: u64, scale: u8) -> Option<i64> {
 pub fn flatten_simulated_account(
     service: &TradingService,
     feedback: &TradingFeedback,
+    pane: &TradingPaneToken,
     account_key: Option<String>,
     cx: &mut gpui::App,
 ) {
     let Some(scope) = account_flatten_scope(account_key) else {
-        feedback.record(Err("Flatten requires a selected account".to_string()));
+        feedback.record_for_pane(pane, Err("Flatten requires a selected account".to_string()));
         return;
     };
     let service = service.clone();
     let feedback = feedback.clone();
+    let Some(request_id) = feedback.begin_request(pane) else {
+        return;
+    };
     cx.background_executor()
         .spawn(async move {
-            feedback.record(flatten_feedback("Flattened", service.flatten(scope)));
+            feedback.finish_request(
+                request_id,
+                flatten_feedback("Flattened", service.flatten(scope)),
+            );
         })
         .detach();
 }
@@ -1172,9 +1200,10 @@ pub fn flatten_simulated_account_for(
     let service = service.clone();
     let feedback = feedback.clone();
     let Some((account_id, instrument)) = prepare_flatten_for(frame, account_key) else {
-        feedback.record(Err(
-            "Flatten requires a selected account and current bid and ask".to_string(),
-        ));
+        feedback.record_for_pane(
+            pane,
+            Err("Flatten requires a selected account and current bid and ask".to_string()),
+        );
         return;
     };
     let Some(request_id) = feedback.begin_request(pane) else {
@@ -1276,6 +1305,44 @@ mod tests {
         let results = feedback.take_request_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_none(), "dead pane routes to notice center");
+    }
+
+    #[test]
+    fn global_notices_are_fifo_and_count_overflow_once() {
+        let feedback = TradingFeedback::default();
+        for index in 0..3 {
+            feedback.record(Ok(format!("global {index}")));
+        }
+        for index in 0..3 {
+            assert_eq!(
+                feedback
+                    .take_unscoped_notice()
+                    .expect("queued notice")
+                    .message,
+                format!("global {index}")
+            );
+        }
+        assert!(feedback.take_unscoped_notice().is_none());
+        for index in 0..super::MAXIMUM_UNSCOPED_NOTICES + 2 {
+            feedback.record(Ok(format!("burst {index}")));
+        }
+        assert_eq!(
+            feedback
+                .take_unscoped_notice()
+                .expect("one loss notice")
+                .message,
+            "2 notices dropped"
+        );
+        for index in 2..super::MAXIMUM_UNSCOPED_NOTICES + 2 {
+            assert_eq!(
+                feedback
+                    .take_unscoped_notice()
+                    .expect("retained notice")
+                    .message,
+                format!("burst {index}")
+            );
+        }
+        assert!(feedback.take_unscoped_notice().is_none());
     }
 
     #[test]

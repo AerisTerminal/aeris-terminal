@@ -182,10 +182,10 @@ impl TerminalApp {
         let message = match self.trading_hotkey_summary(hotkey, cx) {
             Ok(message) => message,
             Err(reason) => {
-                aeris_desktop::trading::record_notice(
-                    self.lifecycle.trading_feedback(),
-                    Err(reason),
-                );
+                let pane = self.active_surface().read(cx).trading_pane_token.clone();
+                self.lifecycle
+                    .trading_feedback()
+                    .record_for_pane(&pane, Err(reason));
                 cx.notify();
                 return true;
             }
@@ -215,10 +215,10 @@ impl TerminalApp {
                 cx,
             ),
             Err(reason) => {
-                aeris_desktop::trading::record_notice(
-                    self.lifecycle.trading_feedback(),
-                    Err(reason),
-                );
+                let pane = self.active_surface().read(cx).trading_pane_token.clone();
+                self.lifecycle
+                    .trading_feedback()
+                    .record_for_pane(&pane, Err(reason));
                 cx.notify();
             }
         }
@@ -347,16 +347,17 @@ impl TerminalApp {
                     placed
                 });
                 if let Err(reason) = placed {
-                    aeris_desktop::trading::record_notice(
-                        self.lifecycle.trading_feedback(),
-                        Err(reason),
-                    );
+                    let pane = self.active_surface().read(cx).trading_pane_token.clone();
+                    self.lifecycle
+                        .trading_feedback()
+                        .record_for_pane(&pane, Err(reason));
                 }
             }
         }
     }
 
     fn send_trading_hotkey(&self, hotkey: TradingHotkey, cx: &mut Context<Self>) {
+        let pane = self.active_surface().read(cx).trading_pane_token.clone();
         match hotkey {
             TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
                 if self.trading_order_entry_locked(cx) {
@@ -371,6 +372,7 @@ impl TerminalApp {
                 aeris_desktop::trading::dispatch_simulated_order(
                     self.lifecycle.trading(),
                     self.lifecycle.trading_feedback(),
+                    &pane,
                     &frame,
                     side,
                     aeris_desktop::trading::SimulatedOrderSelection {
@@ -387,6 +389,7 @@ impl TerminalApp {
                 aeris_desktop::trading::cancel_simulated_accounts(
                     self.lifecycle.trading(),
                     self.lifecycle.trading_feedback(),
+                    &pane,
                     cx,
                 );
             }
@@ -394,6 +397,7 @@ impl TerminalApp {
                 aeris_desktop::trading::flatten_simulated_account(
                     self.lifecycle.trading(),
                     self.lifecycle.trading_feedback(),
+                    &pane,
                     self.trading_order_entry(cx).0,
                     cx,
                 );
@@ -402,6 +406,7 @@ impl TerminalApp {
                 aeris_desktop::trading::kill_simulated_accounts(
                     self.lifecycle.trading(),
                     self.lifecycle.trading_feedback(),
+                    &pane,
                     cx,
                 );
             }

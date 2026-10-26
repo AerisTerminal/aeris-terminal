@@ -94,6 +94,11 @@ violations and missing verification explicitly, and never describe them as satis
   with one notice and no owner call. Completed requests use a pane-lifetime
   marker so a retired pane's result reaches the notice center, never a
   replacement pane that inherited its layout identifier.
+- Pane trading notifications follow displayed dependencies: account balance,
+  P&L and risk changes notify every pane selecting that account, even on
+  another instrument; instrument-level changes notify only matching selections.
+  Other accounts are not notified. Truly global trading notices use a bounded
+  64-entry FIFO, dropping oldest with one counted loss notice per drain.
 - Desktop trading instruction and pane alert timestamps use the instance's
   `DesktopServices` clock; do not restore `trading::now()` or a process-global
   desktop clock.

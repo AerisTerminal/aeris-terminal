@@ -1043,7 +1043,7 @@ fn order_button(
             let price_units = match ticket_price(action, side, frame, settings.offset()) {
                 Ok(price_units) => price_units,
                 Err(reason) => {
-                    aeris_desktop::trading::record_notice(&feedback, Err(reason.to_string()));
+                    feedback.record_for_pane(&pane, Err(reason.to_string()));
                     return;
                 }
             };

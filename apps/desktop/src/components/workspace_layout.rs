@@ -685,9 +685,10 @@ impl TerminalApp {
                 cx.notify();
             }
         }
-        if let Some(result) = self.lifecycle.trading_feedback().take_unscoped_notice()
-            && let Some(host) = toast_host(&self.workspaces[self.active])
-        {
+        let Some(host) = toast_host(&self.workspaces[self.active]) else {
+            return;
+        };
+        while let Some(result) = self.lifecycle.trading_feedback().take_unscoped_notice() {
             self.toaster.post_notice(
                 host,
                 notification_center::UserNotice {
