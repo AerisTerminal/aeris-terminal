@@ -540,7 +540,8 @@ impl Coordinator<'_> {
         if !first {
             return;
         }
-        if let Err(detail) = self.enqueue_history_recovery(series, provider_generation)
+        if let Err(detail) =
+            self.enqueue_history_request_with_capacity_retry(series, provider_generation, None)
             && let Some(waiters) = self.pending.remove(series)
         {
             fail_waiters(
@@ -948,7 +949,7 @@ impl Coordinator<'_> {
         Ok(if self.provider_registry.contains(&provider) {
             match self.provider_registry.request_history(&provider, request) {
                 Ok(true) => Ok(()),
-                Ok(false) => Err("provider history queue is full"),
+                Ok(false) => Err(HISTORY_CAPACITY_EXHAUSTED),
                 Err(_) => Err("provider history worker is unavailable"),
             }
         } else {

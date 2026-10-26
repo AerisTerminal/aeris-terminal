@@ -4012,6 +4012,226 @@ mod tests {
             .collect()
     }
 
+    struct SaturatedHistory(Arc<Mutex<Vec<super::super::HistoryRequest>>>);
+
+    impl super::super::provider_session::ProviderSession for SaturatedHistory {
+        fn connect(
+            &self,
+            _: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+            _: super::super::provider_session::ProviderEventSink,
+        ) -> Result<bool, super::super::provider_session::ProviderSessionError> {
+            Ok(true)
+        }
+        fn apply_demand(
+            &self,
+            _: &super::super::ProviderDemand,
+        ) -> Result<bool, super::super::provider_session::ProviderSessionError> {
+            Ok(true)
+        }
+        fn request_history(
+            &self,
+            request: super::super::HistoryRequest,
+        ) -> Result<bool, super::super::provider_session::ProviderSessionError> {
+            let mut accepted = self.0.lock().unwrap();
+            if accepted.len() == 3 {
+                // A full provider-owned queue is temporary. The next retry can enter.
+                accepted.push(request);
+                return Ok(false);
+            }
+            accepted.push(request);
+            Ok(true)
+        }
+        fn release_idle(
+            &self,
+        ) -> Result<bool, super::super::provider_session::ProviderSessionError> {
+            Ok(true)
+        }
+        fn shutdown(&self) {}
+    }
+
+    #[test]
+    fn restored_multi_pane_layout_loads_every_pane_after_history_capacity_retry() {
+        use super::super::clock::ScriptedClock;
+        use super::super::history::tracker::LaneKind;
+        use super::super::reconnect::ReconnectPolicy;
+        let clock = Arc::new(ScriptedClock::new(1_800_000_000_000_000_000));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        let accepted = Arc::new(Mutex::new(Vec::new()));
+        coordinator.provider_registry.register(
+            "hyperliquid",
+            Box::new(SaturatedHistory(accepted.clone())),
+            ReconnectPolicy::hyperliquid(),
+            clock.as_ref(),
+        );
+        assert!(coordinator.ensure_provider_connection("hyperliquid"));
+        let provider_generation = coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .unwrap()
+            .generation
+            .unwrap();
+        let keys = restore_saved_panes(&mut coordinator);
+        assert_eq!(keys.len(), 5);
+        assert_eq!(keys[0].instrument_id, keys[3].instrument_id);
+        assert_ne!(keys[0].period, keys[3].period);
+        let epoch = history_epoch(&mut coordinator, "hyperliquid", provider_generation);
+        assert!(
+            coordinator
+                .history
+                .pending(&keys[3], epoch, LaneKind::Current)
+                .is_some(),
+            "the fourth pane retains one bounded history retry"
+        );
+        assert_eq!(accepted.lock().unwrap().len(), 5);
+        clock.advance(super::super::HISTORY_RETRY_DELAY);
+        coordinator.retry_history();
+        let requests = std::mem::take(&mut *accepted.lock().unwrap());
+        assert_eq!(requests.len(), 6);
+        let requests = requests
+            .into_iter()
+            .filter(|request| {
+                coordinator
+                    .history
+                    .inflight(&request.series, epoch)
+                    .is_some_and(|(ticket, _)| ticket == &request.ticket)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 5);
+        for request in requests {
+            let period = request.series.period.duration_nanos().unwrap();
+            let mut bars = minute_bars(0, 2);
+            for (index, bar) in bars.iter_mut().enumerate() {
+                bar.exchange_timestamp_unix_nanos =
+                    period * i64::try_from(index).expect("two bars");
+                bar.exchange_timestamp_seconds = bar.exchange_timestamp_unix_nanos / 1_000_000_000;
+            }
+            coordinator.history_completed(
+                &request.ticket,
+                provider_generation,
+                None,
+                Ok(HistorySnapshot {
+                    price_scale: 2,
+                    quantity_scale: 8,
+                    bars,
+                    forming: None,
+                    handoff_boundary_unix_nanos: None,
+                    backwards_exhausted: false,
+                }),
+            );
+        }
+        coordinator.mark_lifecycle_online(
+            "hyperliquid",
+            provider_generation.0.get(),
+            super::super::LiveModel::ProviderCandles,
+        );
+        for (index, key) in keys.iter().enumerate() {
+            let owner = consumer(index as u64 + 1);
+            assert_eq!(
+                coordinator.engine.series_snapshot(key).unwrap().bars.len(),
+                2,
+                "saved pane {index} must receive its covering chart"
+            );
+            assert!(
+                matches!(coordinator.events.get(&owner).unwrap().series_state.as_ref(),
+                Some(MarketRuntimeEvent::SeriesState(state))
+                    if state.state == SeriesLoadState::Live),
+                "saved pane {index} must become ready without a terminal unavailable notice: {:?}",
+                coordinator.events.get(&owner).unwrap().series_state
+            );
+        }
+    }
+
+    fn restore_saved_panes(coordinator: &mut Coordinator<'_>) -> Vec<BarSeriesKey> {
+        use super::super::descriptors::{
+            InstrumentRef, InstrumentRequest, SelectionOutcome, SelectionRequest,
+        };
+        let saved = [
+            ("SOL", aeris_market_data::ChartInterval::Hour1, 1),
+            ("BTC", aeris_market_data::ChartInterval::Minute1, 1),
+            ("ETH", aeris_market_data::ChartInterval::Hour1, 1),
+            ("SOL", aeris_market_data::ChartInterval::Day3, 1),
+            ("SOL", aeris_market_data::ChartInterval::Minute1, 2),
+        ];
+        let mut keys = Vec::new();
+        for (index, (symbol, interval, tab)) in saved.into_iter().enumerate() {
+            let owner = consumer(index as u64 + 1);
+            coordinator
+                .engine
+                .register_consumer(
+                    ConsumerIdentity {
+                        client_id: client(1),
+                        workspace_id: WorkspaceId(nonzero(tab)),
+                        consumer_id: owner,
+                    },
+                    true,
+                )
+                .unwrap();
+            coordinator.events.insert(owner, ConsumerEvents::default());
+            let mut product = hyperliquid_instrument();
+            product.instrument_id = format!("hyperliquid:perp:{symbol}");
+            product.provider_symbol = symbol.into();
+            product.display_symbol = format!("{symbol}-USDC");
+            coordinator.install_provider_instrument(&product).unwrap();
+            coordinator
+                .begin_selection(
+                    client(1),
+                    SelectionRequest {
+                        consumer_id: owner.0.get(),
+                        generation: 1,
+                        instrument: InstrumentRequest::Ref(InstrumentRef {
+                            provider_id: product.provider.clone(),
+                            instrument_id: product.instrument_id.clone(),
+                            entitlement_id: product.entitlement_id.clone(),
+                            query: Some(symbol.into()),
+                        }),
+                        interval,
+                        streams: StreamRequirements::BARS,
+                        viewport: None,
+                    },
+                )
+                .unwrap();
+            let outcomes = &mut coordinator
+                .events
+                .get_mut(&owner)
+                .unwrap()
+                .selection_outcomes;
+            assert!(
+                matches!(
+                    outcomes.pop_front(),
+                    Some(MarketRuntimeEvent::SelectionOutcome(
+                        SelectionOutcome::Selected { .. }
+                    ))
+                ),
+                "saved pane {index} must keep its selection while history waits"
+            );
+            keys.push(
+                coordinator
+                    .engine
+                    .current_demand(owner)
+                    .unwrap()
+                    .series
+                    .clone()
+                    .unwrap(),
+            );
+            let events = coordinator.events.get(&owner).unwrap();
+            assert!(
+                !events.series_state.as_ref().is_some_and(
+                    |event| matches!(event, MarketRuntimeEvent::SeriesState(state)
+                    if state.state == SeriesLoadState::Failed)
+                ),
+                "saved pane {index} must not receive a terminal unavailable notice during retry"
+            );
+            if index == 3 {
+                assert!(
+                    coordinator.pending.contains_key(&keys[index]),
+                    "the rejected fourth covering history keeps its waiter"
+                );
+            }
+        }
+        keys
+    }
+
     fn rithmic_trade_for_series(
         series: &BarSeriesKey,
         sequence: u64,
