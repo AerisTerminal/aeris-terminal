@@ -4951,6 +4951,27 @@ fn stale_drag_posts_one_notice_and_restores_line(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn replacement_chart_requests_the_current_trading_projection(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let previous = harness.pane.update(cx, |pane, _| {
+        pane.trading_pnl.applied_selection = Some(workspace_layout::pane_trading_selection(pane));
+        assert!(workspace_layout::trading_projection_current(pane));
+        pane.chart.clone().expect("installed chart")
+    });
+    harness.reinstall_snapshot(12, cx);
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        let chart = pane.chart.as_ref().expect("replacement chart");
+        assert_ne!(chart.entity_id(), previous.entity_id());
+        assert!(
+            !workspace_layout::trading_projection_current(pane),
+            "an interval switch's replacement chart must receive the trading lines again"
+        );
+    });
+}
+
+#[gpui::test]
 fn descriptor_labels_render_without_desktop_mapping(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     let mut descriptor = cx.read(|cx| {

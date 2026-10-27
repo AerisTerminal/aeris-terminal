@@ -735,18 +735,7 @@ impl TerminalApp {
         pane: &Entity<WorkspaceSurface>,
         cx: &mut Context<Self>,
     ) {
-        let needs_refresh = {
-            let state = pane.read(cx);
-            state.trading_pnl.applied_selection.as_ref()
-                != Some(&(
-                    state
-                        .product
-                        .as_ref()
-                        .map(|product| product.instrument_id.clone()),
-                    state.trading_pnl.order_entry.selected_account_id.clone(),
-                    state.chart_trading_visibility,
-                ))
-        };
+        let needs_refresh = !trading_projection_current(pane.read(cx));
         if needs_refresh && self.trading_store.read(cx).current().is_some() {
             // Selection is rare; the event path is the only regular WorkingSet drain.
             let store = self.trading_store.clone();
@@ -804,6 +793,29 @@ impl TerminalApp {
     }
 }
 
+/// The pane selection a chart trading projection is computed for.
+pub(super) fn pane_trading_selection(
+    state: &WorkspaceSurface,
+) -> (
+    Option<String>,
+    Option<aeris_trading::TradingAccountId>,
+    ChartTradingVisibilitySettings,
+) {
+    (
+        state
+            .product
+            .as_ref()
+            .map(|product| product.instrument_id.clone()),
+        state.trading_pnl.order_entry.selected_account_id.clone(),
+        state.chart_trading_visibility,
+    )
+}
+
+/// Whether the pane's chart already shows the trading projection of its current selection.
+pub(super) fn trading_projection_current(state: &WorkspaceSurface) -> bool {
+    state.trading_pnl.applied_selection.as_ref() == Some(&pane_trading_selection(state))
+}
+
 fn apply_trading_snapshot(
     state: &mut WorkspaceSurface,
     store_entity: &Entity<trading_store::TradingStore>,
@@ -851,14 +863,7 @@ fn apply_trading_snapshot(
         state.product.as_ref(),
         selected_account_id.as_ref(),
     );
-    state.trading_pnl.applied_selection = Some((
-        state
-            .product
-            .as_ref()
-            .map(|product| product.instrument_id.clone()),
-        selected_account_id,
-        state.chart_trading_visibility,
-    ));
+    state.trading_pnl.applied_selection = Some(pane_trading_selection(state));
     let (working_orders, position_marker) = project_working_order_markers(state, store, state_cx);
     state
         .order_book

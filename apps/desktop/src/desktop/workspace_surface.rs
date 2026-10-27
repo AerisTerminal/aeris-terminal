@@ -3622,6 +3622,11 @@ impl WorkspaceSurface {
             .settle_chart(chart.read(cx));
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
+        // The new chart has no trading layer yet. Forgetting the applied selection makes the
+        // pane's next observation project the current orders and position onto it, instead of
+        // leaving them off the chart until an unrelated trading publication arrives.
+        self.trading_pnl.applied_selection = None;
+        cx.notify();
         self.chart_pane_controller.chart_installed();
         self.sync_order_book_demand(cx);
         // Interval switches keep the instrument's tape; project it into the new chart now
