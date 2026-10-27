@@ -577,6 +577,8 @@ impl Drop for TradingStore {
 
 #[cfg(test)]
 pub(in crate::desktop) use tests::real_owner_fill_fixture_for;
+#[cfg(test)]
+pub(in crate::desktop) use tests::real_owner_fill_fixture_for_with_clock;
 
 #[cfg(test)]
 mod tests {
@@ -962,6 +964,29 @@ mod tests {
         InstrumentId,
         InstrumentId,
     ) {
+        let (service, root, account, other_account, instrument, other_instrument, _) =
+            real_owner_fill_fixture_for_with_clock(provider);
+        (
+            service,
+            root,
+            account,
+            other_account,
+            instrument,
+            other_instrument,
+        )
+    }
+
+    pub(in crate::desktop) fn real_owner_fill_fixture_for_with_clock(
+        provider: &str,
+    ) -> (
+        aeris_trading_runtime::TradingService,
+        std::path::PathBuf,
+        TradingAccountId,
+        TradingAccountId,
+        InstrumentId,
+        InstrumentId,
+        Arc<ManualClock>,
+    ) {
         use aeris_trading::{AccountEnvironment, FixedPoint, TradingAccount};
         use aeris_trading_runtime::{
             ExecutionPolicy, TradingRetention, TradingService, TradingServiceConfig,
@@ -977,7 +1002,7 @@ mod tests {
         let service = TradingService::start(TradingServiceConfig {
             database_path: root.join("trading.sqlite3"),
             retention: TradingRetention::default(),
-            clock,
+            clock: clock.clone(),
             execution: ExecutionPolicy::default(),
         })
         .expect("real trading owner");
@@ -1018,6 +1043,7 @@ mod tests {
             other_account,
             instrument,
             other_instrument,
+            clock,
         )
     }
 

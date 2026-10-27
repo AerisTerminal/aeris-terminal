@@ -2027,6 +2027,30 @@ impl AerisChartView {
         (self.built_for.0, self.built_for.1)
     }
 
+    /// Finds a painted protective order's drag hit using the engine's price scale and hit test.
+    /// Diagnostics only: the host never computes chart interaction geometry.
+    #[cfg(feature = "diagnostics")]
+    pub fn diagnostic_trading_order_hit_point(
+        &self,
+        order_id: &str,
+        price: f64,
+    ) -> Option<Point<Pixels>> {
+        let y = self.engine.series_price_to_coordinate(0, price)?;
+        let x = (32..(self.engine.pane_w.to_i32()? - 32))
+            .step_by(8)
+            .map(f64::from)
+            .find(|&x| {
+                self.engine.trading_hit_at(x, y).is_some_and(|hit| {
+                    hit.kind == aeris_charts_engine::TradingHitKind::OrderLine
+                        && matches!(hit.object, aeris_charts_engine::TradingObjectId::Order(id) if id.as_str() == order_id)
+                })
+            })?;
+        Some(gpui::point(
+            self.viewport_bounds.origin.x + px((x + self.engine.pane_left).to_f32()?),
+            self.viewport_bounds.origin.y + px(y.to_f32()?),
+        ))
+    }
+
     /// Offers recovery to a bounded worker queue and marks dispatch only after acceptance.
     ///
     /// # Errors
