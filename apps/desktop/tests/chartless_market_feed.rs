@@ -8,10 +8,19 @@ use aeris_trading::{
     TradingAccount, TradingAccountId, TradingProvenance,
 };
 use aeris_trading_runtime::{
-    ExecutionPolicy, PlaceOrder, TradingRetention, TradingService, TradingServiceConfig,
-    clock::ManualClock,
+    ExecutionPolicy, HistoryQuery, PlaceOrder, TradingRetention, TradingService,
+    TradingServiceConfig, clock::ManualClock,
 };
 use std::{sync::Arc, time::Duration};
+
+fn current(trading: &TradingService) -> aeris_trading_runtime::WorkingSet {
+    let subscription = trading.subscribe().unwrap();
+    *subscription
+        .recv_timeout(Duration::from_secs(2))
+        .expect("initial owner publication")
+        .event
+        .working_set
+}
 
 fn now() -> i64 {
     static AT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
@@ -175,7 +184,7 @@ fn chartless_scripted_provider_marks_and_executes_stop_through_both_attachments(
             Err(error) => panic!(
                 "quote lease was not established: {error}; market={:?}; trading={:?}",
                 market.status(),
-                trading.snapshot()
+                current(&trading)
             ),
         }
     }
@@ -187,17 +196,17 @@ fn chartless_scripted_provider_marks_and_executes_stop_through_both_attachments(
     provider
         .quote(10_025, 10_050, 2, now() + 1_000_000)
         .unwrap();
-    while trading.snapshot().unwrap().fills.is_empty() {
+    while current(&trading).fills.is_empty() {
         assert!(
             std::time::Instant::now() < deadline,
             "entry not filled: {:?}",
-            trading.snapshot()
+            current(&trading)
         );
         std::thread::sleep(Duration::from_millis(2));
     }
     trading.set_ticket_interest(vec![]).unwrap();
     assert_eq!(provider.subscriptions().unwrap(), (1, 0));
-    let baseline = trading.snapshot().unwrap();
+    let baseline = current(&trading);
     assert_eq!(baseline.positions.len(), 1);
     assert_eq!(baseline.positions[0].net_quantity.units(), 1);
     assert_eq!(market.status().unwrap().retained_series, 0);
@@ -212,11 +221,7 @@ fn chartless_scripted_provider_marks_and_executes_stop_through_both_attachments(
                 now() + i64::try_from(sequence).unwrap() * 1_000_000,
             )
             .unwrap();
-        while trading.snapshot().unwrap().positions[0]
-            .unrealized_pnl
-            .units()
-            != expected
-        {
+        while current(&trading).positions[0].unrealized_pnl.units() != expected {
             assert!(std::time::Instant::now() < deadline, "mark not updated");
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -239,21 +244,26 @@ fn chartless_scripted_provider_marks_and_executes_stop_through_both_attachments(
     provider
         .quote(10_050, 10_075, 5, now() + 5_000_000)
         .unwrap();
-    while trading.snapshot().unwrap().positions[0]
-        .net_quantity
-        .units()
-        != 0
-    {
+    while !current(&trading).positions.is_empty() {
         assert!(std::time::Instant::now() < deadline, "stop did not flatten");
         std::thread::sleep(Duration::from_millis(2));
     }
-    let final_state = trading.snapshot().unwrap();
+    let final_state = current(&trading);
     assert_eq!(final_state.fills.len(), 2);
-    assert_eq!(
+    assert_eq!(final_state.positions, []);
+    assert!(
         final_state
             .orders
             .iter()
-            .find(|order| order.client_order_id.as_str() == "chartless-stop")
+            .all(|order| !order.status.is_open())
+    );
+    assert_eq!(
+        trading
+            .history(HistoryQuery::default())
+            .unwrap()
+            .orders
+            .iter()
+            .find(|order| order.client_order_id == stop.client_order_id)
             .unwrap()
             .status,
         OrderStatus::Filled

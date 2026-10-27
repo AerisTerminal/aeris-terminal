@@ -14,9 +14,11 @@ use super::{
     managed_child_client_order_id, opposite_side, order_increment_units, shifted_price,
     tighter_stop,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::ProtectionView;
 use crate::book::lifecycle::{self, CancellationCause, ModificationCause};
 use crate::{
-    MAXIMUM_MANAGED_BRACKETS, MAXIMUM_OPEN_ORDERS, ProtectionRole, ProtectionView, RecoveryNotice,
+    MAXIMUM_MANAGED_BRACKETS, MAXIMUM_OPEN_ORDERS, ProtectionRole, RecoveryNotice,
     RecoveryNoticeKind,
 };
 use aeris_trading::{OrderEventReason, RejectReason};
@@ -1422,6 +1424,7 @@ impl TradingCore {
     }
 
     /// Standalone protections project from their groups for the snapshot reader view.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn protection_order_views(&self) -> Vec<ProtectionView> {
         let mut views = Vec::new();
         for group in self.state.order_groups.values() {

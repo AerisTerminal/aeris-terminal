@@ -90,8 +90,8 @@ violations and missing verification explicitly, and never describe them as satis
 - Simulated order admission and fills use the trading owner's verified session and current-generation Live quote.
   Crypto quotes may be at most 10 seconds old and other classes at most 60 seconds old by default;
   owner-local `eligible_after` fences resting orders after acceptance and across process restarts.
-- Practice-account admission has its own 10,000-account bound, independent of the compatibility
-  snapshot item limit; keep this value so stores written by released versions continue opening.
+- Practice-account admission has its own 10,000-account bound; keep this value so stores
+  written by released versions continue opening.
 - Recurring contract-hour session projection lives in `aeris_instruments::calendar::weekly_hours`;
   market status and trading DAY recovery use that one IANA-zone/DST calculation. A historical
   DAY deadline is derived only from a verified route and the acceptance-time open session;
@@ -282,8 +282,11 @@ violations and missing verification explicitly, and never describe them as satis
   one cycle; an open round trip has no exit fill ID. Active
   bracket/protection views come from a live group-id index maintained with group transitions,
   never a scan of terminal group history. Broker connection, risk profile/meter, session plan
-  and market observation error projections remain owner-owned. The compatibility `snapshot()`
-  view is not bounded by stored-order count; retention bounds the live set.
+  and market observation error projections remain owner-owned.
+- `TradingSnapshot`, `TradingService::snapshot`, its command and ledger construction are
+  available only under `cfg(test)` or the explicit `trading_runtime/test-support` feature;
+  only dev-dependencies may enable that feature. Desktop production and probes use
+  subscription working sets and paged history, never the snapshot API.
 - Desktop production trading reads use the subscription-backed `TradingStore`, never
   `service.snapshot()`, `trading_service.snapshot()` or `trading().snapshot()` on the owner.
   `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.

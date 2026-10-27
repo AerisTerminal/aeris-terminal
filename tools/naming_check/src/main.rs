@@ -294,6 +294,119 @@ fn desktop_trading_reads_come_from_trading_store(source: &str) -> bool {
     .all(|call| !production.contains(call))
 }
 
+/// Remove only explicitly gated snapshot items. A missing attribute, or production after
+/// a gated item, remains visible to the scanner.
+fn snapshot_production_source(source: &str) -> String {
+    let source = production_source_prefix(source);
+    let gates = [
+        "#[cfg(any(test, feature = \"test-support\"))]",
+        "#[cfg(test)]",
+    ];
+    let mut kept = String::new();
+    let mut cursor = 0;
+    while let Some((relative, gate)) = gates
+        .iter()
+        .filter_map(|gate| source[cursor..].find(gate).map(|index| (index, *gate)))
+        .min_by_key(|(index, _)| *index)
+    {
+        let start = cursor + relative;
+        let item = start + gate.len();
+        let after = &source[item..];
+        let next = item + (after.len() - after.trim_start().len());
+        kept.push_str(&source[cursor..start]);
+        let semicolon = source[next..].find(';').map(|offset| next + offset);
+        let brace = source[next..].find('{').map(|offset| next + offset);
+        let end = if source[next..].starts_with("Snapshot(") {
+            source[next..].find('\n').map(|offset| next + offset + 1)
+        } else {
+            match (semicolon, brace) {
+                (Some(semi), Some(open)) if semi < open => Some(semi + 1),
+                (_, Some(open)) => source_block_end(&source, open),
+                (Some(semi), None) => Some(semi + 1),
+                _ => None,
+            }
+        };
+        if let Some(end) = end {
+            cursor = end;
+        } else {
+            kept.push_str(gate);
+            cursor = item;
+        }
+    }
+    kept.push_str(&source[cursor..]);
+    kept
+}
+
+fn snapshot_boundary_ok(path: &str, source: &str) -> bool {
+    if path.starts_with("tools/aeris_probes/src/") {
+        return !source.contains("TradingSnapshot") && !source.contains(".snapshot()");
+    }
+    if path.starts_with("apps/desktop/src/") {
+        return !contains_trading_snapshot(&snapshot_production_source(source))
+            && desktop_trading_reads_come_from_trading_store(source);
+    }
+    let production = snapshot_production_source(source);
+    !contains_trading_snapshot(&production)
+        && !production.contains("fn snapshot(")
+        && !production.contains("fn observe_market(")
+        && !production.contains("Command::Snapshot")
+        && !production.contains("MAXIMUM_SNAPSHOT_ITEMS")
+}
+
+fn contains_trading_snapshot(source: &str) -> bool {
+    source.match_indices("TradingSnapshot").any(|(index, _)| {
+        index == 0
+            || !source.as_bytes()[index - 1].is_ascii_alphanumeric()
+                && source.as_bytes()[index - 1] != b'_'
+    })
+}
+
+fn inspect_snapshot_boundary(
+    root: &Path,
+    directory: &Path,
+    violations: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            inspect_snapshot_boundary(root, &path, violations)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let relative = relative_to(root, &path);
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if name.starts_with("crates/trading_runtime/src/tests")
+                || name.starts_with("crates/trading_runtime/src/replay/")
+                || name.starts_with("crates/trading_runtime/src/admission/parity_tests.rs")
+                || name.starts_with("crates/trading_runtime/src/venue/scripted.rs")
+            {
+                continue; // Declared only under cfg(test) in their parent modules.
+            }
+            if !snapshot_boundary_ok(&name, &read_source(&path)?) {
+                violations.push(relative);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inspect_all_snapshot_boundaries(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
+    for directory in [
+        "crates/trading_runtime/src",
+        "tools/aeris_probes/src",
+        "apps/desktop/src",
+    ] {
+        inspect_snapshot_boundary(root, &root.join(directory), violations)?;
+    }
+    Ok(())
+}
+
+fn inspect_market_tests_and_snapshot_boundaries(
+    root: &Path,
+    violations: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    inspect_market_test_names(root, violations)?;
+    inspect_all_snapshot_boundaries(root, violations)
+}
+
 fn has_process_global_desktop_account(source: &str) -> bool {
     let production = production_source_prefix(source);
     [
@@ -415,8 +528,8 @@ fn main() -> ExitCode {
         eprintln!("failed to inspect repository names: {error}");
         return ExitCode::FAILURE;
     }
-    if let Err(error) = inspect_market_test_names(&root, &mut violations) {
-        eprintln!("failed to read market test names: {error}");
+    if let Err(error) = inspect_market_tests_and_snapshot_boundaries(&root, &mut violations) {
+        eprintln!("failed to inspect market tests or trading snapshot boundary: {error}");
         return ExitCode::FAILURE;
     }
     for path in [
@@ -1160,6 +1273,85 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::production_source_prefix as production_prefix;
+
+    #[test]
+    fn snapshot_confinement_accepts_gated_runtime_and_subscription_consumers() {
+        let gate = "#[cfg(any(test, feature = \"test-support\"))]";
+        for item in [
+            "pub struct TradingSnapshot { pub revision: u64 }",
+            "impl TradingSnapshot { fn snapshot(&self) {} }",
+            "pub fn snapshot(&self) -> TradingSnapshot { self.request(Command::Snapshot) }",
+            "Snapshot(Reply<TradingSnapshot>),",
+            "Command::Snapshot(reply) => { reply.send(self.snapshot()); }",
+            "use super::TradingSnapshot;",
+        ] {
+            assert!(
+                super::snapshot_boundary_ok(
+                    "crates/trading_runtime/src/core/mod.rs",
+                    &format!("{gate}\n{item}\nfn production() {{}}"),
+                ),
+                "{item}"
+            );
+        }
+        assert!(super::snapshot_boundary_ok(
+            "tools/aeris_probes/src/bin/paper_trading_probe/scenario.rs",
+            "fn current(service: &TradingService) { service.subscribe(); service.history(query); }",
+        ));
+    }
+
+    #[test]
+    fn snapshot_confinement_rejects_ungated_runtime_and_probe_calls() {
+        for item in [
+            "pub struct TradingSnapshot {}",
+            "fn snapshot(&self) {}",
+            "fn observe_market(&mut self) {}",
+            "Command::Snapshot(reply) => {}",
+            "const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;",
+        ] {
+            assert!(
+                !super::snapshot_boundary_ok("crates/trading_runtime/src/core/mod.rs", item),
+                "{item}"
+            );
+        }
+        for item in ["TradingSnapshot", "trading.snapshot()"] {
+            assert!(
+                !super::snapshot_boundary_ok(
+                    "tools/aeris_probes/src/bin/paper_trading_probe/scenario.rs",
+                    item
+                ),
+                "{item}"
+            );
+        }
+        assert!(!super::snapshot_boundary_ok(
+            "apps/desktop/src/desktop.rs",
+            "let current: TradingSnapshot = service.snapshot();"
+        ));
+    }
+
+    #[test]
+    fn snapshot_confinement_rejects_stale_gates_and_scans_after_test_modules() {
+        assert!(!super::snapshot_boundary_ok(
+            "crates/trading_runtime/src/core/mod.rs",
+            "#[cfg(test)] mod tests { fn snapshot() {} }\n#[cfg(any(test, feature = \"test-support\"))]\npub struct TradingSnapshot {}\nfn snapshot(&self) {}"
+        ));
+        assert!(!super::snapshot_boundary_ok(
+            "crates/trading_runtime/src/ledger/mod.rs",
+            "#[cfg(feature = \"test-support\")]\nfn snapshot(&self) {}"
+        ));
+        assert!(!super::snapshot_boundary_ok(
+            "crates/trading_runtime/src/core/mod.rs",
+            "pub struct TradingSnapshot {} // a removed test gate must fail"
+        ));
+    }
+
+    #[test]
+    fn practice_account_capacity_survives_snapshot_confinement() {
+        assert!(
+            manifest("crates/trading_runtime/src/admission/mod.rs")
+                .contains("const MAXIMUM_PRACTICE_ACCOUNTS: usize = 10_000;"),
+            "trading owner lost the released practice account capacity"
+        );
+    }
 
     #[test]
     fn desktop_trading_reads_come_from_trading_store_accepts_subscription_and_test_fixtures() {
@@ -5022,7 +5214,6 @@ jobs:
             "pub struct TradingService",
             "mpsc::sync_channel(COMMAND_CAPACITY)",
             "MAXIMUM_OPEN_ORDERS",
-            "MAXIMUM_SNAPSHOT_ITEMS",
             "AccountEnvironment::Simulated",
         ] {
             assert!(runtime.contains(contract), "trading owner lost {contract}");

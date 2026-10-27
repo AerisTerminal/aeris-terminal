@@ -407,6 +407,7 @@ dependencies = [
  "aeris_trading",
  "aeris_trading_runtime",
  "chrono",
+ "rusqlite",
  "serde_json",
 ]
 

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [features]
 test-observability = []
+test-support = []
 
 [dependencies]
 aeris_instruments = { path = "../domain/instruments" }

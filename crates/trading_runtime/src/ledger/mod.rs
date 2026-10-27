@@ -8,12 +8,15 @@ pub(crate) use position::{CostBasis, FillAccounting, TradeCycle};
 
 use super::{
     AccountEnvironment, AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate,
-    FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind, Liquidity, MAXIMUM_SNAPSHOT_ITEMS,
-    Order, OrderEvent, Position, PositionPnl, ProtectionRole, RiskLock, RiskMeter,
-    SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingAccountId, TradingCore,
-    TradingSnapshot, consistency_projection, negative_loss, nonnegative_difference, pnl_ticks,
-    remaining_limit, round_trip, subtract_fixed, tick_value,
+    FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, Position,
+    PositionPnl, ProtectionRole, RiskLock, RiskMeter, TradingAccount, TradingAccountId,
+    TradingCore, consistency_projection, negative_loss, nonnegative_difference, pnl_ticks,
+    remaining_limit, subtract_fixed, tick_value,
 };
+#[cfg(any(test, feature = "test-support"))]
+use super::{SessionAdherenceReview, TradeRoundTrip, TradingSnapshot, round_trip};
+#[cfg(any(test, feature = "test-support"))]
+const SNAPSHOT_TEST_ITEM_LIMIT: usize = 10_000;
 
 /// The durable per-position projection folded from pruned fills: the exact state after every
 /// fill retention deleted for that account and instrument. Recovery replays the checkpoint
@@ -112,22 +115,24 @@ impl TradingCore {
 
     /// Round trips, open and closed, of every account within the snapshot bound; every exit
     /// fill, partial or final, is one closed round trip.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn round_trips(&self) -> Result<Vec<TradeRoundTrip>, String> {
         round_trip::project_round_trips(
-            self.state.fills.iter().rev().take(MAXIMUM_SNAPSHOT_ITEMS),
+            self.state.fills.iter().rev().take(SNAPSHOT_TEST_ITEM_LIMIT),
             &self.state.positions,
             &self.state.fill_accounting,
             &self.state.trade_cycles,
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn snapshot(&self) -> Result<TradingSnapshot, String> {
         // Orders are absent from this guard: retention.maximum_orders already bounds them
         // (250,000), and the compatibility snapshot must still succeed beyond 10,000 orders
         // (M5.11). New subscribers should use the bounded working set instead.
-        if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
-            || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
-            || self.state.positions.len() > MAXIMUM_SNAPSHOT_ITEMS
+        if self.state.accounts.len() > SNAPSHOT_TEST_ITEM_LIMIT
+            || self.state.instruments.len() > SNAPSHOT_TEST_ITEM_LIMIT
+            || self.state.positions.len() > SNAPSHOT_TEST_ITEM_LIMIT
         {
             return Err("trading snapshot item limit exceeded".to_string());
         }
@@ -142,7 +147,7 @@ impl TradingCore {
                 .order_events
                 .iter()
                 .rev()
-                .take(MAXIMUM_SNAPSHOT_ITEMS)
+                .take(SNAPSHOT_TEST_ITEM_LIMIT)
                 .cloned()
                 .collect(),
             fills: self
@@ -150,7 +155,7 @@ impl TradingCore {
                 .fills
                 .iter()
                 .rev()
-                .take(MAXIMUM_SNAPSHOT_ITEMS)
+                .take(SNAPSHOT_TEST_ITEM_LIMIT)
                 .cloned()
                 .collect(),
             completed_trade_pnl: self
@@ -158,7 +163,7 @@ impl TradingCore {
                 .fills
                 .iter()
                 .rev()
-                .take(MAXIMUM_SNAPSHOT_ITEMS)
+                .take(SNAPSHOT_TEST_ITEM_LIMIT)
                 .filter_map(|fill| {
                     self.state
                         .fill_accounting
@@ -171,7 +176,7 @@ impl TradingCore {
                 .fills
                 .iter()
                 .rev()
-                .take(MAXIMUM_SNAPSHOT_ITEMS)
+                .take(SNAPSHOT_TEST_ITEM_LIMIT)
                 .filter_map(|fill| {
                     self.state
                         .fill_accounting
@@ -221,6 +226,7 @@ impl TradingCore {
     }
 
     /// Every account's in-memory equity ring, flattened into one snapshot history.
+    #[cfg(any(test, feature = "test-support"))]
     fn equity_sample_rows(&self) -> Vec<aeris_trading::EquitySample> {
         self.state
             .equity_rings
@@ -365,6 +371,7 @@ impl TradingCore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn session_adherence_reviews(&self) -> Result<Vec<SessionAdherenceReview>, String> {
         self.state
             .session_plans

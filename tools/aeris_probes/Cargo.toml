@@ -28,6 +28,7 @@ aeris_contracts = { path = "../../crates/contracts" }
 aeris_trading = { path = "../../crates/domain/trading" }
 aeris_trading_runtime = { path = "../../crates/trading_runtime" }
 chrono.workspace = true
+rusqlite.workspace = true
 serde_json.workspace = true
 
 [lints]

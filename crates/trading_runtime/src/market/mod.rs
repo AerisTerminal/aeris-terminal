@@ -110,7 +110,7 @@ impl TradingCore {
                     .get(&observation.instrument_id)
                     .copied();
                 self.advance_observation_cursor(&observation);
-                let result = self.observe_market(&observation);
+                let result = self.apply_market_observation(&observation);
                 if self.quote_commit_failed {
                     if let Some(previous) = previous_cursor {
                         self.observation_cursors
@@ -471,7 +471,7 @@ impl TradingCore {
         is_newer
     }
 
-    pub(super) fn observe_market(
+    pub(super) fn apply_market_observation(
         &mut self,
         observation: &SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {

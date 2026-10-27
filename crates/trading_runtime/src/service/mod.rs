@@ -2,6 +2,8 @@
 
 pub(crate) mod owner;
 
+#[cfg(any(test, feature = "test-support"))]
+use super::TradingSnapshot;
 use super::{
     BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount, EconomicEventRiskOutcome,
     EconomicEventRiskTrigger, EmergencyOutcome, FeeSchedule, FlattenOutcome, FlattenScope,
@@ -9,7 +11,7 @@ use super::{
     PlaceInlineBracket, PlaceOco, PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply,
     RevisionedCancelOrder, RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan,
     TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
-    TradingSnapshot, UserRecord,
+    UserRecord,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -80,6 +82,7 @@ pub(crate) enum Command {
     SetTicketInterest(Vec<MarketRoute>, Reply<()>),
     DrainMarketFeed,
     PutUserRecord(UserRecord, Reply<()>),
+    #[cfg(any(test, feature = "test-support"))]
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
     AttachVenue(

@@ -3,7 +3,9 @@
 //! The service owns its bounded command queue, canonical orders/fills/positions, and the one
 //! embedded user-record store. Callers must invoke blocking request methods from background work.
 
-use crate::{clock, round_trip, service, venue};
+#[cfg(any(test, feature = "test-support"))]
+use crate::round_trip;
+use crate::{clock, service, venue};
 #[path = "../admission/mod.rs"]
 mod admission;
 #[path = "../emergency.rs"]
@@ -92,7 +94,6 @@ use std::{
 pub(crate) const COMMAND_CAPACITY: usize = 256;
 pub(crate) const REPLY_CAPACITY: usize = 1;
 pub(crate) const MAXIMUM_OPEN_ORDERS: usize = 4_096;
-pub(crate) const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
 pub(crate) const MAXIMUM_COPY_DISPATCHES: usize = 128;
 pub(crate) const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
 pub(crate) const LIVE_TRADING_DISABLED: &str =
@@ -493,6 +494,7 @@ pub struct VenueNotice {
 }
 
 /// Bounded immutable projection of current trading state.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradingSnapshot {
     pub revision: u64,
@@ -552,6 +554,7 @@ pub struct PositionProtection {
     pub take_profit: Option<FixedPoint>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl TradingSnapshot {
     /// The protective role of an order: a managed bracket's stop or target, or a standalone
     /// stop loss or take profit.
@@ -1323,6 +1326,7 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error when the owner is unavailable or the snapshot bound is exceeded.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn snapshot(&self) -> Result<TradingSnapshot, String> {
         self.request(Command::Snapshot)
     }
@@ -1756,6 +1760,7 @@ impl TradingCore {
             Command::PutUserRecord(record, reply) => {
                 respond(&reply, self.put_user_record(&record));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
             }
@@ -1803,7 +1808,7 @@ impl TradingCore {
                 .get(&observation.instrument_id)
                 .copied();
             if self.advance_observation_cursor(&observation) {
-                match self.observe_market(&observation) {
+                match self.apply_market_observation(&observation) {
                     Ok(_) => self.market_observation_error = None,
                     Err(error) if self.quote_commit_failed => {
                         if let Some(previous) = previous_cursor {

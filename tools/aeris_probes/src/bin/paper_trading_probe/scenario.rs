@@ -20,17 +20,18 @@ use aeris_probes::{
     market, prices, unix_nanos_now, wait_for,
 };
 use aeris_trading::{
-    AccountEnvironment, ClientOrderId, FeeModel, FeeSchedule, Fill, FixedPoint, LedgerEntry,
-    LedgerEntryKind, Order, OrderEvent, OrderEventKind, OrderEventReason, OrderSide, OrderStatus,
-    OrderType, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
+    AccountEnvironment, ClientOrderId, FeeModel, FeeSchedule, Fill, FillId, FixedPoint,
+    LedgerEntry, LedgerEntryKind, Order, OrderEvent, OrderEventKind, OrderEventReason, OrderSide,
+    OrderStatus, OrderType, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
     market::{FeedState, MarketRoute},
 };
 use aeris_trading_runtime::{
     BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, CreatePracticeAccount,
-    ExecutionPolicy, FlattenScope, PlaceInlineBracket, PlaceOrder, PlacementOutcome, PlannedLeg,
-    TradingEventCause, TradingInstrument, TradingRetention, TradingService, TradingServiceConfig,
-    TradingSnapshot, TradingSubscription, clock::SystemClock,
+    ExecutionPolicy, FlattenScope, HistoryQuery, PlaceInlineBracket, PlaceOrder, PlacementOutcome,
+    PlannedLeg, TradingEventCause, TradingInstrument, TradingRetention, TradingService,
+    TradingServiceConfig, TradingSubscription, WorkingSet, clock::SystemClock,
 };
+use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 use super::Options;
@@ -108,6 +109,96 @@ fn start_trading(root: &Path) -> ProbeResult<TradingService> {
         execution: ExecutionPolicy::default(),
     })
     .map_err(|error| ProbeError::Runtime(error.to_string()))
+}
+
+/// Read the subscription's initial, owner-published working set. The handle drops immediately;
+/// later reads use a new subscription so no stale event is mistaken for the latest revision.
+fn working_set(trading: &TradingService) -> ProbeResult<WorkingSet> {
+    let subscription = market(trading.subscribe())?;
+    subscription
+        .recv_timeout(Duration::from_secs(5))
+        .map(|update| *update.event.working_set)
+        .ok_or_else(|| ProbeError::Runtime("initial trading publication timed out".to_string()))
+}
+
+fn order_history(trading: &TradingService) -> ProbeResult<Vec<Order>> {
+    let mut orders = Vec::new();
+    let mut after = None;
+    loop {
+        let page = market(trading.history(HistoryQuery {
+            after,
+            ..HistoryQuery::default()
+        }))?;
+        orders.extend(page.orders);
+        match page.next {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok(orders),
+        }
+    }
+}
+
+/// The probe alone verifies durable cash rows directly from its isolated store. Trading UI
+/// consumers use working sets and history pages, never open the owner's SQLite database.
+fn probe_database(root: &DataRoot) -> ProbeResult<Connection> {
+    Connection::open_with_flags(
+        root.path().join("trading/trading.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| ProbeError::Runtime(error.to_string()))
+}
+
+fn durable_ledger(root: &DataRoot) -> ProbeResult<Vec<LedgerEntry>> {
+    let connection = probe_database(root)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, account_id, kind, amount_units, amount_scale, fill_id, at_unix_nanos
+             FROM ledger_entries ORDER BY rowid",
+        )
+        .map_err(|error| ProbeError::Runtime(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, u8>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(|error| ProbeError::Runtime(error.to_string()))?;
+    rows.map(|row| {
+        let (id, account, kind, units, scale, fill, at) =
+            row.map_err(|error| ProbeError::Runtime(error.to_string()))?;
+        Ok(LedgerEntry {
+            entry_id: id,
+            account_id: TradingAccountId::try_new(account)
+                .map_err(|error| ProbeError::Runtime(error.to_string()))?,
+            kind: LedgerEntryKind::parse(&kind)
+                .map_err(|error| ProbeError::Runtime(error.to_string()))?,
+            amount: FixedPoint::try_new(units, scale)
+                .map_err(|error| ProbeError::Runtime(error.to_string()))?,
+            fill_id: fill
+                .map(FillId::try_new)
+                .transpose()
+                .map_err(|error| ProbeError::Runtime(error.to_string()))?,
+            at_unix_nanos: at,
+        })
+    })
+    .collect()
+}
+
+fn fee_schedule_rows(root: &DataRoot) -> ProbeResult<Vec<(String, String)>> {
+    let connection = probe_database(root)?;
+    let mut statement = connection
+        .prepare("SELECT account_id, model_json FROM fee_schedules ORDER BY account_id")
+        .map_err(|error| ProbeError::Runtime(error.to_string()))?;
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| ProbeError::Runtime(error.to_string()))?
+        .map(|row| row.map_err(|error| ProbeError::Runtime(error.to_string())))
+        .collect()
 }
 
 /// Snaps a fraction of a positive reference price to three significant figures so the
@@ -233,7 +324,7 @@ struct StateDigest {
     fills: Vec<Fill>,
     positions: Vec<PositionDigest>,
     ledger_entries: Vec<LedgerEntry>,
-    fee_schedules: Vec<(TradingAccountId, FeeSchedule)>,
+    fee_schedules: Vec<(String, String)>,
     managed_brackets: Vec<BracketView>,
     planned_legs: Vec<PlannedLeg>,
 }
@@ -285,12 +376,16 @@ impl StateDigest {
         differences
     }
 }
-fn digest(snapshot: &TradingSnapshot) -> StateDigest {
+fn digest(
+    trading: &TradingService,
+    root: &DataRoot,
+    snapshot: &WorkingSet,
+) -> ProbeResult<StateDigest> {
     let mut instruments = snapshot.instruments.clone();
     instruments.sort_by(|a, b| a.instrument_id.as_str().cmp(b.instrument_id.as_str()));
     let mut accounts = snapshot.accounts.clone();
     accounts.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-    let mut orders = snapshot.orders.clone();
+    let mut orders = order_history(trading)?;
     orders.sort_by(|a, b| a.client_order_id.as_str().cmp(b.client_order_id.as_str()));
     let mut order_events = snapshot.order_events.clone();
     order_events.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
@@ -310,15 +405,14 @@ fn digest(snapshot: &TradingSnapshot) -> StateDigest {
         .collect::<Vec<_>>();
     positions
         .sort_by(|a, b| (&a.account_id, &a.instrument_id).cmp(&(&b.account_id, &b.instrument_id)));
-    let mut ledger_entries = snapshot.ledger_entries.clone();
+    let mut ledger_entries = durable_ledger(root)?;
     ledger_entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-    let mut fee_schedules = snapshot.fee_schedules.clone();
-    fee_schedules.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    let fee_schedules = fee_schedule_rows(root)?;
     let mut managed_brackets = snapshot.managed_brackets.clone();
     managed_brackets.sort_by(|a, b| a.bracket_id.cmp(&b.bracket_id));
     let mut planned_legs = snapshot.planned_legs.clone();
     planned_legs.sort_by(|a, b| a.client_order_id.as_str().cmp(b.client_order_id.as_str()));
-    StateDigest {
+    Ok(StateDigest {
         instruments,
         accounts,
         orders,
@@ -329,7 +423,7 @@ fn digest(snapshot: &TradingSnapshot) -> StateDigest {
         fee_schedules,
         managed_brackets,
         planned_legs,
-    }
+    })
 }
 
 /// Creates or reuses the probe's practice account by display name.
@@ -337,7 +431,7 @@ fn practice_account(
     trading: &TradingService,
     evidence: &mut Evidence,
 ) -> ProbeResult<TradingAccount> {
-    let snapshot = market(trading.snapshot())?;
+    let snapshot = working_set(trading)?;
     let existing = snapshot.accounts.iter().find(|account| {
         account.display_name == ACCOUNT_NAME && account.environment == AccountEnvironment::Simulated
     });
@@ -365,15 +459,15 @@ fn practice_account(
 /// Installs the per-contract fee schedule once per account, unless the run is `--no-fees`.
 fn apply_fee_schedule(
     trading: &TradingService,
+    root: &DataRoot,
     account: &TradingAccount,
     evidence: &mut Evidence,
     no_fees: bool,
 ) -> ProbeResult<()> {
     if !no_fees {
-        let installed = market(trading.snapshot())?
-            .fee_schedules
+        let installed = fee_schedule_rows(root)?
             .iter()
-            .any(|(account_id, _)| *account_id == account.id);
+            .any(|(account_id, _)| account_id == account.id.as_str());
         if !installed {
             let mut by_class = BTreeMap::new();
             by_class.insert(
@@ -496,7 +590,7 @@ fn scenario(
     // Verified terms for both instruments register from the live feed (or recover from
     // the store on a rerun against an existing validation root).
     let registered = wait_for("verified instrument terms", Duration::from_secs(45), || {
-        let snapshot = market(trading.snapshot())?;
+        let snapshot = working_set(&trading)?;
         let ready = [BTC_ID, SOL_ID].iter().all(|instrument| {
             snapshot
                 .instruments
@@ -513,7 +607,7 @@ fn scenario(
     })?;
     evidence.check("terms_registered", true, json!({"instruments": registered}))?;
     let account = practice_account(&trading, evidence)?;
-    apply_fee_schedule(&trading, &account, evidence, options.no_fees)?;
+    apply_fee_schedule(&trading, root, &account, evidence, options.no_fees)?;
 
     if options.no_quote {
         return no_quote_rejection(&trading, &account, &sol, generation, recorder, evidence);
@@ -567,7 +661,7 @@ fn no_quote_rejection(
     )?;
     order.limit_price = Some(fixed((100_000_000, 8))?);
     let rejection = trading.place_order(order, false);
-    let snapshot = market(trading.snapshot())?;
+    let snapshot = working_set(trading)?;
     evidence.check(
         "no_quote_rejected",
         rejection.as_ref().is_err_and(|error| {
@@ -603,8 +697,8 @@ struct Probe<'a> {
 }
 
 impl Probe<'_> {
-    fn snapshot(&self) -> ProbeResult<TradingSnapshot> {
-        market(self.trading.snapshot())
+    fn current(&self) -> ProbeResult<WorkingSet> {
+        working_set(&self.trading)
     }
 
     fn latest_quote(&self, instrument: &str) -> ProbeResult<RecordedQuote> {
@@ -654,7 +748,8 @@ impl Probe<'_> {
         )?;
         let order_id = order.id.clone();
         let fill = wait_for("market buy fill", QUOTE_WAIT, || {
-            Ok(market(self.trading.snapshot())?
+            Ok(self
+                .current()?
                 .fills
                 .into_iter()
                 .find(|fill| fill.order_id == order_id))
@@ -759,7 +854,7 @@ impl Probe<'_> {
                 "inline bracket was not locally managed".to_string(),
             ));
         };
-        let snapshot = self.snapshot()?;
+        let snapshot = self.current()?;
         let legs = snapshot
             .planned_legs
             .iter()
@@ -795,7 +890,7 @@ impl Probe<'_> {
                 ..self.btc_order("m512-ioc", reference.provider_generation)?
             },
         )?;
-        let snapshot = self.snapshot()?;
+        let snapshot = self.current()?;
         let events = snapshot
             .order_events
             .iter()
@@ -927,11 +1022,11 @@ impl Probe<'_> {
         guard: &mut TradingGuard,
         target: &FeedTarget,
     ) -> ProbeResult<()> {
-        let pre_snapshot = self.snapshot()?;
+        let pre_snapshot = self.current()?;
         let pre_revision = pre_snapshot.revision;
-        let pre = digest(&pre_snapshot);
+        let pre = digest(&self.trading, self.root, &pre_snapshot)?;
         let pre_unrealized = self
-            .snapshot()?
+            .current()?
             .account_pnl
             .iter()
             .find(|pnl| pnl.account_id == self.account.id)
@@ -965,9 +1060,9 @@ impl Probe<'_> {
         self.trading = trading;
 
         self.quotes_resume(epoch, restart_started_at, pre_unrealized, &subscription)?;
-        let post_snapshot = self.snapshot()?;
+        let post_snapshot = self.current()?;
         let post_revision = post_snapshot.revision;
-        let post = digest(&post_snapshot);
+        let post = digest(&self.trading, self.root, &post_snapshot)?;
         let differences = pre.differences(&post);
         self.evidence.check(
             "restart_state_identical",
@@ -1076,7 +1171,8 @@ impl Probe<'_> {
             json!({ "sell_fills": sell_fills }),
         )?;
         wait_for("flat positions", Duration::from_secs(10), || {
-            Ok(market(self.trading.snapshot())?
+            Ok(self
+                .current()?
                 .positions
                 .iter()
                 .all(|position| position.net_quantity.units() == 0)
@@ -1084,13 +1180,14 @@ impl Probe<'_> {
         })?;
         let cancelled = market(self.trading.cancel_all(None))?;
         wait_for("no working orders", Duration::from_secs(10), || {
-            Ok(market(self.trading.snapshot())?
+            Ok(self
+                .current()?
                 .orders
                 .iter()
                 .all(|order| !order.status.is_open())
                 .then_some(()))
         })?;
-        let snapshot = self.snapshot()?;
+        let snapshot = self.current()?;
         let flat = snapshot
             .positions
             .iter()
@@ -1124,9 +1221,9 @@ impl Probe<'_> {
     /// The account balance is exactly the sum of its ledger entries, and every fill's
     /// fee entries replicate the runtime's per-contract computation.
     fn ledger_identity(&mut self) -> ProbeResult<()> {
-        let snapshot = self.snapshot()?;
-        let entries = snapshot
-            .ledger_entries
+        let snapshot = self.current()?;
+        let ledger = durable_ledger(self.root)?;
+        let entries = ledger
             .iter()
             .filter(|entry| entry.account_id == self.account.id)
             .collect::<Vec<_>>();
@@ -1234,7 +1331,7 @@ impl Probe<'_> {
             .ok()
             .and_then(|body| serde_json::from_slice::<Vec<serde_json::Value>>(&body).ok());
         let csv = std::fs::read_to_string(directory.join("executions.csv")).ok();
-        let snapshot = self.snapshot()?;
+        let snapshot = self.current()?;
         let fill_parity = executions.as_ref().is_some_and(|rows| {
             rows.len() == snapshot.fills.len()
                 && rows.iter().all(|row| {
