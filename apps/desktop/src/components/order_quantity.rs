@@ -366,6 +366,7 @@ fn trade_bar_order_button(
     let quantity = order.quantity;
     div().w(px(TRADE_BAR_BUTTON_WIDTH)).child(
         Button::new(id, theme)
+            .debug_selector(|| id.into())
             .variant(trade_variant(side))
             .button_size(ButtonSize::Sm)
             .full_width()

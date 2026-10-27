@@ -361,6 +361,109 @@ fn assert_owner_rejects_unpriced_modify(
 }
 
 #[gpui::test]
+fn pane_harness_chart_buy_intent_fills_through_owner_and_projects_position(
+    cx: &mut TestAppContext,
+) {
+    let (owner, root, account, _, instrument, _) =
+        trading_store::real_owner_fill_fixture_for("hyperliquid");
+    let subscription = owner.subscribe().expect("owner subscription");
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.instrument_id = instrument.as_str().into();
+    product.price_scale = 2;
+    product.quantity_scale = 0;
+    product.price_increment = Some(1);
+    let (mut harness, cx) = PaneHarness::open_with_product_and_owner(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product,
+        ChartInterval::Minute1,
+        Some(owner.clone()),
+        cx,
+    );
+    harness.publish_snapshot(120, cx);
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(
+            pane.trading_pnl.order_entry.selected_account_id.as_ref(),
+            Some(&account),
+            "the pane selects the scripted practice account"
+        );
+        let chart = pane.chart.as_ref().expect("chart").read(cx);
+        let (width, height) = chart.rendered_viewport_size();
+        assert!(
+            width >= 500.0 && height >= 350.0,
+            "chart needs a realistic viewport: {width}x{height}"
+        );
+        assert!(pane.chart_chrome.chart_trade_buttons.shown());
+        assert!(chart.legend_options().symbol, "symbol legend enabled");
+        assert!(!chart.legend_title().is_empty(), "symbol legend has title");
+    });
+    // The chart prepaint first computes the pane geometry used by the next
+    // legend layout, then the host Buy control can receive a real GPUI click.
+    cx.update(|window, _| window.refresh());
+    let buy = cx
+        .debug_bounds("chart_trade_buy")
+        .expect("host Buy control is painted");
+    cx.simulate_click(buy.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let update = subscription
+        .recv_timeout(Duration::from_secs(2))
+        .expect("owner fill publication after chart Buy click");
+    assert_eq!(update.event.working_set.fills.len(), 1);
+    assert_eq!(update.event.working_set.positions.len(), 1);
+    assert_eq!(update.event.working_set.fills[0].account_id, account);
+    assert_eq!(update.event.working_set.fills[0].instrument_id, instrument);
+    harness.pane.update(cx, |pane, cx| {
+        let store = pane.lifecycle.trading_store().expect("pane TradingStore");
+        store.update(cx, |store, cx| {
+            store.apply_test_publication(update);
+            cx.notify();
+        });
+        workspace_layout::apply_trading_snapshot(pane, &store, cx);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        let store = pane.lifecycle.trading_store().expect("pane TradingStore");
+        let store = store.read(cx);
+        let view = store.pane_view(&account, &instrument);
+        assert_eq!(
+            store
+                .current()
+                .expect("owner projection")
+                .fills
+                .iter()
+                .filter(|fill| fill.account_id == account && fill.instrument_id == instrument)
+                .count(),
+            1,
+            "owner fill in the pane's TradingStore"
+        );
+        assert_eq!(
+            view.positions().count(),
+            1,
+            "owner position in pane projection"
+        );
+        assert_eq!(
+            pane.chart
+                .as_ref()
+                .expect("chart")
+                .read(cx)
+                .trading_snapshot()
+                .positions
+                .len(),
+            1,
+            "the projected position is painted on the chart"
+        );
+    });
+    owner
+        .shutdown(Duration::from_secs(2))
+        .expect("owner stopped");
+    std::fs::remove_dir_all(root).expect("remove test root");
+}
+
+#[gpui::test]
 fn pane_harness_open_session_owner_cancels_resting_orders_and_rejects_missing_quote(
     cx: &mut TestAppContext,
 ) {
