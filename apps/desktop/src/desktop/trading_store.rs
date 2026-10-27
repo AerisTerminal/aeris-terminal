@@ -1155,25 +1155,28 @@ mod tests {
         store.drain().expect("initial store view");
         assert_eq!(store.take_announcements(), []);
         service
-            .place_order(PlaceOrder {
-                client_order_id: ClientOrderId::try_new("real-fill-order").expect("client id"),
-                account_id: account.clone(),
-                instrument_id: instrument.clone(),
-                side: OrderSide::Buy,
-                order_type: OrderType::Market,
-                time_in_force: TimeInForce::Day,
-                quantity: FixedPoint::try_new(1, 0).expect("quantity"),
-                limit_price: None,
-                stop_price: None,
-                submitted_unix_nanos: 1_000_000_000_000,
-                provenance: TradingProvenance {
-                    venue_id: "aeris-sim".into(),
-                    provider_id: "fixture".into(),
-                    session_generation: 1,
-                    source_sequence: 1,
-                    observed_unix_nanos: 1_000_000_000_000,
+            .place_order(
+                PlaceOrder {
+                    client_order_id: ClientOrderId::try_new("real-fill-order").expect("client id"),
+                    account_id: account.clone(),
+                    instrument_id: instrument.clone(),
+                    side: OrderSide::Buy,
+                    order_type: OrderType::Market,
+                    time_in_force: TimeInForce::Day,
+                    quantity: FixedPoint::try_new(1, 0).expect("quantity"),
+                    limit_price: None,
+                    stop_price: None,
+                    submitted_unix_nanos: 1_000_000_000_000,
+                    provenance: TradingProvenance {
+                        venue_id: "aeris-sim".into(),
+                        provider_id: "fixture".into(),
+                        session_generation: 1,
+                        source_sequence: 1,
+                        observed_unix_nanos: 1_000_000_000_000,
+                    },
                 },
-            })
+                false,
+            )
             .expect("owner filled against scripted quote");
         let publication = subscription
             .recv_timeout(Duration::from_secs(2))
@@ -1254,9 +1257,7 @@ mod tests {
         )
         .expect("Buy identity without a pane book");
         assert!(command.limit_price.is_none(), "the owner prices the Buy");
-        let order = service
-            .place_order_from_market(command, true)
-            .expect("owner fill");
+        let order = service.place_order(command, true).expect("owner fill");
         assert_eq!(order.status, OrderStatus::Filled);
         let publication = subscription
             .recv_timeout(Duration::from_secs(2))
@@ -1309,7 +1310,7 @@ mod tests {
             .expect("instruction needs no pane frame")
         };
         service
-            .place_order_from_market(buy(OrderSide::Buy), true)
+            .place_order(buy(OrderSide::Buy), true)
             .expect("open position");
         let (selected_account, selected_instrument) = aeris_desktop::trading::prepare_flatten_for(
             &product.instrument_id,

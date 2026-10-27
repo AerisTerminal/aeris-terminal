@@ -79,14 +79,14 @@ fn setup(
 fn simulated_and_broker_acceptance_have_durable_initial_lifecycle_fields() {
     let (directory, service, _receiver) = setup("initial-lifecycle");
     let simulated = service
-        .place_order({
+        .place_order_caller_priced({
             let mut order = limit_request("local-initial", 9_000);
             order.account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
             order
         })
         .expect("simulated acceptance");
     let broker = service
-        .place_order(limit_request("broker-initial", 9_000))
+        .place_order_caller_priced(limit_request("broker-initial", 9_000))
         .expect("broker submission");
     for order in [&simulated, &broker] {
         assert_eq!(order.revision, 1);
@@ -253,14 +253,14 @@ fn full_outbound_queue_rejects_synchronously_without_pending_order() {
     for index in 0..OUTBOUND_CAPACITY {
         assert_eq!(
             service
-                .place_order(request(&format!("outbound-{index}")))
+                .place_order_caller_priced(request(&format!("outbound-{index}")))
                 .expect("place")
                 .status,
             OrderStatus::Pending
         );
     }
     let error = service
-        .place_order(request("over-capacity"))
+        .place_order_caller_priced(request("over-capacity"))
         .expect_err("full");
     assert_eq!(error, "broker venue outbound queue is full");
     assert_eq!(
@@ -285,7 +285,7 @@ fn full_outbound_queue_rejects_synchronously_without_pending_order() {
 fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
     let (_directory, service, _receiver) = setup("venue-full-amend");
     let placed = service
-        .place_order(limit_request("amend-target", 9_000))
+        .place_order_caller_priced(limit_request("amend-target", 9_000))
         .expect("place");
     service
         .demo_venue_inbox()
@@ -300,7 +300,7 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
     );
     for index in 1..OUTBOUND_CAPACITY {
         service
-            .place_order(request(&format!("queued-{index}")))
+            .place_order_caller_priced(request(&format!("queued-{index}")))
             .expect("queue place");
     }
     let before = service.snapshot().expect("facts before rejected requests");
@@ -313,7 +313,9 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
         provenance: crate::tests::provenance(2, 3_000),
     };
     assert_eq!(
-        service.modify_order(modify).expect_err("queue full"),
+        service
+            .modify_order_caller_priced(modify)
+            .expect_err("queue full"),
         "broker venue outbound queue is full"
     );
     assert_eq!(
@@ -333,7 +335,7 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
 fn pending_broker_modify_preserves_revision_and_time_after_restart() {
     let (directory, service, receiver) = setup("pending-revision");
     let placed = service
-        .place_order(limit_request("pending-revision", 9_000))
+        .place_order_caller_priced(limit_request("pending-revision", 9_000))
         .expect("place");
     assert!(matches!(
         receiver.recv().expect("place request"),
@@ -347,7 +349,7 @@ fn pending_broker_modify_preserves_revision_and_time_after_restart() {
         ))
         .expect("ack");
     let pending = service
-        .modify_order(ModifyOrder {
+        .modify_order_caller_priced(ModifyOrder {
             client_order_id: placed.client_order_id.clone(),
             time_in_force: TimeInForce::GoodTillCancelled,
             limit_price: Some(point(9_025, 2)),
@@ -379,7 +381,7 @@ fn stale_broker_commands_do_not_reserve_venue_requests_or_mutate_facts() {
     use crate::{OrderCommandError, RevisionedCancelOrder, RevisionedModifyOrder};
     let (directory, service, receiver) = setup("broker-stale");
     let placed = service
-        .place_order(limit_request("broker-stale", 9_000))
+        .place_order_caller_priced(limit_request("broker-stale", 9_000))
         .expect("place");
     assert!(matches!(
         receiver.recv().expect("place"),
@@ -473,7 +475,7 @@ fn stale_broker_commands_do_not_reserve_venue_requests_or_mutate_facts() {
 fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
     let (directory, service, receiver) = setup("venue-generation");
     let order = service
-        .place_order(limit_request("generation-order", 9_000))
+        .place_order_caller_priced(limit_request("generation-order", 9_000))
         .expect("place");
     assert_eq!(order.id.as_str(), "broker-order-1");
     assert_eq!(
@@ -603,7 +605,7 @@ fn bounded_inbox_blocks_reader_then_applies_every_event_in_order() {
 fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices() {
     let (_directory, service, receiver) = setup("venue-lifecycle");
     let pending = service
-        .place_order(limit_request("lifecycle", 9_000))
+        .place_order_caller_priced(limit_request("lifecycle", 9_000))
         .expect("pending");
     assert!(matches!(
         receiver.recv().expect("place"),
@@ -630,7 +632,7 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
         modified_unix_nanos: 3_000,
         provenance: crate::tests::provenance(99, 3_000),
     };
-    let pending_modify = service.modify_order(change).expect("modify");
+    let pending_modify = service.modify_order_caller_priced(change).expect("modify");
     assert_eq!(pending_modify.status, OrderStatus::PendingModify);
     assert_eq!(pending_modify.revision, 3);
     assert!(pending_modify.updated_unix_nanos >= pending.accepted_unix_nanos);
@@ -719,7 +721,9 @@ fn refusals_rejections_and_expiry_are_terminal_and_ignore_late_updates() {
         ("venue-refused", None),
     ] {
         let (directory, service, _receiver) = setup(label);
-        let order = service.place_order(request(label)).expect("pending");
+        let order = service
+            .place_order_caller_priced(request(label))
+            .expect("pending");
         let inbox = service.demo_venue_inbox();
         let update = state.map_or_else(
             || VenueUpdate::Refused {
@@ -765,7 +769,9 @@ fn a_report_for_another_account_never_moves_an_order() {
         ..broker()
     };
     service.register_account(other).expect("other account");
-    let order = service.place_order(request("shared-id")).expect("pending");
+    let order = service
+        .place_order_caller_priced(request("shared-id"))
+        .expect("pending");
     service
         .demo_venue_inbox()
         .push(VenueEvent {
@@ -787,7 +793,7 @@ fn a_broker_cancel_keeps_its_reason_and_a_requested_cancel_is_marked() {
     let (_directory, service, _receiver) = setup("venue-cancel-reason");
     let inbox = service.demo_venue_inbox();
     let ended = service
-        .place_order(limit_request("broker-ended", 9_000))
+        .place_order_caller_priced(limit_request("broker-ended", 9_000))
         .expect("pending");
     inbox
         .push(venue(
@@ -823,7 +829,7 @@ fn a_broker_cancel_keeps_its_reason_and_a_requested_cancel_is_marked() {
     );
 
     let asked = service
-        .place_order(limit_request("user-ended", 9_000))
+        .place_order_caller_priced(limit_request("user-ended", 9_000))
         .expect("pending");
     inbox
         .push(venue(
@@ -865,7 +871,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
     let (directory, service, _receiver) = setup("venue-fills");
     let mut place = request("filled");
     place.quantity = point(3, 0);
-    let order = service.place_order(place).expect("pending");
+    let order = service.place_order_caller_priced(place).expect("pending");
     let inbox = service.demo_venue_inbox();
     inbox
         .push(venue(
@@ -1021,13 +1027,13 @@ fn reconcile_settles_every_open_order_and_rebases_positions_the_venue_disagrees_
     assert_eq!(broker_position(&service), None);
 
     let lost = service
-        .place_order(request("never-received"))
+        .place_order_caller_priced(request("never-received"))
         .expect("lost");
     let gone = service
-        .place_order(limit_request("filled-offline", 9_000))
+        .place_order_caller_priced(limit_request("filled-offline", 9_000))
         .expect("gone");
     let kept = service
-        .place_order(limit_request("still-open", 8_900))
+        .place_order_caller_priced(limit_request("still-open", 8_900))
         .expect("kept");
     for order in [&gone, &kept] {
         let broker_id = if order.id == gone.id { "901" } else { "902" };
@@ -1046,7 +1052,9 @@ fn reconcile_settles_every_open_order_and_rebases_positions_the_venue_disagrees_
         modified_unix_nanos: 3_000,
         provenance: crate::tests::provenance(9, 3_000),
     };
-    service.modify_order(change).expect("modify sent");
+    service
+        .modify_order_caller_priced(change)
+        .expect("modify sent");
     while receiver.try_recv().is_ok() {}
 
     // After a reconnect the broker holds only the kept order, at the price it accepted,
@@ -1226,7 +1234,7 @@ fn place_bracket(service: &TradingService, id: &str) -> Order {
         enabled: true,
     };
     let placement = service
-        .place_inline_bracket(crate::PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(crate::PlaceInlineBracket {
             entry: request(id),
             template,
         })
@@ -1353,7 +1361,9 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
     resting.order_type = OrderType::Limit;
     resting.time_in_force = TimeInForce::GoodTillCancelled;
     resting.limit_price = Some(point(8_000, 2));
-    service.place_order(resting).expect("simulated order");
+    service
+        .place_order_caller_priced(resting)
+        .expect("simulated order");
     assert_eq!(service.cancel_all(None).expect("cancel all").len(), 1);
 
     // With no venue attached the kill switch still locks every account, broker included.
@@ -1379,7 +1389,7 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
     crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
     assert!(
         service
-            .place_order(request("after-kill"))
+            .place_order_caller_priced(request("after-kill"))
             .expect_err("locked")
             .contains("AccountLocked: account is risk-locked"),
         "a locked broker account accepts no new order"
@@ -1391,7 +1401,7 @@ fn the_kill_switch_reports_venue_requests_it_could_not_make_after_locking() {
     let (_directory, service, receiver) = setup("venue-kill-pending");
     for index in 0..OUTBOUND_CAPACITY {
         service
-            .place_order(request(&format!("unacknowledged-{index}")))
+            .place_order_caller_priced(request(&format!("unacknowledged-{index}")))
             .expect("pending");
     }
     // The request queue is full, so the venue cannot be asked to cancel anything.
@@ -1433,7 +1443,7 @@ fn the_kill_switch_reports_venue_requests_it_could_not_make_after_locking() {
 fn the_simulator_never_fills_a_broker_order() {
     let (_directory, service, _receiver) = setup("venue-simulator");
     let order = service
-        .place_order(request("broker-market"))
+        .place_order_caller_priced(request("broker-market"))
         .expect("pending");
     service
         .demo_venue_inbox()
@@ -1459,7 +1469,7 @@ fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
         time_in_force: TimeInForce::Day,
         ..limit_request("day-limit", 9_000)
     };
-    let placed = service.place_order(day_limit).expect("limit");
+    let placed = service.place_order_caller_priced(day_limit).expect("limit");
     assert_eq!(placed.time_in_force, TimeInForce::Day);
     // The broker reports a DAY order's session expiry; the owner schedules none.
     assert_eq!(placed.expires_at_unix_nanos, None);
@@ -1467,7 +1477,9 @@ fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
         panic!("a place request");
     };
     assert_eq!(sent.time_in_force, TimeInForce::Day);
-    let market = service.place_order(request("day-market")).expect("market");
+    let market = service
+        .place_order_caller_priced(request("day-market"))
+        .expect("market");
     assert_eq!(market.time_in_force, TimeInForce::ImmediateOrCancel);
     assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
 
@@ -1488,7 +1500,7 @@ fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
     };
     assert_eq!(
         service
-            .modify_order(ModifyOrder {
+            .modify_order_caller_priced(ModifyOrder {
                 time_in_force: TimeInForce::GoodTillCancelled,
                 ..modify.clone()
             })
@@ -1497,7 +1509,10 @@ fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
     );
     assert!(receiver.try_recv().is_err());
     assert_eq!(
-        service.modify_order(modify).expect("modify").status,
+        service
+            .modify_order_caller_priced(modify)
+            .expect("modify")
+            .status,
         OrderStatus::PendingModify
     );
     assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Amend(_))));
@@ -1516,7 +1531,7 @@ fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
 fn an_off_grid_broker_amendment_is_rejected_before_it_is_recorded_or_routed() {
     let (_directory, service, receiver) = setup("venue-off-grid-amend");
     let placed = service
-        .place_order(limit_request("off-grid-amend", 9_000))
+        .place_order_caller_priced(limit_request("off-grid-amend", 9_000))
         .expect("limit");
     assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
     service
@@ -1529,7 +1544,7 @@ fn an_off_grid_broker_amendment_is_rejected_before_it_is_recorded_or_routed() {
     let before = service.snapshot().expect("before");
     // 90.13 is not a multiple of the fixture's 0.25 tick.
     let error = service
-        .modify_order(ModifyOrder {
+        .modify_order_caller_priced(ModifyOrder {
             client_order_id: placed.client_order_id.clone(),
             time_in_force: TimeInForce::GoodTillCancelled,
             limit_price: Some(point(9_013, 2)),
@@ -1628,7 +1643,7 @@ fn open_broker_positions_count_toward_the_maximum_contract_rule() {
         .expect("position");
     assert!(
         service
-            .place_order(request("third-contract"))
+            .place_order_caller_priced(request("third-contract"))
             .expect_err("over the maximum")
             .contains("maximum-contract")
     );
@@ -1650,7 +1665,7 @@ fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
         .expect("an unreachable account still registers");
     assert!(
         service
-            .place_order(request("unknown-open-pnl"))
+            .place_order_caller_priced(request("unknown-open-pnl"))
             .expect_err("fails closed")
             .contains("unreachable"),
     );
@@ -1941,7 +1956,7 @@ fn deals_first_seen_on_the_broker_take_owner_sequence_ids_that_never_collide() {
     let inbox = service.demo_venue_inbox();
     for (index, broker_order_id) in ["900", "901", "902"].into_iter().enumerate() {
         service
-            .place_order(limit_request(&format!("placed-{index}"), 9_000))
+            .place_order_caller_priced(limit_request(&format!("placed-{index}"), 9_000))
             .expect("placed before a mirrored deal");
         inbox
             .push(venue(
@@ -1950,7 +1965,7 @@ fn deals_first_seen_on_the_broker_take_owner_sequence_ids_that_never_collide() {
             ))
             .expect("broker-originated deal");
         service
-            .place_order(limit_request(&format!("after-{index}"), 9_000))
+            .place_order_caller_priced(limit_request(&format!("after-{index}"), 9_000))
             .expect("an order placed after a mirrored deal gets a fresh id");
     }
     let snapshot = service.snapshot().expect("snapshot");
@@ -1972,7 +1987,9 @@ fn deals_first_seen_on_the_broker_take_owner_sequence_ids_that_never_collide() {
 #[test]
 fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror() {
     let (directory, service, _receiver) = setup("deal-before-ack");
-    let placed = service.place_order(request("early-deal")).expect("place");
+    let placed = service
+        .place_order_caller_priced(request("early-deal"))
+        .expect("place");
     let inbox = service.demo_venue_inbox();
     inbox
         .push(venue(
@@ -2025,12 +2042,14 @@ fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror(
 #[test]
 fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
     let (_directory, service, _receiver) = setup("reconcile-gate");
-    service.place_order(request("ready")).expect("reconciled");
+    service
+        .place_order_caller_priced(request("ready"))
+        .expect("reconciled");
     let (generation, receiver) = service
         .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     let refused = service
-        .place_order(request("before-reconcile"))
+        .place_order_caller_priced(request("before-reconcile"))
         .expect_err("not reconciled in this generation");
     assert!(refused.contains("being reconciled"), "{refused}");
     assert!(matches!(
@@ -2039,7 +2058,7 @@ fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
     ));
     crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
     service
-        .place_order(request("after-reconcile"))
+        .place_order_caller_priced(request("after-reconcile"))
         .expect("reconciled again");
     // An unanswered request makes the venue state uncertain: the account is reconciled
     // again and takes no new orders until that reconcile settles it.
@@ -2061,13 +2080,13 @@ fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
     ));
     assert!(
         service
-            .place_order(request("while-uncertain"))
+            .place_order_caller_priced(request("while-uncertain"))
             .expect_err("uncertain")
             .contains("being reconciled")
     );
     crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
     service
-        .place_order(request("settled"))
+        .place_order_caller_priced(request("settled"))
         .expect("settled again");
 }
 
@@ -2110,7 +2129,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
     assert_eq!(service.status().expect("status").venue_error, None);
     assert!(latest_notice(&service).contains("cannot be accounted"));
     let blocked = service
-        .place_order(request("while-unresolved"))
+        .place_order_caller_priced(request("while-unresolved"))
         .expect_err("blocked");
     assert!(blocked.contains("blocked"), "{blocked}");
     // Flatten stays available.
@@ -2139,7 +2158,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
     crate::tests::settle_reconcile(&restarted, generation, BROKER_ACCOUNT);
     assert!(
         restarted
-            .place_order(request("still-unresolved"))
+            .place_order_caller_priced(request("still-unresolved"))
             .expect_err("still blocked")
             .contains("blocked")
     );
@@ -2189,7 +2208,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
     crate::tests::bootstrap_live_feed(&feed, &instrument(), crate::tests::market_feed::route());
     crate::tests::push_live_quote(&feed, &instrument(), 1, 10_000, 10_025, 2);
     restarted
-        .place_order(limit_request("accounted", 9_000))
+        .place_order_caller_priced(limit_request("accounted", 9_000))
         .expect("new orders resume");
     restarted
         .shutdown_after_owner_exit_for_test()

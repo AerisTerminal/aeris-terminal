@@ -581,7 +581,7 @@ pub fn dispatch_simulated_order(
     cx.background_executor()
         .spawn(async move {
             let result = service
-                .place_order_from_market(command, true)
+                .place_order(command, true)
                 .map(|order| order_outcome(&order, OrderOutcome::Placed));
             feedback.finish_request(request_id, result);
         })
@@ -635,11 +635,11 @@ pub fn dispatch_simulated_selected_order(
         .spawn(async move {
             let result = if let Some(template_id) = selection.template_id {
                 service
-                    .place_bracket_from_market(PlaceBracket { entry, template_id })
+                    .place_bracket(PlaceBracket { entry, template_id })
                     .map(|placement| bracket_outcome(&placement))
             } else {
                 service
-                    .place_order_from_market(entry, true)
+                    .place_order(entry, true)
                     .map(|order| order_outcome(&order, OrderOutcome::Placed))
             };
             feedback.finish_request(request_id, result);
@@ -795,7 +795,7 @@ pub fn dispatch_simulated_order_at_price(
     cx.background_executor()
         .spawn(async move {
             let result = service
-                .place_order_from_market(command, false)
+                .place_order(command, false)
                 .map(|order| order_outcome(&order, OrderOutcome::Placed));
             feedback.finish_request(request_id, result);
         })
@@ -902,13 +902,14 @@ pub fn dispatch_ticket_order(
                 Some(bracket) => {
                     let template = bracket.template(&entry);
                     service
-                        .place_inline_bracket_from_market(
-                            aeris_trading_runtime::PlaceInlineBracket { entry, template },
-                        )
+                        .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket {
+                            entry,
+                            template,
+                        })
                         .map(|placement| bracket_outcome(&placement))
                 }
                 None => service
-                    .place_order_from_market(entry, at_touch)
+                    .place_order(entry, at_touch)
                     .map(|order| order_outcome(&order, OrderOutcome::Placed)),
             };
             feedback.finish_request(request_id, result);
@@ -1048,12 +1049,10 @@ pub fn modify_simulated_order_at_price(
     cx.background_executor()
         .spawn(async move {
             match ChartOrderResult::from_checked(
-                service.modify_order_from_market_checked(
-                    aeris_trading_runtime::RevisionedModifyOrder {
-                        order: command,
-                        expected_revision: Some(expected_revision),
-                    },
-                ),
+                service.modify_order_checked(aeris_trading_runtime::RevisionedModifyOrder {
+                    order: command,
+                    expected_revision: Some(expected_revision),
+                }),
                 OrderOutcome::Modified,
             ) {
                 ChartOrderResult::Accepted(message) => {

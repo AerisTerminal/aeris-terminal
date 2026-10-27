@@ -64,16 +64,6 @@ impl TradingCore {
         ))
     }
 
-    pub(super) fn modify_order_checked_internal(
-        &mut self,
-        command: RevisionedModifyOrder,
-    ) -> Result<Result<Order, Box<Order>>, String> {
-        match self.checked_order(&command.order.client_order_id, command.expected_revision)? {
-            Ok(()) => self.modify_order(command.order).map(Ok),
-            Err(current) => Ok(Err(current)),
-        }
-    }
-
     pub(super) fn modify_order_from_market_checked_internal(
         &mut self,
         mut command: RevisionedModifyOrder,

@@ -26,7 +26,7 @@ fn start_active_bracket(directory: &TestDirectory, entry_client: &str) -> Tradin
     entry.limit_price = Some(FixedPoint::try_new(10_000, 2).expect("entry limit"));
     entry.quantity = quantity(2);
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -299,7 +299,9 @@ fn start_migrated_protection(
     entry.order_type = OrderType::Limit;
     entry.limit_price = Some(FixedPoint::try_new(10_000, 2).expect("entry limit"));
     entry.quantity = quantity(2);
-    service.place_order(entry).expect("entry accepted");
+    service
+        .place_order_caller_priced(entry)
+        .expect("entry accepted");
     clock.advance(Duration::from_millis(2));
     service
         .observe_market(observation(9_975, 10_000, 2, clock.wall_unix_nanos()))
@@ -310,7 +312,7 @@ fn start_migrated_protection(
     protective.quantity = quantity(2);
     protective.stop_price = Some(FixedPoint::try_new(9_800, 2).expect("stop"));
     service
-        .place_protective_order(PlaceProtection {
+        .place_protective_order_caller_priced(PlaceProtection {
             order: protective,
             role: ProtectionRole::StopLoss,
         })

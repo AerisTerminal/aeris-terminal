@@ -395,7 +395,9 @@ fn working_set_fields_match_snapshot_projection() {
     resting.order_type = OrderType::Limit;
     resting.time_in_force = TimeInForce::GoodTillCancelled;
     resting.limit_price = Some(FixedPoint::try_new(9_800, 2).expect("limit"));
-    service.place_order(resting).expect("open order");
+    service
+        .place_order_caller_priced(resting)
+        .expect("open order");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     service
         .register_risk_profile(risk_profile_for(&account, clock.wall_unix_nanos()))
@@ -461,7 +463,7 @@ fn working_set_active_bracket_and_protection_match_snapshot() {
     entry.stop_price = Some(price(10_100));
     entry.quantity = quantity(2);
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -991,7 +993,7 @@ fn mark_publications_coalesce_and_carry_the_latest_unrealized() {
     bootstrap_live_feed(&feed, &instrument, market_feed::route());
     service.status().expect("feed drains");
     service
-        .place_order(market_order("mark-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("mark-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry");
     push_live_quote(&feed, &instrument, 2, 9_975, 10_000, 2);
     service.status().expect("entry fills");
@@ -1054,7 +1056,7 @@ fn mark_only_change_keeps_non_mark_fields() {
     bootstrap_live_feed(&feed, &instrument, market_feed::route());
     service.status().expect("feed drains");
     service
-        .place_order(market_order("mark-fields-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("mark-fields-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry");
     push_live_quote(&feed, &instrument, 2, 9_975, 10_000, 2);
     service.status().expect("entry fills");
@@ -1127,7 +1129,9 @@ fn every_revision_changing_step_is_published() {
     resting.order_type = OrderType::Limit;
     resting.time_in_force = TimeInForce::GoodTillCancelled;
     resting.limit_price = Some(FixedPoint::try_new(9_800, 2).expect("limit"));
-    service.place_order(resting).expect("resting order");
+    service
+        .place_order_caller_priced(resting)
+        .expect("resting order");
     // The command reply is sent inside handle, before the owner publishes at the end of
     // its turn. A subsequent status reply proves the placement turn finished publishing.
     service.status().expect("placement publication barrier");

@@ -982,36 +982,52 @@ impl TradingService {
         self.request(|reply| Command::SetTicketInterest(routes, reply))
     }
 
-    /// Submits one order through the authoritative trading command path.
-    ///
-    /// # Errors
-    /// Returns an error when validation, routing, capacity, or persistence fails.
-    pub fn place_order(&self, order: PlaceOrder) -> Result<Order, String> {
-        self.request(|reply| Command::Place(order, reply))
-    }
-
-    /// Submits a desktop instruction using only the owner's current validated market quote.
+    /// Submits an instruction using only the owner's current validated market quote.
     /// `at_touch` prices a limit or stop instruction at the current touch.
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or rejected order.
-    pub fn place_order_from_market(
+    pub fn place_order(&self, order: PlaceOrder, at_touch: bool) -> Result<Order, String> {
+        self.request(|reply| Command::Place(order, at_touch, reply))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn place_order_caller_priced(&self, order: PlaceOrder) -> Result<Order, String> {
+        self.request(|reply| Command::CallerPlace(order, reply))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn place_oco_caller_priced(&self, pair: PlaceOco) -> Result<[Order; 2], String> {
+        self.request(|reply| Command::CallerOco(pair, reply))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn place_inline_bracket_caller_priced(
         &self,
-        order: PlaceOrder,
-        at_touch: bool,
+        bracket: PlaceInlineBracket,
+    ) -> Result<PlacementOutcome, String> {
+        self.request(|reply| Command::CallerInlineBracket(bracket, reply))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn place_protective_order_caller_priced(
+        &self,
+        order: PlaceProtection,
     ) -> Result<Order, String> {
-        self.request(|reply| Command::PlaceFromMarket(order, at_touch, reply))
+        self.request(|reply| Command::CallerProtective(order, reply))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn modify_order_caller_priced(&self, order: ModifyOrder) -> Result<Order, String> {
+        self.request(|reply| Command::CallerModify(order, reply))
     }
 
     /// Submits a template entry using the owner's quote.
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or rejected bracket.
-    pub fn place_bracket_from_market(
-        &self,
-        bracket: PlaceBracket,
-    ) -> Result<PlacementOutcome, String> {
-        self.request(|reply| Command::PlaceBracketFromMarket(bracket, reply))
+    pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<PlacementOutcome, String> {
+        self.request(|reply| Command::PlaceBracket(bracket, reply))
     }
 
     /// Submits an inline bracket stamped with the owner's quote. The entry keeps its own order
@@ -1019,40 +1035,37 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or rejected bracket.
-    pub fn place_inline_bracket_from_market(
+    pub fn place_inline_bracket(
         &self,
         bracket: PlaceInlineBracket,
     ) -> Result<PlacementOutcome, String> {
-        self.request(|reply| Command::PlaceInlineBracketFromMarket(bracket, reply))
+        self.request(|reply| Command::PlaceInlineBracket(bracket, reply))
     }
     /// Places chart-authored bracket levels using verified instrument terms and the owner quote.
     ///
     /// # Errors
     /// Returns an error for unavailable terms or quote, off-grid levels, or rejected admission.
-    pub fn place_chart_bracket_from_market(
+    pub fn place_chart_bracket(
         &self,
         bracket: PlaceChartBracket,
     ) -> Result<PlacementOutcome, String> {
-        self.request(|reply| Command::PlaceChartBracketFromMarket(bracket, reply))
+        self.request(|reply| Command::PlaceChartBracket(bracket, reply))
     }
 
     /// Submits a protective order using the owner's quote.
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or invalid protection.
-    pub fn place_protective_order_from_market(
-        &self,
-        order: PlaceProtection,
-    ) -> Result<Order, String> {
-        self.request(|reply| Command::PlaceProtectiveFromMarket(order, reply))
+    pub fn place_protective_order(&self, order: PlaceProtection) -> Result<Order, String> {
+        self.request(|reply| Command::PlaceProtective(order, reply))
     }
 
     /// Modifies an order using the owner's quote provenance.
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or invalid modification.
-    pub fn modify_order_from_market(&self, order: ModifyOrder) -> Result<Order, String> {
-        self.request(|reply| Command::ModifyFromMarket(order, reply))
+    pub fn modify_order(&self, order: ModifyOrder) -> Result<Order, String> {
+        self.request(|reply| Command::Modify(order, reply))
     }
 
     /// Attaches a bounded demo-venue writer under the next session generation, which the
@@ -1076,41 +1089,14 @@ impl TradingService {
         Arc::clone(&self.runtime.venue_inbox)
     }
 
-    /// Submits one entry whose stop and scale-out targets activate after its fill.
-    ///
-    /// # Errors
-    /// Returns an error when the template, entry, allocation, risk, or persistence is invalid.
-    pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<PlacementOutcome, String> {
-        self.request(|reply| Command::PlaceBracket(bracket, reply))
-    }
-
     /// Submits an explicit one-cancels-the-other pair on the simulated venue, both members
     /// resting until one fills and cancels the other.
     ///
     /// # Errors
     /// Returns an error when the members differ in scope, admission rejects either member,
-    /// capacity is exhausted, or persistence fails.
+    /// capacity is exhausted, the owner's quote is unavailable, or persistence fails.
     pub fn place_oco(&self, pair: PlaceOco) -> Result<[Order; 2], String> {
         self.request(|reply| Command::PlaceOco(pair, reply))
-    }
-
-    /// Submits a chart-authored bracket with exact, inline tick offsets.
-    ///
-    /// # Errors
-    /// Returns an error when the entry, template, risk, or persistence is invalid.
-    pub fn place_inline_bracket(
-        &self,
-        bracket: PlaceInlineBracket,
-    ) -> Result<PlacementOutcome, String> {
-        self.request(|reply| Command::PlaceInlineBracket(bracket, reply))
-    }
-
-    /// Submits one reduce-only protective stop or target for an existing position.
-    ///
-    /// # Errors
-    /// Returns an error unless the order strictly reduces a canonical open position.
-    pub fn place_protective_order(&self, order: PlaceProtection) -> Result<Order, String> {
-        self.request(|reply| Command::PlaceProtective(order, reply))
     }
 
     /// Runs the same authoritative pre-trade checks used by order placement.
@@ -1122,15 +1108,7 @@ impl TradingService {
         self.request(|reply| Command::EvaluateRisk(order, reply))
     }
 
-    /// Modifies a working order through the same bounded owner queue.
-    ///
-    /// # Errors
-    /// Returns an error when the order is missing, not working, invalid, or the owner is busy.
-    pub fn modify_order(&self, order: ModifyOrder) -> Result<Order, String> {
-        self.request(|reply| Command::Modify(order, reply))
-    }
-
-    /// Checks the revision at the trading owner before modifying either venue.
+    /// Checks the revision before reading the owner's verified quote and modifying either venue.
     ///
     /// # Errors
     /// Returns the current order on stale revision; other command failures remain explicit.
@@ -1139,20 +1117,6 @@ impl TradingService {
         command: RevisionedModifyOrder,
     ) -> Result<Order, OrderCommandError> {
         self.request(|reply| Command::ModifyChecked(command, reply))
-            .map_err(OrderCommandError::Other)?
-            .map_err(|current| OrderCommandError::StaleRevision { current })
-    }
-
-    /// Fences a chart/ladder modify against the owner's current revision before reading its
-    /// verified market quote. A stale drag cannot reprice a replaced or filled order.
-    ///
-    /// # Errors
-    /// Returns the current order on stale revision; otherwise reports quote or command failure.
-    pub fn modify_order_from_market_checked(
-        &self,
-        command: RevisionedModifyOrder,
-    ) -> Result<Order, OrderCommandError> {
-        self.request(|reply| Command::ModifyFromMarketChecked(command, reply))
             .map_err(OrderCommandError::Other)?
             .map_err(|current| OrderCommandError::StaleRevision { current })
     }
@@ -1340,7 +1304,7 @@ impl TradingService {
     /// # Errors
     /// Returns an error when the observation is invalid or a fill cannot be persisted exactly.
     #[cfg(test)]
-    pub fn observe_market(
+    pub(crate) fn observe_market(
         &self,
         observation: SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
@@ -1749,20 +1713,14 @@ impl TradingCore {
             #[cfg(test)]
             Command::Observe(..) => self.dispatch_market_command(command),
             Command::Place(..)
-            | Command::PlaceFromMarket(..)
             | Command::PlaceOco(..)
             | Command::PlaceBracket(..)
-            | Command::PlaceBracketFromMarket(..)
             | Command::PlaceInlineBracket(..)
-            | Command::PlaceInlineBracketFromMarket(..)
-            | Command::PlaceChartBracketFromMarket(..)
+            | Command::PlaceChartBracket(..)
             | Command::PlaceProtective(..)
-            | Command::PlaceProtectiveFromMarket(..)
             | Command::EvaluateRisk(..)
             | Command::Modify(..)
             | Command::ModifyChecked(..)
-            | Command::ModifyFromMarket(..)
-            | Command::ModifyFromMarketChecked(..)
             | Command::MovePlannedLeg(..)
             | Command::Cancel(..)
             | Command::CancelChecked(..)
@@ -1770,6 +1728,12 @@ impl TradingCore {
             | Command::MoveBracketLevel(..) => {
                 self.dispatch_order_command(command);
             }
+            #[cfg(test)]
+            Command::CallerPlace(..)
+            | Command::CallerOco(..)
+            | Command::CallerInlineBracket(..)
+            | Command::CallerProtective(..)
+            | Command::CallerModify(..) => self.dispatch_order_command(command),
             Command::RegisterRiskProfile(profile, reply) => {
                 respond(&reply, self.register_risk_profile(profile));
             }
@@ -1963,17 +1927,38 @@ impl TradingCore {
 
     fn dispatch_order_command(&mut self, command: Command) {
         match command {
-            Command::Place(order, reply) => respond(&reply, self.place_order(&order)),
-            Command::PlaceFromMarket(order, at_touch, reply) => {
+            #[cfg(test)]
+            Command::CallerPlace(order, reply) => respond(&reply, self.place_order(&order)),
+            #[cfg(test)]
+            Command::CallerOco(pair, reply) => respond(&reply, self.place_owned_oco(&pair)),
+            #[cfg(test)]
+            Command::CallerInlineBracket(bracket, reply) => {
+                respond(
+                    &reply,
+                    self.place_bracket_with_template(&bracket.entry, &bracket.template),
+                );
+            }
+            #[cfg(test)]
+            Command::CallerProtective(order, reply) => {
+                respond(&reply, self.place_protective_order(order));
+            }
+            #[cfg(test)]
+            Command::CallerModify(order, reply) => respond(&reply, self.modify_order(order)),
+            Command::Place(order, at_touch, reply) => {
                 respond(
                     &reply,
                     self.market_order(order, at_touch)
                         .and_then(|order| self.place_order(&order)),
                 );
             }
-            Command::PlaceBracket(bracket, reply) => respond(&reply, self.place_bracket(&bracket)),
-            Command::PlaceOco(pair, reply) => respond(&reply, self.place_owned_oco(&pair)),
-            Command::PlaceBracketFromMarket(bracket, reply) => {
+            Command::PlaceOco(pair, reply) => {
+                let result = self.market_order(pair.first, false).and_then(|first| {
+                    self.market_order(pair.second, false)
+                        .and_then(|second| self.place_owned_oco(&PlaceOco { first, second }))
+                });
+                respond(&reply, result);
+            }
+            Command::PlaceBracket(bracket, reply) => {
                 respond(
                     &reply,
                     self.market_order(bracket.entry, true).and_then(|entry| {
@@ -1984,34 +1969,23 @@ impl TradingCore {
                     }),
                 );
             }
-            Command::PlaceInlineBracket(bracket, reply) => respond(
-                &reply,
-                self.place_bracket_with_template(&bracket.entry, &bracket.template),
-            ),
-            Command::PlaceInlineBracketFromMarket(bracket, reply) => {
+            Command::PlaceInlineBracket(bracket, reply) => {
                 respond(&reply, self.place_inline_bracket_from_market(bracket));
             }
-            Command::PlaceChartBracketFromMarket(bracket, reply) => {
+            Command::PlaceChartBracket(bracket, reply) => {
                 respond(&reply, self.place_chart_bracket(bracket));
             }
             Command::PlaceProtective(order, reply) => {
-                respond(&reply, self.place_protective_order(order));
-            }
-            Command::PlaceProtectiveFromMarket(order, reply) => {
                 respond(&reply, self.place_protective_from_market(order));
             }
             Command::EvaluateRisk(order, reply) => {
                 let attached_stop = order.stop_price.is_some();
                 respond(&reply, self.evaluate_order_risk(&order, attached_stop));
             }
-            Command::Modify(order, reply) => respond(&reply, self.modify_order(order)),
-            Command::ModifyChecked(command, reply) => {
-                respond(&reply, self.modify_order_checked_internal(command));
-            }
-            Command::ModifyFromMarket(order, reply) => {
+            Command::Modify(order, reply) => {
                 respond(&reply, self.modify_order_from_market(order));
             }
-            Command::ModifyFromMarketChecked(command, reply) => {
+            Command::ModifyChecked(command, reply) => {
                 respond(
                     &reply,
                     self.modify_order_from_market_checked_internal(command),

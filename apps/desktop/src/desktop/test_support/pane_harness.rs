@@ -333,7 +333,7 @@ fn place_scope_resting_order(
     command.client_order_id = aeris_trading::ClientOrderId::try_new(id).expect("client id");
     command.limit_price = Some(aeris_trading::FixedPoint::try_new(9_900, 2).expect("limit"));
     let order = owner
-        .place_order(command)
+        .place_order(command, false)
         .expect("open-session owner admission");
     assert_eq!(order.status, aeris_trading::OrderStatus::Working);
     order
@@ -345,7 +345,7 @@ fn assert_owner_rejects_unpriced_modify(
 ) {
     use aeris_trading_runtime::{ModifyOrder, OrderCommandError, RevisionedModifyOrder};
     let error = owner
-        .modify_order_from_market_checked(RevisionedModifyOrder {
+        .modify_order_checked(RevisionedModifyOrder {
             order: ModifyOrder {
                 client_order_id: order.client_order_id.clone(),
                 time_in_force: order.time_in_force,
@@ -484,7 +484,7 @@ fn place_owner_protective_target(
     )
     .expect("entry");
     entry.client_order_id = ClientOrderId::try_new("pane-protected-entry").expect("id");
-    let filled_entry = owner.place_order(entry).expect("owner entry fill");
+    let filled_entry = owner.place_order(entry, false).expect("owner entry fill");
     assert_eq!(filled_entry.status, OrderStatus::Filled);
     let mut target = aeris_desktop::trading::prepare_product_order(
         1_000_000_000_000,
@@ -499,7 +499,7 @@ fn place_owner_protective_target(
     target.client_order_id = ClientOrderId::try_new("pane-protective-target").expect("id");
     target.limit_price = Some(price(17_700));
     let protected = owner
-        .place_protective_order_from_market(PlaceProtection {
+        .place_protective_order(PlaceProtection {
             order: target,
             role: ProtectionRole::TakeProfit,
         })
@@ -570,7 +570,7 @@ fn fill_owner_protective_target(
             .any(|fill| fill.order_id == protected.id)
     );
     let stale = owner
-        .modify_order_from_market_checked(RevisionedModifyOrder {
+        .modify_order_checked(RevisionedModifyOrder {
             order: ModifyOrder {
                 client_order_id: protected.client_order_id.clone(),
                 time_in_force: protected.time_in_force,

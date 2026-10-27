@@ -43,6 +43,14 @@ fn oco_pair_rests_as_two_working_members_of_one_active_group() {
     );
     let [first, second] = service.place_oco(oco_pair()).expect("pair accepted");
     assert_eq!(
+        first.provenance, second.provenance,
+        "both members use the same owner quote"
+    );
+    assert_eq!(
+        first.provenance.source_sequence, 1,
+        "caller sequences are not trusted"
+    );
+    assert_eq!(
         (first.status, second.status),
         (OrderStatus::Working, OrderStatus::Working),
         "both members rest as working orders"
@@ -63,7 +71,9 @@ fn oco_pair_rests_as_two_working_members_of_one_active_group() {
     other_instrument.second.instrument_id =
         InstrumentId::try_new("instrument:fixture:crypto:BTC").expect("instrument");
     assert_eq!(
-        service.place_oco(other_instrument).expect_err("one scope"),
+        service
+            .place_oco_caller_priced(other_instrument)
+            .expect_err("one scope"),
         "OCO members share one account and instrument"
     );
     service

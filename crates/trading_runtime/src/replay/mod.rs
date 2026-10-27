@@ -276,14 +276,15 @@ impl ReplayHarness {
     }
 
     fn place_order(&mut self, order: PlaceOrder) -> Result<Order, String> {
-        self.command(|reply| Command::Place(order, reply))
+        self.ensure_route();
+        self.command(|reply| Command::CallerPlace(order, reply))
     }
 
     fn place_inline_bracket(
         &mut self,
         bracket: PlaceInlineBracket,
     ) -> Result<PlacementOutcome, String> {
-        self.command(|reply| Command::PlaceInlineBracket(bracket, reply))
+        self.command(|reply| Command::CallerInlineBracket(bracket, reply))
     }
 
     fn observe_market(
@@ -302,11 +303,11 @@ impl ReplayHarness {
     }
 
     fn modify_order(&mut self, order: ModifyOrder) -> Result<Order, String> {
-        self.command(|reply| Command::Modify(order, reply))
+        self.command(|reply| Command::CallerModify(order, reply))
     }
 
     fn place_oco(&mut self, pair: PlaceOco) -> Result<[Order; 2], String> {
-        self.command(|reply| Command::PlaceOco(pair, reply))
+        self.command(|reply| Command::CallerOco(pair, reply))
     }
     fn cancel_order(&mut self, id: ClientOrderId) -> Result<Order, String> {
         self.command(|reply| Command::Cancel(id, reply))

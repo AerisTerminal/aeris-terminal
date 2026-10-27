@@ -83,6 +83,10 @@ violations and missing verification explicitly, and never describe them as satis
 - The desktop never constructs `SimulatedMarketObservation` or relays order-book prices for execution.
   `trading_runtime` consumes the market feed through its bounded inbox and its owner `QuoteBook`;
   desktop trading actions identify instruments and explicit order instructions, never authoritative quotes.
+- Production `TradingService` has one owner-priced entry per placement and modification kind.
+  It stamps instructions from the current verified owner quote; no public caller-priced
+  duplicate or public direct market-observation command is allowed. In-crate legacy
+  characterization tests may use only a `#[cfg(test)]` crate-private caller-priced seam.
 - Simulated order admission and fills use the trading owner's verified session and current-generation Live quote.
   Crypto quotes may be at most 10 seconds old and other classes at most 60 seconds old by default;
   owner-local `eligible_after` fences resting orders after acceptance and across process restarts.

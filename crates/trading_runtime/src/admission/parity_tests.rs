@@ -102,7 +102,9 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
                 ..request.clone()
             };
             assert_eq!(
-                service.place_order(request).expect_err("refused"),
+                service
+                    .place_order_caller_priced(request)
+                    .expect_err("refused"),
                 reason.to_string(),
                 "{case} on {route}"
             );
@@ -123,7 +125,7 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
     too_long.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     assert_eq!(
         service
-            .place_order(too_long)
+            .place_order_caller_priced(too_long)
             .expect_err("broker id too long"),
         RejectReason::ClientIdTooLong.to_string()
     );
@@ -145,7 +147,7 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
         request.limit_price = Some(price(9_000));
         assert!(
             service
-                .place_order(request)
+                .place_order_caller_priced(request)
                 .expect_err("account locked")
                 .contains(&RejectReason::AccountLocked.to_string())
         );
@@ -185,7 +187,9 @@ fn broker_day_entry_keeps_day_in_the_venue_request() {
     entry.order_type = OrderType::Limit;
     entry.time_in_force = TimeInForce::Day;
     entry.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
-    let accepted = service.place_order(entry).expect("broker accepts DAY");
+    let accepted = service
+        .place_order_caller_priced(entry)
+        .expect("broker accepts DAY");
     assert_eq!(accepted.time_in_force, TimeInForce::Day);
     let VenueRequest::Place(sent) = outbound.try_recv().expect("place request") else {
         panic!("expected broker placement");

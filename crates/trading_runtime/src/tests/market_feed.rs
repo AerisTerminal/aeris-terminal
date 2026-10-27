@@ -166,7 +166,7 @@ fn day_acceptance_fixes_session_deadline_and_restores_it() {
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let day = service.place_order(request).expect("day accepted");
+    let day = service.place_order(request, false).expect("day accepted");
     assert_eq!(day.status, OrderStatus::Working);
     assert_eq!(day.expires_at_unix_nanos, Some(2_000_000_000_000));
     let mut gtc = market_order("gtc-session", OrderSide::Buy, 1, 1_000_000_000_000);
@@ -174,7 +174,10 @@ fn day_acceptance_fixes_session_deadline_and_restores_it() {
     gtc.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     gtc.time_in_force = TimeInForce::GoodTillCancelled;
     assert_eq!(
-        service.place_order(gtc).unwrap().expires_at_unix_nanos,
+        service
+            .place_order(gtc, false)
+            .unwrap()
+            .expires_at_unix_nanos,
         None
     );
     let before = service.snapshot().unwrap();
@@ -205,7 +208,7 @@ fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::GoodTillCancelled;
-    let placed = service.place_order(request).expect("gtc accepted");
+    let placed = service.place_order(request, false).expect("gtc accepted");
     assert_eq!(placed.expires_at_unix_nanos, None);
     let amend = |time_in_force, limit| ModifyOrder {
         client_order_id: placed.client_order_id.clone(),
@@ -216,7 +219,7 @@ fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
         provenance: provenance(2, 1_000_000_000_000),
     };
     let day = service
-        .modify_order(amend(TimeInForce::Day, 9_900))
+        .modify_order_caller_priced(amend(TimeInForce::Day, 9_900))
         .expect("to day");
     assert_eq!(day.time_in_force, TimeInForce::Day);
     assert_eq!(day.expires_at_unix_nanos, Some(2_000_000_000_000));
@@ -234,7 +237,7 @@ fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
     .expect("later session");
     service.status().expect("drain");
     let still_day = service
-        .modify_order(amend(TimeInForce::Day, 9_875))
+        .modify_order_caller_priced(amend(TimeInForce::Day, 9_875))
         .expect("day to day");
     assert_eq!(still_day.expires_at_unix_nanos, Some(2_000_000_000_000));
     service.shutdown_after_owner_exit_for_test().unwrap();
@@ -251,14 +254,14 @@ fn time_in_force_amendments_fix_clear_or_keep_the_day_session_deadline() {
         .expect("restored order");
     assert_eq!(restored, still_day);
     let gtc = restarted
-        .modify_order(amend(TimeInForce::GoodTillCancelled, 9_875))
+        .modify_order_caller_priced(amend(TimeInForce::GoodTillCancelled, 9_875))
         .expect("to gtc");
     assert_eq!(gtc.expires_at_unix_nanos, None);
     // Without the feed's verified session no DAY deadline exists, so the change is refused.
     let before = restarted.snapshot().unwrap();
     assert_eq!(
         restarted
-            .modify_order(amend(TimeInForce::Day, 9_875))
+            .modify_order_caller_priced(amend(TimeInForce::Day, 9_875))
             .expect_err("no session"),
         aeris_trading::RejectReason::SessionUnknown.to_string()
     );
@@ -285,7 +288,7 @@ fn day_order_expires_on_owner_boundary_before_late_quote() {
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let accepted = service.place_order(request).expect("day accepted");
+    let accepted = service.place_order(request, false).expect("day accepted");
     clock.set_wall_unix_nanos(1_999_999_000_000);
     assert_eq!(
         service
@@ -351,7 +354,7 @@ fn overdue_day_order_is_expired_before_first_command_after_restart() {
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let working = service.place_order(request).unwrap();
+    let working = service.place_order(request, false).unwrap();
     assert_eq!(working.status, OrderStatus::Working);
     service.shutdown_after_owner_exit_for_test().unwrap();
 
@@ -421,7 +424,7 @@ fn migrated_day_without_deadline_cannot_fill_before_calendar_recovery() {
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let working = service.place_order(request).unwrap();
+    let working = service.place_order(request, false).unwrap();
     service.shutdown_after_owner_exit_for_test().unwrap();
 
     let configuration = config(&directory);
@@ -499,7 +502,7 @@ fn migrated_always_open_day_recovers_acceptance_midnight_before_first_command() 
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let working = service.place_order(request).unwrap();
+    let working = service.place_order(request, false).unwrap();
     let acceptance_midnight = working.expires_at_unix_nanos.unwrap();
     service.shutdown_after_owner_exit_for_test().unwrap();
 
@@ -558,7 +561,7 @@ fn route_less_legacy_day_waits_for_verified_terms_before_expiring() {
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let placed = service.place_order(request).unwrap();
+    let placed = service.place_order(request, false).unwrap();
     let deadline = placed.expires_at_unix_nanos.unwrap();
     service.shutdown_after_owner_exit_for_test().unwrap();
 
@@ -634,9 +637,9 @@ fn failed_multi_day_backfill_rolls_back_every_deadline_and_retries_on_restart() 
     request.order_type = OrderType::Limit;
     request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     request.time_in_force = TimeInForce::Day;
-    let first = service.place_order(request.clone()).unwrap();
+    let first = service.place_order(request.clone(), false).unwrap();
     request.client_order_id = ClientOrderId::try_new("day-batch-two").unwrap();
-    let second = service.place_order(request).unwrap();
+    let second = service.place_order(request, false).unwrap();
     let deadline = first.expires_at_unix_nanos.unwrap();
     assert_eq!(second.expires_at_unix_nanos, Some(deadline));
     service.shutdown_after_owner_exit_for_test().unwrap();
@@ -731,11 +734,11 @@ fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
     day.order_type = OrderType::Limit;
     day.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     day.time_in_force = TimeInForce::Day;
-    let placed = service.place_order(day.clone()).unwrap();
+    let placed = service.place_order(day.clone(), false).unwrap();
     assert_eq!(placed.expires_at_unix_nanos, Some(CLOSE));
     day.client_order_id = ClientOrderId::try_new("weekly-gtc").unwrap();
     day.time_in_force = TimeInForce::GoodTillCancelled;
-    let gtc = service.place_order(day).unwrap();
+    let gtc = service.place_order(day, false).unwrap();
     service.shutdown_after_owner_exit_for_test().unwrap();
     let mut configuration = config(&directory);
     rusqlite::Connection::open(&configuration.database_path)
@@ -953,7 +956,7 @@ fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
         request.order_type = kind;
         request.time_in_force = tif;
         request.limit_price = limit.map(|units| FixedPoint::try_new(units, 2).expect("limit"));
-        let order = service.place_order(request).expect("placement");
+        let order = service.place_order(request, false).expect("placement");
         assert_eq!(order.status, OrderStatus::Filled);
         assert_eq!(order.revision, 2);
         let snapshot = service.snapshot().expect("snapshot");
@@ -1021,7 +1024,7 @@ fn nonmarketable_ioc_and_fok_cancel_in_the_acceptance_step() {
         request.order_type = OrderType::Limit;
         request.time_in_force = tif;
         request.limit_price = Some(FixedPoint::try_new(price, 2).expect("price"));
-        let accepted = service.place_order(request).expect("accepted");
+        let accepted = service.place_order(request, false).expect("accepted");
         assert_eq!(accepted.status, OrderStatus::Cancelled);
         let snapshot = service.snapshot().expect("snapshot");
         let mut events: Vec<_> = snapshot
@@ -1075,7 +1078,7 @@ fn market_without_quote_waits_five_seconds_then_cancels_or_fills() {
     service.status().expect("drain");
 
     let waiting = service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "market-timeout",
             OrderSide::Buy,
             1,
@@ -1109,7 +1112,7 @@ fn market_without_quote_waits_five_seconds_then_cancels_or_fills() {
     assert_eq!(expired.fills.len(), 0);
 
     let arriving = service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "market-arrives",
             OrderSide::Buy,
             1,
@@ -1202,7 +1205,7 @@ fn stops_trigger_at_exact_and_gapped_touches_on_the_correct_side() {
         let mut request = market_order(&format!("stop-gap-{index}"), side, 1, 1_000_000_000_000);
         request.order_type = OrderType::Stop;
         request.stop_price = Some(FixedPoint::try_new(stop, 2).unwrap());
-        let order = service.place_order(request).expect("working stop");
+        let order = service.place_order(request, false).expect("working stop");
         clock.advance(Duration::from_millis(2));
         feed.push(MarketFeedEvent::Quote(quote(1, 2, before_bid, before_ask)))
             .expect("near quote");
@@ -1306,7 +1309,7 @@ fn stop_limit_gap_through_triggers_then_rests_at_limit_across_restart() {
         request.order_type = OrderType::StopLimit;
         request.stop_price = Some(FixedPoint::try_new(stop, 2).unwrap());
         request.limit_price = Some(FixedPoint::try_new(limit, 2).unwrap());
-        let placed = service.place_order(request).expect("working");
+        let placed = service.place_order(request, false).expect("working");
         clock.advance(Duration::from_millis(2));
         feed.push(MarketFeedEvent::Quote(quote(1, 2, gap_bid, gap_ask)))
             .expect("gap");
@@ -1395,7 +1398,7 @@ fn stop_limit_trigger_and_fill_on_one_quote_uses_taker_touch() {
         request.order_type = OrderType::StopLimit;
         request.stop_price = Some(FixedPoint::try_new(stop, 2).unwrap());
         request.limit_price = Some(FixedPoint::try_new(limit, 2).unwrap());
-        let placed = service.place_order(request).expect("working");
+        let placed = service.place_order(request, false).expect("working");
         clock.advance(Duration::from_millis(2));
         feed.push(MarketFeedEvent::Quote(quote(1, 2, bid, ask)))
             .expect("triggering quote");
@@ -1450,7 +1453,7 @@ fn waiting_market_deadline_survives_restart_without_a_feed() {
         .expect("live");
     service.status().expect("drain");
     let waiting = service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "restart-wait",
             OrderSide::Buy,
             1,
@@ -1492,7 +1495,7 @@ fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
     let before = service.snapshot().expect("before");
     assert_eq!(
         service
-            .place_order(missing_quote)
+            .place_order(missing_quote, false)
             .expect_err("no owner quote"),
         aeris_trading::RejectReason::QuoteUnavailable.to_string()
     );
@@ -1523,7 +1526,7 @@ fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
         request.order_type = OrderType::RestingAt;
         request.time_in_force = TimeInForce::GoodTillCancelled;
         request.limit_price = Some(FixedPoint::try_new(units, 2).expect("price"));
-        let placed = service.place_order(request).expect("placed");
+        let placed = service.place_order(request, false).expect("placed");
         assert_eq!(placed.order_type, expected);
         assert_eq!(
             placed.limit_price,
@@ -1605,7 +1608,9 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
                     command.limit_price = Some(FixedPoint::try_new(10_050, 2).expect("limit"));
                 }
                 assert_eq!(
-                    service.place_order(command).expect_err("wrong-side stop"),
+                    service
+                        .place_order(command, false)
+                        .expect_err("wrong-side stop"),
                     aeris_trading::RejectReason::WrongSideTrigger.to_string(),
                     "{side:?}/{kind:?}/{route}"
                 );
@@ -1641,7 +1646,7 @@ fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
-    let accepted = service.place_order(request).expect("accepted");
+    let accepted = service.place_order(request, false).expect("accepted");
     let before = service.snapshot().expect("before");
     // A restart without a feed leaves the owner without any quote; the stale revision is
     // still rejected before the market is read.
@@ -1662,7 +1667,7 @@ fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
         },
         expected_revision: Some(accepted.revision + 1),
     };
-    let result = service.modify_order_from_market_checked(command.clone());
+    let result = service.modify_order_checked(command.clone());
     assert_eq!(
         result.expect_err("stale despite unavailable quote"),
         OrderCommandError::StaleRevision {
@@ -1682,7 +1687,7 @@ fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
         .expect("session");
     service.status().expect("drain feed");
     let updated = service
-        .modify_order_from_market_checked(RevisionedModifyOrder {
+        .modify_order_checked(RevisionedModifyOrder {
             expected_revision: Some(accepted.revision),
             ..command
         })
@@ -1736,7 +1741,7 @@ fn chart_bracket_uses_verified_grid_without_fixed_tick_and_rests() {
     entry.order_type = OrderType::Limit;
     entry.limit_price = Some(FixedPoint::try_new(9_999, 2).unwrap());
     let placed = service
-        .place_chart_bracket_from_market(PlaceChartBracket {
+        .place_chart_bracket(PlaceChartBracket {
             entry,
             stop_price: FixedPoint::try_new(9_996, 2).unwrap(),
             target_price: FixedPoint::try_new(10_003, 2).unwrap(),
@@ -1801,7 +1806,7 @@ fn all_practice_entry_shapes_obey_provider_neutral_session_phases() {
                 .then(|| FixedPoint::try_new(9_000, 2).unwrap());
             order.stop_price = matches!(order_type, OrderType::Stop | OrderType::StopLimit)
                 .then(|| FixedPoint::try_new(10_100, 2).unwrap());
-            let result = service.place_order(order);
+            let result = service.place_order(order, false);
             match phase {
                 SessionPhase::Unknown => assert_eq!(result.unwrap_err(), "market session unknown"),
                 SessionPhase::Closed | SessionPhase::PreOpen | SessionPhase::Break => {
@@ -1869,7 +1874,7 @@ fn provider_families_use_the_same_verified_session_gate() {
         let before = service.snapshot().unwrap();
         assert!(
             service
-                .place_order(market_order(provider, OrderSide::Buy, 2, 1_000))
+                .place_order(market_order(provider, OrderSide::Buy, 2, 1_000), false)
                 .unwrap_err()
                 .contains("market closed"),
             "{provider}"
@@ -1911,7 +1916,7 @@ fn unavailable_and_stale_feeds_reject_without_durable_orders() {
         }
         assert_eq!(
             service
-                .place_order(market_order(
+                .place_order_caller_priced(market_order(
                     &format!("unavailable-{index}"),
                     OrderSide::Buy,
                     2,
@@ -1952,13 +1957,13 @@ fn manual_clock_enforces_per_class_quote_age_on_order_admission() {
         let mut at_limit = market_order("at-limit", OrderSide::Buy, 2, 1_000);
         at_limit.order_type = OrderType::Limit;
         at_limit.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
-        service.place_order(at_limit).unwrap();
+        service.place_order(at_limit, false).unwrap();
         clock.advance(Duration::from_millis(1));
         let mut expired = market_order("past-limit", OrderSide::Buy, 3, 1_000);
         expired.order_type = OrderType::Limit;
         expired.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
         assert_eq!(
-            service.place_order(expired).unwrap_err(),
+            service.place_order(expired, false).unwrap_err(),
             format!(
                 "market quote stale ({} ms exceeds {limit_ms} ms)",
                 limit_ms + 1
@@ -1969,7 +1974,7 @@ fn manual_clock_enforces_per_class_quote_age_on_order_admission() {
         older.order_type = OrderType::Limit;
         older.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
         assert_eq!(
-            service.place_order(older).unwrap_err(),
+            service.place_order(older, false).unwrap_err(),
             format!(
                 "market quote stale ({} ms exceeds {limit_ms} ms)",
                 limit_ms + 1_000
@@ -1994,7 +1999,7 @@ fn closed_phase_updates_marks_but_holds_crossed_resting_order_until_live_open_qu
         .unwrap();
     service.status().unwrap();
     service
-        .place_order(market_order("open-long", OrderSide::Buy, 2, 1_000))
+        .place_order(market_order("open-long", OrderSide::Buy, 2, 1_000), false)
         .unwrap();
     feed.push(MarketFeedEvent::Quote(quote(1, 2, 9_975, 10_000)))
         .unwrap();
@@ -2003,7 +2008,7 @@ fn closed_phase_updates_marks_but_holds_crossed_resting_order_until_live_open_qu
     stop.order_type = OrderType::Stop;
     stop.time_in_force = TimeInForce::GoodTillCancelled;
     stop.stop_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
-    service.place_order(stop).unwrap();
+    service.place_order(stop, false).unwrap();
     let initial_mark = service.snapshot().unwrap().positions[0].unrealized_pnl;
     let MarketFeedEvent::Session(mut closed) = live_session(route().instrument_id, 1) else {
         unreachable!()
@@ -2074,7 +2079,10 @@ fn closed_session_rejects_practice_order_without_writing_a_row() {
     .unwrap();
     service.status().unwrap();
     let before = service.snapshot().unwrap();
-    let result = service.place_order(market_order("closed-market", OrderSide::Buy, 1, 1_000));
+    let result = service.place_order(
+        market_order("closed-market", OrderSide::Buy, 1, 1_000),
+        false,
+    );
     assert!(result.unwrap_err().contains("market closed"));
     let after = service.snapshot().unwrap();
     assert_eq!(after.revision, before.revision);
@@ -2473,7 +2481,7 @@ fn verified_terms_persist_routes_and_recovered_orders_republish_interest() {
     order.order_type = OrderType::Limit;
     order.time_in_force = TimeInForce::GoodTillCancelled;
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
-    service.place_order(order).unwrap();
+    service.place_order(order, false).unwrap();
     service.status().unwrap();
     assert_eq!(sink.0.lock().unwrap().last().unwrap().routes, vec![route()]);
     service
@@ -2496,7 +2504,7 @@ fn verified_terms_persist_routes_and_recovered_orders_republish_interest() {
     order.order_type = OrderType::Limit;
     order.time_in_force = TimeInForce::GoodTillCancelled;
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
-    service.place_order(order).unwrap();
+    service.place_order(order, false).unwrap();
     service.set_ticket_interest(Vec::new()).unwrap();
     service.shutdown_after_owner_exit_for_test().unwrap();
 
@@ -2556,7 +2564,7 @@ fn route_less_hyperliquid_order_publishes_unavailable_until_symbol_terms_resolve
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_900_000_000, 8).unwrap());
-    let order = service.place_order(request).expect("legacy resting order");
+    let order = service.place_order(request, false).unwrap();
     service.shutdown_after_owner_exit_for_test().unwrap();
     // Model the V20-migrated legacy store: the persisted verified route is absent, so the
     // resting order stays route-less until new Terms resolve it.
@@ -2706,7 +2714,7 @@ fn pane_free_quotes_fill_stops_update_marks_and_survive_restart() {
         .unwrap();
     service.status().unwrap();
     service
-        .place_order_from_market(
+        .place_order(
             market_order("position-open", OrderSide::Buy, 1, 1_000),
             false,
         )
@@ -2726,7 +2734,7 @@ fn pane_free_quotes_fill_stops_update_marks_and_survive_restart() {
     stop.order_type = OrderType::Stop;
     stop.time_in_force = TimeInForce::GoodTillCancelled;
     stop.stop_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
-    service.place_order_from_market(stop, false).unwrap();
+    service.place_order(stop, false).unwrap();
     feed.push(MarketFeedEvent::Quote(quote(1, 4, 9_950, 9_975)))
         .unwrap();
     service.status().unwrap();
@@ -2825,7 +2833,7 @@ fn quote_interest_tracks_orders_held_legs_positions_tickets_and_capacity() {
     limit.order_type = OrderType::Limit;
     limit.time_in_force = TimeInForce::GoodTillCancelled;
     limit.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
-    service.place_order(limit).unwrap();
+    service.place_order(limit, false).unwrap();
     published(vec![route()]);
     let sends = count();
     service.set_ticket_interest(vec![route()]).unwrap();
@@ -2850,7 +2858,7 @@ fn quote_interest_tracks_orders_held_legs_positions_tickets_and_capacity() {
     entry.order_type = OrderType::Limit;
     entry.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
     let bracket = service
-        .place_chart_bracket_from_market(PlaceChartBracket {
+        .place_chart_bracket(PlaceChartBracket {
             entry,
             stop_price: FixedPoint::try_new(9_800, 2).unwrap(),
             target_price: FixedPoint::try_new(10_000, 2).unwrap(),
@@ -2913,7 +2921,7 @@ fn assert_position_interest(
         .unwrap();
     published(vec![route()]);
     service
-        .place_order_from_market(
+        .place_order(
             market_order("interest-long", OrderSide::Buy, 3, 1_000),
             false,
         )
@@ -2926,7 +2934,7 @@ fn assert_position_interest(
     published(vec![route()]);
     assert_eq!(sends, count(), "a mark-only change does not resend demand");
     service
-        .place_order_from_market(
+        .place_order(
             market_order("interest-flat", OrderSide::Sell, 5, 1_000),
             false,
         )
@@ -2978,7 +2986,7 @@ fn an_inline_bracket_from_the_market_keeps_its_entry_type() {
         .unwrap();
     service.status().unwrap();
     let placed = service
-        .place_inline_bracket_from_market(PlaceInlineBracket {
+        .place_inline_bracket(PlaceInlineBracket {
             entry: market_order("inline-market", OrderSide::Buy, 9, 1_000),
             template: super::fixed_stop_bracket_template(),
         })
@@ -3005,7 +3013,7 @@ fn an_inline_bracket_from_the_market_keeps_its_entry_type() {
     stop.time_in_force = TimeInForce::GoodTillCancelled;
     stop.stop_price = Some(FixedPoint::try_new(10_100, 2).unwrap());
     let PlacementOutcome::Managed(bracket) = service
-        .place_inline_bracket_from_market(PlaceInlineBracket {
+        .place_inline_bracket(PlaceInlineBracket {
             entry: stop,
             template: super::fixed_stop_bracket_template(),
         })
@@ -3112,7 +3120,7 @@ fn assert_sink_interest_capacity() {
             let before = service.snapshot().unwrap();
             let previous_sends = sink.0.lock().unwrap().len();
             assert_eq!(
-                service.place_order(order).unwrap_err(),
+                service.place_order_caller_priced(order).unwrap_err(),
                 "CapacityExceeded: trading order capacity reached"
             );
             assert_eq!(
@@ -3122,7 +3130,7 @@ fn assert_sink_interest_capacity() {
             );
             assert_eq!(sink.0.lock().unwrap().len(), previous_sends);
         } else {
-            service.place_order(order).unwrap();
+            service.place_order(order, false).unwrap();
         }
         service.status().unwrap();
         let history = sink.0.lock().unwrap();

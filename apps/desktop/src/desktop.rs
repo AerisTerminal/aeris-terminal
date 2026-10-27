@@ -2692,7 +2692,7 @@ fn dispatch_chart_place_bracket(
                 return;
             };
             let task = cx.background_executor().spawn(async move {
-                let result = service.place_chart_bracket_from_market(command);
+                let result = service.place_chart_bracket(command);
                 feedback
                     .finish_pane_result(request_id, result.map(|_| "Bracket placed".to_string()))
             });
@@ -2801,21 +2801,19 @@ fn dispatch_chart_create_protection(
         chart.update(cx, |chart, _| chart.resolve_trading_intent(sequence, false));
         return;
     };
-    let task =
-        cx.background_executor().spawn(async move {
-            let result = service.place_protective_order_from_market(
-                aeris_trading_runtime::PlaceProtection { order, role },
-            );
-            feedback.finish_pane_result(
-                request_id,
-                result.map(|order| {
-                    aeris_desktop::trading::order_outcome(
-                        &order,
-                        aeris_desktop::trading::OrderOutcome::ProtectionPlaced,
-                    )
-                }),
-            )
-        });
+    let task = cx.background_executor().spawn(async move {
+        let result =
+            service.place_protective_order(aeris_trading_runtime::PlaceProtection { order, role });
+        feedback.finish_pane_result(
+            request_id,
+            result.map(|order| {
+                aeris_desktop::trading::order_outcome(
+                    &order,
+                    aeris_desktop::trading::OrderOutcome::ProtectionPlaced,
+                )
+            }),
+        )
+    });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
         chart.update(cx, |chart, _| {
@@ -2851,12 +2849,10 @@ fn dispatch_chart_modify(
     let lost_pane_feedback = feedback.clone();
     let task = cx.background_executor().spawn(async move {
         let result = aeris_desktop::trading::ChartOrderResult::from_checked(
-            service.modify_order_from_market_checked(
-                aeris_trading_runtime::RevisionedModifyOrder {
-                    order: command,
-                    expected_revision: Some(order_revision),
-                },
-            ),
+            service.modify_order_checked(aeris_trading_runtime::RevisionedModifyOrder {
+                order: command,
+                expected_revision: Some(order_revision),
+            }),
             aeris_desktop::trading::OrderOutcome::Modified,
         );
         finish_chart_order_result(&feedback, request_id, result)

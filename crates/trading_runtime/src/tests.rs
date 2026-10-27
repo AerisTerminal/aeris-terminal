@@ -126,7 +126,9 @@ fn simulated_currency_mismatch_is_typed_before_an_order_fact() {
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
     let before = service.snapshot().expect("before");
     assert_eq!(
-        service.place_order(request).expect_err("currency mismatch"),
+        service
+            .place_order_caller_priced(request)
+            .expect_err("currency mismatch"),
         aeris_trading::RejectReason::CurrencyMismatch.to_string()
     );
     assert_eq!(service.snapshot().expect("unchanged"), before);
@@ -170,11 +172,13 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_013, 2).expect("price"));
     let simulated = service
-        .place_order(request.clone())
+        .place_order_caller_priced(request.clone())
         .expect("unknown grid accepts");
     request.client_order_id = ClientOrderId::try_new("unknown-grid-broker").expect("id");
     request.account_id = broker_id;
-    let broker = service.place_order(request).expect("broker accepts");
+    let broker = service
+        .place_order_caller_priced(request)
+        .expect("broker accepts");
     let snapshot = service.snapshot().expect("snapshot");
     for placed in [simulated, broker] {
         let event = snapshot
@@ -235,7 +239,7 @@ fn owner_serializes_eight_submitters_and_recovers_exact_order_revisions() {
                     order.time_in_force = TimeInForce::GoodTillCancelled;
                     order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
                     loop {
-                        match service.place_order(order.clone()) {
+                        match service.place_order_caller_priced(order.clone()) {
                             Ok(accepted) => {
                                 assert_eq!(accepted.client_order_id, order.client_order_id);
                                 break;
@@ -345,7 +349,7 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     order.order_type = OrderType::Limit;
     order.time_in_force = TimeInForce::GoodTillCancelled;
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
-    let accepted = service.place_order(order).expect("accepted");
+    let accepted = service.place_order_caller_priced(order).expect("accepted");
     assert_eq!(accepted.accepted_unix_nanos, 1_000_000_000_000);
     assert_eq!(accepted.updated_unix_nanos, 1_000_000_000_000);
     assert_eq!(accepted.eligible_after_unix_nanos, 1_000_000_000_000);
@@ -375,7 +379,9 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     second.order_type = OrderType::Limit;
     second.time_in_force = TimeInForce::GoodTillCancelled;
     second.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
-    service.place_order(second).expect("second accepted");
+    service
+        .place_order_caller_priced(second)
+        .expect("second accepted");
     let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit-2").expect("id"))
         .expect("second cancel");
@@ -394,9 +400,11 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     third.order_type = OrderType::Limit;
     third.time_in_force = TimeInForce::GoodTillCancelled;
     third.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
-    let accepted = service.place_order(third).expect("third accepted");
+    let accepted = service
+        .place_order_caller_priced(third)
+        .expect("third accepted");
     let modified = service
-        .modify_order(ModifyOrder {
+        .modify_order_caller_priced(ModifyOrder {
             client_order_id: accepted.client_order_id.clone(),
             time_in_force: TimeInForce::GoodTillCancelled,
             limit_price: Some(FixedPoint::try_new(8_975, 2).expect("new limit")),
@@ -442,7 +450,9 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
-    let accepted = service.place_order(request).expect("accepted");
+    let accepted = service
+        .place_order_caller_priced(request)
+        .expect("accepted");
     let modify = ModifyOrder {
         client_order_id: accepted.client_order_id.clone(),
         time_in_force: TimeInForce::GoodTillCancelled,
@@ -526,7 +536,9 @@ fn off_grid_or_unsupported_amendments_are_rejected_without_committing_facts() {
     request.order_type = OrderType::Limit;
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
-    let accepted = service.place_order(request).expect("accepted");
+    let accepted = service
+        .place_order_caller_priced(request)
+        .expect("accepted");
     let before = service.snapshot().expect("before");
     // 90.13 is not a multiple of the fixture's 0.25 tick.
     let off_grid = ModifyOrder {
@@ -538,7 +550,9 @@ fn off_grid_or_unsupported_amendments_are_rejected_without_committing_facts() {
         provenance: provenance(2, 2_000),
     };
     assert_eq!(
-        service.modify_order(off_grid).expect_err("off grid"),
+        service
+            .modify_order_caller_priced(off_grid)
+            .expect_err("off grid"),
         aeris_trading::RejectReason::OffGrid.to_string()
     );
     assert_eq!(service.snapshot().expect("unchanged"), before);
@@ -547,11 +561,13 @@ fn off_grid_or_unsupported_amendments_are_rejected_without_committing_facts() {
     stop.order_type = OrderType::Stop;
     stop.time_in_force = TimeInForce::GoodTillCancelled;
     stop.stop_price = Some(FixedPoint::try_new(10_100, 2).expect("stop"));
-    let stop = service.place_order(stop).expect("stop accepted");
+    let stop = service
+        .place_order_caller_priced(stop)
+        .expect("stop accepted");
     let before = service.snapshot().expect("before tif change");
     assert_eq!(
         service
-            .modify_order(ModifyOrder {
+            .modify_order_caller_priced(ModifyOrder {
                 client_order_id: stop.client_order_id.clone(),
                 time_in_force: TimeInForce::ImmediateOrCancel,
                 limit_price: None,
@@ -577,7 +593,7 @@ fn stale_revision_after_fill_returns_the_terminal_order_without_a_new_fact() {
         .register_instrument(instrument())
         .expect("instrument");
     let accepted = service
-        .place_order(market_order("filled-stale", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("filled-stale", OrderSide::Buy, 1, 1_000))
         .expect("accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
@@ -646,13 +662,15 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
     request.time_in_force = TimeInForce::GoodTillCancelled;
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
     let original = service
-        .place_order(request.clone())
+        .place_order_caller_priced(request.clone())
         .expect("first acceptance");
     assert_eq!(original.revision, 1);
     assert!(original.accepted_unix_nanos > 0);
     let baseline = service.snapshot().expect("initial facts");
     assert_eq!(
-        service.place_order(request.clone()).expect("retry"),
+        service
+            .place_order_caller_priced(request.clone())
+            .expect("retry"),
         original
     );
     assert_eq!(service.snapshot().expect("idempotent facts"), baseline);
@@ -662,7 +680,9 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
         .expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     assert_eq!(
-        restarted.place_order(request.clone()).expect("retry"),
+        restarted
+            .place_order_caller_priced(request.clone())
+            .expect("retry"),
         original
     );
     assert_eq!(restarted.snapshot().expect("restored facts"), baseline);
@@ -686,7 +706,7 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
     ];
     for altered in different {
         let error = restarted
-            .place_order(altered)
+            .place_order_caller_priced(altered)
             .expect_err("conflicting client id");
         assert!(error.contains("ClientIdReused"), "{error}");
         assert_eq!(restarted.snapshot().expect("unchanged facts"), baseline);
@@ -696,7 +716,9 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
         .expect("cancel");
     assert_eq!(cancelled.status, OrderStatus::Cancelled);
     assert_eq!(
-        restarted.place_order(request).expect("terminal retry"),
+        restarted
+            .place_order_caller_priced(request)
+            .expect("terminal retry"),
         cancelled
     );
     restarted
@@ -805,7 +827,7 @@ fn significant_figure_market_quotes_do_not_require_a_fixed_tick() {
     );
     // A quote received exactly at the order's acceptance time is a mark, not a fill.
     service
-        .place_order(PlaceOrder {
+        .place_order_caller_priced(PlaceOrder {
             client_order_id: ClientOrderId::try_new("sigfig-market-buy").expect("client"),
             account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
             instrument_id: crypto.instrument_id.clone(),
@@ -1034,7 +1056,7 @@ fn winning_round_trips(
             let label = format!("{label_prefix}-{sequence}");
             deliver_quote_at(service, feed, &instrument(), *sequence, bid, ask, now);
             service
-                .place_order(market_order(&label, side, *sequence, now))
+                .place_order_caller_priced(market_order(&label, side, *sequence, now))
                 .expect("round-trip order accepted");
         }
     }
@@ -1246,12 +1268,16 @@ fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
     let mut order = market_order("fractional-contract", OrderSide::Buy, 1, 1_000);
     order.quantity = FixedPoint::try_new(50_000_000, 8).expect("half contract");
     assert_eq!(
-        service.place_order(order.clone()).unwrap_err(),
+        service
+            .place_order_caller_priced(order.clone())
+            .unwrap_err(),
         "order quantity must use whole provider units"
     );
     order.client_order_id = ClientOrderId::try_new("whole-contract").expect("client id");
     order.quantity = FixedPoint::try_new(100_000_000, 8).expect("one contract");
-    service.place_order(order).expect("whole contract accepted");
+    service
+        .place_order_caller_priced(order)
+        .expect("whole contract accepted");
     service
         .shutdown_after_owner_exit_for_test()
         .expect("service stops");
@@ -1259,7 +1285,7 @@ fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
     let mut fractional = market_order("fractional-after-restart", OrderSide::Buy, 2, 2_000);
     fractional.quantity = FixedPoint::try_new(50_000_000, 8).expect("half contract");
     assert_eq!(
-        reopened.place_order(fractional).unwrap_err(),
+        reopened.place_order_caller_priced(fractional).unwrap_err(),
         "order quantity must use whole provider units"
     );
 }
@@ -1273,7 +1299,7 @@ fn refreshed_contract_terms_keep_one_instrument_and_an_open_position() {
         .register_instrument(first.clone())
         .expect("initial registration");
     service
-        .place_order(market_order("before-refresh", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("before-refresh", OrderSide::Buy, 1, 1_000))
         .expect("entry accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &first, 2, 9_999, 10_000).len(),
@@ -1304,7 +1330,7 @@ fn practice_order_rejects_contract_with_another_currency() {
         .expect("source currency remains registered");
     assert_eq!(
         service
-            .place_order(market_order("eur-against-usd", OrderSide::Buy, 1, 1_000))
+            .place_order_caller_priced(market_order("eur-against-usd", OrderSide::Buy, 1, 1_000))
             .unwrap_err(),
         "Practice contract currency differs from the account currency"
     );
@@ -1342,7 +1368,7 @@ fn future_and_equity_practice_round_trips_use_their_point_values() {
     service.status().expect("AAPL feed drains");
 
     let es_buy = market_order("es-buy", OrderSide::Buy, 1, 1_000);
-    service.place_order(es_buy).expect("ES buy");
+    service.place_order_caller_priced(es_buy).expect("ES buy");
     assert_eq!(
         deliver_quote(&service, &feed, &future, 2, 9_999, 10_000).len(),
         1,
@@ -1351,14 +1377,16 @@ fn future_and_equity_practice_round_trips_use_their_point_values() {
     // The exit fills at placement against the owner's current quote.
     deliver_quote(&service, &feed, &future, 4, 10_400, 10_401);
     let es_exit = service
-        .place_order(market_order("es-sell", OrderSide::Sell, 3, 3_000))
+        .place_order_caller_priced(market_order("es-sell", OrderSide::Sell, 3, 3_000))
         .expect("ES sell");
     assert_eq!(es_exit.status, OrderStatus::Filled, "ES exit fill");
 
     let mut stock_buy = market_order("aapl-buy", OrderSide::Buy, 1, 1_000);
     stock_buy.instrument_id = equity.instrument_id.clone();
     stock_buy.quantity = FixedPoint::try_new(10, 0).expect("ten shares");
-    service.place_order(stock_buy).expect("AAPL buy");
+    service
+        .place_order_caller_priced(stock_buy)
+        .expect("AAPL buy");
     assert_eq!(
         deliver_quote(&service, &feed, &equity, 2, 33_099, 33_100).len(),
         1,
@@ -1368,7 +1396,9 @@ fn future_and_equity_practice_round_trips_use_their_point_values() {
     let mut stock_sell = market_order("aapl-sell", OrderSide::Sell, 3, 3_000);
     stock_sell.instrument_id = equity.instrument_id.clone();
     stock_sell.quantity = FixedPoint::try_new(10, 0).expect("ten shares");
-    let stock_exit = service.place_order(stock_sell).expect("AAPL sell");
+    let stock_exit = service
+        .place_order_caller_priced(stock_sell)
+        .expect("AAPL sell");
     assert_eq!(stock_exit.status, OrderStatus::Filled, "AAPL exit fill");
 
     let snapshot = service.snapshot().expect("round-trip snapshot");
@@ -1459,7 +1489,9 @@ fn high_precision_crypto_pnl_updates_live_and_closes_without_overflow() {
             observed_unix_nanos: 1_000,
         },
     };
-    service.place_order(order.clone()).expect("entry accepted");
+    service
+        .place_order_caller_priced(order.clone())
+        .expect("entry accepted");
 
     push_live_quote(
         &feed,
@@ -1540,7 +1572,9 @@ fn scale_in_realized_pnl_uses_the_exact_cost_basis_across_a_restart() {
         .expect("instrument registers");
 
     let first = market_order("basis-first", OrderSide::Buy, 1, 1_000);
-    service.place_order(first).expect("first order accepted");
+    service
+        .place_order_caller_priced(first)
+        .expect("first order accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 1, 10_000, 10_001).len(),
         1,
@@ -1551,7 +1585,9 @@ fn scale_in_realized_pnl_uses_the_exact_cost_basis_across_a_restart() {
     deliver_quote(&service, &feed, &instrument(), 2, 10_001, 10_002);
     let mut second = market_order("basis-second", OrderSide::Buy, 2, 2_000);
     second.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-    service.place_order(second).expect("second order accepted");
+    service
+        .place_order_caller_priced(second)
+        .expect("second order accepted");
     let before = service.snapshot().expect("snapshot");
     let open = before
         .positions
@@ -1571,7 +1607,9 @@ fn scale_in_realized_pnl_uses_the_exact_cost_basis_across_a_restart() {
         reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     let mut exit = market_order("basis-exit", OrderSide::Sell, 3, 3_000);
     exit.quantity = FixedPoint::try_new(3, 0).expect("quantity");
-    service.place_order(exit).expect("exit accepted");
+    service
+        .place_order_caller_priced(exit)
+        .expect("exit accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 3, 10_003, 10_004).len(),
         1,
@@ -1615,7 +1653,7 @@ fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
 
     // Taker: the market order fills the touch at 100.01; 2 bps of 5_000.50 rounds to 1.00.
     service
-        .place_order(market_order("fee-taker", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("fee-taker", OrderSide::Buy, 1, 1_000))
         .expect("taker accepted");
     let taker_fills = deliver_quote(&service, &feed, &instrument(), 1, 10_000, 10_001);
     assert_eq!(taker_fills.len(), 1);
@@ -1625,7 +1663,9 @@ fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
     let mut resting = market_order("fee-maker", OrderSide::Buy, 2, 2_000);
     resting.order_type = OrderType::Limit;
     resting.limit_price = Some(FixedPoint::try_new(9_975, 2).expect("limit"));
-    service.place_order(resting).expect("resting accepted");
+    service
+        .place_order_caller_priced(resting)
+        .expect("resting accepted");
     let maker_fills = deliver_quote(&service, &feed, &instrument(), 3, 9_950, 9_975);
     assert_eq!(maker_fills.len(), 1);
 
@@ -1767,7 +1807,7 @@ fn retention_writes_checkpoints_and_recovers_the_exact_projection() {
             // touch.
             deliver_quote_at(&service, &feed, &instrument(), sequence, bid, ask, now);
             service
-                .place_order(market_order(&label, side, sequence, now))
+                .place_order_caller_priced(market_order(&label, side, sequence, now))
                 .expect("round-trip order accepted");
         }
     }
@@ -1787,7 +1827,9 @@ fn retention_writes_checkpoints_and_recovers_the_exact_projection() {
         10_001,
         now,
     );
-    service.place_order(open_buy).expect("open buy accepted");
+    service
+        .place_order_caller_priced(open_buy)
+        .expect("open buy accepted");
 
     let before = service.snapshot().expect("pre-retention snapshot");
     // Owner memory mirrors the retention window; the durable store holds all 13 fills.
@@ -1904,7 +1946,7 @@ fn retention_never_prunes_fills_pinned_by_a_live_group() {
     resume_live_without_quote(&feed, &instrument());
     service.status().expect("owner drains the provider resume");
     let awaiting = service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: bracket_template(),
         })
@@ -2002,7 +2044,7 @@ fn retention_keeps_fills_and_events_referenced_by_an_open_order() {
         .register_instrument(instrument())
         .expect("instrument");
     let order = service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "partially-filled-pin",
             OrderSide::Buy,
             1,
@@ -2018,7 +2060,7 @@ fn retention_keeps_fills_and_events_referenced_by_an_open_order() {
     // its touch.
     deliver_quote(&service, &feed, &instrument(), 4, 10_010, 10_025);
     service
-        .place_order(market_order("later-fill", OrderSide::Sell, 3, 3_000))
+        .place_order_caller_priced(market_order("later-fill", OrderSide::Sell, 3, 3_000))
         .expect("later order");
     let path = config(&directory).database_path;
     let connection = rusqlite::Connection::open(&path).expect("fixture database");
@@ -2101,7 +2143,7 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
     clock.advance(Duration::from_secs(1));
     let accepted_at = clock.wall_unix_nanos();
     service
-        .place_order(market_order("eq-fill", OrderSide::Buy, 1, accepted_at))
+        .place_order_caller_priced(market_order("eq-fill", OrderSide::Buy, 1, accepted_at))
         .expect("order accepted");
     // A quote is eligible only after the order's acceptance time.
     clock.advance(Duration::from_millis(1));
@@ -2217,7 +2259,7 @@ fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
         .set_fee_schedule(account.clone(), schedule.clone())
         .expect("schedule");
     service
-        .place_order(market_order("fee-override", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("fee-override", OrderSide::Buy, 1, 1_000))
         .expect("accepted");
     assert_eq!(
         deliver_quote(&service, &inbox, &instrument(), 1, 10_000, 10_001).len(),
@@ -2243,7 +2285,7 @@ fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
     assert_eq!(recovered.fee_schedules, before.fee_schedules);
     assert_eq!(recovered.ledger_entries, before.ledger_entries);
     service
-        .place_order(market_order("fee-override-exit", OrderSide::Sell, 2, 2_000))
+        .place_order_caller_priced(market_order("fee-override-exit", OrderSide::Sell, 2, 2_000))
         .expect("exit accepted");
     assert_eq!(
         deliver_quote(&service, &inbox, &instrument(), 2, 10_000, 10_001).len(),
@@ -2424,7 +2466,9 @@ fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger
 
     let mut first = market_order("repair-first", OrderSide::Buy, 1, 1_000);
     first.quantity = FixedPoint::try_new(3, 0).expect("quantity");
-    service.place_order(first).expect("first order accepted");
+    service
+        .place_order_caller_priced(first)
+        .expect("first order accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
         1,
@@ -2436,7 +2480,9 @@ fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger
     deliver_quote(&service, &feed, &instrument(), 4, 10_000, 10_001);
     let mut second = market_order("repair-second", OrderSide::Buy, 3, 3_000);
     second.quantity = FixedPoint::try_new(4, 0).expect("quantity");
-    service.place_order(second).expect("second order accepted");
+    service
+        .place_order_caller_priced(second)
+        .expect("second order accepted");
 
     let before = service.snapshot().expect("snapshot");
     let before_position = before
@@ -2483,7 +2529,7 @@ fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger
     let mut third = market_order("repair-third", OrderSide::Buy, 5, 5_000);
     third.quantity = FixedPoint::try_new(1, 0).expect("quantity");
     reopened
-        .place_order(third)
+        .place_order_caller_priced(third)
         .expect("new order accepted after repair");
     let fills = deliver_quote(&reopened, &reopened_feed, &instrument(), 6, 10_024, 10_025);
     assert_eq!(fills.len(), 1);
@@ -2510,7 +2556,7 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
         .register_instrument(instrument())
         .expect("instrument registers");
     service
-        .place_order(market_order("legacy-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("legacy-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
@@ -2542,7 +2588,7 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
     let (reopened, feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     reopened
-        .place_order(market_order("must-not-fill", OrderSide::Buy, 3, 3_000))
+        .place_order_caller_priced(market_order("must-not-fill", OrderSide::Buy, 3, 3_000))
         .expect("order itself is accepted");
     assert_eq!(
         deliver_quote(&reopened, &feed, &instrument(), 4, 10_024, 10_025),
@@ -2613,13 +2659,13 @@ fn confirmed_practice_account_delete_purges_open_state_and_is_durable() {
     working.order_type = OrderType::Limit;
     working.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
     service
-        .place_order(working)
+        .place_order_caller_priced(working)
         .expect("working order accepted");
     let mut market = market_order("delete-position", OrderSide::Buy, 1, 1_100);
     market.account_id = created.id.clone();
     assert_eq!(
         service
-            .place_order(market)
+            .place_order_caller_priced(market)
             .expect("market order accepted")
             .status,
         OrderStatus::Filled,
@@ -2723,7 +2769,7 @@ fn cancelling_a_held_leg_cancels_the_pending_entry_too() {
         .expect("instrument registers");
     let entry = market_order("held-leg-entry", OrderSide::Buy, 1, 1_000);
     let awaiting = service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: bracket_template(),
         })
@@ -2774,7 +2820,7 @@ fn cancelling_pending_bracket_entry_cascades_to_every_held_leg() {
     let mut entry = market_order("cancel-pending-entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = quantity(2);
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: bracket_template(),
         })
@@ -2828,7 +2874,7 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     let mut entry = market_order("bracket-entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     let awaiting = service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: bracket_template(),
         })
@@ -2938,7 +2984,7 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
     entry.order_type = OrderType::Stop;
     entry.stop_price = Some(FixedPoint::try_new(10_100, 2).expect("entry"));
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -3001,7 +3047,9 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
         order.order_type = OrderType::Limit;
         order.time_in_force = TimeInForce::GoodTillCancelled;
         order.limit_price = Some(price(limit));
-        service.place_order(order).expect("limit accepted")
+        service
+            .place_order_caller_priced(order)
+            .expect("limit accepted")
     };
     let buy = place_limit("resting-buy", OrderSide::Buy, 9_900);
     assert_eq!(
@@ -3063,7 +3111,7 @@ fn crossed_limits_execute_by_price_then_acceptance_sequence() {
         request.order_type = OrderType::Limit;
         request.time_in_force = TimeInForce::GoodTillCancelled;
         request.limit_price = Some(price(limit));
-        placed.push(service.place_order(request).expect("limit"));
+        placed.push(service.place_order_caller_priced(request).expect("limit"));
     }
     let fills = deliver_quote(&service, &feed, &instrument(), 2, 9_775, 9_800);
     assert_eq!(
@@ -3104,7 +3152,7 @@ fn crossed_stops_precede_limits_in_trigger_price_order() {
             OrderType::Stop => request.stop_price = Some(price(level)),
             _ => unreachable!("fixture"),
         }
-        placed.push(service.place_order(request).expect("order"));
+        placed.push(service.place_order_caller_priced(request).expect("order"));
     }
     let fills = deliver_quote(&service, &feed, &instrument(), 2, 10_275, 10_300);
     assert_eq!(
@@ -3147,7 +3195,7 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
         let mut buy = market_order("multiplier-buy", OrderSide::Buy, 1, 1_000);
         buy.instrument_id = terms.instrument_id.clone();
         buy.quantity = contracts(2);
-        service.place_order(buy).expect("buy");
+        service.place_order_caller_priced(buy).expect("buy");
         assert_eq!(
             deliver_quote(&service, &feed, &terms, 2, 499_975, 500_000).len(),
             1,
@@ -3166,7 +3214,10 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
         sell.instrument_id = terms.instrument_id;
         sell.quantity = contracts(2);
         assert_eq!(
-            service.place_order(sell).expect("sell").status,
+            service
+                .place_order_caller_priced(sell)
+                .expect("sell")
+                .status,
             OrderStatus::Filled,
             "exit fill"
         );
@@ -3195,7 +3246,7 @@ fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved()
     entry.stop_price = Some(price(10_100));
     entry.quantity = quantity(2);
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -3220,7 +3271,7 @@ fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved()
     );
 
     service
-        .modify_order(ModifyOrder {
+        .modify_order_caller_priced(ModifyOrder {
             client_order_id: ClientOrderId::try_new("planned-entry").expect("client id"),
             time_in_force: TimeInForce::GoodTillCancelled,
             limit_price: None,
@@ -3400,7 +3451,7 @@ fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
     let mut entry = market_order("wide-entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = quantity(2);
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -3530,7 +3581,7 @@ fn last_target_fill_cancels_the_resized_stop_with_typed_cascade() {
     let mut entry = market_order("last-target-entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = quantity(2);
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -3730,7 +3781,7 @@ fn bracket_off_grid_child_refuses_entry_without_writing_facts() {
     let before = service.snapshot().expect("before");
     assert_eq!(
         service
-            .place_inline_bracket(PlaceInlineBracket { entry, template })
+            .place_inline_bracket_caller_priced(PlaceInlineBracket { entry, template })
             .expect_err("off-grid stop and target refuse the whole group"),
         aeris_trading::RejectReason::OffGrid.to_string()
     );
@@ -3747,7 +3798,7 @@ fn bracket_off_grid_child_refuses_entry_without_writing_facts() {
 
 fn place_managed_bracket(service: &TradingService, entry: PlaceOrder) {
     let placement = service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: fixed_stop_bracket_template(),
         })
@@ -3768,7 +3819,7 @@ fn bracket_entry_that_reverses_a_position_protects_only_the_reversed_exposure() 
         .register_instrument(instrument())
         .expect("instrument registers");
     service
-        .place_order(market_order("existing-long", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("existing-long", OrderSide::Buy, 1, 1_000))
         .expect("long accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
@@ -3839,7 +3890,9 @@ fn bracket_entry_that_only_reduces_a_position_completes_without_children() {
         .expect("instrument registers");
     let mut long = market_order("existing-long", OrderSide::Buy, 1, 1_000);
     long.quantity = quantity(2);
-    service.place_order(long).expect("long accepted");
+    service
+        .place_order_caller_priced(long)
+        .expect("long accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
         1,
@@ -3906,7 +3959,9 @@ fn bracket_that_cannot_be_armed_is_rejected_once_and_other_orders_still_fill() {
     stop.order_type = OrderType::Stop;
     stop.time_in_force = TimeInForce::GoodTillCancelled;
     stop.stop_price = Some(FixedPoint::try_new(50, 2).expect("on-grid stop"));
-    service.place_order(stop).expect("manual stop accepted");
+    service
+        .place_order_caller_priced(stop)
+        .expect("manual stop accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 4, 30, 55).len(),
         1,
@@ -3977,7 +4032,9 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
         .expect("instrument registers");
     let mut entry = market_order("protected-entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-    service.place_order(entry).expect("entry accepted");
+    service
+        .place_order_caller_priced(entry)
+        .expect("entry accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
         1,
@@ -3996,13 +4053,13 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     protective.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     protective.stop_price = Some(FixedPoint::try_new(9_800, 2).expect("stop"));
     service
-        .place_protective_order(PlaceProtection {
+        .place_protective_order_caller_priced(PlaceProtection {
             order: protective,
             role: ProtectionRole::StopLoss,
         })
         .expect("reduce-only protection remains available");
     let locked = service
-        .place_order(market_order("locked-entry", OrderSide::Buy, 4, 4_000))
+        .place_order_caller_priced(market_order("locked-entry", OrderSide::Buy, 4, 4_000))
         .expect_err("risk-increasing order remains locked");
     assert!(locked.contains("AccountLocked"), "{locked}");
     assert!(locked.contains("manual test lock"), "{locked}");
@@ -4012,7 +4069,7 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     oversized.stop_price = Some(FixedPoint::try_new(9_700, 2).expect("stop"));
     assert!(
         service
-            .place_protective_order(PlaceProtection {
+            .place_protective_order_caller_priced(PlaceProtection {
                 order: oversized,
                 role: ProtectionRole::StopLoss,
             })
@@ -4053,7 +4110,9 @@ fn position_protection_reports_the_stop_and_target_that_trigger_first() {
         .expect("instrument registers");
     let mut entry = market_order("protected-long", OrderSide::Buy, 1, 1_000);
     entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-    service.place_order(entry).expect("entry accepted");
+    service
+        .place_order_caller_priced(entry)
+        .expect("entry accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
         1,
@@ -4074,7 +4133,7 @@ fn position_protection_reports_the_stop_and_target_that_trigger_first() {
             }
         }
         service
-            .place_protective_order(PlaceProtection { order, role })
+            .place_protective_order_caller_priced(PlaceProtection { order, role })
             .expect("protection accepted");
     };
     protect("stop", 3, ProtectionRole::StopLoss, 9_800);
@@ -4112,7 +4171,9 @@ fn protected_long(
         .expect("instrument registers");
     let mut entry = market_order("entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
-    service.place_order(entry).expect("entry accepted");
+    service
+        .place_order_caller_priced(entry)
+        .expect("entry accepted");
     assert_eq!(
         deliver_quote(service, feed, &instrument(), 2, 9_975, 10_000).len(),
         1,
@@ -4133,7 +4194,7 @@ fn protected_long(
             order.limit_price = price;
         }
         service
-            .place_protective_order(PlaceProtection { order, role })
+            .place_protective_order_caller_priced(PlaceProtection { order, role })
             .expect("protection accepted");
     }
 }
@@ -4169,7 +4230,9 @@ fn market(
     let mut order = market_order(client_id, side, step, time);
     order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
     let before = service.snapshot().expect("snapshot before placement").fills;
-    service.place_order(order).expect("order accepted");
+    service
+        .place_order_caller_priced(order)
+        .expect("order accepted");
     // With a retained quote the market order fills at its placement; after a restart the
     // owner book is empty, so the delivered quote fills the resting order instead. Either
     // way exactly one new fill commits across the placement and the quote.
@@ -4295,7 +4358,7 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
         })
         .expect("profile registers");
     service
-        .place_order(market_order("drawdown-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("drawdown-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 9_975, 10_000).len(),
@@ -4378,7 +4441,9 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
         // on the system clock expires DAY orders before the event comparison below. The
         // scenario counts resting orders, so they rest without a session deadline.
         order.time_in_force = TimeInForce::GoodTillCancelled;
-        service.place_order(order).expect("working order accepted");
+        service
+            .place_order_caller_priced(order)
+            .expect("working order accepted");
     }
     assert!(
         service
@@ -4405,7 +4470,7 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
     third.time_in_force = TimeInForce::GoodTillCancelled;
     assert!(
         service
-            .place_order(third)
+            .place_order_caller_priced(third)
             .expect_err("third working order exceeds the limit")
             .contains("maximum-contract")
     );
@@ -4457,7 +4522,7 @@ fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
     blocked_entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     assert!(
         service
-            .place_inline_bracket(PlaceInlineBracket {
+            .place_inline_bracket_caller_priced(PlaceInlineBracket {
                 entry: blocked_entry,
                 template: bracket_template(),
             })
@@ -4470,7 +4535,7 @@ fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
     let mut accepted_entry = market_order("accepted-bracket", OrderSide::Buy, 2, 2_000);
     accepted_entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry: accepted_entry,
             template: bracket_template(),
         })
@@ -4525,7 +4590,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
         // that quote's touch.
         deliver_quote(&service, &feed, &instrument(), sequence + 1, 9_975, 10_000);
         service
-            .place_order(market_order(
+            .place_order_caller_priced(market_order(
                 entry_id,
                 OrderSide::Buy,
                 sequence,
@@ -4534,7 +4599,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
             .expect("entry accepted");
         deliver_quote(&service, &feed, &instrument(), sequence + 3, 10_100, 10_125);
         service
-            .place_order(market_order(
+            .place_order_caller_priced(market_order(
                 exit_id,
                 OrderSide::Sell,
                 sequence + 2,
@@ -4614,7 +4679,7 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
         .expect("draft plan registers");
     assert!(
         service
-            .place_order(market_order("plan-not-ready", OrderSide::Buy, 1, 1_000))
+            .place_order_caller_priced(market_order("plan-not-ready", OrderSide::Buy, 1, 1_000))
             .expect_err("incomplete checklist blocks entry")
             .contains("checklist")
     );
@@ -4623,12 +4688,12 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
         .expect("ready plan revision registers");
     assert!(
         service
-            .place_order(market_order("outside-hours", OrderSide::Buy, 2, 11_000))
+            .place_order_caller_priced(market_order("outside-hours", OrderSide::Buy, 2, 11_000))
             .expect_err("outside-hours trade is blocked")
             .contains("outside the session plan")
     );
     service
-        .place_order(market_order("planned-entry", OrderSide::Buy, 3, 1_000))
+        .place_order_caller_priced(market_order("planned-entry", OrderSide::Buy, 3, 1_000))
         .expect("planned entry accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 4, 9_975, 10_000).len(),
@@ -4639,7 +4704,7 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
     // executes at its touch and the plan lock evaluates.
     deliver_quote(&service, &feed, &instrument(), 6, 9_900, 9_925);
     service
-        .place_order(market_order("planned-loss", OrderSide::Sell, 5, 3_000))
+        .place_order_caller_priced(market_order("planned-loss", OrderSide::Sell, 5, 3_000))
         .expect("planned exit accepted");
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.session_plans, vec![plan(2, true)]);
@@ -4687,7 +4752,7 @@ fn losing_trades_never_cap_size_or_lock_the_account() {
         // at that quote's touch.
         deliver_quote(service, feed, &instrument(), sequence + 1, 9_975, 10_000);
         service
-            .place_order(market_order(
+            .place_order_caller_priced(market_order(
                 &format!("{prefix}-entry"),
                 OrderSide::Buy,
                 sequence,
@@ -4696,7 +4761,7 @@ fn losing_trades_never_cap_size_or_lock_the_account() {
             .expect("entry accepted");
         deliver_quote(service, feed, &instrument(), sequence + 3, 9_900, 9_925);
         service
-            .place_order(market_order(
+            .place_order_caller_priced(market_order(
                 &format!("{prefix}-exit"),
                 OrderSide::Sell,
                 sequence + 2,
@@ -4709,7 +4774,7 @@ fn losing_trades_never_cap_size_or_lock_the_account() {
     let mut larger = market_order("larger-after-losses", OrderSide::Buy, 10, 10);
     larger.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     service
-        .place_order(larger)
+        .place_order_caller_priced(larger)
         .expect("a larger entry after two quick losses is accepted");
     assert_eq!(service.snapshot().expect("snapshot").risk_locks, Vec::new());
     service
@@ -4739,7 +4804,7 @@ fn filled_stop_produces_a_fast_reentry_warning() {
         enabled: true,
     };
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry: market_order("stopped-entry", OrderSide::Buy, 1, 1_000_000_000),
             template,
         })
@@ -4804,7 +4869,7 @@ fn management_moves_the_stop_only_at_one_tick_or_more() {
     };
     let entry_client = ClientOrderId::try_new("managed-entry").expect("client id");
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry: market_order("managed-entry", OrderSide::Buy, 1, 1_000_000_000),
             template,
         })
@@ -4931,11 +4996,11 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .register_instrument(instrument())
         .expect("instrument registers");
     let first = service
-        .place_order(market_order("client-open", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("client-open", OrderSide::Buy, 1, 1_000))
         .expect("buy accepted");
     assert_eq!(first.status, OrderStatus::Working);
     let duplicate = service
-        .place_order(market_order("client-open", OrderSide::Buy, 2, 1_001))
+        .place_order_caller_priced(market_order("client-open", OrderSide::Buy, 2, 1_001))
         .expect("duplicate is idempotent");
     assert_eq!(duplicate.id, first.id);
     let fills = deliver_quote(&service, &feed, &instrument(), 3, 9_975, 10_000);
@@ -4959,7 +5024,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     let (service, feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
     service
-        .place_order(market_order("client-close", OrderSide::Sell, 4, 3_000))
+        .place_order_caller_priced(market_order("client-close", OrderSide::Sell, 4, 3_000))
         .expect("sell accepted");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 5, 10_100, 10_125).len(),
@@ -5050,7 +5115,9 @@ fn execute_market_order(
     // The quote is delivered before the placement, so the market order fills at its touch
     // whether the owner book retained the previous quote or was waiting for one.
     deliver_quote(service, feed, &instrument(), sequence + 1, bid, ask);
-    let placed = service.place_order(order).expect("order accepted");
+    let placed = service
+        .place_order_caller_priced(order)
+        .expect("order accepted");
     assert_eq!(placed.status, OrderStatus::Filled, "the market order fills");
 }
 
@@ -5530,10 +5597,10 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
     );
 
     let working = service
-        .place_order(market_order("risk-open", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("risk-open", OrderSide::Buy, 1, 1_000))
         .expect("first order accepted");
     let modified = service
-        .modify_order(ModifyOrder {
+        .modify_order_caller_priced(ModifyOrder {
             client_order_id: working.client_order_id.clone(),
             time_in_force: TimeInForce::GoodTillCancelled,
             limit_price: None,
@@ -5564,7 +5631,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
         )
         .expect("lock stores");
     let locked = service
-        .place_order(market_order("risk-locked", OrderSide::Buy, 2, 2_001))
+        .place_order_caller_priced(market_order("risk-locked", OrderSide::Buy, 2, 2_001))
         .expect_err("locked account rejects order");
     assert!(locked.contains("risk-locked"));
     service
@@ -5618,7 +5685,7 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
         .expect("restricted profile stores");
     assert!(
         service
-            .place_order(market_order("news-window", OrderSide::Buy, 1, 4_000))
+            .place_order_caller_priced(market_order("news-window", OrderSide::Buy, 1, 4_000))
             .expect_err("news-time restriction blocks and locks")
             .contains("news/session restriction")
     );
@@ -5651,7 +5718,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
     bootstrap_live_feed(&feed, &instrument(), market_feed::route());
     service.status().expect("feed drains");
     service
-        .place_order(market_order("flatten-open", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("flatten-open", OrderSide::Buy, 1, 1_000))
         .expect("buy accepted");
     push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
     service.status().expect("buy fills");
@@ -5803,12 +5870,12 @@ fn global_flatten_closes_every_registered_account() {
         })
         .expect("secondary account registers");
     service
-        .place_order(market_order("flatten-all-one", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("flatten-all-one", OrderSide::Buy, 1, 1_000))
         .expect("primary order accepted");
     let mut secondary_order = market_order("flatten-all-two", OrderSide::Buy, 2, 1_001);
     secondary_order.account_id = secondary;
     service
-        .place_order(secondary_order)
+        .place_order_caller_priced(secondary_order)
         .expect("secondary order accepted");
     push_live_quote(&feed, &instrument(), 3, 9_975, 10_000, 2);
     service.status().expect("orders fill");
@@ -5846,7 +5913,7 @@ fn reverse_closes_and_reopens_the_exact_opposite_position() {
     bootstrap_live_feed(&feed, &instrument(), market_feed::route());
     service.status().expect("feed drains");
     service
-        .place_order(market_order("reverse-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("reverse-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry accepts");
     push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
     service.status().expect("entry fills");
@@ -5894,11 +5961,13 @@ fn account_flatten_closes_two_positions_without_desktop_interest_in_second_instr
     bootstrap_live_feed(&feed, &eth, eth_route);
     service.status().expect("feed drains");
     service
-        .place_order(market_order("btc-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("btc-entry", OrderSide::Buy, 1, 1_000))
         .expect("btc buy");
     let mut eth_order = market_order("eth-entry", OrderSide::Buy, 2, 1_001);
     eth_order.instrument_id = eth.instrument_id.clone();
-    service.place_order(eth_order).expect("eth buy");
+    service
+        .place_order_caller_priced(eth_order)
+        .expect("eth buy");
     push_live_quote(&feed, &btc, 2, 9_975, 10_000, 2);
     push_live_quote(&feed, &eth, 2, 7_975, 8_000, 2);
     service.status().expect("both entries fill");
@@ -6006,17 +6075,17 @@ fn flatten_scope_isolates_one_account_instrument_pair() {
         .expect("secondary account registers");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     service
-        .place_order(market_order("scope-a-one", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("scope-a-one", OrderSide::Buy, 1, 1_000))
         .expect("first pair order");
     let mut other_instrument = market_order("scope-b-one", OrderSide::Buy, 2, 1_001);
     other_instrument.instrument_id = second.instrument_id.clone();
     service
-        .place_order(other_instrument)
+        .place_order_caller_priced(other_instrument)
         .expect("second instrument order");
     let mut other_account = market_order("scope-a-two", OrderSide::Buy, 3, 1_002);
     other_account.account_id = secondary.clone();
     service
-        .place_order(other_account)
+        .place_order_caller_priced(other_account)
         .expect("second account order");
     push_live_quote(&feed, &first, 4, 9_975, 10_000, 2);
     push_live_quote(&feed, &second, 1, 7_975, 8_000, 2);
@@ -6076,7 +6145,7 @@ fn flatten_keeps_and_reports_positions_without_a_verified_quote() {
     bootstrap_live_feed(&feed, &priced, market_feed::route());
     service.status().expect("feed drains");
     service
-        .place_order(market_order("priced-entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("priced-entry", OrderSide::Buy, 1, 1_000))
         .expect("priced order accepted");
     push_live_quote(&feed, &priced, 2, 9_975, 10_000, 2);
     service.status().expect("priced entry fills");
@@ -6086,7 +6155,7 @@ fn flatten_keeps_and_reports_positions_without_a_verified_quote() {
     bootstrap_live_feed(&feed, &unquoted, unquoted_route);
     service.status().expect("unquoted terms drain");
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry: {
                 let mut entry = market_order("unpriced-entry", OrderSide::Buy, 3, 1_002);
                 entry.instrument_id = unquoted.instrument_id.clone();
@@ -6223,7 +6292,7 @@ fn the_kill_switch_flattens_priced_instruments_and_keeps_stale_protection() {
         "the account is locked"
     );
     let refused = service
-        .place_order(market_order("after-kill", OrderSide::Buy, 1, 1_004))
+        .place_order_caller_priced(market_order("after-kill", OrderSide::Buy, 1, 1_004))
         .expect_err("a locked account accepts no new order");
     assert!(refused.contains("AccountLocked"), "{refused}");
     service
@@ -6318,7 +6387,7 @@ fn kill_switch_world(
             }
         };
     service
-        .place_inline_bracket(bracket(
+        .place_inline_bracket_caller_priced(bracket(
             "kill-long",
             OrderSide::Buy,
             2,
@@ -6327,7 +6396,7 @@ fn kill_switch_world(
         ))
         .expect("long bracket accepted");
     service
-        .place_inline_bracket(bracket(
+        .place_inline_bracket_caller_priced(bracket(
             "kill-short",
             OrderSide::Sell,
             1,
@@ -6336,7 +6405,7 @@ fn kill_switch_world(
         ))
         .expect("short bracket accepted");
     service
-        .place_inline_bracket(bracket(
+        .place_inline_bracket_caller_priced(bracket(
             "kill-stale",
             OrderSide::Buy,
             1,
@@ -6352,7 +6421,7 @@ fn kill_switch_world(
     push_live_quote(feed, &instruments[2], 1, 9_975, 10_000, 2);
     service.status().expect("resting quote");
     service
-        .place_order(resting)
+        .place_order_caller_priced(resting)
         .expect("resting limit accepted");
     push_live_quote(feed, &instruments[0], 1, 9_975, 10_000, 2);
     push_live_quote(feed, &instruments[1], 1, 7_975, 8_000, 2);
@@ -6405,7 +6474,9 @@ fn reverse_rejected_by_risk_leaves_the_position_untouched() {
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     let mut entry = market_order("reverse-risk-entry", OrderSide::Buy, 1, 1_000);
     entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-    service.place_order(entry).expect("entry accepted");
+    service
+        .place_order_caller_priced(entry)
+        .expect("entry accepted");
     push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
     service.status().expect("entry fills");
     service
@@ -6458,7 +6529,7 @@ fn reverse_on_a_locked_account_returns_account_locked_without_a_fill() {
     service.status().expect("feed drains");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "reverse-locked-entry",
             OrderSide::Buy,
             2,
@@ -6610,7 +6681,7 @@ fn daily_loss_locked_world(
     service.status().expect("feed drains");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "roll-entry",
             OrderSide::Buy,
             1,
@@ -6624,7 +6695,7 @@ fn daily_loss_locked_world(
     push_quote_at_clock(&feed, &instrument, &clock, 3, 9_900, 9_925);
     service.status().expect("exit quote");
     service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "roll-exit",
             OrderSide::Sell,
             1,
@@ -6646,7 +6717,7 @@ fn daily_loss_locked_world(
     push_quote_at_clock(&feed, &instrument, &clock, 4, 9_900, 9_925);
     service.status().expect("live check");
     let refused = service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "roll-blocked",
             OrderSide::Buy,
             1,
@@ -6735,7 +6806,9 @@ fn risk_sessions_roll_over_at_the_utc_midnight_boundary() {
     resting.order_type = OrderType::Limit;
     resting.time_in_force = TimeInForce::GoodTillCancelled;
     resting.limit_price = Some(FixedPoint::try_new(9_800, 2).expect("limit"));
-    let accepted = service.place_order(resting).expect("post-roll admission");
+    let accepted = service
+        .place_order_caller_priced(resting)
+        .expect("post-roll admission");
     service
         .cancel_order(accepted.client_order_id)
         .expect("resting order cancels");
@@ -6912,7 +6985,7 @@ fn a_bracket_entry_counts_its_template_stop_as_attached() {
         .register_risk_profile(profile)
         .expect("profile registers");
     service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "plain-entry",
             OrderSide::Buy,
             1,
@@ -6939,7 +7012,7 @@ fn a_bracket_entry_counts_its_template_stop_as_attached() {
         "the plain entry carries the warning"
     );
     service
-        .place_inline_bracket(PlaceInlineBracket {
+        .place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry: market_order(
                 "bracket-entry",
                 OrderSide::Buy,
@@ -7024,9 +7097,11 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
         .expect("copier registers");
 
     let source = market_order("copier-source", OrderSide::Buy, 1, 1_000);
-    service.place_order(source.clone()).expect("source accepts");
     service
-        .place_order(source)
+        .place_order_caller_priced(source.clone())
+        .expect("source accepts");
+    service
+        .place_order_caller_priced(source)
         .expect("source retry is idempotent");
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.orders.len(), 2);
@@ -7152,7 +7227,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
         let sequence = index * 3 + 1;
         let time = i64::try_from(sequence + 1).expect("time");
         service
-            .place_order(market_order(
+            .place_order_caller_priced(market_order(
                 &format!("measurement-{index}"),
                 OrderSide::Buy,
                 sequence,
@@ -7210,7 +7285,7 @@ fn cancelling_a_protective_stop_leaves_it_cancelled() {
         .register_instrument(instrument())
         .expect("instrument");
     service
-        .place_order(market_order("entry", OrderSide::Buy, 1, 1_000))
+        .place_order_caller_priced(market_order("entry", OrderSide::Buy, 1, 1_000))
         .expect("entry");
     assert_eq!(
         deliver_quote(&service, &feed, &instrument(), 2, 500_000, 500_025).len(),
@@ -7221,7 +7296,7 @@ fn cancelling_a_protective_stop_leaves_it_cancelled() {
     stop.order_type = OrderType::Stop;
     stop.stop_price = Some(FixedPoint::try_new(499_000, 2).expect("stop"));
     service
-        .place_protective_order(PlaceProtection {
+        .place_protective_order_caller_priced(PlaceProtection {
             order: stop,
             role: ProtectionRole::StopLoss,
         })

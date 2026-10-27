@@ -29,21 +29,25 @@ pub(crate) enum Command {
     CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
     DeletePracticeAccount(TradingAccountId, Reply<TradingAccount>),
     RegisterInstrument(TradingInstrument, Reply<()>),
-    Place(PlaceOrder, Reply<Order>),
-    PlaceFromMarket(PlaceOrder, bool, Reply<Order>),
+    Place(PlaceOrder, bool, Reply<Order>),
+    #[cfg(test)]
+    CallerPlace(PlaceOrder, Reply<Order>),
     PlaceBracket(PlaceBracket, Reply<PlacementOutcome>),
     PlaceOco(PlaceOco, Reply<[Order; 2]>),
-    PlaceBracketFromMarket(PlaceBracket, Reply<PlacementOutcome>),
+    #[cfg(test)]
+    CallerOco(PlaceOco, Reply<[Order; 2]>),
     PlaceInlineBracket(PlaceInlineBracket, Reply<PlacementOutcome>),
-    PlaceInlineBracketFromMarket(PlaceInlineBracket, Reply<PlacementOutcome>),
-    PlaceChartBracketFromMarket(PlaceChartBracket, Reply<PlacementOutcome>),
+    #[cfg(test)]
+    CallerInlineBracket(PlaceInlineBracket, Reply<PlacementOutcome>),
+    PlaceChartBracket(PlaceChartBracket, Reply<PlacementOutcome>),
     PlaceProtective(PlaceProtection, Reply<Order>),
-    PlaceProtectiveFromMarket(PlaceProtection, Reply<Order>),
+    #[cfg(test)]
+    CallerProtective(PlaceProtection, Reply<Order>),
     EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
     Modify(ModifyOrder, Reply<Order>),
+    #[cfg(test)]
+    CallerModify(ModifyOrder, Reply<Order>),
     ModifyChecked(RevisionedModifyOrder, Reply<Result<Order, Box<Order>>>),
-    ModifyFromMarket(ModifyOrder, Reply<Order>),
-    ModifyFromMarketChecked(RevisionedModifyOrder, Reply<Result<Order, Box<Order>>>),
     MovePlannedLeg(MovePlannedLeg, Reply<PlannedLeg>),
     Cancel(ClientOrderId, Reply<Order>),
     CancelChecked(RevisionedCancelOrder, Reply<Result<Order, Box<Order>>>),

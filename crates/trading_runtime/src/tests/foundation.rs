@@ -32,7 +32,7 @@ fn account_routes_and_broker_identity_survive_restart() {
     let mut request = market_order("demo-route", OrderSide::Buy, 1, 1_000);
     request.account_id = snapshot.accounts[1].id.clone();
     assert_eq!(
-        service.place_order(request).unwrap_err(),
+        service.place_order_caller_priced(request).unwrap_err(),
         "broker demo venue is not connected"
     );
     service
@@ -81,7 +81,7 @@ fn broker_account_of_a_retired_venue_loads_but_never_routes() {
     let mut request = market_order("retired-order", OrderSide::Buy, 1, 1_000);
     request.account_id = retired.id.clone();
     assert_eq!(
-        service.place_order(request).unwrap_err(),
+        service.place_order_caller_priced(request).unwrap_err(),
         "trading account venue is not supported"
     );
     let (_generation, requests) = service
@@ -135,14 +135,17 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
     let mut request = market_order(&"x".repeat(limit + 1), OrderSide::Buy, 1, 1_000);
     request.account_id = broker.id.clone();
     assert_eq!(
-        service.place_order(request).unwrap_err(),
+        service.place_order_caller_priced(request).unwrap_err(),
         aeris_trading::RejectReason::ClientIdTooLong.to_string()
     );
     assert_eq!(service.snapshot().expect("snapshot").orders.len(), 0);
     let mut valid = market_order(&"x".repeat(limit), OrderSide::Buy, 2, 2_000);
     valid.account_id = broker.id;
     assert_eq!(
-        service.place_order(valid).expect("at the limit").status,
+        service
+            .place_order_caller_priced(valid)
+            .expect("at the limit")
+            .status,
         OrderStatus::Pending
     );
     service
@@ -167,7 +170,9 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     service.status().expect("owner drains verified terms");
     let mut request = market_order("live-order", OrderSide::Buy, 1, 1_000);
     let simulated = request.account_id.clone();
-    service.place_order(request.clone()).expect("sim order");
+    service
+        .place_order_caller_priced(request.clone())
+        .expect("sim order");
     let mut broker = broker_account(AccountEnvironment::Live);
     broker.id = simulated;
     service
@@ -175,10 +180,13 @@ fn live_account_rejects_every_trading_command_without_mutation() {
         .expect("replace account");
     request.account_id = broker.id.clone();
     let expected = "broker live accounts are data-only; trading is disabled";
-    assert_eq!(service.place_order(request).unwrap_err(), expected);
+    assert_eq!(
+        service.place_order_caller_priced(request).unwrap_err(),
+        expected
+    );
     assert_eq!(
         service
-            .modify_order(ModifyOrder {
+            .modify_order_caller_priced(ModifyOrder {
                 client_order_id: ClientOrderId::try_new("live-order").expect("id"),
                 time_in_force: TimeInForce::Day,
                 limit_price: None,
@@ -271,7 +279,7 @@ fn owner_replaces_desktop_venue_identity_on_simulated_place_and_modify() {
     request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
     request.provenance.venue_id = "spoofed-venue".into();
     let placed = service
-        .place_order(request)
+        .place_order_caller_priced(request)
         .expect("placed on simulated route");
     assert_eq!(placed.provenance.venue_id, "aeris-sim");
     let mut modified = ModifyOrder {
@@ -285,7 +293,7 @@ fn owner_replaces_desktop_venue_identity_on_simulated_place_and_modify() {
     modified.provenance.venue_id = "spoofed-venue".into();
     assert_eq!(
         service
-            .modify_order(modified)
+            .modify_order_caller_priced(modified)
             .expect("modified")
             .provenance
             .venue_id,
@@ -354,7 +362,7 @@ fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
         );
         entry.account_id = broker.id.clone();
         entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-        let placed = service.place_inline_bracket(PlaceInlineBracket {
+        let placed = service.place_inline_bracket_caller_priced(PlaceInlineBracket {
             entry,
             template: template.clone(),
         });
@@ -380,7 +388,7 @@ fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
         );
         simulated.quantity = FixedPoint::try_new(2, 0).expect("quantity");
         service
-            .place_inline_bracket(PlaceInlineBracket {
+            .place_inline_bracket_caller_priced(PlaceInlineBracket {
                 entry: simulated,
                 template,
             })
@@ -458,7 +466,7 @@ fn copier_rejects_broker_source_and_target_before_persisting() {
         .register_account(reclassified)
         .expect("target reclassified");
     let error = service
-        .place_order(market_order(
+        .place_order_caller_priced(market_order(
             "copier-reclassified",
             OrderSide::Buy,
             1,

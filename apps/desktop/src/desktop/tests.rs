@@ -5788,11 +5788,11 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
     let fixture = ChartOrderFixture::start("open-orders");
     fixture
         .service
-        .place_order(fixture.limit("working"))
+        .place_order(fixture.limit("working"), false)
         .expect("working order");
     fixture
         .service
-        .place_order(fixture.limit("cancelled"))
+        .place_order(fixture.limit("cancelled"), false)
         .expect("second order");
     fixture
         .service
@@ -5868,7 +5868,7 @@ fn trading_projection_baseline_chart_account_and_risk_lock() {
     let fixture = ChartOrderFixture::start("projection-baseline");
     fixture
         .service
-        .place_order(fixture.limit("resting-entry"))
+        .place_order(fixture.limit("resting-entry"), false)
         .expect("resting order");
     fixture
         .service

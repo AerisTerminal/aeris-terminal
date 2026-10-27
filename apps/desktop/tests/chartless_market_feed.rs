@@ -128,12 +128,10 @@ fn start_fixture() -> (
 
 fn await_entry(trading: &TradingService, market: &MarketService, deadline: std::time::Instant) {
     loop {
-        match trading.place_order(order(
-            "chartless-buy",
-            OrderSide::Buy,
-            OrderType::Market,
-            None,
-        )) {
+        match trading.place_order(
+            order("chartless-buy", OrderSide::Buy, OrderType::Market, None),
+            false,
+        ) {
             Ok(_) => break,
             Err(error) => {
                 assert!(
@@ -226,12 +224,15 @@ fn chartless_scripted_provider_marks_and_executes_stop_through_both_attachments(
         assert_eq!(provider.subscriptions().unwrap(), (1, 0));
     }
     let stop = trading
-        .place_order(order(
-            "chartless-stop",
-            OrderSide::Sell,
-            OrderType::Stop,
-            Some(10_050),
-        ))
+        .place_order(
+            order(
+                "chartless-stop",
+                OrderSide::Sell,
+                OrderType::Stop,
+                Some(10_050),
+            ),
+            false,
+        )
         .unwrap();
     assert_eq!(stop.status, OrderStatus::Working);
     clock.advance(Duration::from_millis(1));

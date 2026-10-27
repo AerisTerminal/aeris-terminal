@@ -143,7 +143,7 @@ fn retryable_admission(error: &str) -> bool {
 fn place_order(trading: &TradingService, order: &PlaceOrder) -> ProbeResult<Order> {
     let deadline = Instant::now() + QUOTE_WAIT;
     loop {
-        match trading.place_order(order.clone()) {
+        match trading.place_order(order.clone(), false) {
             Ok(placed) => return Ok(placed),
             Err(error) if retryable_admission(&error) && Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(200));
@@ -566,7 +566,7 @@ fn no_quote_rejection(
         generation,
     )?;
     order.limit_price = Some(fixed((100_000_000, 8))?);
-    let rejection = trading.place_order(order);
+    let rejection = trading.place_order(order, false);
     let snapshot = market(trading.snapshot())?;
     evidence.check(
         "no_quote_rejected",
@@ -870,17 +870,20 @@ impl Probe<'_> {
         }
         let stale_since = self.recorder.latest_quote(SOL_ID);
         let generation = stale_since.map_or(1, |quote| quote.provider_generation);
-        let rejection = self.trading.place_order(PlaceOrder {
-            order_type: OrderType::Market,
-            time_in_force: TimeInForce::Day,
-            ..base_order(
-                "m512-stale-sol",
-                &self.account.id,
-                &self.sol,
-                fixed(SOL_QUANTITY)?,
-                generation,
-            )?
-        });
+        let rejection = self.trading.place_order(
+            PlaceOrder {
+                order_type: OrderType::Market,
+                time_in_force: TimeInForce::Day,
+                ..base_order(
+                    "m512-stale-sol",
+                    &self.account.id,
+                    &self.sol,
+                    fixed(SOL_QUANTITY)?,
+                    generation,
+                )?
+            },
+            false,
+        );
         let result = match rejection {
             Err(error) => {
                 // A reconnect can retire the session before admission observes the

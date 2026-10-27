@@ -173,7 +173,7 @@ impl PropertyWorld {
                 let mut order = market_order(&label, side, sequence, now);
                 order.quantity = FixedPoint::try_new(1 + self.rng.below_i64(3), 0)
                     .map_err(|error| error.to_string())?;
-                let _ = self.service.place_order(order);
+                let _ = self.service.place_order_caller_priced(order);
             }
             2 => {
                 let mut order = market_order(&label, side, sequence, now);
@@ -188,14 +188,16 @@ impl PropertyWorld {
                 } else {
                     TimeInForce::GoodTillCancelled
                 };
-                let _ = self.service.place_order(order);
+                let _ = self.service.place_order_caller_priced(order);
             }
             _ => {
                 let entry = market_order(&label, side, sequence, now);
-                let _ = self.service.place_inline_bracket(PlaceInlineBracket {
-                    entry,
-                    template: bracket_template(),
-                });
+                let _ = self
+                    .service
+                    .place_inline_bracket_caller_priced(PlaceInlineBracket {
+                        entry,
+                        template: bracket_template(),
+                    });
             }
         }
         Ok(())
@@ -248,7 +250,7 @@ impl PropertyWorld {
         let new_limit = self.last_bid + offset * 25;
         if self
             .service
-            .modify_order(ModifyOrder {
+            .modify_order_caller_priced(ModifyOrder {
                 client_order_id: order.client_order_id.clone(),
                 time_in_force: order.time_in_force,
                 limit_price: Some(FixedPoint::try_new(new_limit, 2).expect("limit price")),
@@ -287,7 +289,7 @@ impl PropertyWorld {
         order.quantity =
             FixedPoint::try_new(i64::try_from(net.unsigned_abs() / 2).expect("half"), 0)
                 .expect("half");
-        let _ = self.service.place_order(order);
+        let _ = self.service.place_order_caller_priced(order);
     }
 
     fn scale_in(&mut self) {
@@ -301,7 +303,7 @@ impl PropertyWorld {
         } else {
             OrderSide::Sell
         };
-        let _ = self.service.place_order(market_order(
+        let _ = self.service.place_order_caller_priced(market_order(
             &format!("scale-{}-{sequence}", self.step),
             side,
             sequence,
