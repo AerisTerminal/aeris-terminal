@@ -127,7 +127,6 @@ pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> Chart
     match kind {
         chart_chrome::IndicatorKind::Sma => ChartIndicator::Sma,
         chart_chrome::IndicatorKind::Ema => ChartIndicator::Ema,
-        chart_chrome::IndicatorKind::EmaRibbon => ChartIndicator::EmaRibbon,
         chart_chrome::IndicatorKind::Wma => ChartIndicator::Wma,
         chart_chrome::IndicatorKind::BollingerBands => ChartIndicator::Bollinger,
         chart_chrome::IndicatorKind::Vwap => ChartIndicator::Vwap,

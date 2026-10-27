@@ -19,7 +19,6 @@ pub const HEADER_ICON_SIZE: f32 = HEADER_CONTROL_CONTENT_SIZE * 0.75;
 pub enum IndicatorKind {
     Sma,
     Ema,
-    EmaRibbon,
     Wma,
     BollingerBands,
     Vwap,
@@ -37,7 +36,6 @@ impl IndicatorKind {
         match self {
             Self::Sma => "sma",
             Self::Ema => "ema",
-            Self::EmaRibbon => "ema_ribbon",
             Self::Wma => "wma",
             Self::BollingerBands => "bollinger",
             Self::Vwap => "vwap",
@@ -117,7 +115,7 @@ impl IndicatorSpec {
     }
 }
 
-pub const INDICATOR_SPECS: [IndicatorSpec; 12] = [
+pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         kind: IndicatorKind::Sma,
         label: "Simple Moving Average",
@@ -130,13 +128,6 @@ pub const INDICATOR_SPECS: [IndicatorSpec; 12] = [
         label: "Exponential Moving Average",
         parameters: IndicatorParameters::Period { period: 20 },
         parameter_description: "Period 20",
-        location: IndicatorLocation::MainChartOverlay,
-    },
-    IndicatorSpec {
-        kind: IndicatorKind::EmaRibbon,
-        label: "EMA Ribbon",
-        parameters: IndicatorParameters::None,
-        parameter_description: "Periods 5 - 10 - 20 - 50 - 200",
         location: IndicatorLocation::MainChartOverlay,
     },
     IndicatorSpec {
@@ -1056,7 +1047,6 @@ mod tests {
             [
                 IndicatorKind::Sma,
                 IndicatorKind::Ema,
-                IndicatorKind::EmaRibbon,
                 IndicatorKind::Wma,
                 IndicatorKind::BollingerBands,
                 IndicatorKind::Vwap,
@@ -1077,7 +1067,6 @@ mod tests {
             [
                 IndicatorParameters::Period { period: 20 },
                 IndicatorParameters::Period { period: 20 },
-                IndicatorParameters::None,
                 IndicatorParameters::Period { period: 20 },
                 IndicatorParameters::BollingerBands {
                     period: 20,
@@ -1100,12 +1089,12 @@ mod tests {
             ]
         );
         assert!(
-            INDICATOR_SPECS[..7]
+            INDICATOR_SPECS[..6]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::MainChartOverlay)
         );
         assert!(
-            INDICATOR_SPECS[8..]
+            INDICATOR_SPECS[7..]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::OscillatorPane)
         );

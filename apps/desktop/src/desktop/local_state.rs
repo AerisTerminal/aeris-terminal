@@ -567,7 +567,8 @@ fn sanitize_studies(studies: Vec<WorkspaceChartStudyState>) -> Vec<WorkspaceChar
         if !valid_study_output_colors(&study) {
             study.output_colors.clear();
         }
-        if !valid_study_header(&study, last_local_id)
+        if aeris_study_sdk::is_retired_builtin_study(&study.identifier)
+            || !valid_study_header(&study, last_local_id)
             || !valid_study_settings(&study)
             || !valid_study_outputs(&study)
             || !valid_study_dependencies(&study, &prior_outputs)
@@ -1617,6 +1618,64 @@ mod tests {
 
         let parent = path.parent().expect("temporary workspace parent");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn saved_workspace_with_a_retired_builtin_study_reopens_with_its_other_studies() {
+        let path = temporary_workspace_path();
+        let mut workspace = default_workspace();
+        let chart = workspace.workspace_tabs[0].panes[0]
+            .chart
+            .get_or_insert_with(WorkspaceChartState::default);
+        let ribbon = WorkspaceChartStudyState {
+            line_width: 0,
+            output_colors: Vec::new(),
+            local_id: 1,
+            identifier: "builtin.ema_ribbon".to_string(),
+            implementation_revision: 1,
+            settings: [5, 10, 20, 50, 200]
+                .into_iter()
+                .enumerate()
+                .map(|(index, period)| WorkspaceStudySettingState {
+                    identifier: format!("period_{}", index + 1),
+                    value: Some(workspace_study_setting_state::Value::Integer(period)),
+                })
+                .collect(),
+            dependencies: vec![WorkspaceStudyDependencyState {
+                kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                ..WorkspaceStudyDependencyState::default()
+            }],
+            visible: true,
+            output_identifiers: (1..=5).map(|index| format!("ema_{index}")).collect(),
+        };
+        let sma = persisted_sma_study(2, 20, true);
+        let mut ribbon_dependent = persisted_sma_study(3, 5, true);
+        ribbon_dependent.dependencies = vec![WorkspaceStudyDependencyState {
+            kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
+            study_local_id: 1,
+            output_identifier: "ema_1".to_string(),
+            ..WorkspaceStudyDependencyState::default()
+        }];
+        chart.studies = vec![ribbon, sma.clone(), ribbon_dependent];
+        let pane_count = workspace.workspace_tabs[0].panes.len();
+        std::fs::create_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace directory");
+        std::fs::write(&path, workspace.encode_to_vec()).expect("released workspace writes");
+
+        let restored = load_workspace_from_path(&path).expect("workspace reloads");
+
+        assert_eq!(restored.workspace_tabs[0].panes.len(), pane_count);
+        assert_eq!(
+            restored.workspace_tabs[0].panes[0]
+                .chart
+                .as_ref()
+                .expect("restored chart")
+                .studies,
+            vec![sma]
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
     }
 
     #[test]

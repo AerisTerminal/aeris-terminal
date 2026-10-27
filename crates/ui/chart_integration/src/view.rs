@@ -19,10 +19,10 @@ pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
-    DrawingId, DrawingInterval, DrawingIntervalUnit, EMA_RIBBON_DEFAULT_PERIODS,
-    FinancialAppearance, FinancialLegendIdentity, FinancialLegendRequest, FinancialSeriesColors,
-    HostLegendSeries, IndicatorChromeOptions, IndicatorKind, IndicatorPane, InteractionOptions,
-    PriceScaleMode, PriceScaleTarget, SeriesChromeFlag, TradingIntent, TradingSnapshot,
+    DrawingId, DrawingInterval, DrawingIntervalUnit, FinancialAppearance, FinancialLegendIdentity,
+    FinancialLegendRequest, FinancialSeriesColors, HostLegendSeries, IndicatorChromeOptions,
+    IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleMode, PriceScaleTarget,
+    SeriesChromeFlag, TradingIntent, TradingSnapshot,
 };
 pub use aeris_charts_engine::{
     BigTradesFilter, BigTradesIntensity, BigTradesSize, CumulativeDeltaStyle,
@@ -234,7 +234,6 @@ pub enum ChartIndicator {
     Vwap,
     Sma,
     Ema,
-    EmaRibbon,
     Wma,
     Bollinger,
     Rsi,
@@ -258,12 +257,11 @@ pub struct ChartIndicatorState {
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::Volume,
         Self::Vwap,
         Self::Sma,
         Self::Ema,
-        Self::EmaRibbon,
         Self::Wma,
         Self::Bollinger,
         Self::Rsi,
@@ -284,7 +282,6 @@ impl ChartIndicator {
             Self::Vwap => "vwap",
             Self::Sma => "sma",
             Self::Ema => "ema",
-            Self::EmaRibbon => "ema_ribbon",
             Self::Wma => "wma",
             Self::Bollinger => "bollinger",
             Self::Rsi => "rsi",
@@ -304,7 +301,6 @@ impl ChartIndicator {
             "vwap" => Self::Vwap,
             "sma" => Self::Sma,
             "ema" => Self::Ema,
-            "ema_ribbon" => Self::EmaRibbon,
             "wma" => Self::Wma,
             "bollinger" => Self::Bollinger,
             "rsi" => Self::Rsi,
@@ -324,7 +320,6 @@ impl ChartIndicator {
             Self::Vwap => "Volume Weighted Average Price",
             Self::Sma => "Simple Moving Average",
             Self::Ema => "Exponential Moving Average",
-            Self::EmaRibbon => "EMA Ribbon",
             Self::Wma => "Weighted Moving Average",
             Self::Bollinger => "Bollinger Bands",
             Self::Rsi => "Relative Strength Index",
@@ -343,7 +338,6 @@ impl ChartIndicator {
             Self::Volume => "Up/down volume · optional moving average",
             Self::Vwap => "Session anchored",
             Self::Sma | Self::Ema | Self::Wma => "Period 20",
-            Self::EmaRibbon => "Periods 5 · 10 · 20 · 50 · 200",
             Self::Bollinger => "Period 20 · Deviation 2",
             Self::Rsi | Self::Atr => "Period 14",
             Self::Macd => "Fast 12 · Slow 26 · Signal 9",
@@ -358,7 +352,6 @@ impl ChartIndicator {
             IndicatorKind::Vwap => Self::Vwap,
             IndicatorKind::Sma { .. } => Self::Sma,
             IndicatorKind::Ema { .. } => Self::Ema,
-            IndicatorKind::EmaRibbon { .. } => Self::EmaRibbon,
             IndicatorKind::Wma { .. } => Self::Wma,
             IndicatorKind::Bollinger { .. } => Self::Bollinger,
             IndicatorKind::Rsi { .. } => Self::Rsi,
@@ -375,9 +368,6 @@ impl ChartIndicator {
             Self::Vwap => IndicatorKind::Vwap,
             Self::Sma => IndicatorKind::Sma { period: 20 },
             Self::Ema => IndicatorKind::Ema { period: 20 },
-            Self::EmaRibbon => IndicatorKind::EmaRibbon {
-                periods: EMA_RIBBON_DEFAULT_PERIODS,
-            },
             Self::Wma => IndicatorKind::Wma { period: 20 },
             Self::Bollinger => IndicatorKind::Bollinger {
                 period: 20,

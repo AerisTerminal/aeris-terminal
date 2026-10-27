@@ -2112,6 +2112,14 @@ fn every_builtin_indicator_is_created_restored_and_persisted_by_identifier() {
         assert_eq!(restored.indicator_states(), vec![hidden]);
     }
     assert_eq!(ChartIndicator::from_identifier("not_an_indicator"), None);
+    for retired in [
+        "ema_ribbon",
+        "market_structure",
+        "fair_value_gaps",
+        "order_blocks",
+    ] {
+        assert_eq!(ChartIndicator::from_identifier(retired), None, "{retired}");
+    }
 }
 
 #[test]
@@ -2261,11 +2269,11 @@ fn price_axis_menu_controls_aeris_charts_series_chrome_and_scale() {
         "the main price-axis choice must not overwrite the overlay volume format"
     );
 
-    let ribbon = chart
-        .add_indicator(ChartIndicator::EmaRibbon)
-        .expect("EMA ribbon is available after selecting an explicit precision");
+    let bands = chart
+        .add_indicator(ChartIndicator::Bollinger)
+        .expect("Bollinger Bands are available after selecting an explicit precision");
     assert!(
-        ribbon
+        bands
             .iter()
             .all(|id| series_entry(&chart, *id).price_format.precision == 0),
         "new price indicators must inherit the selected main-axis precision"
@@ -2874,7 +2882,6 @@ fn indicator_catalog_maps_to_aeris_charts_with_legacy_defaults() {
     let cases = [
         (ChartIndicator::Sma, 1, "sma", "SMA 20"),
         (ChartIndicator::Ema, 1, "ema", "EMA 20"),
-        (ChartIndicator::EmaRibbon, 5, "ema_ribbon", "EMA 5"),
         (ChartIndicator::Wma, 1, "wma", "WMA 20"),
         (ChartIndicator::Bollinger, 3, "bollinger", "Bollinger 20 2"),
         (ChartIndicator::Rsi, 1, "rsi", "RSI 14"),
@@ -3406,9 +3413,9 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
     chart
         .add_indicator(ChartIndicator::Volume)
         .expect("volume is created");
-    let ribbon = chart
-        .add_indicator(ChartIndicator::EmaRibbon)
-        .expect("EMA ribbon is created");
+    let bands = chart
+        .add_indicator(ChartIndicator::Bollinger)
+        .expect("Bollinger Bands are created");
     let rows = chart.legend_rows();
     let asset = rows
         .iter()
@@ -3440,16 +3447,21 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
         "custom candle colors leave the volume legend on the volume colors"
     );
 
-    let ribbon_row = rows
+    let bands_row = rows
         .iter()
-        .find(|row| row.item == LegendItem::Indicator(ribbon[0]))
-        .expect("EMA ribbon legend");
-    assert_eq!(ribbon_row.title, "EMA Ribbon");
-    assert_eq!(ribbon_row.values.len(), ribbon.len());
-    for (value, id) in ribbon_row.values.iter().zip(ribbon) {
-        assert_eq!(value.color, series_entry(&chart, id).line_color);
-        assert!(!value.text.contains("EMA"));
-        assert!(!value.text.contains("Ribbon"));
+        .find(|row| row.item == LegendItem::Indicator(bands[0]))
+        .expect("Bollinger Bands legend");
+    assert_eq!(bands_row.title, "Bollinger 20 2");
+    assert_eq!(bands_row.values.len(), bands.len());
+    for (value, id) in bands_row.values.iter().zip(bands) {
+        assert!(
+            value.color.is_some(),
+            "every band value reads in a line color"
+        );
+        if let Some(line_color) = &series_entry(&chart, id).line_color {
+            assert_eq!(value.color.as_ref(), Some(line_color));
+        }
+        assert!(!value.text.contains("Bollinger"));
     }
 }
 
@@ -4209,7 +4221,7 @@ fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_lin
     let timestamps = [60_i64 * 1_000_000_000];
     let values = [Some(20.0)];
     let descriptor = ChartStudyOutputDescriptor {
-        title: "EMA Ribbon",
+        title: "Bollinger Bands",
         legend_label: None,
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,
@@ -4257,7 +4269,7 @@ fn selecting_one_runtime_study_output_selects_the_complete_indicator() {
         .map(|point| Some(point.close - 10.0))
         .collect::<Vec<_>>();
     let descriptor = ChartStudyOutputDescriptor {
-        title: "EMA Ribbon",
+        title: "Bollinger Bands",
         legend_label: None,
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,
@@ -4519,7 +4531,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
 
 #[test]
 fn indicator_metadata_matches_the_legacy_picker_copy() {
-    assert_eq!(ChartIndicator::ALL.len(), 12);
+    assert_eq!(ChartIndicator::ALL.len(), 11);
     assert_eq!(ChartIndicator::Volume.label(), "Volume");
     assert_eq!(
         ChartIndicator::VolumeProfile.label(),
@@ -4529,10 +4541,6 @@ fn indicator_metadata_matches_the_legacy_picker_copy() {
     assert_eq!(ChartIndicator::Sma.label(), "Simple Moving Average");
     assert_eq!(ChartIndicator::Ema.label(), "Exponential Moving Average");
     assert_eq!(ChartIndicator::Sma.parameters(), "Period 20");
-    assert_eq!(
-        ChartIndicator::EmaRibbon.parameters(),
-        "Periods 5 · 10 · 20 · 50 · 200"
-    );
     assert_eq!(
         ChartIndicator::Bollinger.parameters(),
         "Period 20 · Deviation 2"
@@ -5872,7 +5880,7 @@ fn study_output_colors_apply_to_later_outputs_and_return_to_the_engine_default()
     let timestamps = [60_i64 * 1_000_000_000, 120_i64 * 1_000_000_000];
     let values = [Some(10.0), Some(11.0)];
     let descriptor = ChartStudyOutputDescriptor {
-        title: "EMA Ribbon",
+        title: "Bollinger Bands",
         legend_label: None,
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,

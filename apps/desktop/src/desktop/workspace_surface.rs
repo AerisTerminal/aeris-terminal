@@ -1065,7 +1065,6 @@ const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
         indicator,
         ChartIndicator::Sma
             | ChartIndicator::Ema
-            | ChartIndicator::EmaRibbon
             | ChartIndicator::Wma
             | ChartIndicator::Bollinger
             | ChartIndicator::Vwap
@@ -1470,7 +1469,6 @@ pub(super) fn study_display_name(identifier: &str) -> String {
     match identifier {
         aeris_study_sdk::BUILTIN_SMA_IDENTIFIER => "Simple Moving Average".to_string(),
         aeris_study_sdk::BUILTIN_EMA_IDENTIFIER => "Exponential Moving Average".to_string(),
-        aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER => "EMA Ribbon".to_string(),
         aeris_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
         aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
         aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER => "Volume Weighted Average Price".to_string(),
@@ -1614,7 +1612,6 @@ fn legacy_runtime_study_contract(
             )],
             vec![aeris_study_sdk::BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::EmaRibbon => legacy_ema_ribbon_contract(),
         ChartIndicator::Wma => (
             aeris_study_sdk::BUILTIN_WMA_IDENTIFIER,
             aeris_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
@@ -1656,27 +1653,6 @@ fn legacy_runtime_study_contract(
         }
     };
     Some(contract)
-}
-
-fn legacy_ema_ribbon_contract() -> (
-    &'static str,
-    u32,
-    Vec<WorkspaceStudySettingState>,
-    Vec<String>,
-) {
-    (
-        aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER,
-        aeris_study_sdk::BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
-        aeris_study_sdk::BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
-            .iter()
-            .zip(aeris_study_sdk::BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
-            .map(|(identifier, period)| legacy_integer_setting(identifier, period))
-            .collect(),
-        aeris_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
-            .iter()
-            .map(|identifier| (*identifier).to_string())
-            .collect(),
-    )
 }
 
 fn legacy_macd_contract() -> (
@@ -1813,8 +1789,7 @@ pub(super) fn persisted_output_colors(
 /// default. Studies reach the chart as external outputs, so this host default is what applies.
 fn default_study_line_width(identifier: &str) -> u8 {
     match identifier {
-        aeris_study_sdk::BUILTIN_EMA_IDENTIFIER
-        | aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER => 1,
+        aeris_study_sdk::BUILTIN_EMA_IDENTIFIER => 1,
         _ => DEFAULT_STUDY_LINE_WIDTH,
     }
 }

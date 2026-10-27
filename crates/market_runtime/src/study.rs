@@ -1035,7 +1035,7 @@ pub struct StudyOutputSpec {
     pub title: String,
     /// Optional short label used when a host groups multiple outputs into one legend row.
     /// `None` leaves the value unlabeled, which is useful for visually grouped families such as
-    /// EMA ribbons.
+    /// band envelopes.
     pub legend_label: Option<String>,
     pub plot: StudyPlotKind,
     pub pane: StudyPaneTarget,

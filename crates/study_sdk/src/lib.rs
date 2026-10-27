@@ -64,18 +64,6 @@ pub const BUILTIN_EMA_PERIOD_SETTING: &str = "period";
 pub const BUILTIN_EMA_DEFAULT_PERIOD: i64 = 20;
 /// Stable output identifier exposed by the built-in EMA.
 pub const BUILTIN_EMA_OUTPUT_IDENTIFIER: &str = "ema";
-/// Stable implementation revision for the built-in EMA Ribbon.
-pub const BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION: u32 = 1;
-/// Stable implementation identifier for the built-in EMA Ribbon.
-pub const BUILTIN_EMA_RIBBON_IDENTIFIER: &str = "builtin.ema_ribbon";
-/// Stable durable setting identifiers for the five ribbon periods.
-pub const BUILTIN_EMA_RIBBON_PERIOD_SETTINGS: [&str; 5] =
-    ["period_1", "period_2", "period_3", "period_4", "period_5"];
-/// Default EMA Ribbon periods used by legacy workspace migration and product UI.
-pub const BUILTIN_EMA_RIBBON_DEFAULT_PERIODS: [i64; 5] = [5, 10, 20, 50, 200];
-/// Stable EMA Ribbon output identifiers. Output identity is independent of edited periods.
-pub const BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS: [&str; 5] =
-    ["ema_1", "ema_2", "ema_3", "ema_4", "ema_5"];
 /// Stable implementation revision for the built-in Weighted Moving Average.
 pub const BUILTIN_WMA_IMPLEMENTATION_REVISION: u32 = 1;
 /// Stable implementation identifier for the built-in Weighted Moving Average.
@@ -171,6 +159,27 @@ pub const STUDY_SDK_API_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Maximum number of statically approved external study packages in one product build.
 pub const MAXIMUM_TRUSTED_STUDY_PACKAGES: usize = 128;
 const RESERVED_BUILTIN_STUDY_PREFIX: &str = "builtin.";
+/// Every built-in implementation identifier `restore_native_registration` resolves.
+const BUILTIN_STUDY_IDENTIFIERS: [&str; 9] = [
+    BUILTIN_SMA_IDENTIFIER,
+    BUILTIN_EMA_IDENTIFIER,
+    BUILTIN_WMA_IDENTIFIER,
+    BUILTIN_BOLLINGER_IDENTIFIER,
+    BUILTIN_ATR_IDENTIFIER,
+    BUILTIN_VWAP_IDENTIFIER,
+    BUILTIN_RSI_IDENTIFIER,
+    BUILTIN_MACD_IDENTIFIER,
+    BUILTIN_STOCHASTIC_IDENTIFIER,
+];
+
+/// Whether `identifier` lies in the reserved built-in namespace but names no built-in this SDK
+/// restores. Trusted packages cannot claim that namespace, so a durable study with such an
+/// identifier, such as a retired built-in, can never be restored by any product build.
+#[must_use]
+pub fn is_retired_builtin_study(identifier: &str) -> bool {
+    identifier.starts_with(RESERVED_BUILTIN_STUDY_PREFIX)
+        && !BUILTIN_STUDY_IDENTIFIERS.contains(&identifier)
+}
 
 /// Failure while resolving durable study data to trusted native code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -562,15 +571,6 @@ pub fn restore_native_registration(
             }
             builtins::ema_registration(dependencies, settings)
         }
-        BUILTIN_EMA_RIBBON_IDENTIFIER => {
-            if implementation_revision != BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION {
-                return Err(StudySdkError::UnsupportedImplementationRevision {
-                    identifier: identifier.to_string(),
-                    revision: implementation_revision,
-                });
-            }
-            builtins::ema_ribbon_registration(dependencies, settings)
-        }
         BUILTIN_WMA_IDENTIFIER => {
             if implementation_revision != BUILTIN_WMA_IMPLEMENTATION_REVISION {
                 return Err(StudySdkError::UnsupportedImplementationRevision {
@@ -651,9 +651,7 @@ pub mod builtins {
         BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER, BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER,
         BUILTIN_BOLLINGER_PERIOD_SETTING, BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER,
         BUILTIN_EMA_DEFAULT_PERIOD, BUILTIN_EMA_IDENTIFIER, BUILTIN_EMA_OUTPUT_IDENTIFIER,
-        BUILTIN_EMA_PERIOD_SETTING, BUILTIN_EMA_RIBBON_DEFAULT_PERIODS,
-        BUILTIN_EMA_RIBBON_IDENTIFIER, BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS,
-        BUILTIN_EMA_RIBBON_PERIOD_SETTINGS, BUILTIN_MACD_DEFAULT_FAST_PERIOD,
+        BUILTIN_EMA_PERIOD_SETTING, BUILTIN_MACD_DEFAULT_FAST_PERIOD,
         BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD, BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
         BUILTIN_MACD_FAST_PERIOD_SETTING, BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER,
         BUILTIN_MACD_IDENTIFIER, BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER,
@@ -670,10 +668,9 @@ pub mod builtins {
         BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, NativeStudyState, NonZeroUsize,
         StreamRequirements, StudyBarField, StudyDecimal, StudyDefinition, StudyDependency,
         StudyExecutionContext, StudyInputSeries, StudyInvalidationPolicy, StudyMarketInput,
-        StudyOutputBuffer, StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyPointStyle,
-        StudyRuntimeError, StudyScaleTarget, StudySdkError, StudySettingControl,
-        StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
-        StudyThresholdRegion, ToPrimitive,
+        StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyRuntimeError,
+        StudyScaleTarget, StudySdkError, StudySettingControl, StudySettingPresentation,
+        StudySettingSpec, StudySettingValue, StudySettings, StudyThresholdRegion, ToPrimitive,
     };
 
     fn period_setting_spec(identifier: &str, default: i64) -> StudySettingSpec {
@@ -713,25 +710,6 @@ pub mod builtins {
                 enabled_when: None,
             },
         )
-    }
-
-    fn ribbon_period_setting_spec(index: usize) -> StudySettingSpec {
-        StudySettingSpec::new(
-            BUILTIN_EMA_RIBBON_PERIOD_SETTINGS[index],
-            StudySettingValue::Integer(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS[index]),
-        )
-        .with_presentation(StudySettingPresentation {
-            label: format!("EMA {} period", index + 1),
-            description: Some("Period for this ribbon line.".to_string()),
-            group: Some("Periods".to_string()),
-            control: StudySettingControl::Integer {
-                minimum: Some(1),
-                maximum: Some(BUILTIN_MAXIMUM_PERIOD),
-                step: Some(1),
-            },
-            visible_when: None,
-            enabled_when: None,
-        })
     }
 
     fn bollinger_deviation_setting_spec() -> StudySettingSpec {
@@ -809,31 +787,6 @@ pub mod builtins {
                 BUILTIN_EMA_PERIOD_SETTING.to_string(),
                 StudySettingValue::Integer(period_value),
             )]),
-        )
-        .map_err(sdk_error_to_runtime)
-    }
-
-    /// Builds a five-line EMA Ribbon registration over one canonical bar series.
-    ///
-    /// # Errors
-    /// Returns a study validation error when any requested period cannot be
-    /// represented by the durable integer setting contract.
-    pub fn ema_ribbon(
-        series: BarSeriesKey,
-        periods: [NonZeroUsize; 5],
-    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
-        let mut overrides = BTreeMap::new();
-        for (identifier, period) in BUILTIN_EMA_RIBBON_PERIOD_SETTINGS.iter().zip(periods) {
-            let value =
-                i64::try_from(period.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)?;
-            overrides.insert((*identifier).to_string(), StudySettingValue::Integer(value));
-        }
-        ema_ribbon_registration(
-            vec![StudyDependency::Market(StudyMarketInput {
-                series,
-                streams: StreamRequirements::BARS,
-            })],
-            overrides,
         )
         .map_err(sdk_error_to_runtime)
     }
@@ -1147,43 +1100,6 @@ pub mod builtins {
             },
             settings,
             program: NativeStudyProgram::stateful(calculate_ema, create_ema_state),
-        })
-    }
-
-    pub(super) fn ema_ribbon_registration(
-        dependencies: Vec<StudyDependency>,
-        overrides: BTreeMap<String, StudySettingValue>,
-    ) -> Result<NativeStudyRegistration, StudySdkError> {
-        validate_one_numeric_dependency(BUILTIN_EMA_RIBBON_IDENTIFIER, &dependencies)?;
-        let settings_spec = (0..BUILTIN_EMA_RIBBON_PERIOD_SETTINGS.len())
-            .map(ribbon_period_setting_spec)
-            .collect::<Vec<_>>();
-        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
-        let periods = ema_ribbon_periods(&settings)?;
-        let outputs = BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
-            .iter()
-            .zip(periods)
-            .map(|(identifier, period)| StudyOutputSpec {
-                identifier: (*identifier).to_string(),
-                title: format!("EMA {}", period.get()),
-                legend_label: None,
-                plot: StudyPlotKind::Line,
-                pane: StudyPaneTarget::Price,
-                scale: StudyScaleTarget::Primary,
-                threshold_region: None,
-                point_style: StudyPointStyle::Uniform,
-            })
-            .collect();
-        Ok(NativeStudyRegistration {
-            definition: StudyDefinition {
-                identifier: BUILTIN_EMA_RIBBON_IDENTIFIER.to_string(),
-                dependencies,
-                settings: settings_spec,
-                outputs,
-                invalidation: StudyInvalidationPolicy::FromFirstChanged,
-            },
-            settings,
-            program: NativeStudyProgram::stateful(calculate_ema_ribbon, create_ema_ribbon_state),
         })
     }
 
@@ -1537,18 +1453,6 @@ pub mod builtins {
         }
     }
 
-    fn ema_ribbon_periods(
-        settings: &StudySettings,
-    ) -> Result<[NonZeroUsize; 5], StudyRuntimeError> {
-        let periods = BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
-            .iter()
-            .map(|identifier| positive_period(settings, identifier))
-            .collect::<Result<Vec<_>, _>>()?;
-        periods
-            .try_into()
-            .map_err(|_| StudyRuntimeError::InvalidSettingValue)
-    }
-
     fn macd_periods(
         settings: &StudySettings,
     ) -> Result<(NonZeroUsize, NonZeroUsize, NonZeroUsize), StudyRuntimeError> {
@@ -1638,33 +1542,6 @@ pub mod builtins {
         // The pinned Aeris Charts incremental states used below provide mutation-isolated
         // clone/COW semantics for their private checkpoint storage.
         state.clone()
-    }
-
-    #[derive(Clone)]
-    struct EmaRibbonState {
-        states: [aeris_charts_indicators::IncrementalEmaState; 5],
-    }
-
-    fn create_ema_ribbon_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
-        let periods =
-            ema_ribbon_periods(settings).map_err(|_| "EMA Ribbon periods are unavailable")?;
-        Ok(NativeStudyState::new_transactional(
-            EmaRibbonState {
-                states: periods.map(aeris_charts_indicators::IncrementalEmaState::new),
-            },
-            ema_ribbon_state_runtime_bytes,
-            transactional_clone,
-        ))
-    }
-
-    fn ema_ribbon_state_runtime_bytes(state: &EmaRibbonState) -> usize {
-        std::mem::size_of::<EmaRibbonState>().saturating_add(
-            state
-                .states
-                .iter()
-                .map(aeris_charts_indicators::IncrementalEmaState::runtime_bytes)
-                .sum::<usize>(),
-        )
     }
 
     fn create_atr_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
@@ -1786,52 +1663,6 @@ pub mod builtins {
                     |index| series.value(index).flatten(),
                     |index, value| output.set(index, value),
                 )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn calculate_ema_ribbon(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
-        let Some((inputs, state, outputs)) = context.split_with_state::<EmaRibbonState>() else {
-            return Err("EMA Ribbon runtime state is unavailable".to_string());
-        };
-        if outputs.len() != state.states.len() {
-            return Err("EMA Ribbon outputs are unavailable".to_string());
-        }
-        let from = inputs
-            .dirty_range()
-            .start
-            .min(outputs.first().map_or(0, StudyOutputBuffer::len));
-        if outputs.first().is_none_or(|output| from >= output.len()) {
-            return Ok(());
-        }
-        let input = inputs
-            .input(0)
-            .ok_or_else(|| "EMA Ribbon requires one numeric study input".to_string())?;
-        match input {
-            StudyInputSeries::Market(series) => {
-                let close = series.field(StudyBarField::Close);
-                let divisor = 10_f64.powi(i32::from(close.scale()));
-                for (ema_state, output) in state.states.iter_mut().zip(outputs.iter_mut()) {
-                    rebuild_ema_output(
-                        ema_state,
-                        output.len(),
-                        from,
-                        |index| fixed_point_sample(close.value(index), divisor),
-                        |index, value| output.set(index, value),
-                    )?;
-                }
-            }
-            StudyInputSeries::Output(series) => {
-                for (ema_state, output) in state.states.iter_mut().zip(outputs.iter_mut()) {
-                    rebuild_ema_output(
-                        ema_state,
-                        output.len(),
-                        from,
-                        |index| series.value(index).flatten(),
-                        |index, value| output.set(index, value),
-                    )?;
-                }
             }
         }
         Ok(())
@@ -2520,19 +2351,6 @@ mod tests {
             series: test_series(),
             streams: StreamRequirements::BARS,
         })
-    }
-
-    fn ribbon_settings() -> BTreeMap<String, StudySettingValue> {
-        BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
-            .iter()
-            .zip(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
-            .map(|(identifier, period)| {
-                (
-                    (*identifier).to_string(),
-                    StudySettingValue::Integer(period),
-                )
-            })
-            .collect()
     }
 
     fn macd_settings() -> BTreeMap<String, StudySettingValue> {
@@ -3226,37 +3044,9 @@ mod tests {
     #[test]
     fn phase_c_scalar_builtins_preserve_recursive_state_panes_and_stable_outputs() {
         let source = test_series();
-        let ribbon = builtins::ema_ribbon(
-            source.clone(),
-            [5, 10, 20, 50, 200].map(|period| NonZeroUsize::new(period).expect("period")),
-        )
-        .expect("EMA Ribbon registration");
         let atr = builtins::atr(source.clone(), NonZeroUsize::new(14).expect("period"))
             .expect("ATR registration");
         let vwap = builtins::vwap(source.clone()).expect("VWAP registration");
-
-        assert_eq!(ribbon.definition.identifier, BUILTIN_EMA_RIBBON_IDENTIFIER);
-        assert_eq!(
-            ribbon
-                .definition
-                .outputs
-                .iter()
-                .map(|output| output.identifier.as_str())
-                .collect::<Vec<_>>(),
-            BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
-        );
-        assert!(
-            ribbon
-                .definition
-                .outputs
-                .iter()
-                .all(|output| output.pane == StudyPaneTarget::Price)
-        );
-        assert_eq!(
-            ribbon.definition.invalidation,
-            StudyInvalidationPolicy::FromFirstChanged
-        );
-        assert!(ribbon.program.state_factory.is_some());
 
         assert_eq!(atr.definition.identifier, BUILTIN_ATR_IDENTIFIER);
         assert_eq!(
@@ -3381,13 +3171,6 @@ mod tests {
     #[test]
     fn phase_c_scalar_builtins_restore_exact_revisions() {
         let market = test_market_dependency();
-        let ribbon = restore_native_registration(
-            BUILTIN_EMA_RIBBON_IDENTIFIER,
-            BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
-            vec![market.clone()],
-            ribbon_settings(),
-        )
-        .expect("durable EMA Ribbon resolves");
         let atr = restore_native_registration(
             BUILTIN_ATR_IDENTIFIER,
             BUILTIN_ATR_IMPLEMENTATION_REVISION,
@@ -3405,15 +3188,10 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("durable VWAP resolves");
-        assert_eq!(ribbon.definition.outputs.len(), 5);
         assert_eq!(atr.definition.outputs.len(), 1);
         assert_eq!(vwap.definition.outputs.len(), 1);
 
         for (identifier, revision) in [
-            (
-                BUILTIN_EMA_RIBBON_IDENTIFIER,
-                BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
-            ),
             (BUILTIN_ATR_IDENTIFIER, BUILTIN_ATR_IMPLEMENTATION_REVISION),
             (
                 BUILTIN_VWAP_IDENTIFIER,
@@ -3430,6 +3208,26 @@ mod tests {
                 Err(StudySdkError::UnsupportedImplementationRevision { .. })
             ));
         }
+    }
+
+    #[test]
+    fn only_unrestorable_builtin_identifiers_are_retired() {
+        for identifier in BUILTIN_STUDY_IDENTIFIERS {
+            assert!(!is_retired_builtin_study(identifier), "{identifier}");
+            assert!(
+                !matches!(
+                    restore_native_registration(identifier, 1, Vec::new(), BTreeMap::new()),
+                    Err(StudySdkError::UnknownStudyIdentifier(_))
+                ),
+                "{identifier} must resolve to built-in code"
+            );
+        }
+        assert!(is_retired_builtin_study("builtin.ema_ribbon"));
+        assert!(matches!(
+            restore_native_registration("builtin.ema_ribbon", 1, Vec::new(), BTreeMap::new()),
+            Err(StudySdkError::UnknownStudyIdentifier(_))
+        ));
+        assert!(!is_retired_builtin_study("example.workspace_reconnect"));
     }
 
     #[test]
@@ -3492,10 +3290,13 @@ mod tests {
         let output = StudyDependency::Output(upstream.output(0));
         assert!(
             restore_native_registration(
-                BUILTIN_EMA_RIBBON_IDENTIFIER,
-                BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+                BUILTIN_EMA_IDENTIFIER,
+                BUILTIN_EMA_IMPLEMENTATION_REVISION,
                 vec![output.clone()],
-                ribbon_settings(),
+                BTreeMap::from([(
+                    BUILTIN_EMA_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(BUILTIN_EMA_DEFAULT_PERIOD),
+                )]),
             )
             .is_ok()
         );

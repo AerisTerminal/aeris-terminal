@@ -33,9 +33,6 @@ pub enum BuiltinIndicator {
     PivotWoodie,
     PivotDeMark,
     SwingPoints,
-    MarketStructure,
-    FairValueGaps,
-    OrderBlocks,
     SessionLevels,
     PreviousPeriodLevels,
     OpeningRange,
@@ -80,7 +77,7 @@ const DEFAULT_DEVIATION: f64 = 2.0;
 
 impl BuiltinIndicator {
     /// Every built-in indicator in menu order: overlays, market structure, oscillators, volume.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 60] = [
         Self::Dema,
         Self::Tema,
         Self::Smma,
@@ -105,9 +102,6 @@ impl BuiltinIndicator {
         Self::PivotWoodie,
         Self::PivotDeMark,
         Self::SwingPoints,
-        Self::MarketStructure,
-        Self::FairValueGaps,
-        Self::OrderBlocks,
         Self::SessionLevels,
         Self::PreviousPeriodLevels,
         Self::OpeningRange,
@@ -175,9 +169,6 @@ impl BuiltinIndicator {
             Self::PivotWoodie => "pivot_points_woodie",
             Self::PivotDeMark => "pivot_points_demark",
             Self::SwingPoints => "swing_points",
-            Self::MarketStructure => "market_structure",
-            Self::FairValueGaps => "fair_value_gaps",
-            Self::OrderBlocks => "order_blocks",
             Self::SessionLevels => "session_levels",
             Self::PreviousPeriodLevels => "previous_period_levels",
             Self::OpeningRange => "opening_range",
@@ -253,9 +244,6 @@ impl BuiltinIndicator {
             Self::PivotWoodie => "Pivot Points Woodie",
             Self::PivotDeMark => "Pivot Points DeMark",
             Self::SwingPoints => "Swing Highs and Lows",
-            Self::MarketStructure => "Market Structure",
-            Self::FairValueGaps => "Fair Value Gaps",
-            Self::OrderBlocks => "Order Blocks",
             Self::SessionLevels => "Session High and Low",
             Self::PreviousPeriodLevels => "Previous Day High and Low",
             Self::OpeningRange => "Opening Range",
@@ -338,9 +326,6 @@ impl BuiltinIndicator {
             | Self::PivotWoodie
             | Self::PivotDeMark => "Prior period levels",
             Self::SwingPoints => "Left 5 · Right 5",
-            Self::MarketStructure => "Left 5 · Right 5 · Close breaks",
-            Self::FairValueGaps => "Touch mitigation · 20 active",
-            Self::OrderBlocks => "Left 5 · Right 5 · 20 active",
             Self::SessionLevels => "UTC sessions",
             Self::PreviousPeriodLevels => "UTC days",
             Self::OpeningRange => "30 minutes · UTC sessions",

@@ -96,10 +96,6 @@ fn ema_studies_default_to_one_pixel_and_explicit_widths_are_kept() {
         1
     );
     assert_eq!(
-        persisted_study_line_width(&study(aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER, 0)),
-        1
-    );
-    assert_eq!(
         persisted_study_line_width(&study(aeris_study_sdk::BUILTIN_SMA_IDENTIFIER, 0)),
         DEFAULT_STUDY_LINE_WIDTH
     );
@@ -1144,11 +1140,6 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
                 volume: None,
             },
             WorkspaceChartIndicatorState {
-                kind: "ema_ribbon".to_string(),
-                visible: false,
-                volume: None,
-            },
-            WorkspaceChartIndicatorState {
                 kind: "wma".to_string(),
                 visible: true,
                 volume: None,
@@ -1187,11 +1178,10 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
         ..WorkspaceChartState::default()
     };
     let restored = persisted_runtime_studies(Some(&state));
-    assert_eq!(restored.len(), 10);
+    assert_eq!(restored.len(), 9);
     let expected = [
         (aeris_study_sdk::BUILTIN_SMA_IDENTIFIER, false),
         (aeris_study_sdk::BUILTIN_EMA_IDENTIFIER, true),
-        (aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER, false),
         (aeris_study_sdk::BUILTIN_WMA_IDENTIFIER, true),
         (aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER, false),
         (aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER, true),
@@ -1205,14 +1195,7 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
         assert_eq!(state.persisted.visible, visible);
     }
     assert_eq!(
-        restored[2].persisted.output_identifiers,
-        aeris_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
-            .iter()
-            .map(|identifier| (*identifier).to_string())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        restored[4].persisted.output_identifiers,
+        restored[3].persisted.output_identifiers,
         vec![
             aeris_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
             aeris_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
@@ -1226,6 +1209,36 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
             && !state.persist_on_registration
             && !state.blocked
     }));
+}
+
+#[test]
+fn retired_legacy_indicator_kinds_are_dropped_without_affecting_other_indicators() {
+    let state = WorkspaceChartState {
+        indicators: [
+            "ema_ribbon",
+            "sma",
+            "market_structure",
+            "fair_value_gaps",
+            "order_blocks",
+        ]
+        .into_iter()
+        .map(|kind| WorkspaceChartIndicatorState {
+            kind: kind.to_string(),
+            visible: true,
+            volume: None,
+        })
+        .collect(),
+        ..WorkspaceChartState::default()
+    };
+
+    let restored = persisted_runtime_studies(Some(&state));
+
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].persisted.identifier,
+        aeris_study_sdk::BUILTIN_SMA_IDENTIFIER
+    );
+    assert!(!restored[0].blocked);
 }
 
 #[test]
@@ -1282,7 +1295,6 @@ fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicat
 fn migrated_picker_indicators_are_runtime_managed() {
     assert!(runtime_managed_indicator(ChartIndicator::Sma));
     assert!(runtime_managed_indicator(ChartIndicator::Ema));
-    assert!(runtime_managed_indicator(ChartIndicator::EmaRibbon));
     assert!(runtime_managed_indicator(ChartIndicator::Wma));
     assert!(runtime_managed_indicator(ChartIndicator::Bollinger));
     assert!(runtime_managed_indicator(ChartIndicator::Vwap));
@@ -1303,11 +1315,6 @@ fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Ema,
-            visible: true,
-            volume: None,
-        },
-        ChartIndicatorState {
-            indicator: ChartIndicator::EmaRibbon,
             visible: true,
             volume: None,
         },
