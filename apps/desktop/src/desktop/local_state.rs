@@ -268,6 +268,7 @@ pub(super) fn fixture_workspace() -> WorkspaceState {
     workspace.watchlist = vec![instrument.display_symbol.clone()];
     workspace.watchlist_entries = vec![WorkspaceWatchlistEntryState {
         instrument: Some(instrument.clone()),
+        flag_color: String::new(),
     }];
     workspace.workspace_tabs[0].panes[0].instrument = Some(instrument.clone());
     workspace.saved_layouts[0]
@@ -431,6 +432,7 @@ fn sanitize_watchlist(workspace: &mut WorkspaceState) {
             .cloned()
             .map(|instrument| WorkspaceWatchlistEntryState {
                 instrument: Some(instrument),
+                flag_color: String::new(),
             })
             .collect();
     }
@@ -438,6 +440,7 @@ fn sanitize_watchlist(workspace: &mut WorkspaceState) {
         if let Some(instrument) = entry.instrument.as_mut() {
             rebase_durable_instrument(instrument);
         }
+        entry.flag_color = super::normalize_hex_color(&entry.flag_color).unwrap_or_default();
     }
     let mut identities = std::collections::BTreeSet::new();
     workspace.watchlist_entries.retain(|entry| {
@@ -1329,20 +1332,36 @@ mod tests {
     }
 
     #[test]
+    fn workspace_sanitizer_clears_a_watchlist_flag_that_is_not_a_color() {
+        let mut workspace = default_workspace();
+        workspace.watchlist_entries[0].flag_color = "blue".to_string();
+
+        let sanitized = sanitize_workspace(workspace);
+
+        assert_eq!(sanitized.watchlist_entries.len(), 1);
+        assert_eq!(sanitized.watchlist_entries[0].flag_color, "");
+    }
+
+    #[test]
     fn workspace_sanitizer_bounds_and_deduplicates_watchlist_state() {
         let mut workspace = default_workspace();
         let instrument = workspace.watchlist_entries[0]
             .instrument
             .clone()
             .expect("default watchlist instrument");
+        workspace.watchlist_entries[0].flag_color = "335cff".to_string();
         workspace
             .watchlist_entries
             .push(WorkspaceWatchlistEntryState {
                 instrument: Some(instrument),
+                flag_color: "#F23645".to_string(),
             });
         workspace
             .watchlist_entries
-            .push(WorkspaceWatchlistEntryState { instrument: None });
+            .push(WorkspaceWatchlistEntryState {
+                instrument: None,
+                flag_color: String::new(),
+            });
         let pane = &mut workspace.workspace_tabs[0].panes[0];
         pane.side_panel_visibility = u32::MAX;
         pane.side_panel_width = 9_000;
@@ -1352,6 +1371,10 @@ mod tests {
 
         assert_eq!(sanitized.watchlist_entries.len(), 1);
         assert_eq!(sanitized.watchlist, vec!["BTC-USDC"]);
+        assert_eq!(
+            sanitized.watchlist_entries[0].flag_color, "#335CFF",
+            "the first entry keeps its flag, normalized"
+        );
         let pane = &sanitized.workspace_tabs[0].panes[0];
         assert_eq!(pane.side_panel_visibility, 15);
         assert_eq!(pane.side_panel_width, 480);

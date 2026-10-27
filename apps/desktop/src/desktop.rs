@@ -312,7 +312,7 @@ use time_sales_panel::TimeSalesPanelState;
 use toaster::Toaster;
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use volume_dialog::volume_dialog_layer;
-use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
+use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistFlagsView, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
@@ -3715,6 +3715,8 @@ struct WatchlistRow {
     active: bool,
     /// The selected account has a working order or an open position here.
     trading_activity: bool,
+    /// The row's flag color, a normalized CSS hex value.
+    flag: Option<String>,
 }
 
 impl MarketSummaryEntry {
@@ -5316,6 +5318,76 @@ struct WorkspaceDragState {
     strip_left: f32,
 }
 
+/// The color a newly set watchlist flag starts with.
+const DEFAULT_WATCHLIST_FLAG_COLOR: &str = "#335CFF";
+
+/// One watchlist row as the desktop owns it: the instrument and the user's flag.
+#[derive(Clone, Debug, PartialEq)]
+struct WatchlistEntry {
+    instrument: InstallProviderInstrument,
+    /// A normalized CSS hex color; `None` while unflagged.
+    flag: Option<String>,
+}
+
+impl WatchlistEntry {
+    fn is(&self, provider: &str, instrument_id: &str) -> bool {
+        self.instrument.provider == provider && self.instrument.instrument_id == instrument_id
+    }
+}
+
+/// Session-only watchlist flag UI: the color filter, its menu and the open flag picker.
+#[derive(Default)]
+struct WatchlistFlagState {
+    /// Shows only the watchlist rows flagged with this color.
+    filter: Option<String>,
+    filter_menu_open: bool,
+    picker: Option<WatchlistFlagPicker>,
+}
+
+/// The open color picker of one watchlist row's flag.
+#[derive(Clone)]
+struct WatchlistFlagPicker {
+    provider: String,
+    instrument_id: String,
+    input: Entity<InputState>,
+    error: Option<String>,
+}
+
+impl WatchlistFlagPicker {
+    fn is_for(&self, entry: &WatchlistEntry) -> bool {
+        entry.is(&self.provider, &self.instrument_id)
+    }
+}
+
+/// Indices of the entries the watchlist shows: all of them, or only those flagged with
+/// `filter`. The row whose flag picker is open stays shown while its color changes.
+fn visible_watchlist_indices(
+    entries: &[WatchlistEntry],
+    filter: Option<&str>,
+    picker: Option<&WatchlistFlagPicker>,
+) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            filter.is_none_or(|filter| entry.flag.as_deref() == Some(filter))
+                || picker.is_some_and(|picker| picker.is_for(entry))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The distinct flag colors in watchlist order, which the flag filter offers.
+fn watchlist_flag_colors(entries: &[WatchlistEntry]) -> Vec<String> {
+    let mut colors: Vec<String> = Vec::new();
+    for flag in entries.iter().filter_map(|entry| entry.flag.as_ref()) {
+        if !colors.contains(flag) {
+            colors.push(flag.clone());
+        }
+    }
+    colors
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct WatchlistDragState {
     provider: String,
@@ -5618,7 +5690,8 @@ struct TerminalApp {
     lifecycle: DesktopLifecycle,
     trading_store: Entity<trading_store::TradingStore>,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
-    watchlist: Vec<InstallProviderInstrument>,
+    watchlist: Vec<WatchlistEntry>,
+    watchlist_flags: WatchlistFlagState,
     market_summaries: BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     persisted_watchlist: Vec<WorkspaceWatchlistEntryState>,
     watchlist_persistence_dirty: bool,

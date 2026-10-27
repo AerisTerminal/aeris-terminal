@@ -16,10 +16,15 @@ pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize
     true
 }
 
-fn restore_watchlist(entries: Vec<WorkspaceWatchlistEntryState>) -> Vec<InstallProviderInstrument> {
+fn restore_watchlist(entries: Vec<WorkspaceWatchlistEntryState>) -> Vec<WatchlistEntry> {
     entries
         .into_iter()
-        .filter_map(|entry| entry.instrument)
+        .filter_map(|entry| {
+            Some(WatchlistEntry {
+                instrument: entry.instrument?,
+                flag: normalize_hex_color(&entry.flag_color),
+            })
+        })
         .collect()
 }
 
@@ -72,9 +77,9 @@ fn market_summary_tab_instrument(surface: &WorkspaceSurface) -> Option<InstallPr
     )
 }
 
-pub(super) fn market_summary_requirements(
+pub(super) fn market_summary_requirements<'a>(
     tab_instruments: impl IntoIterator<Item = InstallProviderInstrument>,
-    watchlist: &[InstallProviderInstrument],
+    watchlist: impl IntoIterator<Item = &'a InstallProviderInstrument>,
     watchlist_visible: bool,
 ) -> BTreeMap<MarketSummaryKey, (InstallProviderInstrument, bool)> {
     let mut desired = BTreeMap::new();
@@ -187,8 +192,6 @@ impl TerminalApp {
             .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
             .unwrap_or(0);
         Self::wire_restored_surfaces(&workspaces, active, &market_frame_wake, cx);
-        let persisted_watchlist = init.watchlist_entries.clone();
-        let watchlist = restore_watchlist(init.watchlist_entries);
         let (layout_library, layout_drawings) = layout_tabs::restored_layouts(
             init.saved_layouts,
             &mut workspaces,
@@ -212,9 +215,10 @@ impl TerminalApp {
             lifecycle,
             trading_store: trading_store.clone(),
             workspace_factory: init.workspace_factory,
-            watchlist,
+            persisted_watchlist: init.watchlist_entries.clone(),
+            watchlist: restore_watchlist(init.watchlist_entries),
+            watchlist_flags: WatchlistFlagState::default(),
             market_summaries: BTreeMap::new(),
-            persisted_watchlist,
             watchlist_persistence_dirty: false,
             workspace_persistence,
             persisted_layout,
@@ -353,13 +357,22 @@ impl TerminalApp {
         }
     }
 
-    fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
+    pub(super) fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
         self.watchlist
             .iter()
-            .map(|instrument| WorkspaceWatchlistEntryState {
-                instrument: Some(instrument.clone()),
+            .map(|entry| WorkspaceWatchlistEntryState {
+                instrument: Some(entry.instrument.clone()),
+                flag_color: entry.flag.clone().unwrap_or_default(),
             })
             .collect()
+    }
+
+    fn visible_watchlist_indices(&self) -> Vec<usize> {
+        visible_watchlist_indices(
+            &self.watchlist,
+            self.watchlist_flags.filter.as_deref(),
+            self.watchlist_flags.picker.as_ref(),
+        )
     }
 
     pub(super) fn watchlist_rows(&self, cx: &App) -> Vec<WatchlistRow> {
@@ -371,9 +384,11 @@ impl TerminalApp {
             .or(surface.product.as_ref());
         let account = surface.trading_pnl.order_entry.selected_account_id.as_ref();
         let store = self.trading_store.read(cx);
-        self.watchlist
-            .iter()
-            .map(|instrument| {
+        self.visible_watchlist_indices()
+            .into_iter()
+            .filter_map(|index| self.watchlist.get(index))
+            .map(|entry| {
+                let instrument = &entry.instrument;
                 let summary = self
                     .market_summaries
                     .get(&MarketSummaryKey::from_instrument(instrument));
@@ -411,6 +426,7 @@ impl TerminalApp {
                                 })
                         })
                     }),
+                    flag: entry.flag.clone(),
                 }
             })
             .collect()
@@ -421,6 +437,12 @@ impl TerminalApp {
             rows: self.watchlist_rows(cx),
             drag: self.watchlist_drag.clone(),
             scroll: self.watchlist_scroll.clone(),
+            flags: WatchlistFlagsView {
+                picker: self.watchlist_flags.picker.clone(),
+                filter: self.watchlist_flags.filter.clone(),
+                filter_menu_open: self.watchlist_flags.filter_menu_open,
+                colors: watchlist_flag_colors(&self.watchlist),
+            },
         }
     }
 
@@ -463,8 +485,11 @@ impl TerminalApp {
             let surface = workspace.panes[workspace.active_pane].surface.read(cx);
             market_summary_tab_instrument(surface)
         });
-        let desired =
-            market_summary_requirements(tab_instruments, &self.watchlist, watchlist_visible);
+        let desired = market_summary_requirements(
+            tab_instruments,
+            self.watchlist.iter().map(|entry| &entry.instrument),
+            watchlist_visible,
+        );
 
         let stale = self
             .market_summaries
@@ -514,13 +539,18 @@ impl TerminalApp {
         instrument: InstallProviderInstrument,
         cx: &mut Context<Self>,
     ) {
-        if self.watchlist.iter().any(|entry| {
-            entry.provider == instrument.provider && entry.instrument_id == instrument.instrument_id
-        }) || self.watchlist.len() >= local_state::MAXIMUM_WATCHLIST_ENTRIES
+        if self
+            .watchlist
+            .iter()
+            .any(|entry| entry.is(&instrument.provider, &instrument.instrument_id))
+            || self.watchlist.len() >= local_state::MAXIMUM_WATCHLIST_ENTRIES
         {
             return;
         }
-        self.watchlist.push(instrument);
+        self.watchlist.push(WatchlistEntry {
+            instrument,
+            flag: None,
+        });
         self.sync_market_summaries(cx);
         self.watchlist_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
@@ -535,8 +565,14 @@ impl TerminalApp {
     ) {
         let before = self.watchlist.len();
         self.watchlist
-            .retain(|entry| entry.provider != provider || entry.instrument_id != instrument_id);
+            .retain(|entry| !entry.is(provider, instrument_id));
         if self.watchlist.len() != before {
+            if self.watchlist_flags.picker.as_ref().is_some_and(|picker| {
+                picker.provider == provider && picker.instrument_id == instrument_id
+            }) {
+                self.watchlist_flags.picker = None;
+            }
+            self.release_unused_watchlist_flag_filter();
             self.sync_market_summaries(cx);
             self.watchlist_persistence_dirty = true;
             self.persist_workspace_layout_if_changed(cx);
@@ -554,7 +590,7 @@ impl TerminalApp {
         if !self
             .watchlist
             .iter()
-            .any(|entry| entry.provider == provider && entry.instrument_id == instrument_id)
+            .any(|entry| entry.is(provider, instrument_id))
         {
             return;
         }
@@ -594,19 +630,22 @@ impl TerminalApp {
                 drag.scroll_offset_y = scroll_offset_y;
                 drag.cursor_offset_y
             };
+        // A flag filter hides rows, so the drop slot is the visible row's place in the list.
+        let visible = self.visible_watchlist_indices();
         let Some(destination) = watchlist_drag_destination(
             pointer_y,
             body_top,
             scroll_offset_y,
             cursor_offset_y,
-            self.watchlist.len(),
-        ) else {
+            visible.len(),
+        )
+        .and_then(|row| visible.get(row).copied()) else {
             return;
         };
         let Some(source) = self
             .watchlist
             .iter()
-            .position(|entry| entry.provider == provider && entry.instrument_id == instrument_id)
+            .position(|entry| entry.is(provider, instrument_id))
         else {
             return;
         };
@@ -621,6 +660,159 @@ impl TerminalApp {
             return;
         }
         self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
+    }
+
+    /// A left press on a row's flag: an unflagged row takes the default flag and opens its
+    /// color picker; a flagged row loses its flag.
+    pub(super) fn press_watchlist_flag(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self
+            .watchlist
+            .iter_mut()
+            .find(|entry| entry.is(provider, instrument_id))
+        else {
+            return;
+        };
+        if entry.flag.take().is_none() {
+            entry.flag = Some(DEFAULT_WATCHLIST_FLAG_COLOR.to_string());
+            self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
+            return;
+        }
+        if self.watchlist_flags.picker.as_ref().is_some_and(|picker| {
+            picker.provider == provider && picker.instrument_id == instrument_id
+        }) {
+            self.watchlist_flags.picker = None;
+        }
+        self.release_unused_watchlist_flag_filter();
+        self.save_watchlist_flags(cx);
+    }
+
+    /// A right press on a row's flag toggles its color picker, flagging the row first.
+    pub(super) fn toggle_watchlist_flag_picker(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.watchlist_flags.picker.as_ref().is_some_and(|picker| {
+            picker.provider == provider && picker.instrument_id == instrument_id
+        }) {
+            self.close_watchlist_flag_picker(cx);
+            return;
+        }
+        let Some(entry) = self
+            .watchlist
+            .iter_mut()
+            .find(|entry| entry.is(provider, instrument_id))
+        else {
+            return;
+        };
+        entry
+            .flag
+            .get_or_insert_with(|| DEFAULT_WATCHLIST_FLAG_COLOR.to_string());
+        self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
+    }
+
+    fn show_watchlist_flag_picker(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .watchlist
+            .iter()
+            .find(|entry| entry.is(provider, instrument_id))
+            .and_then(|entry| entry.flag.clone())
+            .unwrap_or_else(|| DEFAULT_WATCHLIST_FLAG_COLOR.to_string());
+        let input = cx.new(|input_cx| InputState::new(window, input_cx));
+        input.update(cx, |input, input_cx| {
+            input.set_value(current, window, input_cx);
+        });
+        self.watchlist_flags.filter_menu_open = false;
+        self.watchlist_flags.picker = Some(WatchlistFlagPicker {
+            provider: provider.to_string(),
+            instrument_id: instrument_id.to_string(),
+            input,
+            error: None,
+        });
+        self.save_watchlist_flags(cx);
+    }
+
+    /// Recolors the flag whose picker is open. The change is saved when the picker closes.
+    pub(super) fn apply_watchlist_flag_color(&mut self, color: &str, cx: &mut Context<Self>) {
+        let Some(picker) = self.watchlist_flags.picker.as_mut() else {
+            return;
+        };
+        let Some(color) = normalize_hex_color(color) else {
+            picker.error = Some("Enter a hex color such as #2962FF or #2962FF80.".to_string());
+            cx.notify();
+            return;
+        };
+        picker.error = None;
+        let picker = picker.clone();
+        if let Some(entry) = self.watchlist.iter_mut().find(|entry| picker.is_for(entry)) {
+            entry.flag = Some(color);
+            self.watchlist_persistence_dirty = true;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn close_watchlist_flag_picker(&mut self, cx: &mut Context<Self>) {
+        if self.watchlist_flags.picker.take().is_none() {
+            return;
+        }
+        self.release_unused_watchlist_flag_filter();
+        self.save_watchlist_flags(cx);
+    }
+
+    fn save_watchlist_flags(&mut self, cx: &mut Context<Self>) {
+        self.watchlist_persistence_dirty = true;
+        self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
+    }
+
+    /// Ends a flag filter once no row carries its color, so it never leaves the list empty.
+    fn release_unused_watchlist_flag_filter(&mut self) {
+        let unused = self.watchlist_flags.filter.as_ref().is_some_and(|filter| {
+            !self
+                .watchlist
+                .iter()
+                .any(|entry| entry.flag.as_ref() == Some(filter))
+        });
+        if unused {
+            self.watchlist_flags.filter = None;
+        }
+    }
+
+    pub(super) fn toggle_watchlist_flag_filter_menu(&mut self, cx: &mut Context<Self>) {
+        self.watchlist_flags.filter_menu_open = !self.watchlist_flags.filter_menu_open;
+        cx.notify();
+    }
+
+    pub(super) fn close_watchlist_flag_filter_menu(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.watchlist_flags.filter_menu_open) {
+            cx.notify();
+        }
+    }
+
+    /// Shows only the rows flagged with `filter`, or every row for `None`.
+    pub(super) fn set_watchlist_flag_filter(
+        &mut self,
+        filter: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.watchlist_flags.filter_menu_open = false;
+        self.watchlist_flags.filter = filter;
+        self.release_unused_watchlist_flag_filter();
         cx.notify();
     }
 
@@ -712,6 +904,7 @@ impl TerminalApp {
 
     /// Shows the next or previous watchlist symbol on the active chart.
     fn step_watchlist(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let visible = self.visible_watchlist_indices();
         let current = {
             let surface = self.active_surface().read(cx);
             let active = surface
@@ -719,15 +912,15 @@ impl TerminalApp {
                 .pending_product()
                 .or(surface.product.as_ref());
             active.and_then(|active| {
-                self.watchlist.iter().position(|instrument| {
-                    active.provider == instrument.provider
-                        && active.instrument_id == instrument.instrument_id
+                visible.iter().position(|&index| {
+                    self.watchlist[index].is(&active.provider, &active.instrument_id)
                 })
             })
         };
-        let Some(instrument) = watchlist_step(current, self.watchlist.len(), forward)
-            .and_then(|index| self.watchlist.get(index))
-            .cloned()
+        let Some(instrument) = watchlist_step(current, visible.len(), forward)
+            .and_then(|row| visible.get(row))
+            .and_then(|&index| self.watchlist.get(index))
+            .map(|entry| entry.instrument.clone())
         else {
             return;
         };

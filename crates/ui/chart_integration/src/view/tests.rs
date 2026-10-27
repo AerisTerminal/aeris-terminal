@@ -4692,6 +4692,40 @@ fn anchored_drawing_tools_commit_real_aeris_charts_drawings_and_return_to_cursor
 }
 
 #[test]
+fn straight_line_tools_draw_with_the_aeris_charts_two_pixel_default() {
+    let mut chart = interactive_chart();
+    let tools = [
+        (DrawingKind::TrendLine, 2, 2.0),
+        (DrawingKind::Ray, 2, 2.0),
+        (DrawingKind::ExtendedLine, 2, 2.0),
+        (DrawingKind::InfoLine, 2, 2.0),
+        (DrawingKind::TrendAngle, 2, 2.0),
+        (DrawingKind::ArrowLine, 2, 2.0),
+        (DrawingKind::HorizontalLine, 1, 2.0),
+        (DrawingKind::HorizontalRay, 1, 2.0),
+        (DrawingKind::VerticalLine, 1, 2.0),
+        (DrawingKind::CrossLine, 1, 2.0),
+        (DrawingKind::Rectangle, 2, 1.0),
+    ];
+
+    let mut y = 120.0;
+    for (tool, anchors, width) in tools {
+        chart.set_drawing_tool(Some(tool));
+        y += 20.0;
+        for &x in [260.0, 340.0].iter().take(anchors) {
+            click(&mut chart, x, y);
+        }
+        let drawing = chart
+            .engine
+            .drawings()
+            .last()
+            .expect("tool placed a drawing");
+        assert_eq!(drawing.kind, tool);
+        assert_eq!(drawing.width, width, "{tool:?} default stroke");
+    }
+}
+
+#[test]
 fn every_aeris_charts_drawing_tool_arms_from_the_host_toolbar() {
     let mut chart = interactive_chart();
     let kinds: Vec<_> = (0..=u8::MAX).filter_map(DrawingKind::from_u8).collect();

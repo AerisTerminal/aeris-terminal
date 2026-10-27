@@ -422,6 +422,7 @@ mod tests {
             instrument: local_state::fixture_workspace().watchlist_entries[0]
                 .instrument
                 .clone(),
+            flag_color: "#335CFF".to_string(),
         };
         let drawing_template = WorkspaceDrawingTemplateState {
             kind: "trend_line".to_string(),

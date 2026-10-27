@@ -250,6 +250,10 @@ pub struct WorkspaceDrawingTemplateState {
 pub struct WorkspaceWatchlistEntryState {
     #[prost(message, optional, tag = "1")]
     pub instrument: Option<InstallProviderInstrument>,
+    /// The row's flag as a CSS hex color such as `#335CFF`. Empty means unflagged, which
+    /// is also how entries written before flags existed decode.
+    #[prost(string, tag = "2")]
+    pub flag_color: String,
 }
 
 /// One locally persisted chart styling template. The chart type, market data, indicators,

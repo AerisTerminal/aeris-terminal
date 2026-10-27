@@ -233,6 +233,7 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
         default_chart_settings: None,
         watchlist_entries: vec![WorkspaceWatchlistEntryState {
             instrument: watchlist_instrument,
+            flag_color: "#335CFF".into(),
         }],
         drawing_templates: vec![WorkspaceDrawingTemplateState {
             kind: "trend_line".into(),

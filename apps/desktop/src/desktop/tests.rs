@@ -1485,6 +1485,101 @@ mod timeframe_input {
         (terminal, cx)
     }
 
+    #[gpui::test]
+    fn watchlist_flags_set_recolor_filter_and_clear(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let first = local_state::fixture_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("fixture instrument");
+        let mut second = first.clone();
+        second.instrument_id = format!("{}-second", first.instrument_id);
+        second.display_symbol = "SECOND".to_string();
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, _| {
+                terminal.watchlist = vec![
+                    WatchlistEntry {
+                        instrument: first.clone(),
+                        flag: None,
+                    },
+                    WatchlistEntry {
+                        instrument: second.clone(),
+                        flag: None,
+                    },
+                ];
+            });
+        });
+        let (provider, id) = (first.provider.clone(), first.instrument_id.clone());
+
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.press_watchlist_flag(&provider, &id, window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(
+                terminal.watchlist[0].flag.as_deref(),
+                Some(DEFAULT_WATCHLIST_FLAG_COLOR),
+                "a first press flags the row in the default color"
+            );
+            assert!(
+                terminal
+                    .watchlist_flags
+                    .picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.is_for(&terminal.watchlist[0])),
+                "and opens that row's color picker"
+            );
+        });
+
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.apply_watchlist_flag_color("#f23645", cx);
+            });
+        });
+        cx.update(|_, cx| terminal.update(cx, TerminalApp::close_watchlist_flag_picker));
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert!(terminal.watchlist_flags.picker.is_none());
+            let entries = terminal.watchlist_entries();
+            assert_eq!(
+                entries[0].flag_color, "#F23645",
+                "the picked color persists"
+            );
+            assert_eq!(entries[1].flag_color, "");
+        });
+
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.set_watchlist_flag_filter(Some("#F23645".to_string()), cx);
+            });
+        });
+        cx.read(|cx| {
+            let rows = terminal.read(cx).watchlist_rows(cx);
+            assert_eq!(rows.len(), 1, "the filter shows only rows with its flag");
+            assert_eq!(rows[0].instrument.instrument_id, first.instrument_id);
+        });
+
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.press_watchlist_flag(&provider, &id, window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert!(
+                terminal.watchlist[0].flag.is_none(),
+                "a press on a flag clears it"
+            );
+            assert!(
+                terminal.watchlist_flags.filter.is_none(),
+                "clearing the last flag of the filtered color ends the filter"
+            );
+            assert_eq!(terminal.watchlist_rows(cx).len(), 2);
+        });
+    }
+
     #[test]
     fn terminal_fixture_keeps_the_subscription_thread_off_the_gpui_scheduler() {
         let mut cx = TestAppContext::single();
@@ -3223,6 +3318,38 @@ fn every_registry_shortcut_binds_and_stays_off_the_chart_keys() {
         bindings.len(),
         chord_count,
         "one binding per registry chord"
+    );
+}
+
+#[test]
+fn watchlist_flag_filter_keeps_rows_with_its_color_and_lists_each_color_once() {
+    let instrument = |id: &str| InstallProviderInstrument {
+        provider: "fixture".to_string(),
+        instrument_id: id.to_string(),
+        ..InstallProviderInstrument::default()
+    };
+    let entry = |id: &str, flag: Option<&str>| super::WatchlistEntry {
+        instrument: instrument(id),
+        flag: flag.map(str::to_string),
+    };
+    let entries = [
+        entry("a", Some("#335CFF")),
+        entry("b", None),
+        entry("c", Some("#F23645")),
+        entry("d", Some("#335CFF")),
+    ];
+
+    assert_eq!(
+        super::visible_watchlist_indices(&entries, None, None),
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(
+        super::visible_watchlist_indices(&entries, Some("#335CFF"), None),
+        vec![0, 3]
+    );
+    assert_eq!(
+        super::watchlist_flag_colors(&entries),
+        vec!["#335CFF".to_string(), "#F23645".to_string()]
     );
 }
 
