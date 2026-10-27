@@ -11,8 +11,8 @@ const WATCHLIST_LAST_WIDTH: f32 = 70.0;
 const WATCHLIST_CHANGE_WIDTH: f32 = 66.0;
 const WATCHLIST_CHANGE_PERCENT_WIDTH: f32 = 64.0;
 const WATCHLIST_VOLUME_WIDTH: f32 = 60.0;
-const WATCHLIST_FLAG_SLOT_WIDTH: f32 = 20.0;
-const WATCHLIST_FLAG_GLYPH_SIZE: f32 = 14.0;
+const WATCHLIST_FLAG_SLOT_WIDTH: f32 = 16.0;
+const WATCHLIST_FLAG_GLYPH_SIZE: f32 = 16.0;
 const WATCHLIST_FLAG_GROUP: &str = "watchlist_flag_slot";
 const WATCHLIST_FLAG_FILTER_MENU_WIDTH: f32 = 180.0;
 
@@ -449,8 +449,8 @@ fn interactive_watchlist_row(
         })
 }
 
-/// The flag at a row's leading edge. An unflagged row shows an outline that fills with the
-/// default color on hover. A left press sets or clears the flag and a right press opens its
+/// The flag at a row's leading edge. An unflagged row shows nothing until the slot is
+/// hovered, then previews the flag in the default color. A left press sets or clears the flag and a right press opens its
 /// color picker; neither reaches the row, so they never select, drag or remove it.
 fn watchlist_flag_slot(
     terminal: &Entity<TerminalApp>,
@@ -460,17 +460,11 @@ fn watchlist_flag_slot(
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let glyph = |icon: HugeIcon, color: Hsla| {
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                Icon::new(icon.path())
-                    .with_size(px(WATCHLIST_FLAG_GLYPH_SIZE))
-                    .color(color),
-            )
+        div().absolute().inset_0().flex().items_center().child(
+            Icon::new(icon.path())
+                .with_size(px(WATCHLIST_FLAG_GLYPH_SIZE))
+                .color(color),
+        )
     };
     let glyphs = match &row.flag {
         Some(flag) => vec![glyph(
@@ -478,8 +472,6 @@ fn watchlist_flag_slot(
             chart_css_color(flag, colors.primary),
         )],
         None => vec![
-            glyph(HugeIcon::Flag, gpui_color(colors.text_muted))
-                .group_hover(WATCHLIST_FLAG_GROUP, |style| style.opacity(0.0)),
             glyph(
                 HugeIcon::FlagFilled,
                 chart_css_color(DEFAULT_WATCHLIST_FLAG_COLOR, colors.primary),
