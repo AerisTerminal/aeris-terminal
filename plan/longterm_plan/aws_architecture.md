@@ -71,7 +71,7 @@ All AWS infrastructure is defined with CDK in the website repository (`infra/`),
 | Terminal (this repo) | `C:\Users\devraj\Downloads\Softwares\aeris-terminal` |
 | Website and AWS infra | `C:\Users\devraj\Downloads\Softwares\aeris-website` |
 | Chart engine | `C:\Users\devraj\Downloads\Softwares\aeris-charts` (pinned Git dependency here) |
-| Rithmic Provider Kit | `C:\axiusflow-deps\provider-kit` (licensed, never in Git) |
+| Rithmic proto kit | `C:\rithmic_proto_kit` (licensed, never in Git) |
 
 ### Terminal
 

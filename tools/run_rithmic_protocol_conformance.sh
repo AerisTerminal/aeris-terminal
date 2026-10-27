@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest_path="$repo_root/Cargo.toml"
-kit_proto_dir="$repo_root/provider_kit/current/proto"
+kit_proto_dir="$repo_root/rithmic_proto_kit/proto"
 
 if [[ -d "$kit_proto_dir" ]]; then
     cargo test \

@@ -1381,7 +1381,7 @@ mod tests {
             let path = entry.path();
             if path.is_dir() {
                 if path.file_name().is_some_and(|name| {
-                    name == "provider_kit" || super::should_skip_directory(name)
+                    name == "rithmic_proto_kit" || super::should_skip_directory(name)
                 }) {
                     continue;
                 }
@@ -2137,22 +2137,22 @@ mod tests {
         }
     }
     #[test]
-    fn provider_kit_remains_vendor_only() {
+    fn rithmic_proto_kit_remains_vendor_only() {
         assert!(
-            !manifest("Cargo.toml").contains("provider_kit"),
-            "provider_kit must not become a workspace application crate"
+            !manifest("Cargo.toml").contains("rithmic_proto_kit"),
+            "rithmic_proto_kit must not become a workspace application crate"
         );
 
         // The Rithmic kit is gitignored vendor input. A clean checkout does not have it and the
         // adapter's build script compiles without it, so only its contents are checked here.
-        let provider_kit = repository_root().join("provider_kit");
-        if !provider_kit.is_dir() {
+        let kit = repository_root().join("rithmic_proto_kit");
+        if !kit.is_dir() {
             return;
         }
 
         let mut application_sources = Vec::new();
         collect_files(
-            &provider_kit,
+            &kit,
             |path| {
                 path.file_name().is_some_and(|name| name == "Cargo.toml")
                     || path.extension().is_some_and(|extension| extension == "rs")
@@ -2161,7 +2161,7 @@ mod tests {
         );
         assert!(
             application_sources.is_empty(),
-            "provider_kit must not gain Aeris Rust/application source: {:?}",
+            "rithmic_proto_kit must not gain Aeris Rust/application source: {:?}",
             application_sources
                 .iter()
                 .map(|path| relative_string(path))
@@ -4408,7 +4408,7 @@ jobs:
         }
         assert!(
             workflow.contains("AERIS_RITHMIC_KIT_DISABLED: \"1\"")
-                && !workflow.contains("provider_kit")
+                && !workflow.contains("rithmic_proto_kit")
                 && !workflow.contains("RITHMIC_KIT_ROOT"),
             "public hosted runners must never receive the licensed Rithmic kit"
         );
@@ -4455,7 +4455,7 @@ jobs:
             workflow.contains("RITHMIC_KIT_ARCHIVE: ${{ secrets.AERIS_RITHMIC_KIT_TAR_XZ_B64 }}")
                 && workflow.contains("if: ${{ inputs.rithmic_kit }}")
                 && workflow.contains("if: ${{ always() && inputs.rithmic_kit }}")
-                && workflow.contains("rm -rf provider_kit")
+                && workflow.contains("rm -rf rithmic_proto_kit")
                 && workflow.contains("rithmic.protobuf.rs"),
             "the Rithmic kit must be unpacked only on request, deleted after the build, \
              and proven compiled in"
@@ -4553,7 +4553,7 @@ jobs:
             workflow.contains("RITHMIC_KIT_ARCHIVE: ${{ secrets.AERIS_RITHMIC_KIT_TAR_XZ_B64 }}")
                 && workflow.contains("if: ${{ inputs.rithmic_kit }}")
                 && workflow.contains("if: ${{ always() && inputs.rithmic_kit }}")
-                && workflow.contains("rm -rf provider_kit")
+                && workflow.contains("rm -rf rithmic_proto_kit")
                 && workflow.contains("rithmic.protobuf.rs"),
             "the Rithmic kit must be unpacked only on request, deleted after the build, \
              and proven compiled in"
@@ -4733,7 +4733,7 @@ jobs:
             "the credentialed Rithmic gate must restore the licensed kit before building"
         );
         assert_eq!(
-            workflow.matches("Require Rithmic provider kit").count(),
+            workflow.matches("Require Rithmic proto kit").count(),
             1,
             "the credentialed Rithmic gate must fail fast when the kit is absent"
         );
@@ -4870,10 +4870,10 @@ jobs:
             );
         }
         assert!(
-            workflow.contains("AXIUSFLOW_RITHMIC_KIT_ROOT")
-                && workflow.contains("AERIS_RITHMIC_KIT_ROOT")
-                && workflow.contains("C:\\axiusflow-deps\\provider-kit"),
-            "live-market gates must keep the provisioned Rithmic kit location and accept both env names"
+            workflow.contains("AERIS_RITHMIC_KIT_ROOT")
+                && workflow.contains("C:\\rithmic_proto_kit")
+                && !workflow.contains("axiusflow-deps"),
+            "live-market gates must read the Rithmic proto kit from its provisioned location"
         );
         for hosted in ["ubuntu-latest", "windows-latest", "macos-latest"] {
             assert!(

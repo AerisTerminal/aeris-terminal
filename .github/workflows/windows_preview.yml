@@ -53,10 +53,10 @@ jobs:
             echo "::error::AERIS_RITHMIC_KIT_TAR_XZ_B64 is not set; a Rithmic tester build needs the kit"
             exit 1
           fi
-          mkdir -p provider_kit/current
-          printf '%s' "$RITHMIC_KIT_ARCHIVE" | base64 --decode | tar -xJf - -C provider_kit/current
-          test -f provider_kit/current/proto/change_log
-          ls provider_kit/current/proto/*.proto > /dev/null
+          mkdir -p rithmic_proto_kit
+          printf '%s' "$RITHMIC_KIT_ARCHIVE" | base64 --decode | tar -xJf - -C rithmic_proto_kit
+          test -f rithmic_proto_kit/proto/change_log
+          ls rithmic_proto_kit/proto/*.proto > /dev/null
           echo "PREVIEW_FLAVOR=-rithmic" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup show
@@ -66,7 +66,7 @@ jobs:
         if: ${{ always() && inputs.rithmic_kit }}
         run: |
           set -euo pipefail
-          rm -rf provider_kit
+          rm -rf rithmic_proto_kit
           # A missing kit falls back to a kitless build silently; fail instead.
           ls target/release/build/aeris_rithmic_protocol_adapter-*/out/rithmic.protobuf.rs
       - name: Build installer

@@ -404,8 +404,10 @@ the check.
   Rithmic's `VenueCapabilities`, so the owner reconciles every account after a reconnect; the desktop
   only connects the trading owner's attach and inbox handles to it.
 
-The licensed Rithmic Provider Kit remains outside Git. The canonical local copy is
-`C:\axiusflow-deps\provider-kit`; do not vendor or modify that permanent copy.
+The licensed Rithmic proto kit (the R|Protocol `proto` schema folder) remains outside Git. Its
+canonical local copy is `C:\rithmic_proto_kit\proto`; the repository reaches it through the ignored
+`rithmic_proto_kit` junction, which the adapter's build script reads as `rithmic_proto_kit/proto`.
+Do not vendor or modify that permanent copy.
 
 ## Operating constraints
 

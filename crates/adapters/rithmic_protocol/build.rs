@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         env::var_os("CARGO_MANIFEST_DIR")
             .ok_or("Cargo did not provide CARGO_MANIFEST_DIR to the Rithmic build script")?,
     );
-    let proto_dir = manifest_dir.join("../../../provider_kit/current/proto");
+    let proto_dir = manifest_dir.join("../../../rithmic_proto_kit/proto");
     println!("cargo:rerun-if-changed={}", proto_dir.display());
 
     if env::var_os(KIT_DISABLED_ENV).is_some() || !proto_dir.is_dir() {
