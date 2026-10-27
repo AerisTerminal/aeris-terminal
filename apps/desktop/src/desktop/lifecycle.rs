@@ -82,6 +82,15 @@ impl DesktopLifecycle {
     }
 
     #[cfg(test)]
+    pub(super) fn new_for_test_with_trading(
+        trading: aeris_trading_runtime::TradingService,
+    ) -> Self {
+        let mut lifecycle = Self::new_for_test();
+        lifecycle.services.trading = trading;
+        lifecycle
+    }
+
+    #[cfg(test)]
     pub(super) fn fixture_without_trading_bridge(&self) -> bool {
         self.fixture_without_trading_bridge
     }

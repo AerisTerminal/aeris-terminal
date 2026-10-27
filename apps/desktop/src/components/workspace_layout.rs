@@ -816,7 +816,7 @@ pub(super) fn trading_projection_current(state: &WorkspaceSurface) -> bool {
     state.trading_pnl.applied_selection.as_ref() == Some(&pane_trading_selection(state))
 }
 
-fn apply_trading_snapshot(
+pub(super) fn apply_trading_snapshot(
     state: &mut WorkspaceSurface,
     store_entity: &Entity<trading_store::TradingStore>,
     state_cx: &mut Context<WorkspaceSurface>,

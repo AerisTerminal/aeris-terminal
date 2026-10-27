@@ -23,6 +23,7 @@ struct PaneHarness {
 struct PaneWindow {
     pane: Entity<WorkspaceSurface>,
     toaster: Toaster,
+    _trading_store: Entity<trading_store::TradingStore>,
 }
 
 impl toaster::ToastHost for PaneWindow {
@@ -57,6 +58,27 @@ impl Render for PaneWindow {
 }
 
 impl PaneHarness {
+    fn adopt_owner_publication(
+        &self,
+        subscription: &aeris_trading_runtime::TradingSubscription,
+        cx: &mut VisualTestContext,
+    ) {
+        let update = subscription
+            .recv_timeout(Duration::from_secs(2))
+            .expect("owner publication");
+        self.pane.update(cx, |pane, cx| {
+            let store = pane
+                .lifecycle
+                .trading_store()
+                .expect("injected empty store");
+            store.update(cx, |store, cx| {
+                store.apply_test_publication(update);
+                cx.notify();
+            });
+            workspace_layout::apply_trading_snapshot(pane, &store, cx);
+        });
+    }
+
     fn fixture_snapshot(
         &mut self,
         product: &InstallProviderInstrument,
@@ -157,6 +179,17 @@ impl PaneHarness {
         interval: ChartInterval,
         cx: &mut TestAppContext,
     ) -> (Self, &mut VisualTestContext) {
+        Self::open_with_product_and_owner(restore, fill_command_queue, product, interval, None, cx)
+    }
+
+    fn open_with_product_and_owner(
+        restore: WorkspaceSurfaceRestore,
+        fill_command_queue: bool,
+        product: InstallProviderInstrument,
+        interval: ChartInterval,
+        owner: Option<aeris_trading_runtime::TradingService>,
+        cx: &mut TestAppContext,
+    ) -> (Self, &mut VisualTestContext) {
         let (commands, requests) = mpsc::sync_channel(8);
         let (publications, messages) = market_projection_channel(NonZeroUsize::new(8).unwrap());
         let (_shutdown_sender, shutdown) = mpsc::sync_channel(1);
@@ -176,6 +209,11 @@ impl PaneHarness {
         }
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
+            let lifecycle = owner.map_or_else(DesktopLifecycle::new_for_test, |owner| {
+                DesktopLifecycle::new_for_test_with_trading(owner)
+            });
+            let store = cx.new(|_| trading_store::TradingStore::default());
+            lifecycle.register_trading_store(&store);
             let startup = MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
                 product,
                 interval,
@@ -186,7 +224,7 @@ impl PaneHarness {
             let pane = workspace_surface_entity(
                 startup,
                 worker,
-                &DesktopLifecycle::new_for_test(),
+                &lifecycle,
                 chart_chrome::ChartChromePreferences::default(),
                 restore,
                 window,
@@ -223,6 +261,7 @@ impl PaneHarness {
             PaneWindow {
                 pane,
                 toaster: Toaster::default(),
+                _trading_store: store,
             }
         });
         let pane = cx.read(|cx| view.read(cx).pane.clone());
@@ -273,6 +312,152 @@ impl PaneHarness {
             pane.install_snapshot_chart(&snapshot.snapshot, cx);
         });
     }
+}
+
+fn place_scope_resting_order(
+    owner: &aeris_trading_runtime::TradingService,
+    product: &InstallProviderInstrument,
+    account: &aeris_trading::TradingAccountId,
+    id: &str,
+) -> aeris_trading::Order {
+    let mut command = aeris_desktop::trading::prepare_product_order(
+        1_000_000_000_000,
+        product,
+        aeris_trading::OrderSide::Buy,
+        Some(account.as_str().into()),
+        1,
+        aeris_trading::OrderType::Limit,
+        aeris_trading::TimeInForce::Day,
+    )
+    .expect("valid product-scoped instruction");
+    command.client_order_id = aeris_trading::ClientOrderId::try_new(id).expect("client id");
+    command.limit_price = Some(aeris_trading::FixedPoint::try_new(9_900, 2).expect("limit"));
+    let order = owner
+        .place_order(command)
+        .expect("open-session owner admission");
+    assert_eq!(order.status, aeris_trading::OrderStatus::Working);
+    order
+}
+
+fn assert_owner_rejects_unpriced_modify(
+    owner: &aeris_trading_runtime::TradingService,
+    order: &aeris_trading::Order,
+) {
+    use aeris_trading_runtime::{ModifyOrder, OrderCommandError, RevisionedModifyOrder};
+    let error = owner
+        .modify_order_from_market_checked(RevisionedModifyOrder {
+            order: ModifyOrder {
+                client_order_id: order.client_order_id.clone(),
+                time_in_force: order.time_in_force,
+                limit_price: Some(aeris_trading::FixedPoint::try_new(9_800, 2).expect("new limit")),
+                stop_price: None,
+                modified_unix_nanos: 1_000_000_000_000,
+                provenance: order.provenance.clone(),
+            },
+            expected_revision: Some(order.revision),
+        })
+        .expect_err("owner rejects missing quote for modify");
+    assert!(matches!(error, OrderCommandError::Other(message) if message.contains("quote")));
+}
+
+#[gpui::test]
+fn pane_harness_open_session_owner_cancels_resting_orders_and_rejects_missing_quote(
+    cx: &mut TestAppContext,
+) {
+    use aeris_trading::OrderStatus;
+    use aeris_trading::market::{
+        FeedReason, FeedState, MarketFeedError, MarketFeedEvent, QuoteInterest, QuoteInterestSink,
+    };
+    use aeris_trading_runtime::OrderCommandError;
+    struct Interest;
+    impl QuoteInterestSink for Interest {
+        fn set_interest(&self, _: QuoteInterest) -> Result<(), MarketFeedError> {
+            Ok(())
+        }
+    }
+    let (owner, root, account, _, instrument, _) =
+        trading_store::real_owner_fill_fixture_for("hyperliquid");
+    let subscription = owner.subscribe().expect("owner subscription");
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.instrument_id = instrument.as_str().into();
+    product.price_scale = 0;
+    product.quantity_scale = 0;
+    product.price_increment = Some(1);
+    let (mut harness, cx) = PaneHarness::open_with_product_and_owner(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product.clone(),
+        ChartInterval::Minute1,
+        Some(owner.clone()),
+        cx,
+    );
+    harness.publish_snapshot(12, cx);
+    harness.adopt_owner_publication(&subscription, cx);
+    let first = place_scope_resting_order(&owner, &product, &account, "pane-scope-cancel");
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        let chart = pane.chart.as_ref().expect("populated chart").read(cx);
+        assert_eq!(
+            chart.trading_snapshot().orders.len(),
+            1,
+            "resting owner order is drawn"
+        );
+        assert_eq!(chart.trading_snapshot().orders[0].price, 99.0);
+    });
+    let cancelled = owner
+        .cancel_all(Some(account.clone()))
+        .expect("scoped cancel");
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled[0].id, first.id);
+    assert_eq!(cancelled[0].status, OrderStatus::Cancelled);
+    harness.adopt_owner_publication(&subscription, cx);
+    let second = place_scope_resting_order(&owner, &product, &account, "pane-scope-kill");
+    harness.adopt_owner_publication(&subscription, cx);
+    let feed = owner
+        .attach_market_feed(Arc::new(Interest))
+        .expect("scripted feed");
+    feed.push(MarketFeedEvent::Feed {
+        instrument_id: instrument.clone(),
+        provider_generation: 1,
+        state: FeedState::Unavailable {
+            reason: FeedReason::QuoteMissing,
+        },
+    })
+    .expect("remove owner quote");
+    owner.status().expect("quote removal adopted");
+    assert_owner_rejects_unpriced_modify(&owner, &second);
+    let killed = owner
+        .kill_switch(Some(account), "scope fixture".into(), 1_000_000_000_000)
+        .expect("kill cancels resting order without quote");
+    assert_eq!(killed.cancelled.len(), 1);
+    assert_eq!(killed.cancelled[0].id, second.id);
+    let stale = owner
+        .cancel_order_checked(aeris_trading_runtime::RevisionedCancelOrder {
+            client_order_id: second.client_order_id,
+            expected_revision: Some(second.revision),
+        })
+        .expect_err("the owner rejects the retired revision");
+    assert!(matches!(stale, OrderCommandError::StaleRevision { current }
+        if current.id == second.id && current.status == OrderStatus::Cancelled));
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(
+            pane.chart
+                .as_ref()
+                .expect("chart")
+                .read(cx)
+                .trading_snapshot()
+                .orders,
+            []
+        );
+    });
+    owner
+        .shutdown(Duration::from_secs(2))
+        .expect("owner stopped");
+    std::fs::remove_dir_all(root).expect("remove test root");
 }
 
 #[gpui::test]

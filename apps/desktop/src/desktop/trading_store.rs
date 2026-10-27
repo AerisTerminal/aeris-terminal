@@ -285,6 +285,12 @@ pub(super) struct TradingStore {
 }
 
 impl TradingStore {
+    #[cfg(test)]
+    pub(super) fn apply_test_publication(&mut self, update: SubscriptionUpdate) {
+        self.slot.lock().expect("test slot").offer(update);
+        self.drain().expect("owner publication applied");
+    }
+
     pub(super) fn start(
         &mut self,
         subscription: TradingSubscription,
@@ -568,6 +574,9 @@ impl Drop for TradingStore {
         self.stop.store(true, Ordering::Release);
     }
 }
+
+#[cfg(test)]
+pub(in crate::desktop) use tests::real_owner_fill_fixture_for;
 
 #[cfg(test)]
 mod tests {
@@ -940,6 +949,19 @@ mod tests {
         InstrumentId,
         InstrumentId,
     ) {
+        real_owner_fill_fixture_for("fixture")
+    }
+
+    pub(in crate::desktop) fn real_owner_fill_fixture_for(
+        provider: &str,
+    ) -> (
+        aeris_trading_runtime::TradingService,
+        std::path::PathBuf,
+        TradingAccountId,
+        TradingAccountId,
+        InstrumentId,
+        InstrumentId,
+    ) {
         use aeris_trading::{AccountEnvironment, FixedPoint, TradingAccount};
         use aeris_trading_runtime::{
             ExecutionPolicy, TradingRetention, TradingService, TradingServiceConfig,
@@ -988,7 +1010,7 @@ mod tests {
                 starting_equity: Some(price(1_000_000)),
             })
             .expect("other account registered");
-        script_owner_quote(&service, &instrument);
+        script_owner_quote_for(&service, &instrument, provider);
         (
             service,
             root,
@@ -999,9 +1021,10 @@ mod tests {
         )
     }
 
-    fn script_owner_quote(
+    fn script_owner_quote_for(
         service: &aeris_trading_runtime::TradingService,
         instrument: &InstrumentId,
+        provider: &str,
     ) {
         use aeris_instruments::{
             CalendarSourceKind, InstrumentClass, InstrumentDecimal, PriceGrid, SessionPhase,
@@ -1022,17 +1045,18 @@ mod tests {
         let feed = service
             .attach_market_feed(Arc::new(ScriptedInterest))
             .expect("feed");
+        let route = MarketRoute {
+            provider_id: provider.into(),
+            instrument_id: instrument.clone(),
+            provider_symbol: "REAL".into(),
+            display_symbol: "REAL".into(),
+            venue_id: "Fixture".into(),
+            entitlement_id: None,
+            price_scale: 2,
+            quantity_scale: 0,
+        };
         feed.push(MarketFeedEvent::Terms(InstrumentTerms {
-            route: MarketRoute {
-                provider_id: "fixture".into(),
-                instrument_id: instrument.clone(),
-                provider_symbol: "REAL".into(),
-                display_symbol: "REAL".into(),
-                venue_id: "Fixture".into(),
-                entitlement_id: None,
-                price_scale: 2,
-                quantity_scale: 0,
-            },
+            route: route.clone(),
             instrument_class: InstrumentClass::CryptoPerpetual,
             price_grid: PriceGrid::Fixed(InstrumentDecimal::try_new(1, 2).expect("tick")),
             point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point")),
@@ -1041,16 +1065,26 @@ mod tests {
             expiry: None,
             first_notice: None,
             last_trade: None,
-            session_hours: vec![],
+            session_hours: (1..=7)
+                .map(|weekday| aeris_instruments::SessionHours {
+                    weekday,
+                    open_seconds: 0,
+                    close_seconds: if weekday == 4 { 80_000 } else { 86_400 },
+                    timezone: "Etc/UTC".into(),
+                })
+                .collect(),
             session_generation: 1,
         }))
         .expect("verified terms");
+        service
+            .set_ticket_interest(vec![route])
+            .expect("owner ticket interest");
         feed.push(MarketFeedEvent::Session(InstrumentSession {
             instrument_id: instrument.clone(),
             provider_generation: 1,
-            phase: SessionPhase::AlwaysOpen,
+            phase: SessionPhase::Open,
             source: CalendarSourceKind::ProviderCalendar,
-            session_end_unix_nanos: None,
+            session_end_unix_nanos: Some(80_000_000_000_000),
             next_open_unix_nanos: None,
         }))
         .expect("open session");
@@ -1067,7 +1101,7 @@ mod tests {
             bid_size: None,
             ask_size: None,
             last: None,
-            provider_id: "fixture".into(),
+            provider_id: provider.into(),
             provider_generation: 1,
             source_sequence: Some(1),
             exchange_unix_nanos: None,
