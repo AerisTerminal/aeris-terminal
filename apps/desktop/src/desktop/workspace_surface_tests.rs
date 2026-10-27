@@ -768,7 +768,7 @@ fn failed_study_setting_reinitialization_preserves_durable_configuration() {
         study_id,
         PendingStudyReinitialization {
             series,
-            replacement_persisted: Some(replacement),
+            replacement_settings: Some(replacement.settings),
         },
     );
 
@@ -798,7 +798,7 @@ fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_seri
         study_id,
         PendingStudyReinitialization {
             series: rejected.clone(),
-            replacement_persisted: None,
+            replacement_settings: None,
         },
     );
     let now = std::time::Instant::now();
@@ -813,7 +813,7 @@ fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_seri
         study_id,
         PendingStudyReinitialization {
             series: rejected.clone(),
-            replacement_persisted: None,
+            replacement_settings: None,
         },
     );
     assert_eq!(studies.complete_reinitialization(study_id), Some(false));
@@ -887,14 +887,14 @@ fn reinitializing_dependency_chain() -> (
         root_id,
         PendingStudyReinitialization {
             series: new_series.clone(),
-            replacement_persisted: None,
+            replacement_settings: None,
         },
     );
     studies.begin_reinitialization(
         downstream_id,
         PendingStudyReinitialization {
             series: new_series.clone(),
-            replacement_persisted: None,
+            replacement_settings: None,
         },
     );
     (studies, root_id, downstream_id, new_series)
@@ -1047,7 +1047,7 @@ fn runtime_subtree_removal_fixture() -> (RuntimeStudiesState, StudyInstanceId, S
         downstream_id,
         PendingStudyReinitialization {
             series: custom_package_series("instrument:rithmic:CME:MES"),
-            replacement_persisted: None,
+            replacement_settings: None,
         },
     );
     (studies, root_id, downstream_id)

@@ -2,16 +2,16 @@ use std::{rc::Rc, sync::Arc};
 
 use aeris_design_system::{AerisTheme, RadiusToken};
 use gpui::{
-    App, Bounds, CursorStyle, DispatchPhase, ElementId, Entity, HitboxBehavior, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, Rgba,
-    SharedString, Window, canvas, checkerboard, div, hsla, linear_color_stop, linear_gradient,
-    prelude::*, px, relative,
+    App, Bounds, CursorStyle, DispatchPhase, ElementId, Entity, EntityId, HitboxBehavior, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    RenderOnce, Rgba, SharedString, Subscription, WeakEntity, Window, canvas, checkerboard, div,
+    hsla, linear_color_stop, linear_gradient, prelude::*, px, relative,
 };
 use num_traits::ToPrimitive;
 
 use super::{
     button::{Button, ButtonSize, ButtonVariant},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{ANCHOR_GAP, PopupAnimationOrigin, animate_popup_from_origin},
     popup_fit::fit_to_window,
     rem_scale::design_rems,
@@ -21,7 +21,8 @@ use super::{
 type SelectionHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 type DismissHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
-const PANEL_WIDTH: f32 = 232.0;
+/// Wide enough that the hex field shows a full `#RRGGBBAA` value beside the preview and Set.
+const PANEL_WIDTH: f32 = 288.0;
 const PANEL_PADDING: f32 = 12.0;
 const FIELD_HEIGHT: f32 = 132.0;
 const SLIDER_HEIGHT: f32 = 10.0;
@@ -87,6 +88,40 @@ fn fraction(offset: Pixels, length: Pixels) -> f32 {
 struct PickerPointer {
     drag: Option<PointerTarget>,
     picked: Option<Hsva>,
+}
+
+/// Selects a hex value as it is typed. The hosting dialog owns the input and recreates it each
+/// time the picker opens, so the subscription follows the input it was made for.
+#[derive(Default)]
+struct HexTyping {
+    handler: Option<SelectionHandler>,
+    watched: Option<(EntityId, Subscription)>,
+}
+
+/// Selects the typed value once it is a complete `#RRGGBB` or `#RRGGBBAA` color. Shorthand
+/// forms are prefixes of longer ones, so they wait for Set rather than flash a different color.
+fn select_typed_hex(
+    input: &Entity<InputState>,
+    typing: WeakEntity<HexTyping>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Subscription {
+    window.subscribe(input, cx, move |input, event: &InputEvent, window, cx| {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let value = input.read(cx).value().to_string();
+        let digits = value.trim().strip_prefix('#').unwrap_or(value.trim()).len();
+        if !matches!(digits, 6 | 8) || normalize_hex_color(&value).is_none() {
+            return;
+        }
+        let handler = typing
+            .upgrade()
+            .and_then(|typing| typing.read(cx).handler.clone());
+        if let Some(handler) = handler {
+            handler(value, window, cx);
+        }
+    })
 }
 
 /// What a pointer surface needs to turn a press or drag into a selection.
@@ -170,6 +205,22 @@ impl RenderOnce for ColorPicker {
             cx,
             |_, _| PickerPointer::default(),
         );
+        let typing = window.use_keyed_state(
+            ElementId::NamedChild(Arc::new(self.id.clone()), "typing".into()),
+            cx,
+            |_, _| HexTyping::default(),
+        );
+        let input_id = self.input.entity_id();
+        let watched = typing.read(cx).watched.as_ref().map(|(id, _)| *id);
+        let subscription = (watched != Some(input_id))
+            .then(|| select_typed_hex(&self.input, typing.downgrade(), window, cx));
+        let handler = self.on_select.clone();
+        typing.update(cx, |typing, _| {
+            typing.handler = handler;
+            if let Some(subscription) = subscription {
+                typing.watched = Some((input_id, subscription));
+            }
+        });
         let normalized = normalize_hex_color(&self.current).unwrap_or_else(|| "#335CFF".into());
         // The last picked color is exact while it is still the current value; a hex value alone
         // loses the hue of greys and rounds the handles to 8-bit steps.
@@ -798,6 +849,33 @@ mod tests {
             picks[2],
             at(1.0, 1.0),
             "a drag past the field clamps to its edge"
+        );
+    }
+
+    #[gpui::test]
+    fn a_typed_hex_color_is_selected_once_it_is_complete(cx: &mut TestAppContext) {
+        let picks = Rc::new(RefCell::new(Vec::new()));
+        let harness_picks = picks.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            gpui_base::init(cx);
+            PickerHarness {
+                current: "#335CFF".into(),
+                input: cx.new(|cx| InputState::new(window, cx)),
+                picks: harness_picks,
+            }
+        });
+        cx.run_until_parked();
+        let input = cx.read(|cx| harness.read(cx).input.clone());
+        for typed in ["#12", "#123", "#12345", "#123456", "#1234567", "#12345680"] {
+            cx.update(|window, cx| {
+                input.update(cx, |input, cx| input.replace_all(typed, window, cx));
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            *picks.borrow(),
+            ["#123456", "#12345680"],
+            "only complete RGB and RGBA values are selected while typing"
         );
     }
 }

@@ -14,7 +14,7 @@ const AVERAGE_KIND_CHOICES: [(&str, VolumeAverageKind); 2] = [
     ("EMA", VolumeAverageKind::Exponential),
 ];
 
-/// A swatch that opens the color picker for one volume color. Picks change only the draft. A
+/// A swatch that opens the color picker for one volume color. Picks preview at once. A
 /// `named` swatch shows the color's name instead of its hex code, for paired colors.
 fn color_control(
     app: &Entity<WorkspaceSurface>,

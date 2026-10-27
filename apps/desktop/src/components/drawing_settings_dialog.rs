@@ -144,8 +144,8 @@ enum DrawingInputTarget {
         property: String,
         index: usize,
     },
-    /// Anchor coordinates apply when the field is submitted or loses focus, since a partly
-    /// typed time is not a time.
+    /// Anchor coordinates apply as soon as they parse. A partly typed time is not a time, so
+    /// why they cannot be used is shown only once the field is submitted or loses focus.
     Anchor(usize),
     /// Any interval range field; the whole visibility set is rebuilt from every row.
     Interval,
@@ -716,7 +716,7 @@ impl WorkspaceSurface {
             .drawing_settings_dialog()
             .map_or(0, |dialog| dialog.anchors.len());
         for slot in 0..anchors {
-            if !self.apply_drawing_anchor_input(slot, cx) {
+            if !self.apply_drawing_anchor_input(slot, true, cx) {
                 if let Some(dialog) = self.drawing_settings_dialog_mut() {
                     dialog.tab = Group::Coordinates;
                 }
@@ -811,11 +811,15 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         match (target, event) {
+            (DrawingInputTarget::Anchor(slot), InputEvent::Change) => {
+                self.apply_drawing_anchor_input(*slot, false, cx);
+                cx.notify();
+            }
             (
                 DrawingInputTarget::Anchor(slot),
                 InputEvent::PressEnter { .. } | InputEvent::Blur,
             ) => {
-                self.apply_drawing_anchor_input(*slot, cx);
+                self.apply_drawing_anchor_input(*slot, true, cx);
                 cx.notify();
             }
             (DrawingInputTarget::Property(name), InputEvent::Change) => {
@@ -1063,8 +1067,14 @@ impl WorkspaceSurface {
         self.set_drawing_settings_value("interval_visibility", visibility, cx);
     }
 
-    /// Moves one anchor to its typed coordinates, returning whether they are applied.
-    fn apply_drawing_anchor_input(&mut self, slot: usize, cx: &mut Context<Self>) -> bool {
+    /// Moves one anchor to its typed coordinates, returning whether they are applied. Unless
+    /// `report`, coordinates that cannot be used leave the field's message as it was.
+    fn apply_drawing_anchor_input(
+        &mut self,
+        slot: usize,
+        report: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(dialog) = self.drawing_settings_dialog() else {
             return false;
         };
@@ -1101,7 +1111,11 @@ impl WorkspaceSurface {
             .drawing_settings_dialog_mut()
             .and_then(|dialog| dialog.anchors.get_mut(slot))
         {
-            anchor.error = result.err().map(|error| error.to_string());
+            match &result {
+                Ok(()) => anchor.error = None,
+                Err(error) if report => anchor.error = Some(error.to_string()),
+                Err(_) => {}
+            }
         }
         result.is_ok()
     }
@@ -1885,7 +1899,7 @@ fn anchors_editor(ui: DialogUi<'_>) -> impl IntoElement + use<> {
                     .pt_1()
                     .text_xs()
                     .text_color(gpui_color(theme.colors.text_muted))
-                    .child("Times are YYYY-MM-DD HH:MM in the chart's time zone. Press Enter to move a point."),
+                    .child("Times are YYYY-MM-DD HH:MM in the chart's time zone."),
             )
         })
 }

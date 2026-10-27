@@ -66,6 +66,7 @@ impl AerisChartView {
                         self.engine.set_selected_series(None);
                     }
                 }
+                ChartInputEvent::IndicatorRemoved(binding) => self.indicator_removed(binding),
             }
         }
     }

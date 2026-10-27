@@ -1,12 +1,14 @@
 //! Settings dialogs of the order-flow indicators: cumulative delta (CVD), the delta histogram
-//! and the order book on the chart. Each dialog edits a draft of one indicator's settings; only
-//! Apply hands them to the chart's order-flow settings owner.
+//! and the order book on the chart. Each dialog edits one indicator's settings and previews every
+//! valid edit through the chart's order-flow settings owner; Apply keeps what the chart shows and
+//! Cancel restores the settings the dialog opened with.
 
 use super::big_trades_dialog::{
     SettingDropdown, control_strip, dropdown_choices, setting_input, setting_row, settings_group,
     settings_groups,
 };
 use super::*;
+use crate::desktop::workspace_surface::preview_on_change;
 
 const STYLE_CHOICES: [(&str, CumulativeDeltaStyle); 2] = [
     ("Line", CumulativeDeltaStyle::Line),
@@ -112,7 +114,7 @@ impl OrderFlowDialogDraft {
     }
 }
 
-/// Draft order-book settings. The bounded numbers stay text until Apply validates them.
+/// Draft order-book settings. The bounded numbers stay text and preview once they are valid.
 pub(super) struct OrderBookDraft {
     pub(super) settings: OrderBookDepthSettings,
     pub(super) levels_per_side: Entity<InputState>,
@@ -224,8 +226,10 @@ where
         })
 }
 
-/// Draft settings of one order-flow indicator; the chart changes only when the draft is applied.
+/// Settings of one order-flow indicator being edited, previewed on the chart as they change.
 pub(super) struct OrderFlowDialogState {
+    /// The chart's order-flow settings when the dialog opened; Cancel restores the edited part.
+    pub(super) original: OrderFlowSettings,
     pub(super) draft: OrderFlowDialogDraft,
     /// The colors the chart draws where the draft leaves a color unset.
     pub(super) defaults: OrderFlowDefaultColors,
@@ -233,6 +237,7 @@ pub(super) struct OrderFlowDialogState {
     /// The setting whose dropdown is open.
     pub(super) menu: Option<String>,
     pub(super) message: Option<String>,
+    pub(super) _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl OrderFlowDialogState {
@@ -314,6 +319,34 @@ fn applied_order_flow_settings(
     Ok(settings)
 }
 
+/// `current` with `indicator`'s settings restored from `original`. Whether it is shown stays with
+/// the legend, and an indicator removed meanwhile stays removed.
+fn restored_order_flow_settings(
+    indicator: OrderFlowIndicator,
+    original: OrderFlowSettings,
+    current: OrderFlowSettings,
+) -> OrderFlowSettings {
+    let mut settings = current;
+    match indicator {
+        OrderFlowIndicator::CumulativeDelta => {
+            settings.cumulative_delta = original.cumulative_delta;
+        }
+        OrderFlowIndicator::DeltaHistogram => {
+            settings.delta_histogram = original.delta_histogram;
+        }
+        OrderFlowIndicator::OrderBook => {
+            if let (Some(book), Some(shown)) = (original.order_book_depth, current.order_book_depth)
+            {
+                settings.order_book_depth = Some(OrderBookDepthSettings {
+                    visible: shown.visible,
+                    ..book
+                });
+            }
+        }
+    }
+    settings
+}
+
 impl WorkspaceSurface {
     pub(super) const fn order_flow_dialog(&self) -> Option<&OrderFlowDialogState> {
         match &self.indicator_settings_dialog {
@@ -329,7 +362,7 @@ impl WorkspaceSurface {
         }
     }
 
-    /// Opens a draft of one order-flow indicator's settings.
+    /// Opens one order-flow indicator's settings; every valid edit previews on the chart.
     pub(super) fn open_order_flow_dialog(
         &mut self,
         indicator: OrderFlowIndicator,
@@ -373,22 +406,73 @@ impl WorkspaceSurface {
             );
             return;
         };
+        let subscriptions = match &draft {
+            OrderFlowDialogDraft::OrderBook(book) => [
+                &book.levels_per_side,
+                &book.max_width,
+                &book.opacity_percent,
+            ]
+            .into_iter()
+            .map(|input| preview_on_change(input, window, cx, Self::preview_order_flow_dialog))
+            .collect(),
+            OrderFlowDialogDraft::CumulativeDelta(_) | OrderFlowDialogDraft::DeltaHistogram(_) => {
+                Vec::new()
+            }
+        };
         self.open_indicator_settings_dialog(
             IndicatorSettingsDialog::OrderFlow(OrderFlowDialogState {
+                original: settings,
                 draft,
                 defaults,
                 color_picker: None,
                 menu: None,
                 message: None,
+                _subscriptions: subscriptions,
             }),
             cx,
         );
     }
 
+    /// Cancel: closes the dialog and restores the indicator's settings it opened with.
     pub(super) fn close_order_flow_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.order_flow_dialog().is_some() {
-            self.indicator_settings_dialog = None;
-            cx.notify();
+        let Some((indicator, original)) = self
+            .order_flow_dialog()
+            .map(|dialog| (dialog.draft.indicator(), dialog.original))
+        else {
+            return;
+        };
+        self.indicator_settings_dialog = None;
+        if let Some(current) = self.chart_order_flow_settings(cx) {
+            let restored = restored_order_flow_settings(indicator, original, current);
+            if restored != current {
+                self.set_chart_order_flow_settings(restored, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Shows the dialog's settings on the chart, or why they cannot be shown.
+    fn preview_order_flow_dialog(&mut self, cx: &mut Context<Self>) {
+        let result = self.apply_order_flow_draft(cx);
+        if let Some(dialog) = self.order_flow_dialog_mut() {
+            dialog.message = result.err();
+        }
+        cx.notify();
+    }
+
+    /// Hands the draft to the order-flow settings owner. Visibility stays with the legend.
+    fn apply_order_flow_draft(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some(dialog) = self.order_flow_dialog() else {
+            return Ok(());
+        };
+        let Some(current) = self.chart_order_flow_settings(cx) else {
+            return Err("The chart is unavailable".to_string());
+        };
+        let settings = applied_order_flow_settings(&dialog.draft, current, cx)?;
+        if settings == current || self.set_chart_order_flow_settings(settings, cx) {
+            Ok(())
+        } else {
+            Err("The chart could not apply these settings".to_string())
         }
     }
 
@@ -404,7 +488,7 @@ impl WorkspaceSurface {
             draft.style = style;
             // The style swaps the line swatch for the candle swatches.
             dialog.color_picker = None;
-            cx.notify();
+            self.preview_order_flow_dialog(cx);
         }
     }
 
@@ -418,7 +502,7 @@ impl WorkspaceSurface {
             && draft.reset != reset
         {
             draft.reset = reset;
-            cx.notify();
+            self.preview_order_flow_dialog(cx);
         }
     }
 
@@ -432,7 +516,7 @@ impl WorkspaceSurface {
             && draft.settings.show_sizes != show_sizes
         {
             draft.settings.show_sizes = show_sizes;
-            cx.notify();
+            self.preview_order_flow_dialog(cx);
         }
     }
 
@@ -496,11 +580,12 @@ impl WorkspaceSurface {
             && let Some(slot) = dialog.draft.color_slot(target)
         {
             *slot = Some(color);
+            return self.preview_order_flow_dialog(cx);
         }
         cx.notify();
     }
 
-    /// Resets the whole draft to the indicator's defaults; the chart changes only on Apply.
+    /// Resets the indicator to its defaults, shown on the chart at once.
     pub(super) fn reset_order_flow_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.order_flow_dialog_mut() else {
             return;
@@ -515,31 +600,17 @@ impl WorkspaceSurface {
             OrderFlowDialogDraft::OrderBook(draft) => draft.reset(window, cx),
         }
         dialog.color_picker = None;
-        dialog.message = None;
-        cx.notify();
+        self.preview_order_flow_dialog(cx);
     }
 
-    /// Applies the draft through the order-flow settings owner. Visibility stays with the
-    /// legend.
+    /// Apply: keeps the settings the chart already shows, closing only when they are valid.
     pub(super) fn apply_order_flow_dialog(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.order_flow_dialog() else {
-            return;
-        };
-        let Some(current) = self.chart_order_flow_settings(cx) else {
-            return self.show_order_flow_message("The chart is unavailable".to_string(), cx);
-        };
-        let settings = match applied_order_flow_settings(&dialog.draft, current, cx) {
-            Ok(settings) => settings,
-            Err(message) => return self.show_order_flow_message(message, cx),
-        };
-        if self.set_chart_order_flow_settings(settings, cx) {
-            self.indicator_settings_dialog = None;
-            cx.notify();
-        } else {
-            self.show_order_flow_message(
-                "The chart could not apply these settings".to_string(),
-                cx,
-            );
+        match self.apply_order_flow_draft(cx) {
+            Ok(()) => {
+                self.indicator_settings_dialog = None;
+                cx.notify();
+            }
+            Err(message) => self.show_order_flow_message(message, cx),
         }
     }
 
@@ -551,7 +622,7 @@ impl WorkspaceSurface {
     }
 }
 
-/// A swatch that opens the color picker for one order-flow color. Picks change only the draft. A
+/// A swatch that opens the color picker for one order-flow color. Picks preview at once. A
 /// `named` swatch shows the color's name instead of its hex code, for paired colors.
 fn color_control(
     app: &Entity<WorkspaceSurface>,

@@ -2127,7 +2127,10 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
     let original = workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
         .expect("study fixture");
     let mut replacement = original.clone();
-    replacement.visible = false;
+    replacement.settings = vec![WorkspaceStudySettingState {
+        identifier: "length".to_string(),
+        value: Some(workspace_study_setting_state::Value::Integer(42)),
+    }];
     harness.pane.update(cx, |pane, _| {
         let product = pane.product.as_ref().expect("selected instrument");
         let series = engine_market_worker::series_key(product, ChartInterval::Minute1)
@@ -2141,7 +2144,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
             study_id,
             PendingStudyReinitialization {
                 series,
-                replacement_persisted: Some(replacement.clone()),
+                replacement_settings: Some(replacement.settings.clone()),
             },
         );
     });
@@ -2168,7 +2171,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
             study_id,
             PendingStudyReinitialization {
                 series,
-                replacement_persisted: Some(replacement.clone()),
+                replacement_settings: Some(replacement.settings.clone()),
             },
         );
     });
@@ -2186,6 +2189,163 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
         assert_eq!(pane.studies.active[0].persisted, replacement);
         assert!(!pane.studies.reinitializing.contains_key(&study_id));
         assert!(pane.chart_persistence_dirty);
+    });
+}
+
+/// The SMA periods of the study reinitializations sent since the last call.
+fn reinitialized_sma_periods(harness: &PaneHarness) -> Vec<i64> {
+    harness
+        .commands
+        .as_ref()
+        .expect("command receiver")
+        .try_iter()
+        .filter_map(|command| match command {
+            MarketWorkerCommand::ReinitializeStudy(request) => match request
+                .registration
+                .settings
+                .get(aeris_study_sdk::BUILTIN_SMA_PERIOD_SETTING)
+            {
+                Some(StudySettingValue::Integer(period)) => Some(*period),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn persisted_sma_period(pane: &WorkspaceSurface) -> Option<i64> {
+    pane.studies.active[0]
+        .persisted
+        .settings
+        .iter()
+        .find(|setting| setting.identifier == aeris_study_sdk::BUILTIN_SMA_PERIOD_SETTING)
+        .and_then(|setting| match setting.value {
+            Some(workspace_study_setting_state::Value::Integer(period)) => Some(period),
+            _ => None,
+        })
+}
+
+fn complete_study_reinitialization(
+    harness: &PaneHarness,
+    study_id: StudyInstanceId,
+    cx: &mut VisualTestContext,
+) {
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::StudyReinitialization {
+                study_id,
+                result: Ok(()),
+            },
+        ))
+        .expect("reinitialization success");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+}
+
+#[gpui::test]
+fn pane_harness_study_dialog_previews_edits_one_request_at_a_time_and_cancel_restores(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
+    let original = workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+        .expect("study fixture");
+    harness.pane.update(cx, |pane, _| {
+        let product = pane.product.as_ref().expect("selected instrument");
+        let series = engine_market_worker::series_key(product, ChartInterval::Minute1)
+            .expect("selected series");
+        pane.studies.active.push(RuntimeStudyState {
+            study_id,
+            persisted: original.clone(),
+            resolved_chart_series: Some(series),
+        });
+    });
+    reinitialized_sma_periods(&harness);
+    let original_width = original.line_width;
+
+    let period = cx.update(|window, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            pane.open_study_settings_dialog(study_id, window, cx);
+            pane.study_settings_dialog()
+                .expect("study dialog")
+                .inputs
+                .get(aeris_study_sdk::BUILTIN_SMA_PERIOD_SETTING)
+                .cloned()
+                .expect("period input")
+        })
+    });
+    let original_period = cx.read(|cx| {
+        period
+            .read(cx)
+            .value()
+            .parse::<i64>()
+            .expect("the dialog shows the period it opened with")
+    });
+    cx.update(|_, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            pane.set_study_settings_line_width(4, cx);
+            assert_eq!(
+                pane.studies.active[0].persisted.line_width, 4,
+                "a style edit applies at once"
+            );
+        });
+    });
+    assert!(
+        reinitialized_sma_periods(&harness).is_empty(),
+        "a style edit never reinitializes the study"
+    );
+
+    cx.update(|window, cx| {
+        period.update(cx, |input, cx| input.replace_all("30", window, cx));
+    });
+    assert_eq!(reinitialized_sma_periods(&harness), vec![30]);
+    cx.update(|window, cx| {
+        period.update(cx, |input, cx| input.replace_all("3", window, cx));
+        period.update(cx, |input, cx| input.replace_all("40", window, cx));
+    });
+    assert!(
+        reinitialized_sma_periods(&harness).is_empty(),
+        "edits made while a reinitialization is in flight wait for it"
+    );
+    complete_study_reinitialization(&harness, study_id, cx);
+    assert_eq!(
+        reinitialized_sma_periods(&harness),
+        vec![40],
+        "only the newest waiting edit is sent"
+    );
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(persisted_sma_period(pane), Some(30));
+        assert!(
+            pane.study_settings_dialog().is_some(),
+            "a preview keeps the dialog open"
+        );
+    });
+
+    cx.update(|_, cx| {
+        harness
+            .pane
+            .update(cx, WorkspaceSurface::close_study_settings_dialog);
+    });
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(pane.study_settings_dialog().is_none());
+        assert_eq!(pane.studies.active[0].persisted.line_width, original_width);
+    });
+    complete_study_reinitialization(&harness, study_id, cx);
+    assert_eq!(
+        reinitialized_sma_periods(&harness),
+        vec![original_period],
+        "Cancel restores the settings the dialog opened with"
+    );
+    complete_study_reinitialization(&harness, study_id, cx);
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.studies.active[0].persisted, original);
+        assert!(pane.studies.reinitializing.is_empty());
     });
 }
 

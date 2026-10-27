@@ -3707,6 +3707,28 @@ fn volume_settings_restore_with_the_chart_and_release_their_own_pane() {
 }
 
 #[test]
+fn keyboard_delete_of_the_selected_volume_leaves_nothing_to_restore() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    let columns = volume_binding(&chart).outputs[0];
+    let revision = chart.user_state_revision();
+    chart.engine.set_selected_series(Some(columns));
+    assert!(key(&mut chart, ChartKey::Delete));
+    assert_eq!(
+        chart.indicator_states(),
+        Vec::new(),
+        "a deleted volume is not restored, hidden, on the next instrument or interval"
+    );
+    assert_eq!(chart.volume_settings(), None);
+    assert!(
+        chart.user_state_revision() > revision,
+        "the removal persists"
+    );
+}
+
+#[test]
 fn volume_in_its_own_pane_keeps_its_height_when_settings_change_after_a_resize() {
     let mut chart = interactive_chart();
     chart

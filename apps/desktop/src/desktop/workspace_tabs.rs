@@ -934,21 +934,25 @@ impl TerminalApp {
         }
         if let Some((workspace_id, pane_id, surface, request)) = requested {
             self.select_pane(workspace_id, pane_id, cx);
-            surface.update(cx, |surface, surface_cx| match request {
-                LegendSettingsRequest::Study(study_id) => {
-                    surface.open_study_settings_dialog(study_id, window, surface_cx);
-                }
-                LegendSettingsRequest::BigTrades => {
-                    surface.open_big_trades_dialog(window, surface_cx);
-                }
-                LegendSettingsRequest::Volume => {
-                    surface.open_volume_dialog(window, surface_cx);
-                }
-                LegendSettingsRequest::OrderFlow(indicator) => {
-                    surface.open_order_flow_dialog(indicator, window, surface_cx);
-                }
-                LegendSettingsRequest::Drawing(drawing) => {
-                    surface.open_drawing_settings_dialog(drawing, window, surface_cx);
+            surface.update(cx, |surface, surface_cx| {
+                // An open dialog's previews are restored before the next dialog reads the chart.
+                surface.cancel_indicator_settings_dialog(surface_cx);
+                match request {
+                    LegendSettingsRequest::Study(study_id) => {
+                        surface.open_study_settings_dialog(study_id, window, surface_cx);
+                    }
+                    LegendSettingsRequest::BigTrades => {
+                        surface.open_big_trades_dialog(window, surface_cx);
+                    }
+                    LegendSettingsRequest::Volume => {
+                        surface.open_volume_dialog(window, surface_cx);
+                    }
+                    LegendSettingsRequest::OrderFlow(indicator) => {
+                        surface.open_order_flow_dialog(indicator, window, surface_cx);
+                    }
+                    LegendSettingsRequest::Drawing(drawing) => {
+                        surface.open_drawing_settings_dialog(drawing, window, surface_cx);
+                    }
                 }
             });
         }

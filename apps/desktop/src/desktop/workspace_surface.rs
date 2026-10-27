@@ -746,6 +746,43 @@ fn parse_volume_average_length(text: &str) -> Result<u16, String> {
         })
 }
 
+/// The volume settings a dialog shows, or why its typed length cannot be used.
+fn volume_dialog_settings(dialog: &VolumeDialogState, cx: &App) -> Result<VolumeSettings, String> {
+    let length = parse_volume_average_length(dialog.average_length.read(cx).value().as_ref())?;
+    let mut settings = dialog.draft.clone();
+    settings.average.length = length;
+    Ok(settings)
+}
+
+/// The filter a big-trades dialog shows, or why its typed minimum cannot be used.
+fn big_trades_dialog_filter(
+    dialog: &BigTradesDialogState,
+    cx: &App,
+) -> Result<BigTradesFilter, String> {
+    match dialog.intensity {
+        Some(intensity) => Ok(BigTradesFilter::Auto { intensity }),
+        None => parse_big_trades_minimum_volume(dialog.minimum_volume.read(cx).value().as_ref())
+            .map(|minimum_volume| BigTradesFilter::Fixed { minimum_volume }),
+    }
+}
+
+/// Runs a settings dialog's `preview` each time `input`'s text changes, so typed values reach
+/// the chart while they are typed.
+pub(super) fn preview_on_change(
+    input: &Entity<InputState>,
+    window: &mut Window,
+    cx: &mut Context<WorkspaceSurface>,
+    preview: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+) -> gpui::Subscription {
+    let surface = cx.entity().downgrade();
+    window.subscribe(input, cx, move |_, event: &InputEvent, _, cx| {
+        if matches!(event, InputEvent::Change) {
+            // A surface already gone has no dialog left to preview.
+            let _ = surface.update(cx, preview);
+        }
+    })
+}
+
 /// Editable text for an order volume. Sums of fractional prints carry binary rounding noise, so
 /// the text is rounded unless that would erase a tiny but valid volume.
 fn big_trades_volume_text(volume: f64) -> String {
@@ -4608,7 +4645,7 @@ impl WorkspaceSurface {
                     study_id,
                     PendingStudyReinitialization {
                         series,
-                        replacement_persisted: None,
+                        replacement_settings: None,
                     },
                 );
                 Ok(())
@@ -4740,13 +4777,8 @@ impl WorkspaceSurface {
         if persisted_changed {
             self.chart_persistence_dirty = true;
         }
-        if self
-            .study_settings_dialog()
-            .is_some_and(|dialog| dialog.study_id == study_id)
-        {
-            self.indicator_settings_dialog = None;
-        }
         Self::clear_indicator_failure("study", cx);
+        self.send_queued_study_settings(study_id, cx);
         cx.notify();
     }
 
@@ -4763,6 +4795,7 @@ impl WorkspaceSurface {
             dialog.message = Some("Study settings could not be applied. Try again.".into());
         }
         Self::post_study_failure("Study settings could not be applied. Try again.", cx);
+        self.send_queued_study_settings(study_id, cx);
     }
 
     fn apply_study_output_message(
@@ -7101,7 +7134,6 @@ impl WorkspaceSurface {
         let mut draft_values = BTreeMap::new();
         let mut inputs = HashMap::new();
         let mut subscriptions = Vec::new();
-        let surface = cx.entity();
         for spec in &registration.definition.settings {
             let Some(value) = registration.settings.get(&spec.identifier).cloned() else {
                 Self::post_study_failure("Study settings are incomplete.", cx);
@@ -7112,15 +7144,11 @@ impl WorkspaceSurface {
                 input.update(cx, |input, input_cx| {
                     input.set_value(text, window, input_cx);
                 });
-                let notify_surface = surface.clone();
-                subscriptions.push(window.subscribe(
+                subscriptions.push(preview_on_change(
                     &input,
+                    window,
                     cx,
-                    move |_, event: &InputEvent, _, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            notify_surface.update(cx, |_, surface_cx| surface_cx.notify());
-                        }
-                    },
+                    Self::preview_study_settings_dialog,
                 ));
                 inputs.insert(spec.identifier.clone(), input);
             }
@@ -7150,6 +7178,7 @@ impl WorkspaceSurface {
             IndicatorSettingsDialog::Study(StudySettingsDialogState {
                 study_id,
                 title: study_display_name(&active.persisted.identifier),
+                original: active.persisted.clone(),
                 specs: registration.definition.settings,
                 draft_values,
                 line_width: persisted_study_line_width(&active.persisted),
@@ -7162,6 +7191,20 @@ impl WorkspaceSurface {
             }),
             cx,
         );
+    }
+
+    /// Cancels whichever settings dialog is open, restoring everything it previewed.
+    pub(super) fn cancel_indicator_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        match &self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::Study(_)) => self.close_study_settings_dialog(cx),
+            Some(IndicatorSettingsDialog::BigTrades(_)) => self.close_big_trades_dialog(cx),
+            Some(IndicatorSettingsDialog::Volume(_)) => self.close_volume_dialog(cx),
+            Some(IndicatorSettingsDialog::OrderFlow(_)) => self.close_order_flow_dialog(cx),
+            Some(IndicatorSettingsDialog::Drawing(_)) => {
+                self.close_drawing_settings_dialog(false, cx);
+            }
+            None => {}
+        }
     }
 
     /// Replaces any open indicator settings dialog and dismisses the chrome menus.
@@ -7271,7 +7314,7 @@ impl WorkspaceSurface {
             && dialog.line_width != width
         {
             dialog.line_width = width;
-            cx.notify();
+            self.preview_study_settings_dialog(cx);
         }
     }
 
@@ -7342,30 +7385,35 @@ impl WorkspaceSurface {
                 .find(|draft| draft.output_index == output_index)
         {
             draft.color = (!color.eq_ignore_ascii_case(&draft.default_color)).then_some(color);
+            return self.preview_study_settings_dialog(cx);
         }
         cx.notify();
     }
 
-    /// Applies a study's stroke width and line colors to the chart and its durable state.
+    /// Sets a study's durable stroke width and line colors and shows them on the chart.
     fn apply_study_style(
         &mut self,
         study_id: StudyInstanceId,
-        width: u8,
+        line_width: u32,
         output_colors: &[String],
         cx: &mut Context<Self>,
     ) {
-        if let Some(active) = self
+        let Some(active) = self
             .studies
             .active
             .iter_mut()
             .find(|state| state.study_id == study_id)
-            && (active.persisted.line_width != u32::from(width)
-                || active.persisted.output_colors != output_colors)
+        else {
+            return;
+        };
+        if active.persisted.line_width != line_width
+            || active.persisted.output_colors != output_colors
         {
-            active.persisted.line_width = u32::from(width);
+            active.persisted.line_width = line_width;
             active.persisted.output_colors = output_colors.to_vec();
             self.chart_persistence_dirty = true;
         }
+        let width = persisted_study_line_width(&active.persisted);
         let colors = output_colors
             .iter()
             .map(|color| (!color.is_empty()).then(|| color.clone()))
@@ -7380,11 +7428,31 @@ impl WorkspaceSurface {
         }
     }
 
+    /// Cancel: closes the dialog and restores the study's style and settings it opened with.
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.study_settings_dialog().is_some() {
-            self.indicator_settings_dialog = None;
-            cx.notify();
+        let Some((study_id, original)) = self
+            .study_settings_dialog()
+            .map(|dialog| (dialog.study_id, dialog.original.clone()))
+        else {
+            return;
+        };
+        self.indicator_settings_dialog = None;
+        // A study removed while the dialog was open has nothing left to restore.
+        if self
+            .studies
+            .active
+            .iter()
+            .any(|state| state.study_id == study_id)
+        {
+            self.apply_study_style(study_id, original.line_width, &original.output_colors, cx);
+            if self
+                .request_study_settings(study_id, original.settings)
+                .is_err()
+            {
+                Self::post_study_failure("Study settings could not be restored. Try again.", cx);
+            }
         }
+        cx.notify();
     }
 
     pub(super) fn remove_runtime_study(
@@ -7442,8 +7510,7 @@ impl WorkspaceSurface {
             dialog
                 .draft_values
                 .insert(identifier.to_string(), StudySettingValue::Boolean(value));
-            dialog.message = None;
-            cx.notify();
+            self.preview_study_settings_dialog(cx);
         }
     }
 
@@ -7458,8 +7525,7 @@ impl WorkspaceSurface {
                 identifier.to_string(),
                 StudySettingValue::Choice(value.to_string()),
             );
-            dialog.message = None;
-            cx.notify();
+            self.preview_study_settings_dialog(cx);
         }
     }
 
@@ -7496,76 +7562,102 @@ impl WorkspaceSurface {
             draft.color = None;
         }
         dialog.color_picker = None;
-        dialog.message = None;
-        cx.notify();
+        self.preview_study_settings_dialog(cx);
     }
 
+    /// Apply: keeps what the chart already shows, closing only when every setting is valid. A
+    /// reinitialization still in flight completes after the dialog closes.
     pub(super) fn save_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        match self.apply_study_settings_draft(cx) {
+            Ok(()) => {
+                self.indicator_settings_dialog = None;
+                cx.notify();
+            }
+            Err(message) => self.show_study_settings_message(Some(message), cx),
+        }
+    }
+
+    /// Shows the dialog's style and settings on the chart, or why they cannot be shown.
+    fn preview_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        let result = self.apply_study_settings_draft(cx);
+        self.show_study_settings_message(result.err(), cx);
+    }
+
+    /// Applies the dialog's style at once and requests its settings from the runtime. The style
+    /// applies even while a typed setting is invalid.
+    fn apply_study_settings_draft(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let Some(dialog) = self.study_settings_dialog() else {
-            return;
+            return Ok(());
         };
         let study_id = dialog.study_id;
-        if self.studies.reinitializing.contains_key(&study_id) {
-            return;
-        }
+        let Some(output_count) = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == study_id)
+            .map(|state| state.persisted.output_identifiers.len())
+        else {
+            return Err("Study is no longer active".to_string());
+        };
         let line_width = dialog.line_width;
-        let values = dialog
+        let output_colors = persisted_output_colors(output_count, &dialog.output_colors);
+        let settings = dialog
             .specs
             .iter()
             .map(|spec| {
-                study_setting_value_from_dialog(dialog, spec, cx)
-                    .map(|value| (spec.identifier.clone(), value))
+                study_setting_value_from_dialog(dialog, spec, cx).map(|value| {
+                    WorkspaceStudySettingState {
+                        identifier: spec.identifier.clone(),
+                        value: Some(persisted_study_setting_value(&value)),
+                    }
+                })
             })
             .collect::<Result<Vec<_>, _>>();
-        let values = match values {
-            Ok(values) => values,
-            Err(message) => return self.show_study_settings_message(Some(message), cx),
-        };
+        self.apply_study_style(study_id, u32::from(line_width), &output_colors, cx);
+        self.request_study_settings(study_id, settings?)
+    }
+
+    /// Reinitializes a study with `settings` unless it already computes them. While an earlier
+    /// reinitialization is in flight the newest settings wait in `queued_settings` and are sent
+    /// once the runtime answers, so editing keeps at most one request per study in flight.
+    fn request_study_settings(
+        &mut self,
+        study_id: StudyInstanceId,
+        settings: Vec<WorkspaceStudySettingState>,
+    ) -> Result<(), String> {
         let Some(active) = self
             .studies
             .active
             .iter()
             .find(|state| state.study_id == study_id)
-            .cloned()
         else {
-            let message = "Study is no longer active".to_string();
-            return self.show_study_settings_message(Some(message), cx);
+            return Err("Study is no longer active".to_string());
         };
-        let output_colors = persisted_output_colors(
-            active.persisted.output_identifiers.len(),
-            &dialog.output_colors,
-        );
-        self.apply_study_style(study_id, line_width, &output_colors, cx);
-        let active_settings = active.persisted.settings.clone();
-        let mut replacement = active.persisted;
-        replacement.line_width = u32::from(line_width);
-        replacement.output_colors = output_colors;
-        replacement.settings = values
-            .iter()
-            .map(|(identifier, value)| WorkspaceStudySettingState {
-                identifier: identifier.clone(),
-                value: Some(persisted_study_setting_value(value)),
-            })
-            .collect();
-        if replacement.settings == active_settings {
-            // Only presentation changed; the runtime computation stays as it is.
-            self.indicator_settings_dialog = None;
-            cx.notify();
-            return;
+        if let Some(pending) = self.studies.reinitializing.get(&study_id) {
+            let target = pending
+                .replacement_settings
+                .as_ref()
+                .unwrap_or(&active.persisted.settings);
+            if *target == settings {
+                self.studies.queued_settings.remove(&study_id);
+            } else {
+                self.studies.queued_settings.insert(study_id, settings);
+            }
+            return Ok(());
         }
-        let registration = self.current_runtime_series().and_then(|series| {
+        if active.persisted.settings == settings {
+            return Ok(());
+        }
+        let mut replacement = active.persisted.clone();
+        replacement.settings = settings;
+        let (series, registration) = self.current_runtime_series().and_then(|series| {
             runtime_study_registration(&replacement, &series, &self.studies.active)
                 .map(|registration| (series, registration))
-        });
-        let (series, registration) = match registration {
-            Ok(registration) => registration,
-            Err(message) => return self.show_study_settings_message(Some(message), cx),
-        };
+        })?;
         if !self.retry_automatic_study_removals() {
-            let message = "Study cancellation is waiting for runtime capacity".to_string();
-            return self.show_study_settings_message(Some(message), cx);
+            return Err("Study cancellation is waiting for runtime capacity".to_string());
         }
-        let message = match self
+        match self
             .market_worker
             .try_reinitialize_study(study_id, registration)
         {
@@ -7574,17 +7666,34 @@ impl WorkspaceSurface {
                     study_id,
                     PendingStudyReinitialization {
                         series,
-                        replacement_persisted: Some(replacement),
+                        replacement_settings: Some(replacement.settings),
                     },
                 );
-                None
+                Ok(())
             }
             Err(TrySendError::Full(_)) => {
-                Some("Study settings queue is busy; try again".to_string())
+                Err("Study settings queue is busy; try again".to_string())
             }
-            Err(TrySendError::Disconnected(_)) => Some("Study runtime is unavailable".to_string()),
+            Err(TrySendError::Disconnected(_)) => Err("Study runtime is unavailable".to_string()),
+        }
+    }
+
+    /// Sends the settings that waited for a study's previous reinitialization to finish.
+    fn send_queued_study_settings(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
+        let Some(settings) = self.studies.queued_settings.remove(&study_id) else {
+            return;
         };
-        self.show_study_settings_message(message, cx);
+        let Err(message) = self.request_study_settings(study_id, settings) else {
+            return;
+        };
+        if let Some(dialog) = self.study_settings_dialog_mut()
+            && dialog.study_id == study_id
+        {
+            dialog.message = Some(message);
+            cx.notify();
+        } else {
+            Self::post_study_failure("Study settings could not be applied. Try again.", cx);
+        }
     }
 
     fn show_study_settings_message(&mut self, message: Option<String>, cx: &mut Context<Self>) {
@@ -7594,8 +7703,9 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Opens a draft of the chart's big-trades settings. An automatic filter seeds the fixed
-    /// minimum with the volume it currently applies, so switching to a fixed filter starts there.
+    /// Opens the chart's big-trades settings; every valid edit previews on the chart. An
+    /// automatic filter seeds the fixed minimum with the volume it currently applies, so
+    /// switching to a fixed filter starts there.
     pub(super) fn open_big_trades_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((settings, threshold)) = self.chart.as_ref().map(|chart| {
             let chart = chart.read(cx);
@@ -7623,23 +7733,86 @@ impl WorkspaceSurface {
                 input.set_value(big_trades_volume_text(volume), window, input_cx);
             });
         }
+        let subscriptions = vec![preview_on_change(
+            &minimum_volume,
+            window,
+            cx,
+            Self::preview_big_trades_dialog,
+        )];
         self.open_indicator_settings_dialog(
             IndicatorSettingsDialog::BigTrades(BigTradesDialogState {
+                original: settings,
                 intensity,
                 size: settings.size,
                 show_volume: settings.show_volume,
                 minimum_volume,
                 menu: None,
                 message: None,
+                _subscriptions: subscriptions,
             }),
             cx,
         );
     }
 
+    /// Cancel: closes the dialog and restores the settings it opened with.
     pub(super) fn close_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.big_trades_dialog().is_some() {
-            self.indicator_settings_dialog = None;
-            cx.notify();
+        let Some(original) = self.big_trades_dialog().map(|dialog| dialog.original) else {
+            return;
+        };
+        self.indicator_settings_dialog = None;
+        // Big trades removed while the dialog was open has nothing left to restore.
+        let _ = self.apply_big_trades_settings(
+            original.filter,
+            original.size,
+            original.show_volume,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Shows the dialog's settings on the chart, or why they cannot be shown.
+    fn preview_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.big_trades_dialog() else {
+            return;
+        };
+        let (size, show_volume) = (dialog.size, dialog.show_volume);
+        let result = big_trades_dialog_filter(dialog, cx)
+            .and_then(|filter| self.apply_big_trades_settings(filter, size, show_volume, cx));
+        if let Some(dialog) = self.big_trades_dialog_mut() {
+            dialog.message = result.err();
+        }
+        cx.notify();
+    }
+
+    /// Hands the big-trades settings to the order-flow settings owner. Visibility stays with the
+    /// legend.
+    fn apply_big_trades_settings(
+        &mut self,
+        filter: BigTradesFilter,
+        size: BigTradesSize,
+        show_volume: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(mut settings) = self.chart_order_flow_settings(cx) else {
+            return Err("The chart is unavailable".to_string());
+        };
+        let Some(current) = settings.big_trades else {
+            return Err("Big trades is no longer on this chart".to_string());
+        };
+        let replacement = BigTradesSettings {
+            filter,
+            size,
+            show_volume,
+            visible: current.visible,
+        };
+        if replacement == current {
+            return Ok(());
+        }
+        settings.big_trades = Some(replacement);
+        if self.set_chart_order_flow_settings(settings, cx) {
+            Ok(())
+        } else {
+            Err("The chart could not apply these settings".to_string())
         }
     }
 
@@ -7652,8 +7825,7 @@ impl WorkspaceSurface {
             && dialog.intensity != intensity
         {
             dialog.intensity = intensity;
-            dialog.message = None;
-            cx.notify();
+            self.preview_big_trades_dialog(cx);
         }
     }
 
@@ -7666,7 +7838,7 @@ impl WorkspaceSurface {
             && dialog.size != size
         {
             dialog.size = size;
-            cx.notify();
+            self.preview_big_trades_dialog(cx);
         }
     }
 
@@ -7679,7 +7851,7 @@ impl WorkspaceSurface {
             && dialog.show_volume != show_volume
         {
             dialog.show_volume = show_volume;
-            cx.notify();
+            self.preview_big_trades_dialog(cx);
         }
     }
 
@@ -7697,43 +7869,24 @@ impl WorkspaceSurface {
         dialog.intensity = intensity;
         dialog.size = defaults.size;
         dialog.show_volume = defaults.show_volume;
-        dialog.message = None;
-        cx.notify();
+        self.preview_big_trades_dialog(cx);
     }
 
-    /// Applies the draft through the order-flow settings owner. Visibility stays with the legend.
+    /// Apply: keeps the settings the chart already shows, closing only when they are valid.
     pub(super) fn apply_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.big_trades_dialog() else {
             return;
         };
-        let filter = match dialog.intensity {
-            Some(intensity) => Ok(BigTradesFilter::Auto { intensity }),
-            None => {
-                parse_big_trades_minimum_volume(dialog.minimum_volume.read(cx).value().as_ref())
-                    .map(|minimum_volume| BigTradesFilter::Fixed { minimum_volume })
-            }
-        };
         let (size, show_volume) = (dialog.size, dialog.show_volume);
-        let filter = match filter {
-            Ok(filter) => filter,
-            Err(message) => return self.show_big_trades_message(message, cx),
-        };
-        let Some(mut settings) = self.chart_order_flow_settings(cx) else {
-            return self.show_big_trades_message("The chart is unavailable".to_string(), cx);
-        };
-        let Some(current) = settings.big_trades else {
-            let message = "Big trades is no longer on this chart".to_string();
-            return self.show_big_trades_message(message, cx);
-        };
-        settings.big_trades = Some(BigTradesSettings {
-            filter,
-            size,
-            show_volume,
-            visible: current.visible,
-        });
-        self.indicator_settings_dialog = None;
-        self.set_chart_order_flow_settings(settings, cx);
-        cx.notify();
+        let applied = big_trades_dialog_filter(dialog, cx)
+            .and_then(|filter| self.apply_big_trades_settings(filter, size, show_volume, cx));
+        match applied {
+            Ok(()) => {
+                self.indicator_settings_dialog = None;
+                cx.notify();
+            }
+            Err(message) => self.show_big_trades_message(message, cx),
+        }
     }
 
     fn show_big_trades_message(&mut self, message: String, cx: &mut Context<Self>) {
@@ -7743,7 +7896,7 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Opens a draft of the chart's volume settings.
+    /// Opens the chart's volume settings; every valid edit previews on the chart.
     pub(super) fn open_volume_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(settings) = self
             .chart
@@ -7766,23 +7919,76 @@ impl WorkspaceSurface {
         average_length.update(cx, |input, input_cx| {
             input.set_value(settings.average.length.to_string(), window, input_cx);
         });
+        let subscriptions = vec![preview_on_change(
+            &average_length,
+            window,
+            cx,
+            Self::preview_volume_dialog,
+        )];
         self.open_indicator_settings_dialog(
             IndicatorSettingsDialog::Volume(VolumeDialogState {
+                original: settings.clone(),
                 draft: settings,
                 average_length,
                 color_picker: None,
                 menu: None,
                 message: None,
+                _subscriptions: subscriptions,
             }),
             cx,
         );
     }
 
+    /// Cancel: closes the dialog and restores the settings it opened with.
     pub(super) fn close_volume_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.volume_dialog().is_some() {
-            self.indicator_settings_dialog = None;
-            cx.notify();
+        let Some(original) = self.volume_dialog().map(|dialog| dialog.original.clone()) else {
+            return;
+        };
+        self.indicator_settings_dialog = None;
+        // Volume removed while the dialog was open has nothing left to restore.
+        let _ = self.apply_volume_settings(original, cx);
+        cx.notify();
+    }
+
+    /// Shows the dialog's settings on the chart, or why they cannot be shown.
+    fn preview_volume_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.volume_dialog() else {
+            return;
+        };
+        let result = volume_dialog_settings(dialog, cx)
+            .and_then(|settings| self.apply_volume_settings(settings, cx));
+        if let Some(dialog) = self.volume_dialog_mut() {
+            dialog.message = result.err();
         }
+        cx.notify();
+    }
+
+    /// Rebuilds the chart's volume indicator from `settings` when they differ from it.
+    fn apply_volume_settings(
+        &mut self,
+        settings: VolumeSettings,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(chart) = &self.chart else {
+            return Err("The chart is unavailable".to_string());
+        };
+        let changed = chart.update(cx, |chart, chart_cx| {
+            if chart.volume_settings().is_none() {
+                return Err("Volume is no longer on this chart".to_string());
+            }
+            if chart.volume_settings().as_ref() == Some(&settings) {
+                return Ok(false);
+            }
+            if !chart.set_volume_settings(settings) {
+                return Err("The chart could not apply these settings".to_string());
+            }
+            chart_cx.notify();
+            Ok(true)
+        })?;
+        if changed {
+            self.chart_persistence_dirty = true;
+        }
+        Ok(())
     }
 
     pub(super) fn set_volume_dialog_average_enabled(
@@ -7794,7 +8000,6 @@ impl WorkspaceSurface {
             && dialog.draft.average.enabled != enabled
         {
             dialog.draft.average.enabled = enabled;
-            dialog.message = None;
             if !enabled
                 && dialog
                     .color_picker
@@ -7803,7 +8008,7 @@ impl WorkspaceSurface {
             {
                 dialog.color_picker = None;
             }
-            cx.notify();
+            self.preview_volume_dialog(cx);
         }
     }
 
@@ -7816,7 +8021,7 @@ impl WorkspaceSurface {
             && dialog.draft.average.kind != kind
         {
             dialog.draft.average.kind = kind;
-            cx.notify();
+            self.preview_volume_dialog(cx);
         }
     }
 
@@ -7829,7 +8034,7 @@ impl WorkspaceSurface {
             && dialog.draft.placement != placement
         {
             dialog.draft.placement = placement;
-            cx.notify();
+            self.preview_volume_dialog(cx);
         }
     }
 
@@ -7889,15 +8094,16 @@ impl WorkspaceSurface {
                 .is_none()
                 .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
         }
-        if let Some(color) = normalized {
-            let slot = match target {
-                VolumeColorTarget::Up => &mut dialog.draft.up_color,
-                VolumeColorTarget::Down => &mut dialog.draft.down_color,
-                VolumeColorTarget::Average => &mut dialog.draft.average.color,
-            };
-            *slot = Some(color);
-        }
-        cx.notify();
+        let Some(color) = normalized else {
+            return cx.notify();
+        };
+        let slot = match target {
+            VolumeColorTarget::Up => &mut dialog.draft.up_color,
+            VolumeColorTarget::Down => &mut dialog.draft.down_color,
+            VolumeColorTarget::Average => &mut dialog.draft.average.color,
+        };
+        *slot = Some(color);
+        self.preview_volume_dialog(cx);
     }
 
     pub(super) fn reset_volume_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7913,43 +8119,20 @@ impl WorkspaceSurface {
             );
         });
         dialog.color_picker = None;
-        dialog.message = None;
-        cx.notify();
+        self.preview_volume_dialog(cx);
     }
 
-    /// Applies the draft through the chart, which rebuilds the Aeris Charts volume indicator.
+    /// Apply: keeps the settings the chart already shows, closing only when they are valid.
     /// Visibility stays with the legend.
     pub(super) fn apply_volume_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.volume_dialog() else {
             return;
         };
-        let length =
-            match parse_volume_average_length(dialog.average_length.read(cx).value().as_ref()) {
-                Ok(length) => length,
-                Err(message) => return self.show_volume_message(message, cx),
-            };
-        let mut settings = dialog.draft.clone();
-        settings.average.length = length;
-        let Some(chart) = &self.chart else {
-            return self.show_volume_message("The chart is unavailable".to_string(), cx);
-        };
-        let applied = chart.update(cx, |chart, chart_cx| {
-            if chart.volume_settings().is_none() {
-                return Err("Volume is no longer on this chart".to_string());
-            }
-            if chart.volume_settings().as_ref() == Some(&settings) {
-                return Ok(());
-            }
-            if !chart.set_volume_settings(settings) {
-                return Err("The chart could not apply these settings".to_string());
-            }
-            chart_cx.notify();
-            Ok(())
-        });
+        let applied = volume_dialog_settings(dialog, cx)
+            .and_then(|settings| self.apply_volume_settings(settings, cx));
         match applied {
             Ok(()) => {
                 self.indicator_settings_dialog = None;
-                self.chart_persistence_dirty = true;
                 cx.notify();
             }
             Err(message) => self.show_volume_message(message, cx),

@@ -6,6 +6,14 @@ Aeris is a local-first Rust/GPUI trading terminal. The desktop is the single app
 In-process `market_runtime` and `account_runtime` own provider sessions, canonical market/account state,
 and bounded background work; GPUI owns presentation scheduling only. A secondary local market process must not return.
 
+Aeris is in production. Version 1.0.0 shipped publicly for Windows x64 and macOS Apple silicon on
+2026-10-25 through `https://aeristerminal.com/download/`, and real users run it with their own data.
+Treat every change as a change to a shipped product: durable state written by any released version
+must keep opening and migrating, and a user-visible capability ships only when it works on the
+installed app. What the website (`https://aeristerminal.com/`, sibling repository) says Aeris can do
+must match what the current release does; when a change adds, removes or limits a user-visible
+capability, update the website copy in the same coordinated task.
+
 ## Non-negotiable core principles
 
 Every change must satisfy all five principles below. They are mandatory acceptance criteria for
@@ -579,8 +587,7 @@ unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch.
 
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 
-If something fails, the tester sends back `~/Library/Application Support/Aeris/logs/aeris.log` on
-macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
+If something fails, the user sends back `~/Library/Application Support/Aeris/logs/aeris.log` on macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
 
 ## Rust and documentation conventions
 

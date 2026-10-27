@@ -464,6 +464,20 @@ impl AerisChartView {
             .is_some_and(|volume| series == volume.columns || series == volume.average)
     }
 
+    /// Records an indicator the chart removed itself, such as one deleted from the keyboard, so
+    /// it is not restored on the next instrument or interval.
+    pub(super) fn indicator_removed(&mut self, binding: u32) {
+        if self
+            .volume
+            .as_ref()
+            .is_some_and(|volume| volume.columns == binding)
+        {
+            self.volume = None;
+        }
+        self.invalidate_series_layout();
+        self.mark_user_state_changed();
+    }
+
     /// Removes the volume indicator; the product volume weights stay for the other readers.
     pub(super) fn remove_volume(&mut self) -> bool {
         self.volume

@@ -203,7 +203,7 @@ fn line_thickness_control(
     .render(app, WorkspaceSurface::set_study_settings_line_width, theme)
 }
 
-/// A swatch that opens the color picker for one study line. Picks change only the draft. A study
+/// A swatch that opens the color picker for one study line. Picks preview at once. A study
 /// with several lines shows each line as a bare swatch named by its tooltip, so every swatch fits
 /// on the thickness row; a single line shows its hex code.
 fn output_color_control(
@@ -373,11 +373,6 @@ pub(super) fn study_settings_dialog_layer(
     let reset = app.clone();
     let cancel = app.clone();
     let save = app.clone();
-    let busy = app
-        .read(cx)
-        .studies
-        .reinitializing
-        .contains_key(&dialog.study_id);
 
     Dialog::new(
         "study_settings_dialog",
@@ -395,7 +390,6 @@ pub(super) fn study_settings_dialog_layer(
         Button::new("study_settings_reset", theme)
             .variant(ButtonVariant::Destructive)
             .label("Reset to defaults")
-            .disabled(busy)
             .on_click(move |_, window, cx| {
                 reset.update(cx, |surface, surface_cx| {
                     surface.reset_study_settings_dialog(window, surface_cx);
@@ -413,9 +407,7 @@ pub(super) fn study_settings_dialog_layer(
     .action(
         Button::new("study_settings_save", theme)
             .variant(ButtonVariant::Primary)
-            .label(if busy { "Applying…" } else { "Apply" })
-            .loading(busy)
-            .disabled(busy)
+            .label("Apply")
             .on_click(move |_, _, cx| {
                 save.update(cx, WorkspaceSurface::save_study_settings_dialog);
             }),

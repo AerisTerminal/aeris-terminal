@@ -1303,7 +1303,9 @@ struct PendingRuntimeStudyState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingStudyReinitialization {
     series: BarSeriesKey,
-    replacement_persisted: Option<WorkspaceChartStudyState>,
+    /// The user settings the study adopts once the runtime accepts them; `None` rebinds an
+    /// automatic reinitialization to `series` with the settings it already has.
+    replacement_settings: Option<Vec<WorkspaceStudySettingState>>,
 }
 
 /// A chart settings request waiting for the workspace to select its pane and open the dialog:
@@ -1326,14 +1328,17 @@ enum IndicatorSettingsDialog {
     Drawing(Box<DrawingSettingsDialogState>),
 }
 
-/// Draft volume settings; the chart changes only when the draft is applied.
+/// Volume settings being edited. Every valid edit previews on the chart at once; Apply keeps
+/// the chart as shown and Cancel restores `original`.
 struct VolumeDialogState {
+    original: VolumeSettings,
     draft: VolumeSettings,
     average_length: Entity<InputState>,
     color_picker: Option<DialogColorPickerState<VolumeColorTarget>>,
     /// The setting whose dropdown is open.
     menu: Option<String>,
     message: Option<String>,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 /// The volume color a dialog swatch edits.
@@ -1386,8 +1391,10 @@ impl StudyOutputColorDraft {
     }
 }
 
-/// Draft big-trades settings; the chart changes only when the draft is applied.
+/// Big-trades settings being edited. Every valid edit previews on the chart at once; Apply keeps
+/// the chart as shown and Cancel restores `original`.
 struct BigTradesDialogState {
+    original: BigTradesSettings,
     /// `None` selects the fixed minimum typed into `minimum_volume`.
     intensity: Option<BigTradesIntensity>,
     size: BigTradesSize,
@@ -1396,11 +1403,17 @@ struct BigTradesDialogState {
     /// The setting whose dropdown is open.
     menu: Option<String>,
     message: Option<String>,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
+/// Study settings being edited. Style edits preview on the chart at once and calculation edits
+/// reinitialize the study as they are made; Apply keeps them and Cancel restores the style and
+/// settings of `original`.
 struct StudySettingsDialogState {
     study_id: StudyInstanceId,
     title: String,
+    /// The study as it was when the dialog opened.
+    original: WorkspaceChartStudyState,
     specs: Vec<StudySettingSpec>,
     draft_values: BTreeMap<String, StudySettingValue>,
     /// Host-owned output stroke width; presentation only, so it never reinitializes the study.
@@ -1420,6 +1433,10 @@ struct RuntimeStudiesState {
     active: Vec<RuntimeStudyState>,
     pending: HashMap<u64, PendingRuntimeStudyState>,
     reinitializing: HashMap<StudyInstanceId, PendingStudyReinitialization>,
+    /// The newest user settings for a study whose reinitialization is still in flight. Only the
+    /// latest replaces an earlier one, and it is sent once the runtime answers, so editing a
+    /// setting keeps at most one request per study in flight.
+    queued_settings: HashMap<StudyInstanceId, Vec<WorkspaceStudySettingState>>,
     /// Rejected automatic reinitializations: the chart series each targeted and
     /// when it may be retried.
     reinitialization_retries: HashMap<StudyInstanceId, (BarSeriesKey, Instant)>,
@@ -1439,6 +1456,7 @@ impl Default for RuntimeStudiesState {
             active: Vec::new(),
             pending: HashMap::new(),
             reinitializing: HashMap::new(),
+            queued_settings: HashMap::new(),
             reinitialization_retries: HashMap::new(),
             suppressing_outputs: HashSet::new(),
             automatic_removals: HashSet::new(),
@@ -1479,8 +1497,8 @@ impl RuntimeStudiesState {
             .find(|state| state.study_id == study_id)
         {
             state.resolved_chart_series = Some(pending.series);
-            if let Some(replacement) = pending.replacement_persisted {
-                state.persisted = replacement;
+            if let Some(settings) = pending.replacement_settings {
+                state.persisted.settings = settings;
                 persisted_changed = true;
             }
         }
@@ -1493,7 +1511,7 @@ impl RuntimeStudiesState {
     fn reject_reinitialization(&mut self, study_id: StudyInstanceId, now: Instant) {
         self.suppressing_outputs.remove(&study_id);
         if let Some(pending) = self.reinitializing.remove(&study_id)
-            && pending.replacement_persisted.is_none()
+            && pending.replacement_settings.is_none()
         {
             self.reinitialization_retries
                 .insert(study_id, (pending.series, now + STUDY_RETRY_DELAY));
@@ -1585,6 +1603,8 @@ impl RuntimeStudiesState {
             }
         }
 
+        self.queued_settings
+            .retain(|study_id, _| !removed_runtime_ids.contains(study_id));
         let previous_len = self.active.len();
         self.active
             .retain(|state| !removed_runtime_ids.contains(&state.study_id));

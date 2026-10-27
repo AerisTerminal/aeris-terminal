@@ -1834,7 +1834,7 @@ mod timeframe_input {
     }
 
     #[gpui::test]
-    fn big_trades_dialog_applies_only_a_valid_draft_and_keeps_visibility(cx: &mut TestAppContext) {
+    fn big_trades_dialog_previews_valid_edits_and_keeps_visibility(cx: &mut TestAppContext) {
         let (surface, _requests, _publications, cx) = harness(cx);
         let hidden = BigTradesSettings {
             visible: false,
@@ -1864,12 +1864,12 @@ mod timeframe_input {
         });
 
         cx.update(|window, cx| {
-            input.update(cx, |input, cx| input.set_value("0", window, cx));
+            input.update(cx, |input, cx| input.replace_all("0", window, cx));
             surface.update(cx, |surface, cx| {
+                surface.chart_persistence_dirty = false;
                 surface.set_big_trades_dialog_filter(None, cx);
                 surface.set_big_trades_dialog_size(BigTradesSize::Large, cx);
                 surface.set_big_trades_dialog_show_volume(false, cx);
-                surface.chart_persistence_dirty = false;
                 surface.apply_big_trades_dialog(cx);
             });
         });
@@ -1888,34 +1888,48 @@ mod timeframe_input {
             cx.debug_bounds("big_trades_dialog").is_some(),
             "the fixed draft renders its minimum volume input"
         );
-        assert_eq!(chart_big_trades(&surface, cx), Some(hidden));
+        assert_eq!(
+            chart_big_trades(&surface, cx),
+            Some(hidden),
+            "settings with an unusable minimum are not shown"
+        );
 
+        // Typing a usable minimum shows every edit at once, before Apply.
         cx.update(|window, cx| {
-            input.update(cx, |input, cx| input.set_value(" 25.5 ", window, cx));
-            surface.update(cx, WorkspaceSurface::apply_big_trades_dialog);
+            input.update(cx, |input, cx| input.replace_all(" 25.5 ", window, cx));
         });
+        let edited = BigTradesSettings {
+            filter: BigTradesFilter::Fixed {
+                minimum_volume: 25.5,
+            },
+            size: BigTradesSize::Large,
+            show_volume: false,
+            visible: false,
+        };
+        assert_eq!(
+            chart_big_trades(&surface, cx),
+            Some(edited),
+            "the edits preview while the legend keeps owning visibility"
+        );
         cx.read(|cx| {
             let surface = surface.read(cx);
-            assert!(surface.big_trades_dialog().is_none());
+            let dialog = surface.big_trades_dialog().expect("dialog stays open");
+            assert_eq!(dialog.message, None, "a usable minimum clears the message");
             assert!(surface.chart_persistence_dirty);
         });
+
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::apply_big_trades_dialog));
+        cx.read(|cx| assert!(surface.read(cx).big_trades_dialog().is_none()));
         assert!(cx.debug_bounds("big_trades_dialog").is_none());
         assert_eq!(
             chart_big_trades(&surface, cx),
-            Some(BigTradesSettings {
-                filter: BigTradesFilter::Fixed {
-                    minimum_volume: 25.5
-                },
-                size: BigTradesSize::Large,
-                show_volume: false,
-                visible: false,
-            }),
-            "the draft applies while the legend keeps owning visibility"
+            Some(edited),
+            "Apply keeps them"
         );
     }
 
     #[gpui::test]
-    fn big_trades_dialog_reopens_on_the_fixed_minimum_and_resets_only_the_draft(
+    fn big_trades_dialog_reopens_on_the_fixed_minimum_and_cancel_restores_it(
         cx: &mut TestAppContext,
     ) {
         let (surface, _requests, _publications, cx) = harness(cx);
@@ -1961,13 +1975,21 @@ mod timeframe_input {
             assert_eq!(dialog.size, defaults.size);
             assert_eq!(dialog.show_volume, defaults.show_volume);
         });
+        assert_eq!(
+            chart_big_trades(&surface, cx),
+            Some(BigTradesSettings {
+                visible: fixed.visible,
+                ..BigTradesSettings::default()
+            }),
+            "the reset shows on the chart at once"
+        );
 
         cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_big_trades_dialog));
         assert!(cx.debug_bounds("big_trades_dialog").is_none());
         assert_eq!(
             chart_big_trades(&surface, cx),
             Some(fixed),
-            "only Apply changes the chart"
+            "Cancel restores the settings the dialog opened with"
         );
     }
 
@@ -2017,7 +2039,7 @@ mod timeframe_input {
     }
 
     #[gpui::test]
-    fn volume_dialog_keeps_an_invalid_draft_open_without_changing_the_chart(
+    fn volume_dialog_keeps_the_last_valid_preview_while_a_length_is_invalid(
         cx: &mut TestAppContext,
     ) {
         let (surface, _requests, _publications, cx) = harness(cx);
@@ -2053,13 +2075,19 @@ mod timeframe_input {
                 );
                 assert_eq!(dialog.draft.up_color, None);
                 surface.set_volume_dialog_color(VolumeColorTarget::Up, "#123456", cx);
-            });
-            input.update(cx, |input, cx| input.set_value("0", window, cx));
-            surface.update(cx, |surface, cx| {
                 surface.chart_persistence_dirty = false;
-                surface.apply_volume_dialog(cx);
             });
+            input.update(cx, |input, cx| input.replace_all("0", window, cx));
+            surface.update(cx, WorkspaceSurface::apply_volume_dialog);
         });
+        let previewed = VolumeSettings {
+            up_color: Some("#123456".to_string()),
+            average: VolumeAverageSettings {
+                enabled: true,
+                ..VolumeAverageSettings::default()
+            },
+            ..VolumeSettings::default()
+        };
         cx.read(|cx| {
             let surface = surface.read(cx);
             let dialog = surface.volume_dialog().expect("dialog stays open");
@@ -2083,11 +2111,24 @@ mod timeframe_input {
             cx.debug_bounds("volume_dialog").is_some(),
             "the enabled average renders its settings and the open picker"
         );
-        assert_eq!(chart_volume(&surface, cx), Some(VolumeSettings::default()));
+        assert_eq!(
+            chart_volume(&surface, cx),
+            Some(previewed),
+            "the chart keeps the last valid edits while the typed length is unusable"
+        );
+
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_volume_dialog));
+        assert_eq!(
+            chart_volume(&surface, cx),
+            Some(VolumeSettings::default()),
+            "Cancel restores the settings the dialog opened with"
+        );
     }
 
     #[gpui::test]
-    fn volume_dialog_applies_a_valid_draft_and_reset_waits_for_apply(cx: &mut TestAppContext) {
+    fn volume_dialog_previews_edits_and_cancel_restores_the_opened_settings(
+        cx: &mut TestAppContext,
+    ) {
         let (surface, _requests, _publications, cx) = harness(cx);
         open_volume_dialog_on_a_volume_chart(&surface, cx);
         let input = volume_length_input(&surface, cx);
@@ -2100,8 +2141,7 @@ mod timeframe_input {
                 surface.set_volume_dialog_color(VolumeColorTarget::Average, "#ff9800", cx);
                 surface.chart_persistence_dirty = false;
             });
-            input.update(cx, |input, cx| input.set_value(" 50 ", window, cx));
-            surface.update(cx, WorkspaceSurface::apply_volume_dialog);
+            input.update(cx, |input, cx| input.replace_all(" 50 ", window, cx));
         });
         let applied = VolumeSettings {
             up_color: Some("#123456".to_string()),
@@ -2114,11 +2154,14 @@ mod timeframe_input {
             },
             placement: VolumePlacement::OwnPane,
         };
-        cx.read(|cx| {
-            let surface = surface.read(cx);
-            assert!(surface.volume_dialog().is_none());
-            assert!(surface.chart_persistence_dirty);
-        });
+        assert_eq!(
+            chart_volume(&surface, cx),
+            Some(applied.clone()),
+            "every edit, including the typed length, shows before Apply"
+        );
+        cx.read(|cx| assert!(surface.read(cx).chart_persistence_dirty));
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::apply_volume_dialog));
+        cx.read(|cx| assert!(surface.read(cx).volume_dialog().is_none()));
         assert!(cx.debug_bounds("volume_dialog").is_none());
         assert_eq!(chart_volume(&surface, cx), Some(applied.clone()));
 
@@ -2138,11 +2181,16 @@ mod timeframe_input {
         });
         let input = volume_length_input(&surface, cx);
         cx.read(|cx| assert_eq!(input.read(cx).value(), "20"));
+        assert_eq!(
+            chart_volume(&surface, cx),
+            Some(VolumeSettings::default()),
+            "the reset shows on the chart at once"
+        );
         cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_volume_dialog));
         assert_eq!(
             chart_volume(&surface, cx),
             Some(applied),
-            "only Apply changes the chart"
+            "Cancel restores the settings the dialog opened with"
         );
     }
 
@@ -2186,7 +2234,7 @@ mod timeframe_input {
     }
 
     #[gpui::test]
-    fn order_flow_study_dialogs_apply_only_the_draft_of_their_own_indicator(
+    fn order_flow_study_dialogs_preview_only_the_settings_of_their_own_indicator(
         cx: &mut TestAppContext,
     ) {
         let (surface, _requests, _publications, cx) = harness(cx);
@@ -2234,38 +2282,26 @@ mod timeframe_input {
             });
         });
         assert!(cx.debug_bounds("order_flow_dialog").is_some());
-        assert_eq!(
-            chart_order_flow(&surface, cx),
-            before,
-            "drafts wait for Apply"
-        );
-        cx.update(|_, cx| {
-            surface.update(cx, |surface, cx| {
-                surface.chart_persistence_dirty = false;
-                surface.apply_order_flow_dialog(cx);
-            });
-        });
         let expected_cvd = CumulativeDeltaSettings {
             style: CumulativeDeltaStyle::Candles,
             reset: CumulativeDeltaReset::Continuous,
             up_color: ChartColor::from_hex("#123456"),
             ..CumulativeDeltaSettings::default()
         };
-        cx.read(|cx| {
-            let surface = surface.read(cx);
-            assert!(surface.order_flow_dialog().is_none());
-            assert!(surface.chart_persistence_dirty);
-        });
-        assert!(cx.debug_bounds("order_flow_dialog").is_none());
-        let applied = chart_order_flow(&surface, cx);
+        let edited = OrderFlowSettings {
+            cumulative_delta: expected_cvd,
+            ..before
+        };
         assert_eq!(
-            applied,
-            OrderFlowSettings {
-                cumulative_delta: expected_cvd,
-                ..before
-            },
-            "a color of another indicator is not part of the CVD draft"
+            chart_order_flow(&surface, cx),
+            edited,
+            "edits show at once, and a color of another indicator is not part of the CVD dialog"
         );
+        cx.read(|cx| assert!(surface.read(cx).chart_persistence_dirty));
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::apply_order_flow_dialog));
+        cx.read(|cx| assert!(surface.read(cx).order_flow_dialog().is_none()));
+        assert!(cx.debug_bounds("order_flow_dialog").is_none());
+        assert_eq!(chart_order_flow(&surface, cx), edited, "Apply keeps them");
 
         cx.update(|window, cx| {
             surface.update(cx, |surface, cx| {
@@ -2277,18 +2313,23 @@ mod timeframe_input {
                     OrderFlowDialogDraft::CumulativeDelta(draft)
                         if draft == CumulativeDeltaSettings::default()
                 ));
-                surface.close_order_flow_dialog(cx);
             });
         });
         assert_eq!(
             chart_order_flow(&surface, cx).cumulative_delta,
+            CumulativeDeltaSettings::default(),
+            "the reset shows on the chart at once"
+        );
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_order_flow_dialog));
+        assert_eq!(
+            chart_order_flow(&surface, cx).cumulative_delta,
             expected_cvd,
-            "reset changes only the draft"
+            "Cancel restores the settings the dialog opened with"
         );
     }
 
     #[gpui::test]
-    fn delta_histogram_dialog_cancel_discards_and_apply_changes_only_its_colors(
+    fn delta_histogram_dialog_previews_its_colors_and_cancel_restores_them(
         cx: &mut TestAppContext,
     ) {
         let (surface, _requests, _publications, cx) = harness(cx);
@@ -2304,13 +2345,23 @@ mod timeframe_input {
                 cx,
             );
         };
+        let picked = OrderFlowSettings {
+            delta_histogram: DeltaHistogramSettings {
+                up_color: None,
+                down_color: ChartColor::from_hex("#ABCDEF80"),
+            },
+            ..before
+        };
         cx.update(|window, cx| {
-            surface.update(cx, |surface, cx| {
-                pick_negative(surface, window, cx);
-                surface.close_order_flow_dialog(cx);
-            });
+            surface.update(cx, |surface, cx| pick_negative(surface, window, cx));
         });
-        assert_eq!(chart_order_flow(&surface, cx), before, "Cancel discards");
+        assert_eq!(
+            chart_order_flow(&surface, cx),
+            picked,
+            "a pick shows at once"
+        );
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_order_flow_dialog));
+        assert_eq!(chart_order_flow(&surface, cx), before, "Cancel restores");
         cx.update(|window, cx| {
             surface.update(cx, |surface, cx| {
                 pick_negative(surface, window, cx);
@@ -2318,20 +2369,11 @@ mod timeframe_input {
                 assert!(surface.order_flow_dialog().is_none());
             });
         });
-        assert_eq!(
-            chart_order_flow(&surface, cx),
-            OrderFlowSettings {
-                delta_histogram: DeltaHistogramSettings {
-                    up_color: None,
-                    down_color: ChartColor::from_hex("#ABCDEF80"),
-                },
-                ..before
-            }
-        );
+        assert_eq!(chart_order_flow(&surface, cx), picked);
     }
 
     #[gpui::test]
-    fn order_book_dialog_validates_its_numbers_and_keeps_visibility(cx: &mut TestAppContext) {
+    fn order_book_dialog_previews_valid_numbers_and_keeps_visibility(cx: &mut TestAppContext) {
         let (surface, _requests, _publications, cx) = harness(cx);
         install_order_flow_chart(&surface, cx);
         cx.update(|window, cx| {
@@ -2356,7 +2398,7 @@ mod timeframe_input {
         });
         let [levels, width, opacity] = inputs;
         cx.update(|window, cx| {
-            levels.update(cx, |input, cx| input.set_value("0", window, cx));
+            levels.update(cx, |input, cx| input.replace_all("0", window, cx));
             surface.update(cx, WorkspaceSurface::apply_order_flow_dialog);
         });
         cx.read(|cx| {
@@ -2382,9 +2424,22 @@ mod timeframe_input {
         );
 
         cx.update(|window, cx| {
-            levels.update(cx, |input, cx| input.set_value(" 80 ", window, cx));
-            width.update(cx, |input, cx| input.set_value("200", window, cx));
-            opacity.update(cx, |input, cx| input.set_value("70", window, cx));
+            levels.update(cx, |input, cx| input.replace_all(" 80 ", window, cx));
+            width.update(cx, |input, cx| input.replace_all("200", window, cx));
+            opacity.update(cx, |input, cx| input.replace_all("70", window, cx));
+        });
+        assert_eq!(
+            chart_order_flow(&surface, cx).order_book_depth,
+            Some(OrderBookDepthSettings {
+                visible: false,
+                levels_per_side: 80,
+                max_width: 200,
+                opacity_percent: 70,
+                ..OrderBookDepthSettings::default()
+            }),
+            "typed numbers show as soon as they are valid"
+        );
+        cx.update(|_, cx| {
             surface.update(cx, |surface, cx| {
                 surface.set_order_flow_dialog_show_sizes(false, cx);
                 surface.set_order_flow_dialog_color(OrderFlowColorTarget::Bid, "#112233", cx);
@@ -2392,14 +2447,39 @@ mod timeframe_input {
                 assert!(surface.order_flow_dialog().is_none());
             });
         });
+        assert_eq!(
+            chart_order_flow(&surface, cx).order_book_depth,
+            Some(OrderBookDepthSettings {
+                visible: false,
+                levels_per_side: 80,
+                max_width: 200,
+                opacity_percent: 70,
+                show_sizes: false,
+                bid_color: ChartColor::from_hex("#112233"),
+                ask_color: None,
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn order_book_dialog_reset_previews_and_cancel_restores_the_opened_settings(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        install_order_flow_chart(&surface, cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_order_flow_dialog(OrderFlowIndicator::OrderBook, window, cx);
+                surface.set_order_flow_dialog_show_sizes(false, cx);
+                surface.set_order_flow_dialog_color(OrderFlowColorTarget::Bid, "#112233", cx);
+                surface.apply_order_flow_dialog(cx);
+            });
+        });
         let applied = OrderBookDepthSettings {
             visible: false,
-            levels_per_side: 80,
-            max_width: 200,
-            opacity_percent: 70,
             show_sizes: false,
             bid_color: ChartColor::from_hex("#112233"),
-            ask_color: None,
+            ..OrderBookDepthSettings::default()
         };
         assert_eq!(
             chart_order_flow(&surface, cx).order_book_depth,
@@ -2429,10 +2509,19 @@ mod timeframe_input {
             assert_eq!(draft.max_width.read(cx).value(), "120");
             assert_eq!(draft.opacity_percent.read(cx).value(), "50");
         });
+        assert_eq!(
+            chart_order_flow(&surface, cx).order_book_depth,
+            Some(OrderBookDepthSettings {
+                visible: false,
+                ..OrderBookDepthSettings::default()
+            }),
+            "the reset shows on the chart at once"
+        );
         cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_order_flow_dialog));
         assert_eq!(
             chart_order_flow(&surface, cx).order_book_depth,
-            Some(applied)
+            Some(applied),
+            "Cancel restores the settings the dialog opened with"
         );
     }
 
