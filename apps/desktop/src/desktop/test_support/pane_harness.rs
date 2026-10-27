@@ -5179,6 +5179,60 @@ fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn pane_harness_off_viewport_working_order_line_paints_without_overflow(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    cx.run_until_parked();
+    let chart = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .chart
+            .clone()
+            .expect("populated chart")
+    });
+    chart.update(cx, |chart, cx| {
+        chart
+            .set_trading_snapshot(ChartTradingSnapshot {
+                orders: vec![ChartWorkingOrder {
+                    id: ChartOrderId::new("distant-working-order").expect("order id"),
+                    account_id: None,
+                    pane_index: 0,
+                    price_scale: ChartTradingPriceScale::Right,
+                    side: ChartOrderSide::Sell,
+                    kind: ChartOrderKind::Limit,
+                    role: ChartOrderRole::Working,
+                    status: ChartOrderStatus::Working,
+                    price: 1.0e16,
+                    stop_price: None,
+                    trailing_trigger_price: None,
+                    break_even_trigger_price: None,
+                    quantity: 1.0,
+                    filled_quantity: 0.0,
+                    position_id: None,
+                    parent_order_id: None,
+                    bracket_id: None,
+                    oco_group_id: None,
+                    revision: 1,
+                    annotations: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .expect("valid working order");
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let chart = chart.read(cx);
+        assert_eq!(chart.trading_snapshot().orders[0].price, 1.0e16);
+        assert!(
+            chart.rendered_viewport_size().0 > 0.0,
+            "the real GPUI pane must paint the order"
+        );
+    });
+}
+
+#[gpui::test]
 fn stale_drag_posts_one_notice_and_restores_line(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
