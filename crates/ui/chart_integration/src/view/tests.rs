@@ -5098,6 +5098,51 @@ fn cursor_selects_and_moves_unlocked_drawings_but_locked_drawings_do_not_drag() 
 }
 
 #[test]
+fn control_drag_box_selection_drives_group_toolbar_actions() {
+    let mut chart = interactive_chart();
+    for y in [180.0, 240.0, 330.0] {
+        chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+        click(&mut chart, 300.0, y);
+    }
+    assert_eq!(chart.drawing_count(), 3);
+    let ids = chart
+        .engine
+        .drawings()
+        .iter()
+        .map(|drawing| drawing.id)
+        .collect::<Vec<_>>();
+
+    drag_with(&mut chart, (500.0, 150.0), (560.0, 260.0), CTRL);
+    assert_eq!(chart.selected_drawing_count(), 2);
+    assert_eq!(chart.engine.selected_drawings(), &ids[..2]);
+
+    assert!(chart.apply_selected_drawings_options(&serde_json::json!({ "color": "#7b1fa2" })));
+    let colors = chart
+        .engine
+        .drawings()
+        .iter()
+        .map(|drawing| drawing.color.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(colors[..2], ["#7b1fa2", "#7b1fa2"]);
+    assert_ne!(colors[2], "#7b1fa2");
+
+    assert!(chart.set_selected_drawing_locked(true));
+    assert!(!chart.set_selected_drawing_locked(true));
+    assert!(chart.set_selected_drawing_locked(false));
+
+    assert_eq!(chart.clone_selected_drawings().len(), 2);
+    assert_eq!(chart.drawing_count(), 5);
+    assert!(key_with(&mut chart, ChartKey::Undo, CTRL));
+    assert_eq!(chart.drawing_count(), 3);
+
+    chart.engine.set_selected_drawings(&ids[..2]);
+    assert!(key(&mut chart, ChartKey::Delete));
+    assert_eq!(chart.drawing_count(), 1);
+    assert!(key_with(&mut chart, ChartKey::Undo, CTRL));
+    assert_eq!(chart.drawing_count(), 3);
+    assert_eq!(chart.selected_drawing_count(), 2);
+}
+#[test]
 fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
     let mut chart = interactive_chart();
     chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));

@@ -294,7 +294,13 @@ impl AerisChartView {
         self.engine.drawing(id).is_some()
     }
 
-    /// Returns whether the selected drawing is locked against pointer movement.
+    /// Returns how many drawings are selected. Ctrl/Cmd + drag on empty pane selects several.
+    #[must_use]
+    pub fn selected_drawing_count(&self) -> usize {
+        self.engine.selected_drawings().len()
+    }
+
+    /// Returns whether the primary selected drawing is locked against pointer movement.
     #[must_use]
     pub fn selected_drawing_locked(&self) -> bool {
         self.engine
@@ -303,19 +309,45 @@ impl AerisChartView {
             .is_some_and(|drawing| drawing.locked)
     }
 
-    /// Locks or unlocks the selected drawing against pointer movement.
+    /// Locks or unlocks every selected drawing against pointer movement, as one undo step.
     pub fn set_selected_drawing_locked(&mut self, locked: bool) -> bool {
-        let Some(id) = self.engine.selected_drawing() else {
-            return false;
-        };
-        if self.selected_drawing_locked() == locked {
+        let changes = self.engine.selected_drawings().iter().any(|&id| {
+            self.engine
+                .drawing(id)
+                .is_some_and(|drawing| drawing.locked != locked)
+        });
+        if !changes {
             return false;
         }
-        let changed = self.engine.set_drawing_locked(id, locked);
-        if changed {
+        self.engine.set_selected_drawings_locked(locked);
+        self.invalidate_series_frame();
+        true
+    }
+
+    /// Shows or hides every selected drawing, as one undo step.
+    pub fn set_selected_drawings_visible(&mut self, visible: bool) -> bool {
+        let changes = self.engine.selected_drawings().iter().any(|&id| {
+            self.engine
+                .drawing(id)
+                .is_some_and(|drawing| drawing.visible != visible)
+        });
+        if !changes {
+            return false;
+        }
+        self.engine.set_selected_drawings_visibility(visible);
+        self.invalidate_series_frame();
+        true
+    }
+
+    /// Duplicates every selected drawing in place, as one undo step; the copies become the
+    /// selection.
+    pub fn clone_selected_drawings(&mut self) -> Vec<DrawingId> {
+        let _ = self.finish_text_edit();
+        let copies = self.engine.clone_selected_drawings(0.0, 0.0);
+        if !copies.is_empty() {
             self.invalidate_series_frame();
         }
-        changed
+        copies
     }
 
     /// Returns aggregate lock state for the drawing toolbar.
@@ -350,7 +382,7 @@ impl AerisChartView {
         true
     }
 
-    /// Removes the selected drawing, if one exists.
+    /// Removes every selected drawing as one undo step.
     pub fn remove_selected_drawing(&mut self) -> bool {
         let removed = self.engine.remove_selected_drawing();
         if removed {
@@ -381,10 +413,29 @@ impl AerisChartView {
         applied
     }
 
+    /// Merges an options patch into every selected drawing that has those settings. Outside a
+    /// settings session each call is one undo step; inside one, the session commit records it.
+    pub fn apply_selected_drawings_options(&mut self, patch: &serde_json::Value) -> bool {
+        let applied = self
+            .engine
+            .apply_selected_drawings_options(&patch.to_string())
+            > 0;
+        if applied {
+            self.invalidate_series_frame();
+        }
+        applied
+    }
+
     /// Starts a settings session that previews edits live; any previous session is committed.
     pub fn begin_drawing_settings_edit(&mut self, id: DrawingId) -> bool {
         let _ = self.finish_text_edit();
         self.engine.begin_drawing_options_edit(id)
+    }
+
+    /// Starts one settings session over every selected drawing.
+    pub fn begin_selected_drawings_settings_edit(&mut self) -> bool {
+        let _ = self.finish_text_edit();
+        self.engine.begin_selected_drawings_options_edit()
     }
 
     /// Ends the settings session, keeping its edits as one undo step.

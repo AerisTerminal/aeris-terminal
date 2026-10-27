@@ -85,11 +85,11 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce892
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", default-features = false, features = ["font-kit", "wayland", "x11"] }
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.1.0" }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "40508828c55ffa7cddefc431221c6414fbd12097", version = "=0.3.0" }
-aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "40508828c55ffa7cddefc431221c6414fbd12097", version = "=0.3.0" }
-aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "40508828c55ffa7cddefc431221c6414fbd12097", version = "=0.3.0" }
-aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "40508828c55ffa7cddefc431221c6414fbd12097", version = "=0.3.0", features = ["gpui-backend"] }
-aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "40508828c55ffa7cddefc431221c6414fbd12097", version = "=0.3.0" }
+aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ba4f10ac40e887f12759f512b87922dde02b14ff", version = "=0.3.0" }
+aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ba4f10ac40e887f12759f512b87922dde02b14ff", version = "=0.3.0" }
+aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ba4f10ac40e887f12759f512b87922dde02b14ff", version = "=0.3.0" }
+aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ba4f10ac40e887f12759f512b87922dde02b14ff", version = "=0.3.0", features = ["gpui-backend"] }
+aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ba4f10ac40e887f12759f512b87922dde02b14ff", version = "=0.3.0" }
 
 [patch.crates-io]
 # Aeris Charts pins the published `gpui = 0.2.2`; replace it with the exact same reviewed Git

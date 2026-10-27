@@ -1,6 +1,8 @@
 //! The floating toolbar of the active chart's selected drawing. Its quick controls come from the
 //! Aeris Charts property schema of the drawing's kind (the properties flagged `toolbar`), so every
-//! kind gets the controls it paints without a per-kind toolbar.
+//! kind gets the controls it paints without a per-kind toolbar. With several drawings selected
+//! it shows the primary drawing's controls, and style, lock, hide, clone and remove act on the
+//! whole selection (each drawing takes only the settings its kind has).
 
 use super::*;
 use aeris_chart_integration::{
@@ -222,14 +224,15 @@ impl TerminalApp {
         }
     }
 
-    /// One option change. Outside the color picker's session it is its own undo step.
+    /// One option change for every selected drawing. Outside the color picker's session it is
+    /// its own undo step.
     fn apply_drawing_toolbar_option(&mut self, name: &str, value: Value, cx: &mut Context<Self>) {
         let Some(selected) = self.toolbar_drawing(cx) else {
             return;
         };
         let patch = single_option(name, value);
         selected.chart.update(cx, |chart, chart_cx| {
-            if chart.apply_drawing_options(selected.settings.id, &patch) {
+            if chart.apply_selected_drawings_options(&patch) {
                 chart_cx.notify();
             }
         });
@@ -261,10 +264,9 @@ impl TerminalApp {
         let Some(selected) = self.toolbar_drawing(cx) else {
             return;
         };
-        let drawing = selected.settings.id;
         if !selected
             .chart
-            .update(cx, |chart, _| chart.begin_drawing_settings_edit(drawing))
+            .update(cx, |chart, _| chart.begin_selected_drawings_settings_edit())
         {
             return;
         }
@@ -324,25 +326,25 @@ impl TerminalApp {
 
     fn toggle_selected_drawing_lock(&mut self, cx: &mut Context<Self>) {
         self.edit_selected_drawing(cx, |chart, settings| {
-            chart.set_drawing_locked(settings.id, !settings.flag("locked"));
+            chart.set_selected_drawing_locked(!settings.flag("locked"));
         });
     }
 
     fn hide_selected_drawing(&mut self, cx: &mut Context<Self>) {
-        self.edit_selected_drawing(cx, |chart, settings| {
-            chart.set_drawing_visible(settings.id, false);
+        self.edit_selected_drawing(cx, |chart, _| {
+            chart.set_selected_drawings_visible(false);
         });
     }
 
     fn clone_selected_drawing(&mut self, cx: &mut Context<Self>) {
-        self.edit_selected_drawing(cx, |chart, settings| {
-            chart.clone_drawing(settings.id);
+        self.edit_selected_drawing(cx, |chart, _| {
+            chart.clone_selected_drawings();
         });
     }
 
     fn remove_selected_drawing(&mut self, cx: &mut Context<Self>) {
-        self.edit_selected_drawing(cx, |chart, settings| {
-            chart.remove_drawing(settings.id);
+        self.edit_selected_drawing(cx, |chart, _| {
+            chart.remove_selected_drawing();
         });
     }
 
