@@ -86,6 +86,8 @@ violations and missing verification explicitly, and never describe them as satis
 - Simulated order admission and fills use the trading owner's verified session and current-generation Live quote.
   Crypto quotes may be at most 10 seconds old and other classes at most 60 seconds old by default;
   owner-local `eligible_after` fences resting orders after acceptance and across process restarts.
+- Practice-account admission has its own 10,000-account bound, independent of the compatibility
+  snapshot item limit; keep this value so stores written by released versions continue opening.
 - Recurring contract-hour session projection lives in `aeris_instruments::calendar::weekly_hours`;
   market status and trading DAY recovery use that one IANA-zone/DST calculation. A historical
   DAY deadline is derived only from a verified route and the acceptance-time open session;

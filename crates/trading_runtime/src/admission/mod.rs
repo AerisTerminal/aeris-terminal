@@ -1,11 +1,11 @@
 use super::{
     AccountEnvironment, BracketStrategyTemplate, BracketView, CreatePracticeAccount,
     DEMO_VENUE_UNAVAILABLE, FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind,
-    MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, OrderEventId, OrderEventKind,
-    OrderId, OrderStatus, OrderStep, OrderType, PlaceOrder, PlaceProtection, ProtectionRole,
-    TradeCopyDispatch, TradingAccount, TradingAccountId, TradingCore, TradingInstrument,
-    VenueRequestReceiver, VenueRoute, instrument_tick_units, mirrored_client_order_id,
-    multiply_quantity, order_acceptance_detail, shifted_price, venue,
+    MAXIMUM_OPEN_ORDERS, Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus,
+    OrderStep, OrderType, PlaceOrder, PlaceProtection, ProtectionRole, TradeCopyDispatch,
+    TradingAccount, TradingAccountId, TradingCore, TradingInstrument, VenueRequestReceiver,
+    VenueRoute, instrument_tick_units, mirrored_client_order_id, multiply_quantity,
+    order_acceptance_detail, shifted_price, venue,
 };
 use aeris_instruments::PriceGrid;
 use aeris_trading::venue::VenueCapabilities;
@@ -13,6 +13,25 @@ use aeris_trading::{OrderSide, RejectReason, RiskWarning, TimeInForce};
 
 mod capabilities;
 pub(crate) use capabilities::RouteCapabilities;
+
+/// Preserve the released practice-account capacity independently of snapshot projection.
+const MAXIMUM_PRACTICE_ACCOUNTS: usize = 10_000;
+
+fn practice_account_capacity_available(account_count: usize) -> bool {
+    account_count < MAXIMUM_PRACTICE_ACCOUNTS
+}
+
+#[cfg(test)]
+mod account_capacity_tests {
+    use super::practice_account_capacity_available;
+
+    #[test]
+    fn practice_account_bound_admits_ten_thousand_and_refuses_the_next() {
+        assert!(practice_account_capacity_available(9_999));
+        assert!(!practice_account_capacity_available(10_000));
+        assert!(!practice_account_capacity_available(10_001));
+    }
+}
 
 /// Explicit no-op buying-power step; margin is outside the solid-core venue.
 pub(crate) struct BuyingPower;
@@ -503,7 +522,7 @@ impl TradingCore {
         if starting_equity.units() <= 0 {
             return Err("practice account equity must be positive".to_string());
         }
-        if self.state.accounts.len() >= MAXIMUM_SNAPSHOT_ITEMS {
+        if !practice_account_capacity_available(self.state.accounts.len()) {
             return Err("practice account limit reached".to_string());
         }
         let sequence = self
