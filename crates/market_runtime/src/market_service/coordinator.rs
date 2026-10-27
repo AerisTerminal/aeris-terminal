@@ -9643,12 +9643,11 @@ mod tests {
                 if selection.selection_generation == 10
         ));
         coordinator.handle_catalog_selection(owner.0.get(), 9, resolved.clone());
-        assert!(
-            coordinator
-                .catalog
-                .get(&("hyperliquid".into(), "hyperliquid:perp:BTC".into()))
-                .is_some_and(|instrument| instrument.contract_metadata.is_none())
-        );
+        let provisional = coordinator
+            .catalog
+            .get(&("hyperliquid".into(), "hyperliquid:perp:BTC".into()))
+            .expect("provisional default is installed");
+        assert!(super::super::instrument_terms_from_install(provisional).is_err());
         coordinator.handle_catalog_selection(owner.0.get(), 10, resolved.clone());
         let installed = coordinator
             .catalog

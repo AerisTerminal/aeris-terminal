@@ -805,6 +805,26 @@ while M6.5's exact four-pane and second-tab checks remain not yet validated. M6.
 previous-selection deletion and fence rule plus VAL-DSK-014's interval storm; M6.7 is the
 active item (parts 1-8); M6.8-M6.12 are open.
 
+- [x] M6 fresh-workspace chart regression (D18, VAL-DSK-120) - Restore the default chart
+  - 2026-10-28 `fix(desktop)`: introducing commit `511161cb` changed snapshot conversion
+    from provider-shaped identity parsing to the bound runtime descriptor. A fresh default
+    selects before its catalog contract reply; `InstrumentDescriptor::from_install` used
+    the complete trading-terms validator for chart class/currency, so provisional BTC-USDC
+    was `Other`/unknown. The first snapshot failed with `engine snapshot instrument class
+    is unknown`; subsequent updates failed with `market update arrived before the initial
+    covering snapshot`, and readiness repeatedly moved the pane back to Ready. The runtime
+    now publishes explicit provisional chart class/currency and projects these independently
+    of verified trading terms; trading still refuses incomplete terms and the price grid
+    remains Unknown until verified. `fresh_default_descriptor_has_chart_terms_before_trading_terms_resolve`
+    failed before (`Other` versus `CryptoPerpetual`) and passes after. PaneHarness
+    `fresh_default_partial_terms_cover_chart_and_stay_ready_through_live_updates` failed
+    with chart Error at the initial snapshot on the old projection and passes after with
+    a covering bar, Ready and three accepted live updates. Clean release-build GUI on a
+    fresh isolated root showed BTC-USDC 1m candles and both axes at +15.13 s and +60.08 s;
+    history loaded twice (1,599 bars) and zero `Chart unavailable` notices followed.
+    Redacted evidence: mission `library/evidence/m6-chart-unavailable-fix/`. The unrelated
+    retirement warning is triaged in section 7. No new restriction.
+
 - [x] M6.1 desktop-services-test-support - Inject `DesktopServices`; move `FixtureMarketWorker` to test support
   - Part 1: move the disconnected replay worker to cfg-gated `desktop/test_support/`, preserve its
     diagnostics-only conformance command and test clients, and enforce the boundary in naming_check.
@@ -3199,10 +3219,22 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-27 UI feat(desktop): no stabilization item. The watchlist flag is a pole-less ribbon with a notched right edge, drawn flush against the row's left edge (about 10 by 12 px in a 16 px slot). An unflagged row shows nothing until its flag slot is hovered, which previews the flag in the default blue; a set flag always shows in its color. The flag filter in the header keeps the outline flag icon. Checked by hand in the debug build.
 - 2026-10-27 feat(release): no stabilization item. Release 1.2.0 is published with everything since 1.1.0: the High Contrast light and dark theme preset, watchlist flags (one color per symbol, set from the row's flag slot and the main color picker, with a filter by flag), the fix that redraws order, bracket and position lines immediately on the chart built by a timeframe or symbol switch, and a regression check that straight-line drawing tools use the engine's 2 px default stroke. The version stays 1.2.0 because the earlier 1.2.0 release commit was never published.
 - 2026-10-27 chore(build): no stabilization item. The licensed Rithmic kit is renamed from the Axiusflow-era "provider kit" to the Rithmic proto kit. Its canonical copy moves from `C:\aeris-provider-kit's\provider-kit` to `C:\rithmic_proto_kit` (the same 156 files under `proto`), and the repository's ignored `provider_kit\current` junction is replaced by a `rithmic_proto_kit` junction. The adapter build script, the conformance script, `.gitignore`, both preview workflows (which now unpack the kit secret into `rithmic_proto_kit`) and the live-market gate (default root `C:\rithmic_proto_kit`, the legacy `AXIUSFLOW_RITHMIC_KIT_ROOT` fallback removed) use the new name, and `tools/naming_check` enforces it (`rithmic_proto_kit_remains_vendor_only`). The repository secret name is unchanged.
+- 2026-10-28 M6 fresh-workspace chart regression fix(desktop): no stabilization item. D18/VAL-DSK-120: `511161cb` coupled chart descriptor class/currency to complete trading terms, making the provisional default `Other`; the first snapshot failed and later updates retriggered Error after each Ready. Runtime default chart metadata now supplies CryptoPerpetual/USDC without admitting unverified practice trading. Owner test and PaneHarness test failed before and pass after (three live updates). Clean release GUI: candles and both axes at +15.13 s and +60.08 s, two 1,599-bar histories, zero `Chart unavailable` lines. Shutdown retirement warning persists and is triaged below. Full gate and CI results accompany the commit.
+
 ## 7. Known gaps / deferred
 
 From `reports/work_items.md` ("Deferred / out of scope") plus mission-accepted limitations:
 
+- Shutdown retirement warning (D18 triage, separate from chart metadata): the isolated
+  release run logged `market consumer could not be removed during retirement: consumer is
+  not owned by the attached client` twice at 18:47:23.863/.864 UTC, only after a graceful
+  window close; the chart had been ready for 60+ seconds without errors. This is
+  `engine_market_worker/runtime.rs::retire_endpoint` calling `MarketService::remove_consumer`,
+  which rejects an already-removed/wrong-client consumer in
+  `market_service::coordinator::handle_remove`/`authorize_consumer`. The chart fix affects
+  provisional descriptor metadata and cannot change that ownership check. Investigate
+  consumer retirement ordering and idempotence separately; never suppress the warning or
+  ignore a true wrong-client removal. No consumer-retirement code changed here.
 - Depth-aware partial fills, the slippage model, margin and buying power, currency conversion, and the
   Funding/MarginReserve ledger kinds. Only hooks are left (D3 "solid core").
 - Removing the old P&L tables (`trade_pnl_cycles`, `risk_trade_cycles`) and the per-fill P&L columns;

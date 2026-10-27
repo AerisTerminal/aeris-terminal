@@ -64,18 +64,7 @@ pub fn instrument_terms_from_install(
             .map_or(PriceGrid::Unknown, PriceGrid::Fixed),
         _ => return Err(unavailable("price grid is incomplete")),
     };
-    let instrument_class = match metadata
-        .instrument_class
-        .and_then(|value| ProviderInstrumentClass::try_from(value).ok())
-    {
-        Some(ProviderInstrumentClass::Equity) => InstrumentClass::Equity,
-        Some(ProviderInstrumentClass::Option) => InstrumentClass::Option,
-        Some(ProviderInstrumentClass::Future) => InstrumentClass::Future,
-        Some(ProviderInstrumentClass::ForeignExchange) => InstrumentClass::ForeignExchange,
-        Some(ProviderInstrumentClass::CryptoSpot) => InstrumentClass::CryptoSpot,
-        Some(ProviderInstrumentClass::CryptoPerpetual) => InstrumentClass::CryptoPerpetual,
-        _ => InstrumentClass::Other,
-    };
+    let instrument_class = instrument_class_from_provider(metadata.instrument_class);
     let terms = InstrumentTerms {
         route: MarketRoute {
             provider_id: instrument.provider.clone(),
@@ -124,6 +113,18 @@ pub fn instrument_terms_from_install(
     };
     terms.validate().map_err(|error| error.to_string())?;
     Ok(terms)
+}
+
+pub(super) fn instrument_class_from_provider(value: Option<i32>) -> InstrumentClass {
+    match value.and_then(|value| ProviderInstrumentClass::try_from(value).ok()) {
+        Some(ProviderInstrumentClass::Equity) => InstrumentClass::Equity,
+        Some(ProviderInstrumentClass::Option) => InstrumentClass::Option,
+        Some(ProviderInstrumentClass::Future) => InstrumentClass::Future,
+        Some(ProviderInstrumentClass::ForeignExchange) => InstrumentClass::ForeignExchange,
+        Some(ProviderInstrumentClass::CryptoSpot) => InstrumentClass::CryptoSpot,
+        Some(ProviderInstrumentClass::CryptoPerpetual) => InstrumentClass::CryptoPerpetual,
+        _ => InstrumentClass::Other,
+    }
 }
 
 fn verified_session_hours(

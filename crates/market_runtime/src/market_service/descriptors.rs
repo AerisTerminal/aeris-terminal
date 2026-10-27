@@ -1,7 +1,8 @@
 //! Provider and instrument metadata published by the market runtime.
 
 use aeris_contracts::{
-    InstallProviderInstrument, ProviderConnectionKind, ProviderPresentationDescriptor,
+    InstallProviderInstrument, ProviderConnectionKind, ProviderContractMetadata,
+    ProviderInstrumentClass, ProviderPresentationDescriptor,
 };
 use aeris_instruments::{CalendarSourceKind, InstrumentClass, PriceGrid};
 use aeris_market_data::{BarPeriod, BarSeriesKey, ChartInterval};
@@ -188,6 +189,11 @@ pub(super) fn default_instrument() -> InstallProviderInstrument {
         price_scale: 8,
         quantity_scale: 8,
         entitlement_id: "hyperliquid-public".into(),
+        contract_metadata: Some(Box::new(ProviderContractMetadata {
+            instrument_class: Some(ProviderInstrumentClass::CryptoPerpetual as i32),
+            currency: Some("USDC".into()),
+            ..Default::default()
+        })),
         ..Default::default()
     }
 }
@@ -244,10 +250,17 @@ impl InstrumentDescriptor {
             instrument: instrument.clone(),
             display_symbol: instrument.display_symbol.clone(),
             venue: instrument.venue_id.clone(),
-            asset_class: terms
-                .as_ref()
-                .map_or(InstrumentClass::Other, |terms| terms.instrument_class),
-            currency: terms.as_ref().map(|terms| terms.currency.clone()),
+            asset_class: instrument.contract_metadata.as_deref().map_or(
+                InstrumentClass::Other,
+                |metadata| {
+                    super::trading_feed::instrument_class_from_provider(metadata.instrument_class)
+                },
+            ),
+            currency: instrument
+                .contract_metadata
+                .as_deref()
+                .and_then(|metadata| metadata.currency.clone())
+                .filter(|currency| !currency.trim().is_empty()),
             price_scale: u8::try_from(instrument.price_scale)
                 .map_err(|_| DescriptorError::InvalidInstrument)?,
             price_grid: terms.map_or(PriceGrid::Unknown, |terms| terms.price_grid),
@@ -290,6 +303,21 @@ impl ResolvedSeries {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+
+    #[test]
+    fn fresh_default_descriptor_has_chart_terms_before_trading_terms_resolve() {
+        let default = default_instrument();
+        assert!(super::super::instrument_terms_from_install(&default).is_err());
+        let descriptor = InstrumentDescriptor::from_install(
+            &default,
+            &super::super::HYPERLIQUID_PRESENTATION,
+            true,
+        )
+        .expect("provisional default descriptor");
+        assert_eq!(descriptor.asset_class, InstrumentClass::CryptoPerpetual);
+        assert_eq!(descriptor.currency.as_deref(), Some("USDC"));
+        assert_eq!(descriptor.price_grid, PriceGrid::Unknown);
+    }
 
     #[test]
     fn fresh_default_selection_is_ungated_and_restored_symbols_use_catalog_refs() {

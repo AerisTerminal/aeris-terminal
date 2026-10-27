@@ -276,6 +276,142 @@ impl PaneHarness {
 }
 
 #[gpui::test]
+fn fresh_default_partial_terms_cover_chart_and_stay_ready_through_live_updates(
+    cx: &mut TestAppContext,
+) {
+    use aeris_contracts::{ProviderContractMetadata, ProviderInstrumentClass};
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.contract_metadata = Some(Box::new(ProviderContractMetadata {
+        instrument_class: Some(ProviderInstrumentClass::CryptoPerpetual as i32),
+        currency: Some("USDC".into()),
+        ..Default::default()
+    }));
+    assert!(aeris_market_runtime::market_service::instrument_terms_from_install(&product).is_err());
+    let descriptor = aeris_market_runtime::InstrumentDescriptor::from_install(
+        &product,
+        aeris_market_runtime::built_in_provider_presentations()
+            .iter()
+            .find(|presentation| presentation.id == product.provider)
+            .expect("published default provider"),
+        true,
+    )
+    .expect("the provisional default has chart metadata without verified trading terms");
+
+    let (harness, cx) = PaneHarness::open_with_product(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product.clone(),
+        ChartInterval::Minute1,
+        cx,
+    );
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::BoundDescriptor {
+                generation: 1,
+                descriptor: Box::new(descriptor),
+                provider_display_name: "Hyperliquid".into(),
+            },
+        ))
+        .expect("default descriptor");
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::SelectedInstrument {
+                generation: 1,
+                instrument: product.clone(),
+            },
+        ))
+        .expect("default selection");
+    harness
+        .pane
+        .update(cx, |pane, cx| assert_eq!(pane.poll_market_worker(cx), 2));
+
+    let series = engine_market_worker::series_key(&product, ChartInterval::Minute1)
+        .expect("default minute series");
+    let events = FixtureMarketEvents::default();
+    let bar = fixture_bar();
+    harness
+        .publications
+        .send(runtime_bar_snapshot_message(
+            &product, &series, bar, &events, 1, 1,
+        ))
+        .expect("initial covering snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(
+            pane.chart_state,
+            ChartState::Error,
+            "the initial snapshot must be accepted"
+        );
+        assert!(pane.chart.is_some(), "the covering bar installs a chart");
+    });
+    harness
+        .publications
+        .send(harness.fixture_readiness(
+            1,
+            aeris_contracts::SeriesLoadState::Live,
+            "current coverage is live",
+        ))
+        .expect("runtime ready");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Ready);
+    });
+    for revision in 2..=4 {
+        harness
+            .publications
+            .send(default_live_tail_event(
+                &product, &series, bar, &events, revision,
+            ))
+            .expect("live update");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+            assert_eq!(
+                pane.chart_state,
+                ChartState::Ready,
+                "live revision {revision}"
+            );
+            assert!(pane.chart.is_some());
+            assert_eq!(pane.chart_failure, None);
+        });
+    }
+}
+
+fn default_live_tail_event(
+    product: &InstallProviderInstrument,
+    series: &aeris_market_data::BarSeriesKey,
+    bar: aeris_market_data::MarketBar,
+    events: &FixtureMarketEvents,
+    revision: u64,
+) -> PaneProjectionEvent {
+    let timestamp = 300 + i64::try_from(revision - 1).expect("small revision") * 60;
+    let tail = events.update(
+        &FixtureSeries {
+            series: series.clone(),
+            provider_generation: product.session_generation,
+            price_scale: u8::try_from(product.price_scale).expect("price scale"),
+            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+        },
+        1,
+        revision,
+        aeris_market_runtime::SeriesTailOperation::Append,
+        aeris_market_data::MarketBar {
+            source_sequence: revision,
+            exchange_timestamp_seconds: timestamp,
+            exchange_timestamp_unix_nanos: timestamp * 1_000_000_000,
+            ..bar
+        },
+        false,
+    );
+    PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection::series(
+        tail,
+        timestamp * 1_000_000_000,
+        None,
+    ))
+}
+
+#[gpui::test]
 fn pane_harness_four_restored_panes_apply_one_initial_reply_each(cx: &mut TestAppContext) {
     let saved_instrument = local_state::fixture_workspace().watchlist_entries[0]
         .instrument
