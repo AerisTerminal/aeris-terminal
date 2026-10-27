@@ -30,10 +30,10 @@ const PRESET_SWATCH_INSET: f32 = 2.0;
 /// Presets lay out two per row.
 const PRESET_ROWS: usize = ThemePreset::ALL.len().div_ceil(2);
 const _: () = assert!(
-    PRESET_ROWS == 4,
-    "PRESET_GRID_HEIGHT assumes four preset rows"
+    PRESET_ROWS == 5,
+    "PRESET_GRID_HEIGHT assumes five preset rows"
 );
-const PRESET_GRID_HEIGHT: f32 = 4.0 * PRESET_CHIP_HEIGHT + 3.0 * PRESET_CHIP_GAP;
+const PRESET_GRID_HEIGHT: f32 = 5.0 * PRESET_CHIP_HEIGHT + 4.0 * PRESET_CHIP_GAP;
 const THEME_SECTION_HEIGHT: f32 = SECTION_TITLE_HEIGHT
     + THEME_PREVIEW_HEIGHT
     + THEME_CARD_GAP
@@ -640,10 +640,15 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
                 .flex_col()
                 .gap(px(PRESET_CHIP_GAP))
                 .children(ThemePreset::ALL.chunks(2).map(|row| {
-                    div().flex().gap(px(PRESET_CHIP_GAP)).children(
-                        row.iter()
-                            .map(|preset| preset_chip(*preset, theme, on_select.clone())),
-                    )
+                    div()
+                        .flex()
+                        .gap(px(PRESET_CHIP_GAP))
+                        .children(
+                            row.iter()
+                                .map(|preset| preset_chip(*preset, theme, on_select.clone())),
+                        )
+                        // An odd last row keeps its chip at half width.
+                        .when(row.len() == 1, |row| row.child(div().flex_1()))
                 })),
         )
 }
@@ -651,6 +656,7 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
 const fn preset_chip_id(preset: ThemePreset) -> &'static str {
     match preset {
         ThemePreset::Aeris => "platform_menu_preset_aeris",
+        ThemePreset::HighContrast => "platform_menu_preset_high_contrast",
         ThemePreset::TokyoNight => "platform_menu_preset_tokyo_night",
         ThemePreset::Catppuccin => "platform_menu_preset_catppuccin",
         ThemePreset::Github => "platform_menu_preset_github",

@@ -169,6 +169,7 @@ impl ThemeMode {
 pub enum ThemePreset {
     #[default]
     Aeris,
+    HighContrast,
     TokyoNight,
     Catppuccin,
     Github,
@@ -182,8 +183,9 @@ const _: () = assert!(ThemePreset::ALL.len() == PRESET_COUNT + 1);
 
 impl ThemePreset {
     /// Every preset in picker order, Aeris first.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Aeris,
+        Self::HighContrast,
         Self::TokyoNight,
         Self::Catppuccin,
         Self::Github,
@@ -207,6 +209,7 @@ impl ThemePreset {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Aeris => "Aeris",
+            Self::HighContrast => "High Contrast",
             Self::TokyoNight => "Tokyo Night",
             Self::Catppuccin => "Catppuccin",
             Self::Github => "GitHub",
@@ -227,13 +230,14 @@ impl ThemePreset {
     const fn generated_index(self) -> Option<usize> {
         match self {
             Self::Aeris => None,
-            Self::TokyoNight => Some(0),
-            Self::Catppuccin => Some(1),
-            Self::Github => Some(2),
-            Self::One => Some(3),
-            Self::Dracula => Some(4),
-            Self::Solarized => Some(5),
-            Self::Gruvbox => Some(6),
+            Self::HighContrast => Some(0),
+            Self::TokyoNight => Some(1),
+            Self::Catppuccin => Some(2),
+            Self::Github => Some(3),
+            Self::One => Some(4),
+            Self::Dracula => Some(5),
+            Self::Solarized => Some(6),
+            Self::Gruvbox => Some(7),
         }
     }
 }
@@ -994,6 +998,7 @@ mod tests {
             ThemePreset::ALL.map(ThemePreset::id),
             [
                 "aeris",
+                "high-contrast",
                 "tokyo-night",
                 "catppuccin",
                 "github",
@@ -1016,6 +1021,12 @@ mod tests {
             }
         }
         assert_eq!(ThemePreset::from_id("missing"), None);
+        let high_contrast = AerisTheme::resolve(ThemePreset::HighContrast, ThemeMode::Dark);
+        assert_eq!(high_contrast.colors.surface, ThemeColor::from_rgb8(0, 0, 0));
+        assert_eq!(
+            token_source(&high_contrast.color_tokens(), "border-secondary"),
+            "#404040"
+        );
         let tokyo = AerisTheme::resolve(ThemePreset::TokyoNight, ThemeMode::Dark);
         assert_eq!(
             tokyo.colors.surface,

@@ -1,6 +1,6 @@
 # Theme presets
 
-Every Theme Studio theme in one place: the default Aeris theme plus seven presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines.
+Every Theme Studio theme in one place: the default Aeris theme plus eight presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines.
 
 ## How to use
 
@@ -39,13 +39,14 @@ Floating layers (menus, dialogs, tooltips) should read the popover tokens with a
 | Theme | `data-theme` | Light | Dark |
 | --- | --- | --- | --- |
 | [Aeris (default)](#1-aeris-default) | none | Light | Dark |
-| [Tokyo Night](#2-tokyo-night) | `tokyo-night` | Day | Night |
-| [Catppuccin](#3-catppuccin) | `catppuccin` | Latte | Mocha |
-| [GitHub](#4-github) | `github` | GitHub Light | GitHub Dark |
-| [One Dark / Light](#5-one-dark--light) | `one` | Atom One Light | One Dark Pro |
-| [Dracula](#6-dracula) | `dracula` | Alucard | Dracula |
-| [Solarized](#7-solarized) | `solarized` | Solarized Light | Solarized Dark |
-| [Gruvbox](#8-gruvbox) | `gruvbox` | Gruvbox Light | Gruvbox Dark (medium) |
+| [High Contrast](#2-high-contrast) | `high-contrast` | Light | Pure black |
+| [Tokyo Night](#3-tokyo-night) | `tokyo-night` | Day | Night |
+| [Catppuccin](#4-catppuccin) | `catppuccin` | Latte | Mocha |
+| [GitHub](#5-github) | `github` | GitHub Light | GitHub Dark |
+| [One Dark / Light](#6-one-dark--light) | `one` | Atom One Light | One Dark Pro |
+| [Dracula](#7-dracula) | `dracula` | Alucard | Dracula |
+| [Solarized](#8-solarized) | `solarized` | Solarized Light | Solarized Dark |
+| [Gruvbox](#9-gruvbox) | `gruvbox` | Gruvbox Light | Gruvbox Dark (medium) |
 
 ## 1. Aeris (default)
 
@@ -296,7 +297,242 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
 }
 ```
 
-## 2. Tokyo Night
+## 2. High Contrast
+
+The earlier Aeris palette, kept for people who prefer a pure black screen. Dark mode uses a `#000000` surface with a `#171717` secondary surface and solid `#2c2c2c` / `#404040` borders. Light mode matches Aeris with a stronger `--border-secondary` and hover / active fills. Like the other presets, it has no popover layer, so menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge.
+
+```css
+[data-theme="high-contrast"] {
+  /* Surfaces */
+  --surface: #ffffff;
+  --surface-secondary: #fafafa;
+
+  /* Borders */
+  --border: #0a0a0a33;
+  --border-secondary: #0a0a0a33;
+  --border-subtle: #0a0a0a12;
+  --border-width: 1px;
+
+  /* Text */
+  --text-default: #0a0a0a;
+  --text-secondary: #0a0a0a94;
+  --text-muted: #0a0a0a40;
+  --text-positive: var(--positive);
+  --text-negative: var(--negative);
+  --text-danger: var(--danger);
+  --text-warning: #ff6900;
+  /* Text on interactive items (buttons, tabs, links). Keep these values in
+     step with --icon / --icon-active: normal text = normal icon colour,
+     hover/active text = active icon colour. They are separate tokens on
+     purpose, never point one at the other. */
+  --text-interactive: #0a0a0a94;
+  --text-hover: #0a0a0a;
+  --text-active: #0a0a0a;
+
+  /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
+  --hover-bg: #0a0a0a14;
+  --active-bg: #0a0a0a1f;
+  --disabled-bg: #0a0a0a0d;
+
+  /* Icons — normal and hovered/pressed/selected */
+  --icon: #0a0a0a94;
+  --icon-active: #0a0a0a;
+
+  /* Status — gains / losses, success / failure. Shared with the main platform. */
+  --positive: #089981;
+  --positive-subtle: #dcf5f0;
+  --negative: #f7525f;
+  --negative-subtle: #ffe2e2;
+  --warning: #ff6900;
+  --warning-subtle: #ffedd4;
+  --indigo: #615fff;
+  --indigo-subtle: #e0e7ff;
+  --purple: #ad46ff;
+  --purple-subtle: #f3e8ff;
+
+  /* Actions */
+  --primary: #006EDD;
+  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
+  --primary-active: #0050b2;
+  --primary-disabled: color-mix(in srgb, var(--primary) 30%, var(--surface));
+  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, var(--surface));
+  --primary-subtle: color-mix(in srgb, var(--primary) 12%, var(--surface));
+  --primary-foreground: #ffffff;
+  --danger: #f7525f;
+  --danger-hover: #e5404d;
+  --danger-disabled: #ffc9c9;
+  --danger-disabled-foreground: #ffa2a2;
+  --danger-ring: #ffc9c9;
+  --danger-foreground: #ffffff;
+  --warning-hover: #e05c00;
+  --warning-foreground: #ffffff;
+
+  /* Buttons — neutral default button */
+  --button-fill: #0a0a0af2;
+  --button-fill-hover: #0a0a0ada;
+  --button-fill-active: #0a0a0ac2;
+  --button-fill-foreground: #fafafaf2;
+  --button-fill-subtle: #0a0a0a14;
+
+  /* Trade — dedicated buy / sell buttons. Hover and press darken the fill; no shadows. */
+  --buy: var(--primary);
+  --buy-hover: var(--primary-hover);
+  --buy-active: var(--primary-active);
+  --buy-disabled: var(--primary-disabled);
+  --buy-disabled-foreground: var(--primary-disabled-foreground);
+  --buy-foreground: var(--primary-foreground);
+  --sell: #f7525f;
+  --sell-hover: #e5404d;
+  --sell-active: #c9303c;
+  --sell-disabled: #ffc9c9;
+  --sell-disabled-foreground: #ffa2a2;
+  --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 12%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 20%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 28%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #000000);
+  --sell-subtle: color-mix(in srgb, var(--sell) 12%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 20%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 28%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #000000);
+
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 40%, var(--surface));
+  --book-bid-text: var(--primary);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 75%, #000000);
+  --book-fill-text: #000000;
+
+  /* Focus */
+  --ring-primary: var(--primary);
+
+  /* Radius */
+  --radius-small: 4px;
+  --radius-compact: 6px;
+  --radius-default: 8px;
+  --radius-medium: 14px;
+  --radius-large: 999px;
+
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
+  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+}
+
+[data-theme="high-contrast"].dark {
+  /* Surfaces */
+  --surface: #000000;
+  --surface-secondary: #171717;
+
+  /* Borders */
+  --border: #2c2c2c;
+  --border-secondary: #404040;
+  --border-subtle: #fafafa12;
+  --border-width: 1px;
+
+  /* Text */
+  --text-default: #ededed;
+  --text-secondary: #fafafa8c;
+  --text-muted: #fafafa59;
+  --text-positive: var(--positive);
+  --text-negative: var(--negative);
+  --text-danger: #ffa2a2;
+  --text-warning: #ffb86a;
+  --text-interactive: #fafafa8c;
+  --text-hover: #ededed;
+  --text-active: #ededed;
+
+  /* Interaction states */
+  --hover-bg: #fafafa1f;
+  --active-bg: #fafafa26;
+  --disabled-bg: #fafafa0d;
+
+  /* Icons */
+  --icon: #fafafa8c;
+  --icon-active: #ededed;
+
+  /* Status — gains / losses, success / failure. Shared with the main platform. */
+  --positive: #089981;
+  --positive-subtle: #193c37;
+  --negative: #f7525f;
+  --negative-subtle: #532b2e;
+  --warning: #ff6900;
+  --warning-subtle: #7e2a0c;
+  --indigo: #615fff;
+  --indigo-subtle: #312c85;
+  --purple: #ad46ff;
+  --purple-subtle: #59168b;
+
+  /* Actions */
+  --primary: #006EDD;
+  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
+  --primary-active: #0050b2;
+  --primary-disabled: color-mix(in srgb, var(--primary) 35%, var(--surface));
+  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, white);
+  --primary-subtle: color-mix(in srgb, var(--primary) 22%, var(--surface));
+  --primary-foreground: #ffffff;
+  --danger: #f7525f;
+  --danger-hover: #f96a75;
+  --danger-disabled: #6b3135;
+  --danger-disabled-foreground: #d0646c;
+  --danger-ring: #c10007;
+  --danger-foreground: #ffffff;
+  --warning-hover: #ff7b1f;
+  --warning-foreground: #ffffff;
+
+  /* Buttons — neutral default button */
+  --button-fill: #fafafad9;
+  --button-fill-hover: #fafafac3;
+  --button-fill-active: #fafafaad;
+  --button-fill-foreground: #0a0a0ad9;
+  --button-fill-subtle: #fafafa14;
+
+  /* Trade — dedicated buy / sell buttons. Hover and press brighten the fill; no shadows. */
+  --buy: var(--primary);
+  --buy-hover: var(--primary-hover);
+  --buy-active: var(--primary-active);
+  --buy-disabled: var(--primary-disabled);
+  --buy-disabled-foreground: var(--primary-disabled-foreground);
+  --buy-foreground: var(--primary-foreground);
+  --sell: #f7525f;
+  --sell-hover: #f96a75;
+  --sell-active: #fb838c;
+  --sell-disabled: #6b3135;
+  --sell-disabled-foreground: #ae8e90;
+  --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 18%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 26%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 34%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #ffffff);
+  --sell-subtle: color-mix(in srgb, var(--sell) 18%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 26%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 34%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #ffffff);
+
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 35%, var(--surface));
+  --book-bid-text: color-mix(in srgb, var(--primary) 80%, #ffffff);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 35%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 85%, #ffffff);
+  --book-fill-text: #ffffff;
+
+  /* Focus */
+  --ring-primary: var(--primary);
+
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
+  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+}
+```
+
+## 3. Tokyo Night
 
 Day (light) and Night (dark).
 
@@ -531,7 +767,7 @@ Day (light) and Night (dark).
 }
 ```
 
-## 3. Catppuccin
+## 4. Catppuccin
 
 Latte (light) and Mocha (dark).
 
@@ -766,7 +1002,7 @@ Latte (light) and Mocha (dark).
 }
 ```
 
-## 4. GitHub
+## 5. GitHub
 
 GitHub Light (light) and GitHub Dark (dark).
 
@@ -1001,7 +1237,7 @@ GitHub Light (light) and GitHub Dark (dark).
 }
 ```
 
-## 5. One Dark / Light
+## 6. One Dark / Light
 
 Atom One Light (light) and One Dark Pro (dark).
 
@@ -1236,7 +1472,7 @@ Atom One Light (light) and One Dark Pro (dark).
 }
 ```
 
-## 6. Dracula
+## 7. Dracula
 
 Alucard (light) and Dracula (dark).
 
@@ -1471,7 +1707,7 @@ Alucard (light) and Dracula (dark).
 }
 ```
 
-## 7. Solarized
+## 8. Solarized
 
 Solarized Light (light) and Solarized Dark (dark).
 
@@ -1706,7 +1942,7 @@ Solarized Light (light) and Solarized Dark (dark).
 }
 ```
 
-## 8. Gruvbox
+## 9. Gruvbox
 
 Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
 
