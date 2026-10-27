@@ -67,6 +67,7 @@ impl AerisChartView {
                     }
                 }
                 ChartInputEvent::IndicatorRemoved(binding) => self.indicator_removed(binding),
+                ChartInputEvent::PanesResized => self.remember_pane_heights(),
             }
         }
     }

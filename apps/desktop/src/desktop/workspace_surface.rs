@@ -1954,6 +1954,34 @@ fn initialize_restored_chart(
     observe_chart(chart, cx);
 }
 
+/// Pane heights as a multiple of the main pane, in basis points; zero is never written.
+fn persisted_pane_heights(heights: &[ChartPaneHeight]) -> Vec<WorkspaceChartPaneHeightState> {
+    heights
+        .iter()
+        .filter_map(|height| {
+            let share_basis_points = (height.share * 10_000.0).round().to_u32()?;
+            (share_basis_points > 0).then(|| WorkspaceChartPaneHeightState {
+                content: height.content.identifier(),
+                share_basis_points,
+            })
+        })
+        .collect()
+}
+
+/// Saved pane heights the chart understands; unknown pane contents and zero heights are skipped.
+fn restored_pane_heights(saved: &[WorkspaceChartPaneHeightState]) -> Vec<ChartPaneHeight> {
+    saved
+        .iter()
+        .filter(|height| height.share_basis_points > 0)
+        .filter_map(|height| {
+            Some(ChartPaneHeight {
+                content: ChartPaneContent::from_identifier(&height.content)?,
+                share: f64::from(height.share_basis_points) / 10_000.0,
+            })
+        })
+        .collect()
+}
+
 /// Writes pane-owned presentation choices to the same document whether the chart is
 /// loaded or still waiting for a covering snapshot.
 struct PanePersistence<'a>(&'a WorkspaceSurface);
@@ -2034,6 +2062,7 @@ impl PanePresentation {
             .as_ref()
             .and_then(restored_order_flow_settings);
         let legend = restored_chart_legend(state.legend);
+        let pane_heights = restored_pane_heights(&state.pane_heights);
         chart.update(cx, |chart, _| {
             let mut failed = chart.set_time_zone(&state.time_zone).is_err();
             failed |= chart
@@ -2054,6 +2083,7 @@ impl PanePresentation {
                 chart.set_axis_appearance(axis);
             }
             failed |= chart.restore_indicator_states(&indicators).is_err();
+            chart.restore_pane_heights(&pane_heights);
             if let Some(price_axis) = price_axis {
                 chart.restore_price_axis_menu_state(price_axis);
             }
@@ -2123,6 +2153,7 @@ impl WorkspaceSurface {
             )),
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
             legend: Some(persisted_chart_legend(chart.legend_options())),
+            pane_heights: persisted_pane_heights(&chart.pane_heights()),
             ..WorkspaceChartState::default()
         };
         PanePersistence(self).apply_surface_fields(&mut state);
@@ -4888,7 +4919,16 @@ impl WorkspaceSurface {
             .find(|state| state.study_id == snapshot.study_id)
             .map(|state| persisted_study_output_colors(&state.persisted))
             .unwrap_or_default();
+        let pane_key = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == snapshot.study_id)
+            .map(|state| state.persisted.local_id);
         chart.update(cx, |chart, chart_cx| {
+            if let Some(key) = pane_key {
+                chart.set_study_pane_key(snapshot.study_id.get(), key);
+            }
             chart.set_study_line_width(snapshot.study_id.get(), line_width);
             chart.set_study_output_colors(snapshot.study_id.get(), &output_colors);
             match chart.install_study_output(

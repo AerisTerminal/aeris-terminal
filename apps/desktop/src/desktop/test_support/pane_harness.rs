@@ -2644,6 +2644,78 @@ fn assert_chart_presentation(
 }
 
 #[gpui::test]
+fn pane_harness_interval_switch_keeps_the_chosen_separate_pane_height(cx: &mut TestAppContext) {
+    use aeris_chart_integration::{
+        ChartPaneContent, ChartPaneHeight, VolumePlacement, VolumeSettings,
+    };
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let chosen = vec![ChartPaneHeight {
+        content: ChartPaneContent::Volume,
+        share: 0.08,
+    }];
+    let original = harness.pane.update(cx, |pane, cx| {
+        assert!(pane.add_indicator(ChartIndicator::Volume, cx));
+        let chart = pane.chart.as_ref().expect("original chart").clone();
+        chart.update(cx, |chart, _| {
+            assert!(chart.set_volume_settings(VolumeSettings {
+                placement: VolumePlacement::OwnPane,
+                ..VolumeSettings::default()
+            }));
+            chart.restore_pane_heights(&chosen);
+        });
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+        chart.entity_id()
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("interval selection");
+    harness
+        .publications
+        .send(PaneProjectionEvent::LocalCommandOutcome(
+            LocalCommandOutcome::EngineSelection {
+                sequence,
+                succeeded: true,
+            },
+        ))
+        .expect("selection commit");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let snapshot = harness.fixture_snapshot(&product, ChartInterval::Minute5, sequence, 13);
+    harness
+        .publications
+        .send(snapshot)
+        .expect("covering snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        let chart = pane.chart.as_ref().expect("replacement chart");
+        assert_ne!(
+            chart.entity_id(),
+            original,
+            "the interval switch rebuilt the chart"
+        );
+        assert_eq!(chart.read(cx).pane_heights(), chosen);
+        let saved = pane.workspace_chart_state(cx).expect("saved presentation");
+        assert_eq!(saved.pane_heights.len(), 1);
+        assert_eq!(saved.pane_heights[0].content, "volume");
+        assert_eq!(saved.pane_heights[0].share_basis_points, 800);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_symbol_switch_retains_style_colors_and_scale_mode(cx: &mut TestAppContext) {
     use prost::Message as _;
 

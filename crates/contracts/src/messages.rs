@@ -395,6 +395,22 @@ pub struct WorkspaceChartState {
     /// owned drawings. Read only to migrate them into the layout; new saves leave it empty.
     #[prost(message, repeated, tag = "21")]
     pub instrument_drawings: Vec<WorkspaceInstrumentDrawingsState>,
+    /// Heights the user gave separate chart panes, by pane content. Empty (and absent in older
+    /// workspaces) keeps the chart's default pane heights.
+    #[prost(message, repeated, tag = "22")]
+    pub pane_heights: Vec<WorkspaceChartPaneHeightState>,
+}
+
+/// The height of one separate chart pane, kept by what the pane shows so a rebuilt chart
+/// restores it.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceChartPaneHeightState {
+    /// Stable chart-integration pane content identifier, such as `volume` or `study.3`.
+    #[prost(string, tag = "1")]
+    pub content: String,
+    /// The pane's height as a multiple of the main price pane's height, in basis points.
+    #[prost(uint32, tag = "2")]
+    pub share_basis_points: u32,
 }
 
 /// Committed drawings of one instrument, keyed by its stable provider identity so

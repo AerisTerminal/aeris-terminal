@@ -723,12 +723,13 @@ mod tests {
     }
     use aeris_contracts::{
         WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
-        WorkspaceChartState, WorkspaceChartStudyState, WorkspaceCumulativeDeltaState,
-        WorkspaceDeltaHistogramState, WorkspaceInstrumentDrawingsState,
-        WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState,
-        WorkspacePriceAxisState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-        WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-        WorkspaceVolumeSettingsState, workspace_study_setting_state,
+        WorkspaceChartPaneHeightState, WorkspaceChartState, WorkspaceChartStudyState,
+        WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
+        WorkspaceInstrumentDrawingsState, WorkspaceOrderBookDepthState,
+        WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+        WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+        WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceVolumeSettingsState,
+        workspace_study_setting_state,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1020,6 +1021,10 @@ mod tests {
                 instrument_id: "ETH".to_string(),
                 chart_state_json: r#"[{"id":4,"kind":"trend_line","pane_index":0,"points":[{"logical":1.0,"price":3000.0},{"logical":5.0,"price":3100.0}]}]"#.to_string(),
                 locked_drawing_ids: vec![4],
+            }],
+            pane_heights: vec![WorkspaceChartPaneHeightState {
+                content: "volume".to_string(),
+                share_basis_points: 1_200,
             }],
         }
     }

@@ -1206,6 +1206,8 @@ pub struct AerisChartView {
     study_styles: std::collections::BTreeMap<u64, studies::StudyStyle>,
     /// The color Aeris Charts gave each external study output when it was installed.
     study_default_colors: std::collections::BTreeMap<(u64, usize), Option<String>>,
+    /// Separate-pane heights the user chose, restored onto panes as they appear.
+    pane_heights: pane_heights::PaneHeights,
     /// Window bounds of the chart canvas from the latest prepaint.
     viewport_bounds: Bounds<Pixels>,
     /// GPUI event translation; every interaction decision lives in the Aeris Charts controller.
@@ -1322,6 +1324,7 @@ impl AerisChartView {
             fitted: false,
             study_styles: std::collections::BTreeMap::new(),
             study_default_colors: std::collections::BTreeMap::new(),
+            pane_heights: pane_heights::PaneHeights::default(),
             volume_profile: None,
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
@@ -1435,6 +1438,7 @@ impl AerisChartView {
             fitted: false,
             study_styles: std::collections::BTreeMap::new(),
             study_default_colors: std::collections::BTreeMap::new(),
+            pane_heights: pane_heights::PaneHeights::default(),
             volume_profile: None,
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
@@ -2993,6 +2997,7 @@ impl AerisChartView {
             )
         };
 
+        self.sync_pane_heights();
         let fit_content = !self.fitted;
         let force_layout = self.layout_dirty;
         let mut preparation = self.prepare_frame(
@@ -3522,6 +3527,8 @@ mod order_flow;
 pub use order_flow::classify_order_flow_sweeps;
 mod palette;
 pub use palette::{ChartAxisAppearance, ChartThemeDefaults};
+mod pane_heights;
 use palette::{PresetPalette, chart_theme, effective_color, theme_defaults};
+pub use pane_heights::{ChartPaneContent, ChartPaneHeight};
 mod studies;
 pub use studies::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};

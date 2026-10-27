@@ -3762,6 +3762,89 @@ fn volume_in_its_own_pane_keeps_its_height_when_settings_change_after_a_resize()
 }
 
 #[test]
+fn a_resized_volume_pane_keeps_its_height_on_a_rebuilt_chart() {
+    let layout = |chart: &mut AerisChartView| {
+        chart.sync_pane_heights();
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    };
+    let own_pane = VolumeSettings {
+        placement: VolumePlacement::OwnPane,
+        ..VolumeSettings::default()
+    };
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    assert!(chart.set_volume_settings(own_pane.clone()));
+    layout(&mut chart);
+    assert_eq!(chart.engine.panes.len(), 2);
+    let default_height = chart.engine.panes[1].height;
+    assert!(
+        default_height < chart.engine.panes[0].height * 0.2,
+        "a fresh volume pane opens small: {default_height}"
+    );
+    assert!(
+        chart.pane_heights().is_empty(),
+        "untouched panes persist nothing"
+    );
+
+    let revision = chart.user_state_revision();
+    let separator = chart.engine.panes[1].top;
+    drag(&mut chart, (300.0, separator), (300.0, separator + 25.0));
+    layout(&mut chart);
+    let resized = chart.engine.panes[1].height / chart.engine.panes[0].height;
+    assert!(
+        chart.user_state_revision() > revision,
+        "the resize persists"
+    );
+    let heights = chart.pane_heights();
+    assert_eq!(heights.len(), 1);
+    assert_eq!(heights[0].content, ChartPaneContent::Volume);
+
+    // An interval switch builds a new chart and restores the saved presentation onto it.
+    let mut rebuilt = interactive_chart();
+    rebuilt
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    assert!(rebuilt.set_volume_settings(own_pane));
+    rebuilt.restore_pane_heights(&heights);
+    layout(&mut rebuilt);
+    let restored = rebuilt.engine.panes[1].height / rebuilt.engine.panes[0].height;
+    assert!(
+        (restored - resized).abs() < 1e-3,
+        "the rebuilt volume pane keeps the chosen height: {restored} vs {resized}"
+    );
+    assert_eq!(rebuilt.pane_heights(), heights);
+}
+
+#[test]
+fn pane_content_identifiers_round_trip() {
+    for content in [
+        ChartPaneContent::Volume,
+        ChartPaneContent::CumulativeDelta,
+        ChartPaneContent::Delta,
+        ChartPaneContent::Indicator {
+            indicator: ChartIndicator::Rsi,
+            occurrence: 1,
+        },
+        ChartPaneContent::Study(7),
+    ] {
+        assert_eq!(
+            ChartPaneContent::from_identifier(&content.identifier()),
+            Some(content)
+        );
+    }
+    assert_eq!(
+        ChartPaneContent::from_identifier("indicator.unknown.0"),
+        None
+    );
+    assert_eq!(ChartPaneContent::from_identifier("study.x"), None);
+    assert_eq!(ChartPaneContent::from_identifier(""), None);
+}
+
+#[test]
 fn native_indicator_hover_selection_and_delete_reach_aeris_charts() {
     let mut chart = interactive_chart();
     let indicator = chart
