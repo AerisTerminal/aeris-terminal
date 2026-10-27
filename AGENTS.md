@@ -585,6 +585,17 @@ versioning from 1.0.0); never put a provider name or "preview" in them. CI never
 credentials; publication runs on the maintainer's machine. Builds are ad-hoc signed on macOS and
 unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch.
 
+When the maintainer says "release the new version", run this whole path without asking again:
+confirm `main` is clean and pushed; bump `[workspace.package] version` (minor when the release adds a
+user-visible capability, patch when it only fixes) and run `cargo update --workspace --offline` so the
+lockfile changes only workspace versions (published installer names are versioned and served with
+immutable caching, so a version is never republished); commit `feat(release): release <version>` with
+a stabilization log entry naming the version and what it ships since the previous release; push;
+wait for CI on that commit; run both preview lanes; check their smoke tests and the Windows checksum;
+publish with `publish:desktop`; and confirm that `https://aeristerminal.com/downloads/latest.json` names
+the version and the public files hash to the built artifacts. The `feat(release)` entries in
+`plan/stabilization/stabilization_work.md` are the release record.
+
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 
 If something fails, the user sends back `~/Library/Application Support/Aeris/logs/aeris.log` on macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
