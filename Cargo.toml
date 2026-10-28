@@ -78,7 +78,6 @@ protoc-bin-vendored = "=3.2.0"
 gpui-base = { path = "third_party/gpui_base" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", default-features = false, features = ["font-kit", "wayland", "x11"] }
-reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.1.0" }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "50bde982233a6f7e3dff09b8bc7bb4635fa5f635", version = "=0.3.0" }
 aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "50bde982233a6f7e3dff09b8bc7bb4635fa5f635", version = "=0.3.0" }

@@ -11,6 +11,7 @@
 
 pub mod loopback;
 pub mod oidc;
+mod photo;
 pub mod pkce;
 
 use aeris_observability::diagnostic;
@@ -25,7 +26,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{AccountSessionState, AccountView, LoginAuthorization};
+use crate::{
+    AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto, ProfilePhotoStatus,
+};
 use aeris_account::{
     AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
     MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
@@ -154,6 +157,25 @@ struct ServiceState {
     pending: Option<PendingLogin>,
     last_generation: u64,
     restore_allowed: bool,
+    photo: PhotoSlot,
+}
+
+/// The profile photo for one fetchable address of the signed-in profile.
+#[derive(Default)]
+struct PhotoSlot {
+    /// Empty when the session has no fetchable photo address.
+    url: String,
+    /// Changes with `url`, so a fetch for a replaced address drops its result.
+    sequence: u64,
+    loaded: Option<ProfilePhoto>,
+    fetching: bool,
+    failed_at: Option<Instant>,
+}
+
+/// One photo download the account status read decided to start.
+struct PhotoFetch {
+    sequence: u64,
+    url: String,
 }
 
 #[derive(Clone)]
@@ -182,6 +204,7 @@ pub struct AccountService {
     profile_refresh_in_flight: Arc<AtomicBool>,
     restore_started: Arc<AtomicBool>,
     restore_readiness: Arc<AtomicU8>,
+    photo_fetcher: photo::PhotoFetcher,
 }
 
 #[derive(Default)]
@@ -333,6 +356,7 @@ impl AccountService {
                 pending: None,
                 last_generation: 0,
                 restore_allowed: true,
+                photo: PhotoSlot::default(),
             })),
             vault_commit: Arc::new(Mutex::new(())),
             endpoints: Arc::new(Mutex::new(None)),
@@ -341,6 +365,7 @@ impl AccountService {
             profile_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             restore_started: Arc::new(AtomicBool::new(false)),
             restore_readiness: Arc::new(AtomicU8::new(AccountRestoreReadiness::Ready as u8)),
+            photo_fetcher: photo::https_photo_fetcher(),
         }
     }
 
@@ -1054,15 +1079,19 @@ impl AccountService {
     }
 
     /// Returns the current sanitized account view, expiring stale logins.
+    ///
+    /// The view carries the signed-in profile's photo; the first read that
+    /// sees a new fetchable photo address starts its bounded background fetch.
     #[must_use]
     pub fn account_status(&self) -> AccountView {
-        let Ok(mut state) = self.state.lock() else {
+        let Ok(mut guard) = self.state.lock() else {
             return cleared_view(
                 AccountSessionState::TerminalError,
                 0,
                 "account state is unavailable",
             );
         };
+        let state = &mut *guard;
         if state
             .pending
             .as_ref()
@@ -1076,7 +1105,52 @@ impl AccountService {
                 "sign-in timed out; retry sign-in",
             );
         }
-        state.view.clone()
+        let fetch = reconcile_profile_photo(state, Instant::now());
+        let view = state.view.clone();
+        drop(guard);
+        if let Some(fetch) = fetch {
+            self.start_photo_fetch(fetch);
+        }
+        view
+    }
+
+    fn start_photo_fetch(&self, fetch: PhotoFetch) {
+        let sequence = fetch.sequence;
+        let service = self.clone();
+        if std::thread::Builder::new()
+            .name("aeris-account-photo".to_string())
+            .spawn(move || {
+                let result = (service.photo_fetcher)(&fetch.url);
+                service.complete_photo_fetch(fetch.sequence, result);
+            })
+            .is_err()
+        {
+            self.complete_photo_fetch(
+                sequence,
+                Err("profile photo fetch could not start".to_string()),
+            );
+        }
+    }
+
+    fn complete_photo_fetch(&self, sequence: u64, result: Result<ProfilePhoto, String>) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let slot = &mut state.photo;
+        if slot.sequence != sequence {
+            return;
+        }
+        slot.fetching = false;
+        match result {
+            Ok(photo) => {
+                slot.loaded = Some(photo);
+                slot.failed_at = None;
+            }
+            Err(error) => {
+                diagnostic!("Aeris profile photo unavailable: {error}");
+                slot.failed_at = Some(Instant::now());
+            }
+        }
     }
 
     /// Enqueues one best-effort refresh for the currently verified profile
@@ -1585,6 +1659,7 @@ fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> Ac
         display_name: String::new(),
         email: String::new(),
         photo_url: String::new(),
+        photo: ProfilePhotoStatus::Absent,
     }
 }
 
@@ -1604,7 +1679,46 @@ fn signed_in_view(
         display_name: profile.display_name,
         email: profile.email,
         photo_url: profile.photo_url,
+        photo: ProfilePhotoStatus::Absent,
     }
+}
+
+/// Aligns the published photo with the signed-in profile's address and
+/// returns the fetch to start, if one is due. A changed address drops the
+/// previous photo, so another user's or an outdated photo never shows.
+fn reconcile_profile_photo(state: &mut ServiceState, now: Instant) -> Option<PhotoFetch> {
+    let wanted =
+        if is_signed_in(state.view.state) && photo::is_fetchable_photo_url(&state.view.photo_url) {
+            state.view.photo_url.as_str()
+        } else {
+            ""
+        };
+    if state.photo.url != wanted {
+        state.photo = PhotoSlot {
+            url: wanted.to_string(),
+            sequence: state.photo.sequence.wrapping_add(1),
+            ..PhotoSlot::default()
+        };
+    }
+    let slot = &mut state.photo;
+    let due = !slot.url.is_empty()
+        && slot.loaded.is_none()
+        && !slot.fetching
+        && slot
+            .failed_at
+            .is_none_or(|failed| now.saturating_duration_since(failed) >= photo::PHOTO_RETRY_DELAY);
+    if due {
+        slot.fetching = true;
+    }
+    state.view.photo = match (&slot.loaded, slot.fetching) {
+        (Some(photo), _) => ProfilePhotoStatus::Loaded(photo.clone()),
+        (None, true) => ProfilePhotoStatus::Loading,
+        (None, false) => ProfilePhotoStatus::Absent,
+    };
+    due.then(|| PhotoFetch {
+        sequence: slot.sequence,
+        url: slot.url.clone(),
+    })
 }
 
 fn lock_state(

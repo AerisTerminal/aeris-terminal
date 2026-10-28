@@ -712,11 +712,16 @@ still wait on the GUI checks and the remaining work on their lines.
     handles queued commands before its next refresh, and `request_reply` refuses a full queue and
     waits at most four request timeouts (one in-flight refresh makes at most three requests) before
     returning an explicit timeout. A test stalls the worker's fetch and gets that timeout.
+  - Landed: AC-07. `account_runtime` fetches the profile picture with ureq (`https` only, 1 MiB,
+    15 s, signature-checked PNG/JPEG/GIF/WebP, sequence-fenced per address, retry after five
+    minutes) and publishes the bytes as `AccountView::photo`. The desktop builds one GPUI image per
+    photo and renders it from bytes; `reqwest_client` is gone, and `cargo tree -i reqwest` and
+    `cargo tree -i hyper` are empty (50 packages left the lock). `http_wiring_tests.rs` now
+    decodes runtime photo bytes.
   - Left:
-    - Fetch the avatar with ureq and remove `reqwest_client` (AC-07).
     - Remove unused crates and put `rpassword` behind a feature.
     - Centralize pins and dedupe sysinfo.
-    - GUI smoke test.
+    - GUI smoke test, including a signed-in avatar check (not run).
   - Also covers the remaining TR-12 items and PL-15.
 - [ ] M8.11 Vendor and tooling trim
   - Left: trim the `gpui_base` LSP editor, then lint and pin it.

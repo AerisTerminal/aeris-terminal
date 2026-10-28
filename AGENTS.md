@@ -632,7 +632,10 @@ the fixed ports 47210, 47211 or 47212 (bound on both `127.0.0.1` and `[::1]`), a
 RS256 ID token with `ring` against the issuer JWKS (issuer, audience, `token_use=id`, expiry, nonce).
 Only the refresh token and the cached profile (`sub`, email, name, picture) are stored, in the native
 vault; there is no lease, device key or entitlement, and every signed-in account shows the
-"Unlimited" plan. An unreachable provider keeps a saved session signed in (Offline) with bounded backoff;
+"Unlimited" plan. The account runtime downloads the profile picture itself on a background thread
+(`https` only, at most 1 MiB, a 15-second timeout, PNG/JPEG/GIF/WebP by signature, one retry per
+address after five minutes) and publishes the bytes in `AccountView`; the desktop renders them as a
+GPUI image and installs no GPUI HTTP client. An unreachable provider keeps a saved session signed in (Offline) with bounded backoff;
 only a rejected refresh grant signs out. Sign-out revokes the refresh token, deletes the vault entries
 and returns to the sign-in gate. `apps/desktop/src/account/mod.rs::sign_in_required` is the one policy:
 every process except a validation data root installs the account session. Before the first usable

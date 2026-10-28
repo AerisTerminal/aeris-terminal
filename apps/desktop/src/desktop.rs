@@ -249,7 +249,6 @@ use price_alert_dialog::{
     price_alert_dialog_layer, price_alert_trigger_text, replace_chart_price_alert_lines,
     runtime_price_alerts,
 };
-use reqwest_client::ReqwestClient;
 use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
 use std::{
     borrow::Cow,
@@ -301,13 +300,6 @@ use workspace_layout::{
     WorkspaceMarketArea, WorkspaceMaximizeTransition, pane_chart_notice, toast_host,
     workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
 };
-
-fn install_platform_http_client(cx: &mut App) {
-    match ReqwestClient::user_agent(concat!("Aeris/", env!("CARGO_PKG_VERSION"))) {
-        Ok(client) => cx.set_http_client(Arc::new(client)),
-        Err(error) => diagnostic!("Aeris image networking degraded: {error}"),
-    }
-}
 
 trait AccountRefreshExitClaim {
     fn wait_for_exit(&self) -> Result<(), String>;
@@ -5733,7 +5725,6 @@ fn run_sign_in(gate: sign_in_gate::SignInGate) {
 fn prepare_application(cx: &mut App) {
     gpui_base::init(cx);
     cx.set_global(base_theme(&AerisTheme::dark()));
-    install_platform_http_client(cx);
     if aeris_platform_runtime::active_data_root().is_ok_and(|root| {
         root.allows_installed_app_side_effect(
             aeris_platform_runtime::InstalledAppSideEffect::NotificationIdentityRegistration,

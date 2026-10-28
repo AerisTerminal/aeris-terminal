@@ -147,16 +147,14 @@ fn account_avatar_face(
                     &presentation.email,
                 )),
         )
-        .children(
-            aeris_desktop::account::has_profile_photo(&presentation.photo_url).then(|| {
-                img(presentation.photo_url.as_str())
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .rounded_full()
-                    .object_fit(ObjectFit::Cover)
-            }),
-        )
+        .children(presentation.avatar.as_ref().map(|avatar| {
+            img(avatar.image())
+                .absolute()
+                .inset_0()
+                .size_full()
+                .rounded_full()
+                .object_fit(ObjectFit::Cover)
+        }))
         .into_any_element()
 }
 

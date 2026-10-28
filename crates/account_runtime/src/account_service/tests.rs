@@ -6,8 +6,10 @@ use super::{
     REFRESH_VAULT_KEY, RejectedRestoreMarker, SESSION_REFRESH_INTERVAL,
     SESSION_REFRESH_JITTER_SECONDS, SessionRefresh, UnavailableVault, claim_profile_refresh,
     oidc::{self, AccountProfile, OidcEndpoints, SecretToken, VerifiedTokens},
+    photo::PHOTO_RETRY_DELAY,
+    reconcile_profile_photo, signed_in_view,
 };
-use crate::{AccountSessionState, AccountView};
+use crate::{AccountSessionState, AccountView, ProfilePhoto, ProfilePhotoStatus};
 use aeris_account::AccountId;
 use aeris_platform_runtime::CredentialVault;
 use std::{
@@ -255,6 +257,7 @@ fn service_with_marker_state(rejected_restore_marker: RejectedRestoreMarker) -> 
     );
     // OS-assigned callback ports keep parallel tests off the registered ports.
     service.callback_ports = &[0];
+    service.photo_fetcher = Arc::new(|_| Err("unit tests fetch no photos".to_string()));
     // Stub discovery so unit tests never touch the network.
     service
         .endpoints
@@ -1384,6 +1387,120 @@ fn account_switch_replaces_profile_without_carryover() {
     assert_eq!(view.display_name, "bob");
     assert_eq!(view.email, "bob@example.com");
     assert!(view.photo_url.contains("bob"));
+}
+
+fn photo_fixture() -> ProfilePhoto {
+    ProfilePhoto::from_bytes(b"GIF89a\x01\0\x01\0".to_vec()).expect("photo fixture builds")
+}
+
+fn signed_in_with_photo(service: &AccountService, name: &str) {
+    service.state.lock().expect("account state locks").view = signed_in_view(
+        AccountSessionState::Active,
+        &account("acct_01"),
+        profile(name, &format!("{name}@example.test")),
+        1,
+        "signed in",
+    );
+}
+
+#[test]
+fn profile_photo_loads_once_for_the_signed_in_address_and_clears_on_sign_out() {
+    let mut service = service();
+    let fetched = Arc::new(Mutex::new(Vec::<String>::new()));
+    let recorder = Arc::clone(&fetched);
+    service.photo_fetcher = Arc::new(move |url| {
+        recorder
+            .lock()
+            .expect("fetch record locks")
+            .push(url.to_string());
+        Ok(photo_fixture())
+    });
+    assert_eq!(service.account_status().photo, ProfilePhotoStatus::Absent);
+    let vault = MemoryVault::default();
+    service.begin_login(41).expect("login starts");
+    assert!(service.complete_with_tokens(
+        41,
+        &account("acct_01"),
+        &profile("ada", "ada@example.com"),
+        "refresh-ada",
+        &vault,
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while service.account_status().photo != ProfilePhotoStatus::Loaded(photo_fixture()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the profile photo must load"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            service.account_status().photo,
+            ProfilePhotoStatus::Loaded(photo_fixture())
+        );
+    }
+    assert_eq!(
+        *fetched.lock().expect("fetch record locks"),
+        vec!["https://auth.example.test/photo/ada.png".to_string()]
+    );
+
+    without_revocation(&service);
+    let signed_out = service.sign_out_with(&vault).expect("sign-out succeeds");
+    assert_eq!(signed_out.photo, ProfilePhotoStatus::Absent);
+    assert_eq!(service.account_status().photo, ProfilePhotoStatus::Absent);
+}
+
+#[test]
+fn a_replaced_photo_address_drops_the_previous_fetch() {
+    let service = service();
+    signed_in_with_photo(&service, "ada");
+    let now = std::time::Instant::now();
+    let first = {
+        let mut state = service.state.lock().expect("account state locks");
+        let first = reconcile_profile_photo(&mut state, now).expect("first photo fetch is due");
+        assert_eq!(state.view.photo, ProfilePhotoStatus::Loading);
+        assert!(reconcile_profile_photo(&mut state, now).is_none());
+        first
+    };
+    signed_in_with_photo(&service, "bob");
+    let second = reconcile_profile_photo(&mut service.state.lock().expect("state locks"), now)
+        .expect("the replaced address starts its own fetch");
+    assert_eq!(second.url, "https://auth.example.test/photo/bob.png");
+
+    service.complete_photo_fetch(first.sequence, Ok(photo_fixture()));
+    assert_eq!(service.account_status().photo, ProfilePhotoStatus::Loading);
+    service.complete_photo_fetch(second.sequence, Ok(photo_fixture()));
+    assert_eq!(
+        service.account_status().photo,
+        ProfilePhotoStatus::Loaded(photo_fixture())
+    );
+}
+
+#[test]
+fn a_failed_photo_fetch_waits_out_the_retry_delay() {
+    let service = service();
+    signed_in_with_photo(&service, "ada");
+    let now = std::time::Instant::now();
+    let fetch = reconcile_profile_photo(&mut service.state.lock().expect("state locks"), now)
+        .expect("photo fetch is due");
+    service.complete_photo_fetch(fetch.sequence, Err("unreachable".to_string()));
+    let mut state = service.state.lock().expect("account state locks");
+    assert!(reconcile_profile_photo(&mut state, std::time::Instant::now()).is_none());
+    assert_eq!(state.view.photo, ProfilePhotoStatus::Absent);
+    assert!(
+        reconcile_profile_photo(&mut state, std::time::Instant::now() + PHOTO_RETRY_DELAY)
+            .is_some()
+    );
+}
+
+#[test]
+fn signed_out_sessions_fetch_no_photo() {
+    let service = service();
+    signed_in_with_photo(&service, "ada");
+    let mut state = service.state.lock().expect("account state locks");
+    state.view.state = AccountSessionState::ReauthenticationRequired;
+    assert!(reconcile_profile_photo(&mut state, std::time::Instant::now()).is_none());
+    assert_eq!(state.view.photo, ProfilePhotoStatus::Absent);
 }
 
 #[test]

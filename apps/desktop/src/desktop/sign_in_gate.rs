@@ -515,7 +515,7 @@ mod tests {
                 detail: String::new(),
                 display_name: String::new(),
                 email: String::new(),
-                photo_url: String::new(),
+                avatar: None,
                 pending: false,
             },
             error: None,

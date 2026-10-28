@@ -20,7 +20,10 @@ use std::{
 };
 
 use aeris_account_runtime::AccountService;
-use aeris_account_runtime::{AccountSessionState, AccountView, LoginAuthorization};
+use aeris_account_runtime::{
+    AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto, ProfilePhotoFormat,
+    ProfilePhotoStatus,
+};
 
 /// A window's account-change callback. The session holds it weakly.
 pub type AccountChangeWake = Arc<dyn Fn() + Send + Sync>;
@@ -154,7 +157,7 @@ pub fn unavailable_presentation() -> AccountPresentation {
         detail: String::new(),
         display_name: String::new(),
         email: String::new(),
-        photo_url: String::new(),
+        avatar: None,
         pending: false,
     }
 }
@@ -186,14 +189,41 @@ pub fn profile_initials(display_name: &str, email: &str) -> String {
     initials.to_uppercase()
 }
 
-/// Returns whether a profile photo URL is renderable. Only `https` URLs
-/// reach the image loader; anything else falls back to initials.
-#[must_use]
-pub fn has_profile_photo(photo_url: &str) -> bool {
-    !photo_url.is_empty()
-        && photo_url.len() <= 2048
-        && photo_url.starts_with("https://")
-        && !photo_url.contains([' ', '\n', '\r', '\t'])
+/// The account runtime's profile photo as a GPUI image, built once per photo
+/// so rendering never copies or hashes the bytes. GPUI decodes it off the UI
+/// thread; until then, or when decoding fails, the initials stay visible.
+#[derive(Clone)]
+pub struct AccountAvatar {
+    photo: ProfilePhoto,
+    image: Arc<gpui::Image>,
+}
+
+impl AccountAvatar {
+    #[must_use]
+    pub fn new(photo: ProfilePhoto) -> Self {
+        let format = match photo.format() {
+            ProfilePhotoFormat::Png => gpui::ImageFormat::Png,
+            ProfilePhotoFormat::Jpeg => gpui::ImageFormat::Jpeg,
+            ProfilePhotoFormat::Gif => gpui::ImageFormat::Gif,
+            ProfilePhotoFormat::Webp => gpui::ImageFormat::Webp,
+        };
+        let image = Arc::new(gpui::Image::from_bytes(format, photo.bytes().to_vec()));
+        Self { photo, image }
+    }
+
+    #[must_use]
+    pub fn image(&self) -> Arc<gpui::Image> {
+        Arc::clone(&self.image)
+    }
+}
+
+impl std::fmt::Debug for AccountAvatar {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AccountAvatar")
+            .field("photo", &self.photo)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Owned settings-menu state for one account session.
@@ -341,8 +371,8 @@ pub struct AccountPresentation {
     pub display_name: String,
     /// Verified email; empty unless signed in.
     pub email: String,
-    /// Verified photo URL; empty unless signed in with a photo.
-    pub photo_url: String,
+    /// Verified profile photo; present only while signed in with a loaded photo.
+    pub avatar: Option<AccountAvatar>,
     /// Whether an account-runtime request is in flight.
     pub pending: bool,
 }
@@ -351,6 +381,8 @@ struct AccountShared {
     generation: AtomicU64,
     pending: AtomicBool,
     view: Mutex<AccountView>,
+    /// The image for `view`'s loaded photo. Lock order: `view`, then `avatar`.
+    avatar: Mutex<Option<AccountAvatar>>,
     error: Mutex<Option<AccountError>>,
     last_status_poll: Mutex<Instant>,
     profile_refresh_until: Mutex<Option<Instant>>,
@@ -379,7 +411,7 @@ struct AccountShared {
 /// What the account poller thread receives: a worker reply, or a request to
 /// re-plan its next tick after a new request started.
 enum PollerEvent {
-    Response(AccountResponse),
+    Response(Box<AccountResponse>),
     Replan,
 }
 
@@ -406,6 +438,7 @@ fn signed_out_view() -> AccountView {
         display_name: String::new(),
         email: String::new(),
         photo_url: String::new(),
+        photo: ProfilePhotoStatus::Absent,
     }
 }
 
@@ -515,6 +548,7 @@ impl DesktopAccount {
             generation: AtomicU64::new(unix_millis()),
             pending: AtomicBool::new(false),
             view: Mutex::new(signed_out_view()),
+            avatar: Mutex::new(None),
             error: Mutex::new(None),
             last_status_poll: Mutex::new(now),
             profile_refresh_until: Mutex::new(None),
@@ -584,11 +618,18 @@ impl DesktopAccount {
     /// Returns the current presentation snapshot for rendering.
     #[must_use]
     pub fn presentation(&self) -> AccountPresentation {
-        let view = self
-            .shared
-            .view
-            .lock()
-            .map_or_else(|_| signed_out_view(), |view| view.clone());
+        let (view, avatar) = self.shared.view.lock().map_or_else(
+            |_| (signed_out_view(), None),
+            |view| {
+                let avatar = self
+                    .shared
+                    .avatar
+                    .lock()
+                    .ok()
+                    .and_then(|avatar| avatar.clone());
+                (view.clone(), avatar)
+            },
+        );
         AccountPresentation {
             action: account_action_label(&view),
             state: account_state_label(view.state),
@@ -596,7 +637,7 @@ impl DesktopAccount {
             detail: view.detail.clone(),
             display_name: view.display_name.clone(),
             email: view.email.clone(),
-            photo_url: view.photo_url.clone(),
+            avatar,
             pending: self.shared.pending.load(Ordering::Acquire),
         }
     }
@@ -791,7 +832,7 @@ fn run_account_poller(
             Cadence::OnEvents => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         let response = match event {
-            Ok(PollerEvent::Response(response)) => Some(response),
+            Ok(PollerEvent::Response(response)) => Some(*response),
             Ok(PollerEvent::Replan) | Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => return,
         };
@@ -849,6 +890,11 @@ fn status_poll_interval(shared: &AccountShared) -> Duration {
     // otherwise polling would wait on the view it is meant to fetch.
     let transactional = shared.login_open.load(Ordering::Acquire)
         || shared.view.lock().is_ok_and(|view| is_authorizing(&view));
+    // The runtime's photo fetch is bounded, so the faster cadence ends with it.
+    let photo_loading = shared
+        .view
+        .lock()
+        .is_ok_and(|view| view.photo == ProfilePhotoStatus::Loading);
     let profile_refresh_active = shared.profile_refresh_until.lock().is_ok_and(|mut until| {
         if until.is_some_and(|deadline| Instant::now() < deadline) {
             true
@@ -861,7 +907,7 @@ fn status_poll_interval(shared: &AccountShared) -> Duration {
         INITIAL_STATUS_POLL_INTERVAL
     } else if transactional {
         STATUS_POLL_INTERVAL
-    } else if profile_refresh_active {
+    } else if profile_refresh_active || photo_loading {
         PROFILE_REFRESH_POLL_INTERVAL
     } else {
         IDLE_STATUS_POLL_INTERVAL
@@ -984,9 +1030,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
                 }
             }
             let authenticated = account_view_authenticated(&view);
-            if let Ok(mut current) = shared.view.lock() {
-                *current = view;
-            }
+            store_view(shared, view);
             if authenticated {
                 clear_account_error(shared);
             } else {
@@ -1012,9 +1056,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             if epoch != shared.epoch.load(Ordering::Acquire) {
                 return;
             }
-            if let Ok(mut current) = shared.view.lock() {
-                *current = view;
-            }
+            store_view(shared, view);
             if let Ok(mut until) = shared.profile_refresh_until.lock() {
                 *until = Instant::now().checked_add(PROFILE_REFRESH_POLL_WINDOW);
             }
@@ -1054,9 +1096,25 @@ fn apply_retired_account_view(shared: &AccountShared, view: AccountView) {
     if let Ok(mut url) = shared.authorization_url.lock() {
         url.take();
     }
-    if let Ok(mut current) = shared.view.lock() {
-        *current = view;
+    store_view(shared, view);
+}
+
+/// Replaces the presented view, rebuilding the avatar image only when the
+/// runtime's photo changed. Runs on the poller thread, never the UI thread.
+fn store_view(shared: &AccountShared, view: AccountView) {
+    let Ok(mut current) = shared.view.lock() else {
+        return;
+    };
+    let photo = match &view.photo {
+        ProfilePhotoStatus::Loaded(photo) => Some(photo),
+        ProfilePhotoStatus::Absent | ProfilePhotoStatus::Loading => None,
+    };
+    if let Ok(mut avatar) = shared.avatar.lock()
+        && avatar.as_ref().map(|avatar| &avatar.photo) != photo
+    {
+        *avatar = photo.cloned().map(AccountAvatar::new);
     }
+    *current = view;
 }
 
 fn account_error_snapshot(shared: &AccountShared) -> (Option<String>, bool) {
@@ -1139,7 +1197,7 @@ fn run_account_client_with(
 ) {
     while let Ok(request) = requests.recv() {
         if results
-            .send(PollerEvent::Response(handle(request)))
+            .send(PollerEvent::Response(Box::new(handle(request))))
             .is_err()
         {
             return;
@@ -1201,7 +1259,9 @@ mod tests {
         resolve_authoritative_authentication, sanitized_plan_label, unavailable_menu_state,
     };
     use aeris_account_runtime::{AccountService, AccountServiceConfig};
-    use aeris_account_runtime::{AccountSessionState, AccountView};
+    use aeris_account_runtime::{
+        AccountSessionState, AccountView, ProfilePhoto, ProfilePhotoStatus,
+    };
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1324,6 +1384,7 @@ mod tests {
             view.display_name = name.to_string();
             view.email = email.to_string();
             view.photo_url = "https://auth.example.test/photo/ada.png".to_string();
+            view.photo = ProfilePhotoStatus::Loaded(photo_fixture());
             self.view = view;
         }
     }
@@ -1395,7 +1456,12 @@ mod tests {
             display_name: String::new(),
             email: String::new(),
             photo_url: String::new(),
+            photo: ProfilePhotoStatus::Absent,
         }
+    }
+
+    fn photo_fixture() -> ProfilePhoto {
+        ProfilePhoto::from_bytes(b"GIF89a\x01\0\x01\0".to_vec()).expect("photo fixture builds")
     }
 
     #[test]
@@ -1536,7 +1602,7 @@ mod tests {
             detail: String::new(),
             display_name: String::new(),
             email: String::new(),
-            photo_url: String::new(),
+            avatar: None,
             pending: false,
         };
         // Plain signed out: only the Sign in row (plus any error) renders.
@@ -1598,27 +1664,50 @@ mod tests {
     }
 
     #[test]
-    fn only_https_photos_reach_the_image_loader() {
-        use super::has_profile_photo;
+    fn a_loading_photo_polls_on_the_profile_cadence() {
+        use super::{
+            IDLE_STATUS_POLL_INTERVAL, PROFILE_REFRESH_POLL_INTERVAL, status_poll_interval,
+        };
 
-        assert!(has_profile_photo("https://auth.example.test/photo/a.png"));
-        assert!(has_profile_photo(
-            "https://lh3.googleusercontent.com/a/photo?x=1&y=2"
-        ));
-        for bad in [
-            "",
-            "http://auth.example.test/photo/a.png",
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "https://auth.example.test/has space",
-            "data:image/png;base64,AAA",
-        ] {
-            assert!(!has_profile_photo(bad), "photo must not load: {bad}");
-        }
-        assert!(!has_profile_photo(&format!(
-            "https://auth.example.test/{}",
-            "a".repeat(2048)
-        )));
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        session
+            .shared
+            .initial_status_resolved
+            .store(true, Ordering::Release);
+        let mut active = view(AccountSessionState::Active);
+        *session.shared.view.lock().expect("desktop view locks") = active.clone();
+        assert_eq!(
+            status_poll_interval(&session.shared),
+            IDLE_STATUS_POLL_INTERVAL
+        );
+        active.photo = ProfilePhotoStatus::Loading;
+        *session.shared.view.lock().expect("desktop view locks") = active;
+        assert_eq!(
+            status_poll_interval(&session.shared),
+            PROFILE_REFRESH_POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn the_avatar_image_is_built_once_per_runtime_photo() {
+        use super::store_view;
+
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        let mut active = view(AccountSessionState::Active);
+        active.photo = ProfilePhotoStatus::Loaded(photo_fixture());
+        store_view(&session.shared, active.clone());
+        let first = session.presentation().avatar.expect("loaded photo shows");
+        assert_eq!(first.image().format, gpui::ImageFormat::Gif);
+        assert_eq!(first.image().bytes, photo_fixture().bytes());
+        store_view(&session.shared, active.clone());
+        let second = session
+            .presentation()
+            .avatar
+            .expect("loaded photo still shows");
+        assert!(Arc::ptr_eq(&first.image(), &second.image()));
+        active.photo = ProfilePhotoStatus::Loading;
+        store_view(&session.shared, active);
+        assert!(session.presentation().avatar.is_none());
     }
 
     #[test]
@@ -1652,6 +1741,7 @@ mod tests {
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
         active.photo_url = "https://auth.example.test/photo/ada.png".to_string();
+        active.photo = ProfilePhotoStatus::Loaded(photo_fixture());
         apply_account_response(
             &session.shared,
             AccountResponse::Status {
@@ -1664,10 +1754,7 @@ mod tests {
         assert_eq!(presentation.action, "Account");
         assert_eq!(presentation.display_name, "Ada Trader");
         assert_eq!(presentation.email, "ada@example.com");
-        assert_eq!(
-            presentation.photo_url,
-            "https://auth.example.test/photo/ada.png"
-        );
+        assert!(presentation.avatar.is_some());
         // Sign-out status wipes the profile: no stale identity survives.
         apply_account_response(
             &session.shared,
@@ -1676,7 +1763,7 @@ mod tests {
         let signed_out = session.presentation();
         assert_eq!(signed_out.display_name, "");
         assert_eq!(signed_out.email, "");
-        assert_eq!(signed_out.photo_url, "");
+        assert!(signed_out.avatar.is_none());
     }
 
     #[test]
@@ -1712,7 +1799,7 @@ mod tests {
         assert_eq!(presentation.action, "Sign in");
         assert_eq!(presentation.display_name, "");
         assert_eq!(presentation.email, "");
-        assert_eq!(presentation.photo_url, "");
+        assert!(presentation.avatar.is_none());
         assert_eq!(
             session.error().as_deref(),
             Some("sign-out could not remove saved credentials; retry sign-out")
@@ -2056,7 +2143,7 @@ mod tests {
         let presentation = session.presentation();
         assert_eq!(presentation.display_name, "Ada Trader");
         assert_eq!(presentation.email, "ada@example.com");
-        assert_ne!(presentation.photo_url, "");
+        assert!(presentation.avatar.is_some());
         assert!(session.error().is_none());
         // Terminal state closes the transaction and drops the URL.
         assert!(!session.shared.login_open.load(Ordering::Acquire));
@@ -2234,7 +2321,7 @@ mod tests {
         let cleared = session.presentation();
         assert_eq!(cleared.display_name, "");
         assert_eq!(cleared.email, "");
-        assert_eq!(cleared.photo_url, "");
+        assert!(cleared.avatar.is_none());
         // A second user signs in on a fresh generation with no carryover.
         session.request_sign_in().expect("second sign-in queues");
         wait_for("authorizing again", || {
