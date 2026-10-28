@@ -19,7 +19,7 @@ use std::{
     io::ErrorKind,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -30,7 +30,7 @@ use aeris_account::{
     MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
 };
 use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
-use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
+use aeris_platform_runtime::{CredentialVault, MAX_SECRET_BYTES, NativeCredentialVault};
 use zeroize::Zeroizing;
 
 use loopback::{CALLBACK_PORTS, LoopbackListener, validate_callback_query};
@@ -54,7 +54,8 @@ const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const PROFILE_VAULT_KEY: &str = "account-profile-v1";
 const REJECTED_RESTORE_MARKER_FILE: &str = "account-restore-rejected-v1";
 const PROFILE_VAULT_SCHEMA_VERSION: u32 = 1;
-const MAXIMUM_PROFILE_VAULT_BYTES: usize = 4096;
+const MAXIMUM_PROFILE_VAULT_BYTES: usize = 2_560;
+const _: () = assert!(MAXIMUM_PROFILE_VAULT_BYTES <= MAX_SECRET_BYTES);
 
 /// Interval between verified session refreshes while online.
 const SESSION_REFRESH_INTERVAL: Duration = Duration::from_hours(1);
@@ -170,6 +171,11 @@ pub struct AccountService {
     callback_ports: &'static [u16],
     rejected_restore_marker: RejectedRestoreMarker,
     state: Arc<Mutex<ServiceState>>,
+    /// Serializes every vault and rejection-marker commit with the fence
+    /// check that admitted it. State readers never wait on native vault I/O,
+    /// and a stale worker's write always lands before a newer session's.
+    /// Lock order: `refresh_gate`, then `vault_commit`, then `state`.
+    vault_commit: Arc<Mutex<()>>,
     endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
     refresh_gate: Arc<Mutex<()>>,
     refresh_lifecycle: Arc<Mutex<RefreshLifecycleState>>,
@@ -328,6 +334,7 @@ impl AccountService {
                 last_generation: 0,
                 restore_allowed: true,
             })),
+            vault_commit: Arc::new(Mutex::new(())),
             endpoints: Arc::new(Mutex::new(None)),
             refresh_gate: Arc::new(Mutex::new(())),
             refresh_lifecycle: Arc::new(Mutex::new(RefreshLifecycleState::default())),
@@ -445,6 +452,18 @@ impl AccountService {
     fn set_restore_readiness(&self, readiness: AccountRestoreReadiness) {
         self.restore_readiness
             .store(readiness as u8, Ordering::Release);
+    }
+
+    fn lock_vault_commit(&self) -> MutexGuard<'_, ()> {
+        // The lock guards no data, so a holder that panicked leaves nothing
+        // to repair.
+        self.vault_commit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn restore_fence_holds(&self) -> bool {
+        self.state.lock().is_ok_and(|state| restore_fence(&state))
     }
 
     /// Prevents new refresh grants from starting and returns a bounded waiter
@@ -645,7 +664,7 @@ impl AccountService {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+        if !restore_fence(&state) {
             return;
         }
         state.view = signed_in_view(
@@ -662,8 +681,8 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let state = self.state.lock().map_err(|_| ())?;
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+        let _commit = self.lock_vault_commit();
+        if !self.restore_fence_holds() {
             return Ok(None);
         }
         load_refresh_token(vault)
@@ -693,24 +712,26 @@ impl AccountService {
             }
         };
         // A rotating grant may invalidate the previous token immediately.
-        // Persist its verified replacement before anything else, holding the
-        // lifecycle fence so sign-out cannot be undone.
-        let Ok(mut state) = self.state.lock() else {
-            return None;
-        };
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+        // Persist its verified replacement before anything else, under the
+        // vault commit fence so sign-out cannot be undone.
+        let _commit = self.lock_vault_commit();
+        if !self.restore_fence_holds() {
             return None;
         }
         if let Some(rotated) = tokens.refresh.as_ref() {
             let secret = Zeroizing::new(rotated.expose().as_bytes().to_vec());
             if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
                 let _ = self.retire_unusable_vault_material(vault);
-                state.restore_allowed = false;
-                state.view = cleared_view(
-                    AccountSessionState::TerminalError,
-                    0,
-                    "credential storage is unavailable; sign in again",
-                );
+                if let Ok(mut state) = self.state.lock()
+                    && restore_fence(&state)
+                {
+                    state.restore_allowed = false;
+                    state.view = cleared_view(
+                        AccountSessionState::TerminalError,
+                        0,
+                        "credential storage is unavailable; sign in again",
+                    );
+                }
                 return None;
             }
         }
@@ -731,14 +752,18 @@ impl AccountService {
             );
             return false;
         };
-        let Ok(mut state) = self.state.lock() else {
-            return false;
-        };
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+        let _commit = self.lock_vault_commit();
+        if !self.restore_fence_holds() {
             return false;
         }
         if store_profile_material(vault, &account_id, &tokens.profile).is_err() {
             diagnostic!("Aeris account profile cache write degraded");
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !restore_fence(&state) {
+            return false;
         }
         state.restore_allowed = false;
         state.view = signed_in_view(
@@ -771,21 +796,25 @@ impl AccountService {
 
     /// Retires an authoritatively rejected saved grant and every durable
     /// credential that could otherwise re-authenticate the same restore on a
-    /// later process start. The generation-zero lifecycle fence stays held
-    /// while deleting so a stale restore cannot erase credentials written by
-    /// a newer interactive login.
+    /// later process start. The vault commit lock stays held from the
+    /// generation-zero fence check through the deletes so a stale restore
+    /// cannot erase credentials written by a newer interactive login.
     fn retire_rejected_restore<V>(&self, vault: &V)
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+        let _commit = self.lock_vault_commit();
+        if !self.restore_fence_holds() {
             return;
         }
         let cleanup_complete = self.retire_unusable_vault_material(vault);
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if !restore_fence(&state) {
+            return;
+        }
         state.restore_allowed = false;
         state.view = if cleanup_complete {
             cleared_view(
@@ -811,13 +840,17 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
+        let _commit = self.lock_vault_commit();
+        if !self.is_current(generation) {
+            return;
+        }
+        let cleanup_complete = self.retire_unusable_vault_material(vault);
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if state.last_generation != generation || !is_signed_in(state.view.state) {
             return;
         }
-        let cleanup_complete = self.retire_unusable_vault_material(vault);
         state.view = if cleanup_complete {
             cleared_view(
                 AccountSessionState::ReauthenticationRequired,
@@ -834,10 +867,10 @@ impl AccountService {
     }
 
     /// Removes every durable credential capable of restoring a session that
-    /// must no longer be restorable. Callers hold the account lifecycle state
-    /// lock while this runs so a newer interactive session cannot race these
-    /// vault mutations. The durable rejection marker doubles as the restart
-    /// fence when cleanup cannot complete.
+    /// must no longer be restorable. Callers hold the vault commit lock after
+    /// a passing fence check, never the state lock, so a newer interactive
+    /// session cannot race these vault mutations. The durable rejection
+    /// marker doubles as the restart fence when cleanup cannot complete.
     fn retire_unusable_vault_material<V>(&self, vault: &V) -> bool
     where
         V: CredentialVault,
@@ -858,7 +891,7 @@ impl AccountService {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+        if !restore_fence(&state) {
             return false;
         }
         // A transient failure never discards a cached verified session; only
@@ -1097,17 +1130,20 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let token = load_refresh_token(vault).unwrap_or_default();
-        // Retire every background completion before deleting credentials.
-        // Workers take the same state lock while committing vault writes.
+        // Retire every background completion before touching credentials.
+        // Workers re-check that fence under the vault commit lock, so a
+        // commit already in flight lands before these deletes.
         if let Ok(mut state) = self.state.lock() {
             let generation = state.last_generation;
             state.restore_allowed = false;
             state.pending = None;
             state.view = cleared_view(AccountSessionState::SignedOut, generation, "signed out");
         }
+        let commit = self.lock_vault_commit();
+        let token = load_refresh_token(vault).unwrap_or_default();
         let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
         let profile_deleted = vault.delete(PROFILE_VAULT_KEY).is_ok();
+        drop(commit);
         // Revocation reuses already-cached endpoints only: sign-out never
         // performs discovery on the caller's path.
         let cached = self
@@ -1308,14 +1344,8 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let Ok(mut state) = self.state.lock() else {
-            return false;
-        };
-        if state
-            .pending
-            .as_ref()
-            .is_none_or(|pending| pending.generation != generation)
-        {
+        let _commit = self.lock_vault_commit();
+        if !self.login_generation_is_pending(generation) {
             return false;
         }
         let secret = Zeroizing::new(refresh_token.as_bytes().to_vec());
@@ -1326,6 +1356,22 @@ impl AccountService {
             let _ = self.retire_unusable_vault_material(vault);
         }
         let marker_cleared = stored && self.clear_rejected_restore_marker().is_ok();
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.generation != generation)
+        {
+            // Cancelled, expired or signed out while the vault was written:
+            // nothing this login stored may restore on a later start.
+            drop(state);
+            if stored {
+                let _ = self.retire_unusable_vault_material(vault);
+            }
+            return false;
+        }
         state.pending = None;
         if !marker_cleared {
             state.view = cleared_view(
@@ -1456,17 +1502,23 @@ impl AccountService {
             diagnostic!("Aeris account refresh returned another subject");
             return false;
         }
-        let Ok(mut state) = self.state.lock() else {
-            return false;
+        let owns_session = |state: &ServiceState| {
+            state.last_generation == generation
+                && state.view.account_id == expected_account.as_str()
+                && is_signed_in(state.view.state)
         };
-        if state.last_generation != generation
-            || state.view.account_id != expected_account.as_str()
-            || !is_signed_in(state.view.state)
-        {
+        let _commit = self.lock_vault_commit();
+        if !self.state.lock().is_ok_and(|state| owns_session(&state)) {
             return false;
         }
         if store_profile_material(vault, expected_account, &tokens.profile).is_err() {
             diagnostic!("Aeris account profile cache write degraded");
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !owns_session(&state) {
+            return false;
         }
         state
             .view
@@ -1496,6 +1548,11 @@ impl AccountService {
             cleared_view(AccountSessionState::TerminalError, generation, detail)
         };
     }
+}
+
+/// Whether the generation-zero saved-session restore still owns the session.
+fn restore_fence(state: &ServiceState) -> bool {
+    state.last_generation == 0 && state.pending.is_none() && state.restore_allowed
 }
 
 const fn is_signed_in(state: AccountSessionState) -> bool {
@@ -1585,20 +1642,22 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    // Resolve network-owned endpoint metadata before taking the lifecycle lock.
-    // Credential selection below must then remain under one generation fence:
-    // otherwise a stale worker could consume a newer login's rotating token.
+    // Resolve network-owned endpoint metadata before taking the vault commit
+    // lock. Credential selection below must then stay under that lock and its
+    // generation fence: otherwise a stale worker could consume a newer
+    // login's rotating token.
     let endpoints = service
         .oidc_endpoints()
         .map_err(|_| SessionRefresh::Unavailable)?;
-    let state = service.state.lock().map_err(|_| SessionRefresh::Retired)?;
-    if state.last_generation != generation || !is_signed_in(state.view.state) {
-        return Err(SessionRefresh::Retired);
-    }
-    let account_id =
-        AccountId::try_new(&state.view.account_id).map_err(|_| SessionRefresh::Retired)?;
+    let _commit = service.lock_vault_commit();
+    let account_id = {
+        let state = service.state.lock().map_err(|_| SessionRefresh::Retired)?;
+        if state.last_generation != generation || !is_signed_in(state.view.state) {
+            return Err(SessionRefresh::Retired);
+        }
+        AccountId::try_new(&state.view.account_id).map_err(|_| SessionRefresh::Retired)?
+    };
     let Ok(Some(refresh_token)) = load_refresh_token(vault) else {
-        drop(state);
         fail_current_storage(service, generation);
         return Err(SessionRefresh::Retired);
     };
@@ -1623,23 +1682,16 @@ where
         return service.is_current(generation);
     };
     let secret = Zeroizing::new(refresh_token.expose().as_bytes().to_vec());
-    let Ok(mut state) = service.state.lock() else {
-        return false;
-    };
-    if state.last_generation != generation || !is_signed_in(state.view.state) {
+    let _commit = service.lock_vault_commit();
+    if !service.is_current(generation) {
         return false;
     }
     if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
         // A successful rotating grant may have invalidated the durable token
         // still stored. Retire every restorable artifact under this same
-        // generation fence so a restart cannot resurrect the unusable session.
+        // commit fence so a restart cannot resurrect the unusable session.
         let _ = service.retire_unusable_vault_material(vault);
-        state.restore_allowed = false;
-        state.view = cleared_view(
-            AccountSessionState::TerminalError,
-            generation,
-            "credential storage is unavailable; sign in again",
-        );
+        fail_current_storage(service, generation);
         return false;
     }
     true

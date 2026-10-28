@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-56 of 90 items are fully done (2026-10-28).
+57 of 90 items are fully done (2026-10-28).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -41,7 +41,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 2 / 12 | 10 |
+| M8 lifecycle and trim | 3 / 12 | 9 |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -571,12 +571,22 @@ still wait on the GUI checks and the remaining work on their lines.
     naming_check rejects any manifest other than `platform_sys` that lowers `unsafe_code`.
     Closes PL-02.
   - Maintainer-only: the logoff flush test that would allow deleting `NativeSessionShutdownGuard`.
-- [ ] M8.4 Account runtime vault and lock fixes
-  - Left:
-    - AC-02: a 2,560-byte secret cap with a precheck.
-    - AC-03: vault I/O outside the state mutex, with a generation fence.
-    - AC-06: recovery from a poisoned mutex.
-  - AC-04 and AC-08 were closed by the Cognito sign-in work.
+- [x] M8.4 Account runtime vault and lock fixes
+  - AC-02: `credential_vault::MAX_SECRET_BYTES` is 2,560 bytes (the Windows blob limit) on every
+    platform; `store()` rejects a larger secret with `SecretTooLarge` before the backend runs.
+    Const asserts keep the account profile cache (now 2,560, was 4,096), the refresh-token bound
+    (now 2,560, was 8,192) and the Rithmic credential blob within it. A macOS profile entry
+    above 2,560 bytes now reads as absent, so that restore verifies online first.
+  - AC-03: no vault or rejection-marker I/O runs under the account state mutex. A separate
+    vault-commit lock covers each fence check and the writes it admits, so a stale worker's
+    write always lands before a newer session's; the state is re-locked and the fence re-checked
+    before applying. A login cancelled, expired or signed out during its vault write now retires
+    what it stored. Sign-out deletes (and reads the token to revoke) under the same lock.
+  - AC-06: the vault access mutex recovers from poisoning; `AccessSerialized` is removed.
+  - Tests: oversize and poisoned-lock vault tests, a probe proving no vault call runs under the
+    state lock across restore, refresh, rejection, login and sign-out, a cancel-during-commit
+    test, profile and refresh-token bound tests. AC-04 and AC-08 were closed by the Cognito
+    sign-in work.
 - [ ] M8.5 Shared readiness report
   - Left: one `ReadinessReport` for the desktop and the launcher.
   - Readiness runs on a `VACUUM INTO` copy, so the real `trading.sqlite3` is unchanged.

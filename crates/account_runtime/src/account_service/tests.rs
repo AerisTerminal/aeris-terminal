@@ -16,7 +16,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener},
     path::PathBuf,
     sync::{
-        Arc, Barrier, Mutex,
+        Arc, Barrier, Mutex, TryLockError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -133,10 +133,11 @@ impl CredentialVault for SelectiveDeleteFailureVault<'_> {
     }
 }
 
-/// Tries to advance the session generation while a stale worker selects
-/// credentials, proving selection holds the lifecycle fence.
+/// Tries to commit a newer generation's refresh material while a stale
+/// worker selects credentials, proving selection holds the vault commit fence.
 struct GenerationRaceVault<'a> {
     inner: &'a MemoryVault,
+    vault_commit: Arc<Mutex<()>>,
     state: Arc<Mutex<super::ServiceState>>,
     attempted_advance: AtomicBool,
     advanced: AtomicBool,
@@ -153,13 +154,81 @@ impl CredentialVault for GenerationRaceVault<'_> {
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
         if key == REFRESH_VAULT_KEY {
             self.attempted_advance.store(true, Ordering::Release);
-            if let Ok(mut state) = self.state.try_lock() {
+            if let Ok(_commit) = self.vault_commit.try_lock() {
+                let mut state = self.state.lock().map_err(|_| "state".to_string())?;
                 state.last_generation = self.replacement_generation;
                 state.view.request_generation = self.replacement_generation;
                 self.inner.store(REFRESH_VAULT_KEY, b"newer-refresh")?;
                 self.advanced.store(true, Ordering::Release);
             }
         }
+        self.inner.load(key)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), Self::Error> {
+        self.inner.delete(key)
+    }
+}
+
+/// Counts vault calls made while the account state lock is held.
+struct StateProbeVault<'a> {
+    inner: &'a MemoryVault,
+    state: Arc<Mutex<super::ServiceState>>,
+    calls: AtomicU64,
+    calls_under_state_lock: AtomicU64,
+}
+
+impl StateProbeVault<'_> {
+    fn observe(&self) {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        if matches!(self.state.try_lock(), Err(TryLockError::WouldBlock)) {
+            self.calls_under_state_lock.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+impl CredentialVault for StateProbeVault<'_> {
+    type Error = String;
+
+    fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+        self.observe();
+        self.inner.store(key, secret)
+    }
+
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.observe();
+        self.inner.load(key)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), Self::Error> {
+        self.observe();
+        self.inner.delete(key)
+    }
+}
+
+/// Cancels the pending login from inside its profile write, as a user who
+/// cancels while sign-in completes would.
+struct CancellingVault<'a> {
+    inner: &'a MemoryVault,
+    service: &'a AccountService,
+    generation: u64,
+}
+
+impl CredentialVault for CancellingVault<'_> {
+    type Error = String;
+
+    fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+        self.inner.store(key, secret)?;
+        if key == PROFILE_VAULT_KEY {
+            if self.service.state.try_lock().is_err() {
+                return Err("vault write ran under the account state lock".to_string());
+            }
+            self.service.cancel_login(self.generation)?;
+        }
+        Ok(())
+    }
+
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
         self.inner.load(key)
     }
 
@@ -732,6 +801,7 @@ fn session_credentials_bind_the_refresh_token_read_to_its_generation() {
     active_session(&service, 61, "acct_01");
     let racing = GenerationRaceVault {
         inner: &vault,
+        vault_commit: Arc::clone(&service.vault_commit),
         state: Arc::clone(&service.state),
         attempted_advance: AtomicBool::new(false),
         advanced: AtomicBool::new(false),
@@ -745,7 +815,7 @@ fn session_credentials_bind_the_refresh_token_read_to_its_generation() {
     assert!(racing.attempted_advance.load(Ordering::Acquire));
     assert!(
         !racing.advanced.load(Ordering::Acquire),
-        "a newer generation must not replace durable refresh material while stale credential selection owns the lifecycle fence"
+        "a newer generation must not replace durable refresh material while stale credential selection owns the vault commit fence"
     );
     assert_eq!(session.refresh_token.as_str(), "generation-refresh");
     assert_eq!(session.account_id.as_str(), "acct_01");
@@ -753,6 +823,124 @@ fn session_credentials_bind_the_refresh_token_read_to_its_generation() {
         super::session_credentials(&service, 60, &vault),
         Err(SessionRefresh::Retired)
     ));
+}
+
+#[test]
+fn vault_io_never_runs_under_the_account_state_lock() {
+    let service = restoring_service();
+    let vault = MemoryVault::default();
+    seed_saved_session(&vault, "acct_01", "ada");
+    let probe = StateProbeVault {
+        inner: &vault,
+        state: Arc::clone(&service.state),
+        calls: AtomicU64::new(0),
+        calls_under_state_lock: AtomicU64::new(0),
+    };
+
+    assert!(matches!(
+        service.restore_local_session(&probe),
+        LocalRestore::ContinueOnline
+    ));
+    assert!(
+        service
+            .current_restore_refresh_token(&probe)
+            .expect("restore selection reads")
+            .is_some()
+    );
+    let restored = service
+        .accept_online_restore_refresh(
+            &probe,
+            Ok(verified("acct_01", "ada", Some("rotated-restore"))),
+        )
+        .expect("restore rotation commits");
+    assert!(service.apply_online_restore_tokens(&probe, &restored));
+
+    let Ok(session) = super::session_credentials(&service, 0, &probe) else {
+        panic!("restored session selects its credentials");
+    };
+    assert_eq!(session.refresh_token.as_str(), "rotated-restore");
+    let Ok(refreshed) = super::accept_refresh_grant(
+        &service,
+        0,
+        &probe,
+        Ok(verified("acct_01", "ada-renamed", Some("rotated-session"))),
+    ) else {
+        panic!("session rotation commits");
+    };
+    assert!(service.apply_verified_profile(&probe, 0, &account("acct_01"), &refreshed));
+    service.retire_rejected_session(0, &probe);
+    assert_eq!(
+        service.account_status().state,
+        AccountSessionState::ReauthenticationRequired
+    );
+
+    service.begin_login(5).expect("login starts");
+    assert!(service.complete_with_tokens(
+        5,
+        &account("acct_02"),
+        &profile("bob", "bob@example.test"),
+        "refresh-bob",
+        &probe,
+    ));
+    without_revocation(&service);
+    service
+        .sign_out_with(&probe)
+        .expect("account signs out durably");
+
+    assert!(probe.calls.load(Ordering::Acquire) >= 12);
+    assert_eq!(
+        probe.calls_under_state_lock.load(Ordering::Acquire),
+        0,
+        "native vault I/O must never block account state readers"
+    );
+}
+
+#[test]
+fn login_cancelled_during_its_vault_commit_leaves_nothing_restorable() {
+    let service = service();
+    let vault = MemoryVault::default();
+    service.begin_login(51).expect("login starts");
+    let cancelling = CancellingVault {
+        inner: &vault,
+        service: &service,
+        generation: 51,
+    };
+
+    assert!(!service.complete_with_tokens(
+        51,
+        &account("acct_01"),
+        &profile("ada", "ada@example.com"),
+        "refresh-cancelled",
+        &cancelling,
+    ));
+    let view = service.account_status();
+    assert_eq!(view.state, AccountSessionState::SignedOut);
+    assert_eq!(view.detail, "sign-in cancelled");
+    assert_eq!(view.account_id, "");
+    assert!(vault.load(REFRESH_VAULT_KEY).expect("reads").is_none());
+    assert!(vault.load(PROFILE_VAULT_KEY).expect("reads").is_none());
+}
+
+#[test]
+fn profile_cache_beyond_the_vault_limit_is_rejected_before_the_vault() {
+    let vault = MemoryVault::default();
+    let bounded = AccountProfile {
+        display_name: "n".repeat(aeris_account::MAXIMUM_PROFILE_NAME_BYTES),
+        email: "e".repeat(aeris_account::MAXIMUM_PROFILE_EMAIL_BYTES),
+        photo_url: "https://auth.example.test/photo/ada.png".to_string(),
+    };
+    super::store_profile_material(&vault, &account("acct_01"), &bounded)
+        .expect("a profile with maximum name and email fits the vault");
+    let oversized = AccountProfile {
+        photo_url: "p".repeat(aeris_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES),
+        ..bounded
+    };
+    assert!(super::store_profile_material(&vault, &account("acct_01"), &oversized).is_err());
+    let cached = vault
+        .load(PROFILE_VAULT_KEY)
+        .expect("reads")
+        .expect("the earlier profile remains");
+    assert!(cached.len() <= aeris_platform_runtime::MAX_SECRET_BYTES);
 }
 
 #[test]

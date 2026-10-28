@@ -15,6 +15,8 @@ pub const MAXIMUM_RITHMIC_SYSTEM_NAME_BYTES: usize = 128;
 /// Maximum bytes accepted in one versioned Rithmic credential blob.
 pub const MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES: usize =
     HEADER_BYTES + MAXIMUM_RITHMIC_SYSTEM_NAME_BYTES + (2 * MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES);
+const _: () =
+    assert!(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES <= aeris_platform_runtime::MAX_SECRET_BYTES);
 
 /// Redacted validation failures for a versioned Rithmic credential blob.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -26,7 +26,8 @@ const MAXIMUM_TOKEN_RESPONSE_BYTES: u64 = 65_536;
 /// Maximum compact ID-token length accepted for verification.
 const MAXIMUM_ID_TOKEN_BYTES: usize = 16_384;
 /// Maximum refresh-token length accepted for vault storage.
-const MAXIMUM_REFRESH_TOKEN_BYTES: usize = 8_192;
+const MAXIMUM_REFRESH_TOKEN_BYTES: usize = 2_560;
+const _: () = assert!(MAXIMUM_REFRESH_TOKEN_BYTES <= aeris_platform_runtime::MAX_SECRET_BYTES);
 /// Clock-skew allowance applied to ID-token expiry.
 const ID_TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 300;
 /// Scopes requested for the desktop session; no long-lived consent prompt.
@@ -970,6 +971,15 @@ mod tests {
         assert!(clipped.len() <= 128);
         assert_eq!(clipped.chars().count(), 32);
         assert_eq!(super::clip_profile("", 128), String::new());
+    }
+
+    #[test]
+    fn refresh_tokens_beyond_the_vault_limit_are_not_kept() {
+        let limit = aeris_platform_runtime::MAX_SECRET_BYTES;
+        let kept = super::bounded_refresh(Some("r".repeat(limit))).expect("limit-sized token");
+        assert_eq!(kept.expose().len(), limit);
+        assert!(super::bounded_refresh(Some("r".repeat(limit + 1))).is_none());
+        assert!(super::bounded_refresh(Some(String::new())).is_none());
     }
 
     #[test]

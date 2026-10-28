@@ -1,10 +1,19 @@
 //! Protected credential storage boundary and native operating-system adapter.
 
-use std::{error::Error, fmt, sync::Mutex};
+use std::{
+    error::Error,
+    fmt,
+    sync::{Mutex, PoisonError},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use keyring::{Entry, Error as KeyringError};
+
+/// Largest secret the native vault stores: the Windows Credential Manager
+/// blob limit (`CRED_MAX_CREDENTIAL_BLOB_SIZE`, 5 * 512 bytes). Every platform
+/// enforces it so a secret that saves on one platform saves on all of them.
+pub const MAX_SECRET_BYTES: usize = 2_560;
 
 static NATIVE_CREDENTIAL_ACCESS: Mutex<()> = Mutex::new(());
 
@@ -65,7 +74,7 @@ pub trait CredentialVault {
 pub enum NativeCredentialVaultError {
     InvalidService,
     InvalidKey,
-    AccessSerialized,
+    SecretTooLarge,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     Platform(KeyringError),
     UnsupportedPlatform,
@@ -76,9 +85,10 @@ impl fmt::Display for NativeCredentialVaultError {
         match self {
             Self::InvalidService => formatter.write_str("credential vault service is invalid"),
             Self::InvalidKey => formatter.write_str("credential vault key is invalid"),
-            Self::AccessSerialized => {
-                formatter.write_str("credential vault access lock is unavailable")
-            }
+            Self::SecretTooLarge => write!(
+                formatter,
+                "credential vault secret exceeds {MAX_SECRET_BYTES} bytes"
+            ),
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             Self::Platform(error) => {
                 write!(formatter, "operating-system credential vault: {error}")
@@ -207,9 +217,11 @@ impl NativeCredentialVault {
         ) -> Result<T, NativeCredentialVaultError>,
     ) -> Result<T, NativeCredentialVaultError> {
         validate_identifier(key).map_err(|()| NativeCredentialVaultError::InvalidKey)?;
+        // The lock guards no data; it only serializes backend calls, so a
+        // holder that panicked leaves nothing to repair.
         let _guard = NATIVE_CREDENTIAL_ACCESS
             .lock()
-            .map_err(|_| NativeCredentialVaultError::AccessSerialized)?;
+            .unwrap_or_else(PoisonError::into_inner);
         let (production_access, namespace) = match &self.routing {
             VaultRouting::Production => (true, "aeris"),
             VaultRouting::Validation { namespace } => (false, namespace.as_str()),
@@ -238,6 +250,9 @@ impl CredentialVault for NativeCredentialVault {
     type Error = NativeCredentialVaultError;
 
     fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+        if secret.len() > MAX_SECRET_BYTES {
+            return Err(NativeCredentialVaultError::SecretTooLarge);
+        }
         self.with_backend_access(key, |backend, service, key, legacy| {
             backend
                 .store(service, key, secret)
@@ -355,13 +370,13 @@ fn legacy_services(service: &str) -> &'static [(&'static str, &'static str)] {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialVault, KeyringError, NativeCredentialBackend, NativeCredentialVault,
-        NativeCredentialVaultError, backend_identifier, legacy_backend_identifier,
-        validate_identifier,
+        CredentialVault, KeyringError, MAX_SECRET_BYTES, NATIVE_CREDENTIAL_ACCESS,
+        NativeCredentialBackend, NativeCredentialVault, NativeCredentialVaultError,
+        backend_identifier, legacy_backend_identifier, validate_identifier,
     };
     use std::{
         collections::BTreeMap,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, PoisonError},
     };
 
     type MemorySecrets = Arc<Mutex<BTreeMap<(String, String), Vec<u8>>>>;
@@ -594,5 +609,59 @@ mod tests {
                 .expect("production remains"),
             b"production"
         );
+    }
+
+    #[test]
+    fn native_vault_rejects_secrets_above_the_platform_limit_before_the_backend() {
+        let backend = MemoryCredentialBackend::default();
+        let vault = NativeCredentialVault::with_backend("com.aeris.account", backend.clone())
+            .expect("canonical account service creates a vault");
+
+        vault
+            .store("session", &[7; MAX_SECRET_BYTES])
+            .expect("a secret at the limit is stored");
+        assert!(matches!(
+            vault.store("session", &[8; MAX_SECRET_BYTES + 1]),
+            Err(NativeCredentialVaultError::SecretTooLarge)
+        ));
+        assert_eq!(
+            vault.load("session").expect("stored secret loads"),
+            Some(vec![7; MAX_SECRET_BYTES]),
+            "an oversized write leaves the stored secret untouched"
+        );
+        assert_eq!(
+            backend.secrets.lock().expect("memory backend locks").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_vault_recovers_from_a_poisoned_access_lock() {
+        let poisoner = std::thread::spawn(|| {
+            let _guard = NATIVE_CREDENTIAL_ACCESS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            panic!("a vault caller panics while holding the access lock");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(NATIVE_CREDENTIAL_ACCESS.is_poisoned());
+
+        let vault = NativeCredentialVault::with_backend(
+            "com.aeris.terminal",
+            MemoryCredentialBackend::default(),
+        )
+        .expect("valid service creates a native vault");
+        vault
+            .store("session", b"after-poison")
+            .expect("store recovers the poisoned lock");
+        assert_eq!(
+            vault
+                .load("session")
+                .expect("load recovers the poisoned lock"),
+            Some(b"after-poison".to_vec())
+        );
+        vault
+            .delete("session")
+            .expect("delete recovers the poisoned lock");
     }
 }

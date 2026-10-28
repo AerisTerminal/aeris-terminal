@@ -28,7 +28,9 @@ pub use aeris_platform_sys::trust;
 pub use aeris_platform_sys::ui::{confirm_message_box, message_box};
 pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;
-pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};
+pub use credential_vault::{
+    CredentialVault, MAX_SECRET_BYTES, NativeCredentialVault, NativeCredentialVaultError,
+};
 pub use data_root::{
     DataRoot, DataRootError, DataRootMode, InstalledAppSideEffect, InstanceLock,
     ParsedDataRootArguments, active_data_root, initialize_data_root,
