@@ -221,6 +221,17 @@ violations and missing verification explicitly, and never describe them as satis
   over the `platform_sys` power, network and session-shutdown registrations.
 - `platform_sys` is a leaf crate. Only `platform_runtime`, `trading_runtime`, and `observability`
   may depend on it directly.
+- Normal and build dependencies follow the layer order that
+  `crate_dependencies_follow_the_direction_rules` reads from every `Cargo.toml`. Leaf crates
+  depend on no workspace crate; the domain crate only on leaf and domain crates; platform crates
+  and adapters only on leaf, domain and platform crates; runtimes also on adapters and runtimes;
+  presentation crates (`application`, `chart_integration`, `terminal_ui`) never on a runtime or
+  adapter; and nothing depends on a composition root (`desktop`, `aeris_probes`,
+  `release_packager`, `naming_check`). Every workspace package needs a layer there.
+  `trading_runtime` never depends on `market_runtime`, `market_engine`, `platform_runtime` or an
+  adapter; `market_runtime` never depends on `trading_runtime` or `study_sdk`; only a composition
+  root depends on both runtimes; and `rusqlite` belongs to `trading_runtime` plus the probes'
+  read-only store check. `study_sdk -> market_runtime` is the accepted published-API facade.
 - `release_lifecycle` (`crates/release_lifecycle`) owns the signed install, update, rollback and
   uninstall lifecycle, release delivery plans, rollout policy, the compiled release identity, the
   release origin layout (`origin_layout.rs`, shared with the packager) and the launcher

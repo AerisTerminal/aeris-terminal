@@ -690,7 +690,7 @@ still wait on the GUI checks and the remaining work on their lines.
     spends 25 s verifying before READY and the restart proceeds. The real verification time on an
     installed app is not measured.
   - Left: a green windows-latest CI run of `lifecycle_e2e` with these cases.
-- [ ] M8.9 Dependency direction and `contracts`
+- [x] M8.9 Dependency direction and `contracts`
   - Landed: G5. `EmbeddedReplaySource` and the demo chart constructor compile only for tests or
     the new `test-support` features of `application` and `chart_integration`; only
     dev-dependencies and the desktop `diagnostics` feature enable them, which naming_check checks
@@ -700,9 +700,12 @@ still wait on the GUI checks and the remaining work on their lines.
     `account_runtime`, and the unused `GetAccountStatus`, `RefreshAccountProfile`,
     `BeginLogin`, `CancelLogin` and `SignOut` messages were deleted. naming_check allows only the
     desktop and `market_runtime` to depend on `contracts` and rejects a non-prost type in it.
-  - Left:
-    - Add naming_check direction rules from the `Cargo.toml` files.
-    - Record `study_sdk -> market_runtime` as the accepted facade. Closes PL-13 and PL-14.
+  - Landed: direction rules. naming_check reads every `Cargo.toml` and checks its normal and
+    build dependencies against the architecture §2.2 layer order and rules 3, 5, 7 and 8
+    (`crate_dependencies_follow_the_direction_rules`, with fixture tests); every workspace
+    package must have a layer. Rules 1, 2 and 6 keep their existing checks.
+  - Landed: `study_sdk -> market_runtime` recorded as the accepted facade (D27), so
+    `cargo tree -p aeris_study_sdk` still lists the adapters by decision. Closes PL-13 and PL-14.
 - [ ] M8.10 Dependency hygiene
   - Left:
     - Fetch the avatar with ureq and remove `reqwest_client` (AC-07).
@@ -754,6 +757,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D24 | Probation acceptance | (2026-10-28) A release generation is accepted once a desktop it started records the startup-complete marker; later launches of that generation skip probation, so only a release that has never finished starting is rolled back for a crash or a hang. The marker is written when the first window opens (the sign-in window counts) so a user who has not signed in within 60 s does not trigger a rollback. |
 | D25 | Update recovery | (2026-10-28) An update runs readiness on a copy of the user's data before the active pointer moves and journals `ReadinessPassed` first, so recovery finishes the update (or discards a candidate whose files changed since) without running candidate code. The `Activated` and `HealthChecked` journal states are removed; no released version wrote them, because 1.0.0 installs through Inno Setup without the lifecycle. A candidate that fails readiness never ran on the user's data, so its rollback needs no state-compatibility check. The launch audit stays exact; every launcher command recovers first, and recovery moves entries no release record owns into `orphaned/<ms>/`, keeping the newest 8 batches. |
 | D26 | Restart verification bound | (2026-10-28) The restart helper's verification (a 15 s-bounded channel fetch plus hashing the prepared and active releases) runs before READY, and the desktop waits for READY up to a shared 2-minute bound rather than the former 20 s handshake, so a slow disk or channel no longer fails a restart. The READY-to-COMMIT window keeps its existing bounds, since the desktop's durability waits (up to 22 s) already fit the launcher's 60 s commit wait. |
+| D27 | Study SDK facade | (2026-10-28) PL-13 is resolved as accepted, as `architecture.md` section 2.2 rule 8 records: `study_sdk` is the published-API facade above the in-process study runtime and is used only by the desktop's built-in study packages, so it keeps its `market_runtime` dependency and with it the adapters (`cargo tree -p aeris_study_sdk` still lists them). It is not an inversion while `market_runtime` only dev-depends on it, which naming_check enforces. Moving the study types into a contract crate waits until third-party study authors exist. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in

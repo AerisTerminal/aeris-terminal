@@ -289,6 +289,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: SDK types were reused from the runtime instead of being defined in a contract crate.
 - Fix: Move the shared study types into `market_data` (or a `study_contracts` crate); `market_runtime` depends on the SDK contracts, not the reverse.
 - Verification: `cargo tree -p study_sdk | rg adapter` empty.
+- Status (2026-10-28, M8.9): accepted rather than moved (stabilization D27). `study_sdk` is the published-API facade above the in-process study runtime, used only by the desktop's built-in study packages; `market_runtime` only dev-depends on it, which naming_check enforces.
 
 ### PL-14 `contracts` mixes in-process DTOs with persisted schema
 
@@ -298,6 +299,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: The process boundary was removed but its message set was kept.
 - Fix: Keep only the persisted workspace schema in `contracts` (rename to `workspace_schema`); replace in-process DTOs with plain Rust types in their owning crates.
 - Verification: `rg "GetAccountStatus|RefreshAccountProfile"` empty; `contracts` has no consumers outside persistence.
+- Status (2026-10-28, M8.9): fixed. `contracts` holds only the prost workspace schema and keeps its crate name; in-process types moved to `market_runtime` and `account_runtime`, and only the desktop and `market_runtime` depend on it.
 
 ### PL-15 Dependency hygiene
 

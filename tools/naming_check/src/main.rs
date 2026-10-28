@@ -2535,6 +2535,207 @@ mod tests {
         }
     }
 
+    /// Architecture layers in dependency order (architecture section 2.2). Every workspace
+    /// package belongs to exactly one.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CrateLayer {
+        Leaf,
+        Domain,
+        Platform,
+        Adapter,
+        Runtime,
+        Presentation,
+        CompositionRoot,
+    }
+
+    fn crate_layer(package: &str) -> Option<CrateLayer> {
+        Some(match package {
+            "aeris_account"
+            | "aeris_contracts"
+            | "aeris_design_system"
+            | "aeris_instruments"
+            | "aeris_market_data"
+            | "aeris_platform_sys"
+            | "aeris_provider_history"
+            | "gpui-base" => CrateLayer::Leaf,
+            "aeris_trading" => CrateLayer::Domain,
+            "aeris_observability" | "aeris_platform_runtime" | "aeris_release_lifecycle" => {
+                CrateLayer::Platform
+            }
+            "aeris_hyperliquid_market_adapter" | "aeris_rithmic_protocol_adapter" => {
+                CrateLayer::Adapter
+            }
+            // `aeris_study_sdk` is the accepted published-API facade above the in-process
+            // study runtime, so it sits with the runtimes and may depend on `market_runtime`.
+            "aeris_account_runtime"
+            | "aeris_context_runtime"
+            | "aeris_market_engine"
+            | "aeris_market_runtime"
+            | "aeris_study_sdk"
+            | "aeris_trading_runtime" => CrateLayer::Runtime,
+            "aeris_application" | "aeris_chart_integration" | "aeris_terminal_ui" => {
+                CrateLayer::Presentation
+            }
+            "aeris_desktop" | "aeris_naming_check" | "aeris_probes" | "aeris_release_packager" => {
+                CrateLayer::CompositionRoot
+            }
+            _ => return None,
+        })
+    }
+
+    fn layer_may_depend_on(layer: CrateLayer, dependency: CrateLayer) -> bool {
+        use CrateLayer::{Adapter, CompositionRoot, Domain, Leaf, Platform, Presentation, Runtime};
+        match layer {
+            Leaf => false,
+            Domain => matches!(dependency, Leaf | Domain),
+            Platform | Adapter => matches!(dependency, Leaf | Domain | Platform),
+            Runtime => matches!(dependency, Leaf | Domain | Platform | Adapter | Runtime),
+            Presentation => matches!(dependency, Leaf | Domain | Platform | Presentation),
+            CompositionRoot => dependency != CompositionRoot,
+        }
+    }
+
+    fn rusqlite_dependent_is_allowed(package: &str) -> bool {
+        [
+            "aeris_trading_runtime",
+            // `paper_trading_probe` opens its isolated validation store read-only to verify
+            // the durable cash rows; the probes are never shipped.
+            "aeris_probes",
+        ]
+        .contains(&package)
+    }
+
+    /// The direction rules `package` breaks through its normal and build dependencies.
+    fn direction_violations(package: &str, dependencies: &[&str]) -> Vec<String> {
+        let mut violations = Vec::new();
+        let layer = crate_layer(package);
+        for dependency in dependencies {
+            let target = crate_layer(dependency);
+            if let (Some(layer), Some(target)) = (layer, target)
+                && !layer_may_depend_on(layer, target)
+            {
+                violations.push(format!(
+                    "{package} ({layer:?}) must not depend on {dependency} ({target:?})"
+                ));
+            }
+            let forbidden = match package {
+                "aeris_trading_runtime" => {
+                    matches!(
+                        *dependency,
+                        "aeris_market_runtime" | "aeris_market_engine" | "aeris_platform_runtime"
+                    ) || target == Some(CrateLayer::Adapter)
+                }
+                "aeris_market_runtime" => {
+                    matches!(*dependency, "aeris_trading_runtime" | "aeris_study_sdk")
+                }
+                _ => false,
+            };
+            if forbidden {
+                violations.push(format!("{package} must not depend on {dependency}"));
+            }
+            if *dependency == "rusqlite" && !rusqlite_dependent_is_allowed(package) {
+                violations.push(format!(
+                    "{package} uses rusqlite; the trading store is the only SQLite owner"
+                ));
+            }
+        }
+        if layer != Some(CrateLayer::CompositionRoot)
+            && dependencies.contains(&"aeris_market_runtime")
+            && dependencies.contains(&"aeris_trading_runtime")
+        {
+            violations.push(format!(
+                "{package} depends on both runtimes; only a composition root may"
+            ));
+        }
+        violations
+    }
+
+    #[test]
+    fn direction_rules_accept_and_reject_fixtures() {
+        for (package, dependencies) in [
+            (
+                "aeris_market_runtime",
+                &[
+                    "aeris_market_engine",
+                    "aeris_rithmic_protocol_adapter",
+                    "chrono",
+                ][..],
+            ),
+            (
+                "aeris_desktop",
+                &["aeris_market_runtime", "aeris_trading_runtime"][..],
+            ),
+            ("aeris_study_sdk", &["aeris_market_runtime"][..]),
+        ] {
+            assert_eq!(
+                direction_violations(package, dependencies),
+                Vec::<String>::new()
+            );
+        }
+        for (package, dependencies) in [
+            ("aeris_instruments", &["aeris_market_data"][..]),
+            ("aeris_trading", &["aeris_platform_runtime"][..]),
+            ("aeris_terminal_ui", &["aeris_market_runtime"][..]),
+            (
+                "aeris_chart_integration",
+                &["aeris_hyperliquid_market_adapter"][..],
+            ),
+            ("aeris_trading_runtime", &["aeris_platform_runtime"][..]),
+            ("aeris_market_runtime", &["aeris_trading_runtime"][..]),
+            ("aeris_market_runtime", &["aeris_study_sdk"][..]),
+            ("aeris_market_runtime", &["rusqlite"][..]),
+            ("aeris_market_runtime", &["aeris_desktop"][..]),
+            (
+                "aeris_study_sdk",
+                &["aeris_market_runtime", "aeris_trading_runtime"][..],
+            ),
+        ] {
+            assert!(
+                !direction_violations(package, dependencies).is_empty(),
+                "{package} -> {dependencies:?} must break a direction rule"
+            );
+        }
+    }
+
+    #[test]
+    fn crate_dependencies_follow_the_direction_rules() {
+        let mut packages = Vec::new();
+        for path in workspace_manifests() {
+            let relative = relative_string(&path);
+            let contents = super::read_source(&path).expect("manifest");
+            let Some(package) = manifest_entries(&contents)
+                .into_iter()
+                .find(|entry| entry.section == "package" && entry.key == "name")
+            else {
+                continue;
+            };
+            let package = package.value.trim_matches('"').to_string();
+            assert!(
+                crate_layer(&package).is_some(),
+                "{relative} declares {package} without an architecture layer"
+            );
+            let dependencies = manifest_dependencies(&contents);
+            let names = dependencies
+                .iter()
+                .filter(|(kind, _, _)| *kind != DependencyKind::Dev)
+                .map(|(_, name, _)| name.as_str())
+                .collect::<Vec<_>>();
+            let violations = direction_violations(&package, &names);
+            assert!(violations.is_empty(), "{relative}: {violations:?}");
+            packages.push(package);
+        }
+        for expected in [
+            "aeris_desktop",
+            "aeris_market_runtime",
+            "aeris_trading_runtime",
+        ] {
+            assert!(
+                packages.iter().any(|package| package == expected),
+                "the direction scan missed {expected}"
+            );
+        }
+    }
+
     fn contains_unsafe_code(source: &str) -> bool {
         source.contains("allow(unsafe_code)")
             || source.contains("unsafe {")
