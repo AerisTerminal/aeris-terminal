@@ -367,69 +367,46 @@ pub(super) fn restored_chart_appearance(
     );
     let line_width = u8::try_from(appearance.line_width).ok()?.clamp(1, 4);
     let line_style = u8::try_from(appearance.line_style).ok()?.min(4);
-    let series_color =
-        |color: &str| restored_series_color(color, appearance.area_bottom_color.is_empty());
     Some(ChartAppearanceSettings {
-        background_color: restored_appearance_color(&appearance.background_color, |colors| {
-            colors.background
-        }),
-        text_color: restored_appearance_color(&appearance.text_color, |colors| colors.text),
+        background_color: restored_theme_color(&appearance.background_color),
+        text_color: restored_theme_color(&appearance.text_color),
         grid_visible: appearance.grid_visible,
-        grid_color: restored_appearance_color(&appearance.grid_color, |colors| colors.grid),
+        grid_color: restored_theme_color(&appearance.grid_color),
         grid_style,
-        crosshair_color: restored_appearance_color(&appearance.crosshair_color, |colors| {
-            colors.crosshair
-        }),
+        crosshair_color: restored_theme_color(&appearance.crosshair_color),
         crosshair_width,
         crosshair_style,
-        up_color: restored_appearance_color(&appearance.up_color, |colors| colors.bullish),
-        down_color: restored_appearance_color(&appearance.down_color, |colors| colors.bearish),
-        wick_up_color: restored_appearance_color(&appearance.wick_up_color, |colors| {
-            colors.bullish
-        }),
-        wick_down_color: restored_appearance_color(&appearance.wick_down_color, |colors| {
-            colors.bearish
-        }),
-        border_up_color: restored_appearance_color(&appearance.border_up_color, |colors| {
-            colors.bullish
-        }),
-        border_down_color: restored_appearance_color(&appearance.border_down_color, |colors| {
-            colors.bearish
-        }),
+        up_color: restored_theme_color(&appearance.up_color),
+        down_color: restored_theme_color(&appearance.down_color),
+        wick_up_color: restored_theme_color(&appearance.wick_up_color),
+        wick_down_color: restored_theme_color(&appearance.wick_down_color),
+        border_up_color: restored_theme_color(&appearance.border_up_color),
+        border_down_color: restored_theme_color(&appearance.border_down_color),
         wick_visible: appearance.wick_visible,
         border_visible: appearance.border_visible,
         open_visible: appearance.open_visible,
         thin_bars: appearance.thin_bars,
-        line_color: series_color(&appearance.line_color),
+        line_color: restored_theme_color(&appearance.line_color),
         line_width,
         line_style,
-        area_top_color: series_color(&appearance.area_top_color),
-        area_bottom_color: series_color(&appearance.area_bottom_color),
-        baseline_top_color: series_color(&appearance.baseline_top_color),
-        baseline_bottom_color: series_color(&appearance.baseline_bottom_color),
+        area_top_color: restored_theme_color(&appearance.area_top_color),
+        area_bottom_color: restored_theme_color(&appearance.area_bottom_color),
+        baseline_top_color: restored_theme_color(&appearance.baseline_top_color),
+        baseline_bottom_color: restored_theme_color(&appearance.baseline_bottom_color),
     })
 }
 
-/// Axis colors were never flattened into theme defaults, so only an empty or theme marker
-/// follows the theme.
 pub(super) fn restored_chart_axis(
     appearance: &WorkspaceChartAppearanceState,
 ) -> ChartAxisAppearance {
-    let color = |color: &str| {
-        if color.is_empty() || color == THEME_APPEARANCE_COLOR {
-            ChartAppearanceColor::Theme
-        } else {
-            ChartAppearanceColor::Custom(color.to_string())
-        }
-    };
     ChartAxisAppearance {
-        border_color: color(&appearance.axis_border_color),
-        text_color: color(&appearance.axis_text_color),
+        border_color: restored_theme_color(&appearance.axis_border_color),
+        text_color: restored_theme_color(&appearance.axis_text_color),
     }
 }
 
 /// Durable marker for an appearance color that follows the active chart theme.
-const THEME_APPEARANCE_COLOR: &str = "theme";
+pub(super) const THEME_APPEARANCE_COLOR: &str = "theme";
 
 fn persisted_appearance_color(color: &ChartAppearanceColor) -> String {
     match color {
@@ -438,35 +415,11 @@ fn persisted_appearance_color(color: &ChartAppearanceColor) -> String {
     }
 }
 
-/// Layouts written before typed provenance flattened a theme-following color into that
-/// theme's concrete default, so either theme's default for the role follows the theme again.
-/// An empty value comes from a layout saved before the field existed and also follows the theme.
-fn restored_appearance_color(
-    color: &str,
-    role: fn(ChartThemeColors) -> &'static str,
-) -> ChartAppearanceColor {
-    let theme_default = [AerisChartTheme::Light, AerisChartTheme::Dark]
-        .into_iter()
-        .any(|theme| role(ChartThemeColors::for_theme(theme)).eq_ignore_ascii_case(color));
-    if color.is_empty() || color == THEME_APPEARANCE_COLOR || theme_default {
-        ChartAppearanceColor::Theme
-    } else {
-        ChartAppearanceColor::Custom(color.to_string())
-    }
-}
-
-/// The colors Aeris Charts reported for an unset line, area or baseline color before those
-/// fields carried provenance (its line, market up and market down fallbacks).
-const LEGACY_SERIES_DEFAULT_COLORS: [&str; 3] = ["#2196f3", "#089981", "#f7525f"];
-
-/// A line, area or baseline color. A `legacy` layout pinned whichever fallback the engine
-/// reported, which painted an opaque area fill, so those fallbacks follow the default again.
-fn restored_series_color(color: &str, legacy: bool) -> ChartAppearanceColor {
-    let legacy_default = legacy
-        && LEGACY_SERIES_DEFAULT_COLORS
-            .iter()
-            .any(|fallback| fallback.eq_ignore_ascii_case(color));
-    if color.is_empty() || color == THEME_APPEARANCE_COLOR || legacy_default {
+/// A stored appearance color: schema 3 documents carry provenance (the theme marker or an
+/// empty value follows the theme), and the migration chain canonicalizes every older document
+/// before restore.
+fn restored_theme_color(color: &str) -> ChartAppearanceColor {
+    if color.is_empty() || color == THEME_APPEARANCE_COLOR {
         ChartAppearanceColor::Theme
     } else {
         ChartAppearanceColor::Custom(color.to_string())
@@ -997,7 +950,7 @@ fn chart_study_threshold(
     })
 }
 
-const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
+pub(super) const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
     matches!(
         indicator,
         ChartIndicator::Sma
@@ -1421,14 +1374,14 @@ fn runtime_study_uses_current_chart(state: &WorkspaceChartStudyState) -> bool {
     })
 }
 
-fn legacy_integer_setting(identifier: &str, value: i64) -> WorkspaceStudySettingState {
+fn integer_setting(identifier: &str, value: i64) -> WorkspaceStudySettingState {
     WorkspaceStudySettingState {
         identifier: identifier.to_string(),
         value: Some(workspace_study_setting_state::Value::Integer(value)),
     }
 }
 
-fn legacy_runtime_study_contract(
+fn default_runtime_study_contract(
     indicator: ChartIndicator,
 ) -> Option<(
     &'static str,
@@ -1440,7 +1393,7 @@ fn legacy_runtime_study_contract(
         ChartIndicator::Sma => (
             aeris_study_sdk::BUILTIN_SMA_IDENTIFIER,
             aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
-            vec![legacy_integer_setting(
+            vec![integer_setting(
                 aeris_study_sdk::BUILTIN_SMA_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_SMA_DEFAULT_PERIOD,
             )],
@@ -1449,7 +1402,7 @@ fn legacy_runtime_study_contract(
         ChartIndicator::Ema => (
             aeris_study_sdk::BUILTIN_EMA_IDENTIFIER,
             aeris_study_sdk::BUILTIN_EMA_IMPLEMENTATION_REVISION,
-            vec![legacy_integer_setting(
+            vec![integer_setting(
                 aeris_study_sdk::BUILTIN_EMA_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_EMA_DEFAULT_PERIOD,
             )],
@@ -1458,13 +1411,13 @@ fn legacy_runtime_study_contract(
         ChartIndicator::Wma => (
             aeris_study_sdk::BUILTIN_WMA_IDENTIFIER,
             aeris_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
-            vec![legacy_integer_setting(
+            vec![integer_setting(
                 aeris_study_sdk::BUILTIN_WMA_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
             )],
             vec![aeris_study_sdk::BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Bollinger => legacy_bollinger_contract(),
+        ChartIndicator::Bollinger => default_bollinger_contract(),
         ChartIndicator::Vwap => (
             aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER,
             aeris_study_sdk::BUILTIN_VWAP_IMPLEMENTATION_REVISION,
@@ -1474,18 +1427,18 @@ fn legacy_runtime_study_contract(
         ChartIndicator::Rsi => (
             aeris_study_sdk::BUILTIN_RSI_IDENTIFIER,
             aeris_study_sdk::BUILTIN_RSI_IMPLEMENTATION_REVISION,
-            vec![legacy_integer_setting(
+            vec![integer_setting(
                 aeris_study_sdk::BUILTIN_RSI_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_RSI_DEFAULT_PERIOD,
             )],
             vec![aeris_study_sdk::BUILTIN_RSI_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Macd => legacy_macd_contract(),
-        ChartIndicator::Stochastic => legacy_stochastic_contract(),
+        ChartIndicator::Macd => default_macd_contract(),
+        ChartIndicator::Stochastic => default_stochastic_contract(),
         ChartIndicator::Atr => (
             aeris_study_sdk::BUILTIN_ATR_IDENTIFIER,
             aeris_study_sdk::BUILTIN_ATR_IMPLEMENTATION_REVISION,
-            vec![legacy_integer_setting(
+            vec![integer_setting(
                 aeris_study_sdk::BUILTIN_ATR_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_ATR_DEFAULT_PERIOD,
             )],
@@ -1498,7 +1451,7 @@ fn legacy_runtime_study_contract(
     Some(contract)
 }
 
-fn legacy_macd_contract() -> (
+fn default_macd_contract() -> (
     &'static str,
     u32,
     Vec<WorkspaceStudySettingState>,
@@ -1508,15 +1461,15 @@ fn legacy_macd_contract() -> (
         aeris_study_sdk::BUILTIN_MACD_IDENTIFIER,
         aeris_study_sdk::BUILTIN_MACD_IMPLEMENTATION_REVISION,
         vec![
-            legacy_integer_setting(
+            integer_setting(
                 aeris_study_sdk::BUILTIN_MACD_FAST_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_MACD_DEFAULT_FAST_PERIOD,
             ),
-            legacy_integer_setting(
+            integer_setting(
                 aeris_study_sdk::BUILTIN_MACD_SLOW_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
             ),
-            legacy_integer_setting(
+            integer_setting(
                 aeris_study_sdk::BUILTIN_MACD_SIGNAL_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD,
             ),
@@ -1529,7 +1482,7 @@ fn legacy_macd_contract() -> (
     )
 }
 
-fn legacy_stochastic_contract() -> (
+fn default_stochastic_contract() -> (
     &'static str,
     u32,
     Vec<WorkspaceStudySettingState>,
@@ -1539,11 +1492,11 @@ fn legacy_stochastic_contract() -> (
         aeris_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER,
         aeris_study_sdk::BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
         vec![
-            legacy_integer_setting(
+            integer_setting(
                 aeris_study_sdk::BUILTIN_STOCHASTIC_K_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD,
             ),
-            legacy_integer_setting(
+            integer_setting(
                 aeris_study_sdk::BUILTIN_STOCHASTIC_D_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD,
             ),
@@ -1555,7 +1508,7 @@ fn legacy_stochastic_contract() -> (
     )
 }
 
-fn legacy_bollinger_contract() -> (
+fn default_bollinger_contract() -> (
     &'static str,
     u32,
     Vec<WorkspaceStudySettingState>,
@@ -1565,7 +1518,7 @@ fn legacy_bollinger_contract() -> (
         aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER,
         aeris_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
         vec![
-            legacy_integer_setting(
+            integer_setting(
                 aeris_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING,
                 aeris_study_sdk::BUILTIN_BOLLINGER_DEFAULT_PERIOD,
             ),
@@ -1637,13 +1590,15 @@ fn default_study_line_width(identifier: &str) -> u8 {
     }
 }
 
-pub(super) fn legacy_runtime_study(
+/// The default durable study state for a runtime-managed builtin indicator: the add-from-menu
+/// path and the workspace migration chain both materialize it.
+pub(super) fn default_runtime_study(
     local_id: u64,
     indicator: ChartIndicator,
     visible: bool,
 ) -> Option<WorkspaceChartStudyState> {
     let (identifier, implementation_revision, settings, output_identifiers) =
-        legacy_runtime_study_contract(indicator)?;
+        default_runtime_study_contract(indicator)?;
     Some(WorkspaceChartStudyState {
         line_width: 0,
         output_colors: Vec::new(),
@@ -1661,53 +1616,14 @@ pub(super) fn legacy_runtime_study(
     })
 }
 
+/// The pane's durable studies. The migration chain has already materialized runtime-managed
+/// legacy indicator entries into the study graph, so restore reads it without re-deriving.
 fn persisted_runtime_studies(
     restored_chart_state: Option<&WorkspaceChartState>,
 ) -> Vec<PendingRuntimeStudyState> {
-    let Some(state) = restored_chart_state else {
-        return Vec::new();
-    };
-    let mut persisted = state.studies.clone();
-    let mut durable_identifiers = std::collections::BTreeMap::<String, usize>::new();
-    for study in &persisted {
-        *durable_identifiers
-            .entry(study.identifier.clone())
-            .or_default() += 1;
-    }
-    let mut used_local_ids = persisted
-        .iter()
-        .map(|study| study.local_id)
-        .collect::<Vec<_>>();
-    for item in &state.indicators {
-        let Some(indicator) = ChartIndicator::from_identifier(&item.kind) else {
-            continue;
-        };
-        if !runtime_managed_indicator(indicator) {
-            continue;
-        }
-        let mut local_id = 1_u64;
-        while used_local_ids.contains(&local_id) {
-            let Some(next) = local_id.checked_add(1) else {
-                break;
-            };
-            local_id = next;
-        }
-        if used_local_ids.contains(&local_id) {
-            continue;
-        }
-        let Some(legacy) = legacy_runtime_study(local_id, indicator, item.visible) else {
-            continue;
-        };
-        if let Some(remaining) = durable_identifiers.get_mut(&legacy.identifier)
-            && *remaining > 0
-        {
-            *remaining -= 1;
-            continue;
-        }
-        used_local_ids.push(local_id);
-        persisted.push(legacy);
-    }
-    persisted
+    restored_chart_state
+        .map(|state| state.studies.clone())
+        .unwrap_or_default()
         .into_iter()
         .map(|persisted| PendingRuntimeStudyState {
             persisted,
@@ -7858,7 +7774,7 @@ impl WorkspaceSurface {
                 Self::post_study_failure("Study identity space is exhausted.", cx);
                 return false;
             };
-            let Some(persisted) = legacy_runtime_study(local_id, indicator, true) else {
+            let Some(persisted) = default_runtime_study(local_id, indicator, true) else {
                 Self::post_study_failure("Study implementation is unavailable.", cx);
                 return false;
             };

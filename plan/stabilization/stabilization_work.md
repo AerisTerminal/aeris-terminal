@@ -332,11 +332,21 @@ only on the guarded GUI checks on their lines.
     writes, a corrupt primary restoring the backup with the quarantined copy reported, a
     corrupt document defaulting while keeping the rejected files, and the legacy frame
     reporting `Migrated { from: 0 }`.
+  - Landed (migration chain, per M-D5): `desktop/workspace_migrations.rs` owns the ordered
+    chain to schema 3 — the legacy `workspace-state.frame` is schema 0, a released bare
+    protobuf payload carries its schema in `schema_revision` (at most 2, so a bare payload
+    past that is rejected as unrecognizable), and the envelope schema is authoritative for
+    enveloped files. 1-to-2 moves the order ticket out of the order book; 2-to-3
+    canonicalizes flattened theme-default colors to the `theme` marker, frees the legacy
+    series fallbacks only for layouts without the bottom fill, and materializes
+    runtime-managed legacy indicator entries into the study graph above existing identities
+    (the old restore-time heuristics are deleted; restore reads both plainly). The chain runs
+    before the sanitizer on every load and is persisted at the first schema 3 write, which
+    preserves the pre-migration payload as `workspace-state.pb.pre-v3` exactly once and keeps
+    the frame file. Golden tests cover each step, idempotence, the write-once copy, the
+    bare-revision fence and an enveloped schema 1 development file.
   - Left: the writer thread owns `WorkspaceDocument` and folds in chart chrome, deleting
-    `ChartChromeShutdownWait`.
-  - An ordered migration chain to schema 3 with golden fixtures (the legacy color,
-    area-bottom and `legacy_*_contract` heuristics and the chrome key=value fold move into
-    the 2-to-3 step; the pre-v3 copy is kept).
+    `ChartChromeShutdownWait`; the chrome key=value fold moves into the chain then.
   - GUI checks: a corrupt workspace shows the notice with Open folder and the layout is not
     silently replaced; a newer-version workspace shows the read-only notice; a copied real
     workspace migrates intact.

@@ -219,7 +219,15 @@ violations and missing verification explicitly, and never describe them as satis
   primary to `<name>.corrupt-1`, keeping the newest three; the readiness gate inspects
   read-only. The magic starts with NUL, which no released payload (protobuf, `key=value`
   text) can, so a file without it opens unchanged as a legacy payload and is enveloped on the
-  next save. An envelope whose schema is newer than the build's newest supported schema is a
+  next save. Workspace documents migrate through the ordered chain in
+  `desktop/workspace_migrations.rs`: the legacy `workspace-state.frame` is document schema 0,
+  a released 1.x build's bare payload carries its document schema in the payload
+  `schema_revision` (never past 2, so a bare payload past that is rejected as
+  unrecognizable), and the envelope schema is authoritative once present. The chain runs
+  before the sanitizer on every load and is persisted at the first schema 3 write, which
+  preserves the pre-migration payload as `workspace-state.pb.pre-v3` exactly once (the one
+  raw `fs::write` allowlist entry in `local_state.rs`) and keeps the frame file. An envelope
+  whose schema is newer than the build's newest supported schema is a
   newer-version document, not corruption: a load reports it without quarantining the file or
   offering an older copy, a write never replaces it, the workspace opens read-only for the
   session with a persistent notice, and the readiness gate refuses it. Restore outcomes the

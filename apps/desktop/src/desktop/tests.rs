@@ -5232,6 +5232,24 @@ fn chart_detail_is_bounded_and_suppresses_generic_duplicates() {
     assert!(detail.ends_with('…'));
 }
 
+/// Runs the workspace migration chain on a schema 2 document whose single chart carries
+/// `appearance`, returning the migrated appearance.
+fn migrated_chart_appearance(
+    appearance: aeris_contracts::WorkspaceChartAppearanceState,
+) -> aeris_contracts::WorkspaceChartAppearanceState {
+    let mut workspace = super::local_state::default_workspace();
+    workspace.schema_revision = 2;
+    workspace.workspace_tabs[0].panes[0]
+        .chart
+        .get_or_insert_with(Default::default)
+        .appearance = Some(appearance);
+    super::workspace_migrations::migrate_workspace(workspace, 2).workspace_tabs[0].panes[0]
+        .chart
+        .as_ref()
+        .and_then(|chart| chart.appearance.clone())
+        .expect("migrated appearance")
+}
+
 #[test]
 fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() {
     use super::workspace_surface::{
@@ -5269,6 +5287,8 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
         appearance
     );
 
+    // A schema 2 layout flattened theme-following colors into theme defaults; the migration
+    // chain restores their provenance before restore reads them plainly.
     let mut legacy = persisted;
     legacy.down_color = ChartThemeColors::for_theme(AerisChartTheme::Light)
         .bearish
@@ -5278,10 +5298,10 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
         .to_string();
     legacy.background_color.clear();
     legacy.text_color.clear();
-    legacy.axis_border_color.clear();
-    legacy.axis_text_color.clear();
-    assert_eq!(restored_chart_axis(&legacy), ChartAxisAppearance::default());
-    let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
+    let migrated = migrated_chart_appearance(legacy);
+    assert_eq!(migrated.down_color, "theme");
+    assert_eq!(migrated.grid_color, "theme");
+    let restored = restored_chart_appearance(&migrated).expect("migrated appearance");
     assert_eq!(restored.down_color, ChartAppearanceColor::Theme);
     assert_eq!(restored.grid_color, ChartAppearanceColor::Theme);
     assert_eq!(restored.background_color, ChartAppearanceColor::Theme);
@@ -5289,6 +5309,15 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
     assert_eq!(
         restored.up_color,
         ChartAppearanceColor::Custom("#abcdef".to_string())
+    );
+
+    // Axis colors were never flattened; an empty stored axis color follows the theme.
+    let mut cleared_axis = migrated.clone();
+    cleared_axis.axis_border_color.clear();
+    cleared_axis.axis_text_color.clear();
+    assert_eq!(
+        restored_chart_axis(&cleared_axis),
+        ChartAxisAppearance::default()
     );
 }
 
@@ -5424,14 +5453,15 @@ fn saved_area_fill_follows_the_translucent_default_instead_of_a_pinned_fallback(
     }
 
     // A layout saved before these colors carried provenance pinned the engine's opaque
-    // fallbacks and has no bottom fill.
+    // fallbacks and has no bottom fill; the migration chain recognizes exactly that shape.
     let mut legacy = persisted.clone();
     legacy.line_color = "#089981".to_string();
     legacy.area_top_color = "#089981".to_string();
     legacy.area_bottom_color.clear();
     legacy.baseline_top_color = "#089981".to_string();
     legacy.baseline_bottom_color = "#F7525F".to_string();
-    let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
+    let restored =
+        restored_chart_appearance(&migrated_chart_appearance(legacy)).expect("migrated appearance");
     assert_eq!(restored, ChartAppearanceSettings::default());
 
     // A user's own pick survives, including one equal to a former fallback once saved with

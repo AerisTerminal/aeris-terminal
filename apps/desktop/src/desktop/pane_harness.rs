@@ -2790,7 +2790,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
-    let original = workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+    let original = workspace_surface::default_runtime_study(3, ChartIndicator::Sma, true)
         .expect("study fixture");
     let mut replacement = original.clone();
     replacement.settings = vec![WorkspaceStudySettingState {
@@ -2917,7 +2917,7 @@ fn pane_harness_study_dialog_previews_edits_one_request_at_a_time_and_cancel_res
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
-    let original = workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+    let original = workspace_surface::default_runtime_study(3, ChartIndicator::Sma, true)
         .expect("study fixture");
     harness.pane.update(cx, |pane, _| {
         let product = pane.product.as_ref().expect("selected instrument");
@@ -3078,7 +3078,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
     harness.pane.update(cx, |pane, _| {
         pane.studies.activate(RuntimeStudyState {
             study_id,
-            persisted: workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+            persisted: workspace_surface::default_runtime_study(3, ChartIndicator::Sma, true)
                 .expect("study fixture"),
             resolved_chart_series: None,
         });
@@ -4810,7 +4810,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
             pane.studies.insert_pending(
                 sequence,
                 PendingRuntimeStudyState {
-                    persisted: workspace_surface::legacy_runtime_study(
+                    persisted: workspace_surface::default_runtime_study(
                         sequence,
                         ChartIndicator::Sma,
                         true,
@@ -4856,7 +4856,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
         pane.studies.insert_pending(
             3,
             PendingRuntimeStudyState {
-                persisted: workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+                persisted: workspace_surface::default_runtime_study(3, ChartIndicator::Sma, true)
                     .expect("fixture study"),
                 resolved_chart_series: None,
                 remove_on_registration: false,
@@ -4902,7 +4902,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
 
 fn deferred_sma_study() -> PendingRuntimeStudyState {
     PendingRuntimeStudyState {
-        persisted: workspace_surface::legacy_runtime_study(1, ChartIndicator::Sma, true)
+        persisted: workspace_surface::default_runtime_study(1, ChartIndicator::Sma, true)
             .expect("fixture study"),
         resolved_chart_series: None,
         remove_on_registration: false,

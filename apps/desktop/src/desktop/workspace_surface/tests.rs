@@ -695,7 +695,7 @@ fn missing_custom_package_does_not_starve_later_independent_study_restore() {
         visible: true,
         output_identifiers: vec!["value".to_string()],
     };
-    let builtin = legacy_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
+    let builtin = default_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
     let studies = StudiesController::restore(vec![
         PendingRuntimeStudyState {
             persisted: missing,
@@ -740,7 +740,7 @@ fn study_decimal_editor_round_trips_exact_fixed_point_values() {
 #[test]
 fn failed_study_setting_reinitialization_preserves_durable_configuration() {
     let study_id = StudyInstanceId::try_from_u64(1).expect("study id");
-    let original = legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study");
+    let original = default_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study");
     let mut replacement = original.clone();
     replacement.settings = vec![WorkspaceStudySettingState {
         identifier: aeris_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
@@ -854,9 +854,9 @@ fn reinitializing_dependency_chain() -> (
     let downstream_id = StudyInstanceId::try_from_u64(2).expect("downstream study id");
     let old_series = custom_package_series("instrument:rithmic:CME:MNQ");
     let new_series = custom_package_series("instrument:rithmic:CME:MES");
-    let root = legacy_runtime_study(1, ChartIndicator::Sma, true).expect("root study");
+    let root = default_runtime_study(1, ChartIndicator::Sma, true).expect("root study");
     let mut downstream =
-        legacy_runtime_study(2, ChartIndicator::Sma, true).expect("downstream study");
+        default_runtime_study(2, ChartIndicator::Sma, true).expect("downstream study");
     downstream.dependencies.push(WorkspaceStudyDependencyState {
         kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
         study_local_id: 1,
@@ -973,7 +973,7 @@ fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_un
 
 fn dependent_legacy_study(local_id: u64, upstream_local_id: u64) -> WorkspaceChartStudyState {
     let mut study =
-        legacy_runtime_study(local_id, ChartIndicator::Sma, true).expect("dependent study");
+        default_runtime_study(local_id, ChartIndicator::Sma, true).expect("dependent study");
     study.dependencies = vec![WorkspaceStudyDependencyState {
         kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
         study_local_id: upstream_local_id,
@@ -1003,13 +1003,13 @@ fn runtime_subtree_removal_fixture() -> (StudiesController, StudyInstanceId, Stu
     let mut studies = StudiesController::restore(vec![
         pending_runtime_study(dependent_legacy_study(5, 4), true),
         pending_runtime_study(
-            legacy_runtime_study(6, ChartIndicator::Wma, true).expect("unrelated deferred study"),
+            default_runtime_study(6, ChartIndicator::Wma, true).expect("unrelated deferred study"),
             false,
         ),
     ]);
     studies.activate(RuntimeStudyState {
         study_id: root_id,
-        persisted: legacy_runtime_study(1, ChartIndicator::Sma, true).expect("root study"),
+        persisted: default_runtime_study(1, ChartIndicator::Sma, true).expect("root study"),
         resolved_chart_series: None,
     });
     studies.activate(RuntimeStudyState {
@@ -1019,7 +1019,7 @@ fn runtime_subtree_removal_fixture() -> (StudiesController, StudyInstanceId, Stu
     });
     studies.activate(RuntimeStudyState {
         study_id: unrelated_id,
-        persisted: legacy_runtime_study(3, ChartIndicator::Wma, true).expect("unrelated study"),
+        persisted: default_runtime_study(3, ChartIndicator::Wma, true).expect("unrelated study"),
         resolved_chart_series: None,
     });
     studies.insert_pending(
@@ -1113,6 +1113,19 @@ fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cle
     assert!(!studies.suppresses_output(downstream_id));
 }
 
+/// Runs the workspace migration chain on a document whose single pane holds `chart`, the way
+/// a schema 2 file reaches restore.
+fn migrated_chart_studies(chart: WorkspaceChartState) -> WorkspaceChartState {
+    let mut workspace = super::super::local_state::default_workspace();
+    workspace.schema_revision = 2;
+    workspace.workspace_tabs[0].panes[0].chart = Some(chart);
+    let migrated = super::super::workspace_migrations::migrate_workspace(workspace, 2);
+    migrated.workspace_tabs[0].panes[0]
+        .chart
+        .clone()
+        .expect("migrated chart")
+}
+
 #[test]
 fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only() {
     let state = WorkspaceChartState {
@@ -1165,6 +1178,11 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
         ],
         ..WorkspaceChartState::default()
     };
+    let state = migrated_chart_studies(state);
+    assert!(
+        state.indicators.is_empty(),
+        "the migration materialized every legacy entry into the study graph"
+    );
     let restored = persisted_runtime_studies(Some(&state));
     assert_eq!(restored.len(), 9);
     let expected = [
@@ -1178,9 +1196,10 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
         (aeris_study_sdk::BUILTIN_MACD_IDENTIFIER, false),
         (aeris_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER, true),
     ];
-    for (state, (identifier, visible)) in restored.iter().zip(expected) {
+    for (index, (state, (identifier, visible))) in restored.iter().zip(expected).enumerate() {
         assert_eq!(state.persisted.identifier, identifier);
         assert_eq!(state.persisted.visible, visible);
+        assert_eq!(state.persisted.local_id, index as u64 + 1);
     }
     assert_eq!(
         restored[3].persisted.output_identifiers,
@@ -1219,6 +1238,8 @@ fn retired_legacy_indicator_kinds_are_dropped_without_affecting_other_indicators
         ..WorkspaceChartState::default()
     };
 
+    let state = migrated_chart_studies(state);
+
     let restored = persisted_runtime_studies(Some(&state));
 
     assert_eq!(restored.len(), 1);
@@ -1227,12 +1248,26 @@ fn retired_legacy_indicator_kinds_are_dropped_without_affecting_other_indicators
         aeris_study_sdk::BUILTIN_SMA_IDENTIFIER
     );
     assert!(!restored[0].blocked);
+    assert_eq!(
+        state
+            .indicators
+            .iter()
+            .map(|item| item.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "ema_ribbon",
+            "market_structure",
+            "fair_value_gaps",
+            "order_blocks"
+        ],
+        "unrecognized kinds stay in the engine's list without becoming studies"
+    );
 }
 
 #[test]
 fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicates() {
-    let durable_wma = legacy_runtime_study(7, ChartIndicator::Wma, true).expect("WMA study");
-    let durable_rsi = legacy_runtime_study(8, ChartIndicator::Rsi, true).expect("RSI study");
+    let durable_wma = default_runtime_study(7, ChartIndicator::Wma, true).expect("WMA study");
+    let durable_rsi = default_runtime_study(8, ChartIndicator::Rsi, true).expect("RSI study");
     let state = WorkspaceChartState {
         studies: vec![durable_wma.clone(), durable_rsi.clone()],
         indicators: vec![
@@ -1260,18 +1295,27 @@ fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicat
         ..WorkspaceChartState::default()
     };
 
+    let state = migrated_chart_studies(state);
+    assert!(
+        state.indicators.is_empty(),
+        "the migration materialized every legacy entry into the study graph"
+    );
+
     let restored = persisted_runtime_studies(Some(&state));
 
     assert_eq!(restored.len(), 4);
     assert_eq!(restored[0].persisted, durable_wma);
     assert_eq!(restored[1].persisted, durable_rsi);
-    assert_eq!(restored[2].persisted.local_id, 1);
+    assert_eq!(
+        restored[2].persisted.local_id, 9,
+        "materialized studies take fresh identities above the durable graph"
+    );
     assert_eq!(
         restored[2].persisted.identifier,
         aeris_study_sdk::BUILTIN_RSI_IDENTIFIER
     );
     assert!(!restored[2].persisted.visible);
-    assert_eq!(restored[3].persisted.local_id, 2);
+    assert_eq!(restored[3].persisted.local_id, 10);
     assert_eq!(
         restored[3].persisted.identifier,
         aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
@@ -1411,12 +1455,12 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
     let mut studies = StudiesController::default();
     studies.activate(RuntimeStudyState {
         study_id: first,
-        persisted: legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
+        persisted: default_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
         resolved_chart_series: None,
     });
     studies.activate(RuntimeStudyState {
         study_id: removing,
-        persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
+        persisted: default_runtime_study(2, ChartIndicator::Bollinger, true)
             .expect("Bollinger study"),
         resolved_chart_series: None,
     });
@@ -1424,7 +1468,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
     studies.insert_pending(
         3,
         PendingRuntimeStudyState {
-            persisted: legacy_runtime_study(3, ChartIndicator::Wma, true).expect("WMA study"),
+            persisted: default_runtime_study(3, ChartIndicator::Wma, true).expect("WMA study"),
             resolved_chart_series: None,
             remove_on_registration: false,
             persist_on_registration: true,
@@ -1434,7 +1478,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
     studies.insert_pending(
         4,
         PendingRuntimeStudyState {
-            persisted: legacy_runtime_study(4, ChartIndicator::Bollinger, true)
+            persisted: default_runtime_study(4, ChartIndicator::Bollinger, true)
                 .expect("Bollinger study"),
             resolved_chart_series: None,
             remove_on_registration: true,
@@ -1443,7 +1487,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
         },
     );
     studies.push_deferred(PendingRuntimeStudyState {
-        persisted: legacy_runtime_study(5, ChartIndicator::Bollinger, true)
+        persisted: default_runtime_study(5, ChartIndicator::Bollinger, true)
             .expect("Bollinger study"),
         resolved_chart_series: None,
         remove_on_registration: false,
@@ -1460,7 +1504,7 @@ fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_
     let mut studies = StudiesController::default();
     studies.activate_for_removal(RuntimeStudyState {
         study_id,
-        persisted: legacy_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
+        persisted: default_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
         resolved_chart_series: None,
     });
 
@@ -1503,7 +1547,7 @@ fn automatic_study_removal_retries_after_runtime_failure() {
     let mut studies = StudiesController::default();
     studies.activate_for_removal(RuntimeStudyState {
         study_id,
-        persisted: legacy_runtime_study(10, ChartIndicator::Sma, true).expect("SMA study"),
+        persisted: default_runtime_study(10, ChartIndicator::Sma, true).expect("SMA study"),
         resolved_chart_series: None,
     });
 
@@ -1534,7 +1578,7 @@ fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work
     studies.insert_pending(
         1,
         PendingRuntimeStudyState {
-            persisted: legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
+            persisted: default_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
             resolved_chart_series: None,
             remove_on_registration: false,
             persist_on_registration: true,
@@ -1542,7 +1586,7 @@ fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work
         },
     );
     studies.push_deferred(PendingRuntimeStudyState {
-        persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
+        persisted: default_runtime_study(2, ChartIndicator::Bollinger, true)
             .expect("Bollinger study"),
         resolved_chart_series: None,
         remove_on_registration: false,
@@ -1573,10 +1617,10 @@ fn durable_study_output_dependency_resolves_to_the_restored_runtime_identity() {
     let upstream_id = StudyInstanceId::try_from_u64(7).expect("runtime study id");
     let upstream = RuntimeStudyState {
         study_id: upstream_id,
-        persisted: legacy_runtime_study(1, ChartIndicator::Sma, true).expect("SMA study"),
+        persisted: default_runtime_study(1, ChartIndicator::Sma, true).expect("SMA study"),
         resolved_chart_series: Some(series.clone()),
     };
-    let mut downstream = legacy_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
+    let mut downstream = default_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
     downstream.dependencies = vec![WorkspaceStudyDependencyState {
         kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
         study_local_id: 1,
@@ -1824,7 +1868,7 @@ mod instrument_drawings {
             ..OrderFlowSettings::default()
         }));
         original.studies =
-            vec![legacy_runtime_study(1, ChartIndicator::Sma, false).expect("hidden saved study")];
+            vec![default_runtime_study(1, ChartIndicator::Sma, false).expect("hidden saved study")];
         original.legend = Some(persisted_chart_legend(ChartLegendOptions {
             symbol_values: false,
             indicators: false,
@@ -2129,7 +2173,7 @@ mod instrument_drawings {
         cx: &mut TestAppContext,
     ) {
         let restored = WorkspaceChartState {
-            studies: vec![legacy_runtime_study(1, ChartIndicator::Sma, true).expect("SMA study")],
+            studies: vec![default_runtime_study(1, ChartIndicator::Sma, true).expect("SMA study")],
             ..WorkspaceChartState::default()
         };
         let (commands, requests) = mpsc::sync_channel(8);
@@ -2191,7 +2235,7 @@ mod instrument_drawings {
         surface.update(cx, |surface, cx| {
             surface.studies.activate_for_removal(RuntimeStudyState {
                 study_id,
-                persisted: legacy_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
+                persisted: default_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
                 resolved_chart_series: None,
             });
             surface.synchronize_runtime_studies(cx);

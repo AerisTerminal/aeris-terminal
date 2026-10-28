@@ -5,6 +5,10 @@ use aeris_platform_runtime::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::workspace_migrations::{
+    self, CURRENT_WORKSPACE_SCHEMA, raw_proto_document_schema, workspace_panes,
+};
+
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
@@ -19,10 +23,7 @@ use prost::Message as _;
 #[cfg(test)]
 const WORKSPACE_FILE: &str = "workspace-state.pb";
 const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
-const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
 const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
-/// The durable-container schema of the workspace payload, a bare `WorkspaceState` message.
-const WORKSPACE_CONTAINER_SCHEMA: u32 = 1;
 const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATES: usize = 32;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES: usize = 64;
@@ -30,24 +31,6 @@ pub(super) const MAXIMUM_WATCHLIST_ENTRIES: usize = 64;
 /// Fewer than Aeris Charts accepts, so the largest templates cannot crowd the workspace file.
 pub(super) const MAXIMUM_DRAWING_TEMPLATES: usize = 64;
 pub(super) const MAXIMUM_DRAWING_TEMPLATE_NAME_BYTES: usize = 64;
-/// Revision 2 moved the order ticket out of the order book into its own order entry panel.
-const WORKSPACE_SCHEMA_REVISION: u32 = 2;
-
-#[derive(Clone, PartialEq, prost::Message)]
-struct LegacyWorkspaceEnvelope {
-    #[prost(uint32, tag = "1")]
-    protocol_version: u32,
-    #[prost(oneof = "legacy_workspace_envelope::Payload", tags = "5")]
-    payload: Option<legacy_workspace_envelope::Payload>,
-}
-
-mod legacy_workspace_envelope {
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Payload {
-        #[prost(message, tag = "5")]
-        WorkspaceState(super::WorkspaceState),
-    }
-}
 
 /// How the persisted workspace entered this session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,8 +92,9 @@ pub(super) fn load_workspace_with_origin(path: &Path) -> (WorkspaceState, bool) 
 /// Loads persisted workspace state for the release activation readiness gate.
 ///
 /// Unlike normal interactive startup this path is fallible and deliberately
-/// does not migrate or rewrite legacy persistence. A candidate must prove it
-/// can read the user's current state before it can pass activation health.
+/// does not rewrite legacy persistence; the in-memory migration chain runs so
+/// a candidate must prove it can read the user's current state before it can
+/// pass activation health.
 pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState, String> {
     let load = workspace_container(path).inspect(decode_workspace_candidate);
     report_workspace_rejections(&load);
@@ -125,7 +109,7 @@ pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if legacy.is_file() {
-        load_legacy_workspace_from_path(&legacy)
+        load_legacy_workspace_from_path(&legacy).map(|(workspace, _)| workspace)
     } else if load.rejected.is_empty() {
         Ok(default_workspace())
     } else {
@@ -146,9 +130,7 @@ fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
     }
     if let Some(((workspace, from), source)) = load.restored {
         let outcome = match source {
-            DurableSource::Primary if from == WORKSPACE_CONTAINER_SCHEMA => {
-                RestoreOutcome::Restored
-            }
+            DurableSource::Primary if from == CURRENT_WORKSPACE_SCHEMA => RestoreOutcome::Restored,
             DurableSource::Primary => RestoreOutcome::Migrated { from },
             DurableSource::Staged(_) | DurableSource::Backup => {
                 RestoreOutcome::RestoredFromFallback {
@@ -172,23 +154,32 @@ fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
             Err(workspace_rejection_summary(&load))
         };
     }
-    let workspace = load_legacy_workspace_from_path(&legacy)?;
-    match save_workspace_to_path(&workspace, path) {
-        Ok(()) => {
-            if let Err(error) = fs::remove_file(&legacy)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                diagnostic!("Aeris legacy workspace cleanup deferred: {error}");
-            }
-        }
-        Err(error) => {
-            diagnostic!("Aeris workspace migration could not persist the current format: {error}");
-        }
+    let (workspace, raw_payload) = load_legacy_workspace_from_path(&legacy)?;
+    // The raw frame payload is preserved before the first schema 3 write; the frame file
+    // itself stays for manual recovery.
+    preserve_pre_migration_copy(path, &raw_payload);
+    if let Err(error) = save_workspace_to_path(&workspace, path) {
+        diagnostic!("Aeris workspace migration could not persist the current format: {error}");
     }
     Ok(RestoredWorkspace {
         workspace,
         outcome: RestoreOutcome::Migrated { from: 0 },
     })
+}
+
+/// One copy of the bytes a migration started from, kept next to the workspace file; a copy
+/// failure never blocks the migration.
+fn preserve_pre_migration_copy(path: &Path, bytes: &[u8]) {
+    let copy = path.with_file_name(format!(
+        "{}.pre-v3",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    if copy.exists() {
+        return;
+    }
+    if let Err(error) = fs::write(&copy, bytes) {
+        diagnostic!("Aeris workspace pre-migration copy could not be written: {error}");
+    }
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
@@ -205,30 +196,41 @@ fn workspace_container(path: &Path) -> DurableContainer {
     DurableContainer::new(
         path.to_path_buf(),
         MAXIMUM_WORKSPACE_FILE_BYTES,
-        WORKSPACE_CONTAINER_SCHEMA,
+        CURRENT_WORKSPACE_SCHEMA,
     )
 }
 
-/// Both the enveloped schema-1 payload and a released version's bare file are one encoded
-/// `WorkspaceState` message stored at schema 1; the decode returns the schema it read. The
-/// container fences a newer schema before this decoder runs, so it never sees one.
+/// A payload is one encoded `WorkspaceState` message at the envelope schema, or — for a bare
+/// file from a released 1.x build — at its payload revision; the migration chain lifts either
+/// to the current schema and the decode returns the schema it read. The container fences a
+/// newer schema before this decoder runs, so it never sees one.
 fn decode_workspace_candidate(
     candidate: DurableCandidate<'_>,
 ) -> Result<(WorkspaceState, u32), String> {
     let from = match candidate.format {
-        DurableFormat::Legacy
-        | DurableFormat::Envelope {
-            schema_version: WORKSPACE_CONTAINER_SCHEMA,
-        } => WORKSPACE_CONTAINER_SCHEMA,
+        DurableFormat::Envelope { schema_version }
+            if schema_version <= CURRENT_WORKSPACE_SCHEMA =>
+        {
+            schema_version
+        }
         DurableFormat::Envelope { schema_version } => {
             return Err(format!(
                 "workspace schema version {schema_version} is unsupported"
             ));
         }
+        // A bare protobuf payload is what every released 1.x build wrote; its document schema
+        // is the payload revision.
+        DurableFormat::Legacy => 0,
     };
-    WorkspaceState::decode(candidate.payload)
-        .map(|workspace| (restored_workspace(workspace), from))
-        .map_err(|error| error.to_string())
+    let workspace = WorkspaceState::decode(candidate.payload).map_err(|error| error.to_string())?;
+    let from = match candidate.format {
+        DurableFormat::Legacy => raw_proto_document_schema(&workspace)?,
+        DurableFormat::Envelope { .. } => from,
+    };
+    Ok((
+        restored_workspace(workspace_migrations::migrate_workspace(workspace, from)),
+        from,
+    ))
 }
 
 fn report_workspace_rejections<T>(load: &DurableLoad<T>) {
@@ -242,7 +244,7 @@ fn report_workspace_rejections<T>(load: &DurableLoad<T>) {
     }
     if let Some(newer) = &load.newer_version {
         diagnostic!(
-            "Aeris workspace {} was written by a newer version (schema {}); this build reads up to schema {WORKSPACE_CONTAINER_SCHEMA}",
+            "Aeris workspace {} was written by a newer version (schema {}); this build reads up to schema {CURRENT_WORKSPACE_SCHEMA}",
             newer.path.display(),
             newer.schema_version
         );
@@ -257,32 +259,14 @@ fn workspace_rejection_summary<T>(load: &DurableLoad<T>) -> String {
         .join("; ")
 }
 
-fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
+/// The document schema 0 path: decode the frame, run the chain from 0, and return the raw
+/// payload bytes so the caller can preserve them as the pre-migration copy.
+fn load_legacy_workspace_from_path(path: &Path) -> Result<(WorkspaceState, Vec<u8>), String> {
     let bytes = read_bounded(path)?;
-    if bytes.len() < 5 {
-        return Err("legacy workspace frame is truncated".to_string());
-    }
-    let declared = u32::from_be_bytes(
-        bytes[..4]
-            .try_into()
-            .map_err(|_| "legacy workspace frame header is invalid".to_string())?,
-    );
-    let declared = usize::try_from(declared)
-        .map_err(|_| "legacy workspace frame length is invalid".to_string())?;
-    if declared == 0 || declared > MAXIMUM_WORKSPACE_FILE_BYTES || declared != bytes.len() - 4 {
-        return Err("legacy workspace frame length is invalid".to_string());
-    }
-    let envelope =
-        LegacyWorkspaceEnvelope::decode(&bytes[4..]).map_err(|error| error.to_string())?;
-    if envelope.protocol_version != LEGACY_WORKSPACE_PROTOCOL_VERSION {
-        return Err("legacy workspace protocol version is unsupported".to_string());
-    }
-    match envelope.payload {
-        Some(legacy_workspace_envelope::Payload::WorkspaceState(workspace)) => {
-            Ok(restored_workspace(workspace))
-        }
-        None => Err("legacy workspace file does not contain workspace state".to_string()),
-    }
+    let workspace =
+        workspace_migrations::migrate_legacy_frame(&bytes, MAXIMUM_WORKSPACE_FILE_BYTES)?;
+    let migrated = restored_workspace(workspace_migrations::migrate_workspace(workspace, 0));
+    Ok((migrated, bytes[4..].to_vec()))
 }
 
 pub(super) fn save_workspace(workspace: &WorkspaceState, path: &Path) -> Result<(), String> {
@@ -295,8 +279,18 @@ fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(),
     if bytes.is_empty() || bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
         return Err("workspace file exceeds the local persistence bound".to_string());
     }
-    workspace_container(path)
-        .write(WORKSPACE_CONTAINER_SCHEMA, &bytes)
+    // Every successful write is at the current schema, so the first one preserves a copy of
+    // the pre-migration primary payload next to the workspace file.
+    let container = workspace_container(path);
+    if let DurableLoad {
+        restored: Some((payload, DurableSource::Primary)),
+        ..
+    } = container.inspect(DurableContainer::durable_payload_raw)
+    {
+        preserve_pre_migration_copy(path, &payload);
+    }
+    container
+        .write(CURRENT_WORKSPACE_SCHEMA, &bytes)
         .map_err(|error| error.to_string())
 }
 
@@ -366,7 +360,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         interval_seconds: 60,
         watchlist: Vec::new(),
         workspace_revision: 1,
-        schema_revision: WORKSPACE_SCHEMA_REVISION,
+        schema_revision: CURRENT_WORKSPACE_SCHEMA,
         layout_generation: 1,
         active_workspace_id: 1,
         workspace_tabs: vec![tab],
@@ -399,13 +393,8 @@ pub(super) fn fixture_workspace() -> WorkspaceState {
     workspace
 }
 
-fn sanitize_side_panels(pane: &mut WorkspacePaneState, ticket_in_order_book: bool) {
-    let order_book = u32::from(super::SidePanel::OrderBook.persisted_bit());
-    let order_entry = u32::from(super::SidePanel::OrderEntry.persisted_bit());
+fn sanitize_side_panels(pane: &mut WorkspacePaneState) {
     pane.side_panel_visibility &= u32::from(super::SidePanelVisibility::PERSISTED);
-    if ticket_in_order_book && pane.side_panel_visibility & order_book != 0 {
-        pane.side_panel_visibility |= order_entry;
-    }
     if pane.side_panel_width != 0 {
         pane.side_panel_width = pane.side_panel_width.clamp(360, 480);
     }
@@ -453,11 +442,11 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     // default template so reset cannot be overwritten after the engine API runs.
     workspace.default_chart_settings = None;
     sanitize_watchlist(&mut workspace);
-    // Earlier revisions docked the ticket inside the order book, so an open book keeps it.
-    let ticket_in_order_book = workspace.schema_revision < WORKSPACE_SCHEMA_REVISION;
-    workspace.schema_revision = workspace.schema_revision.max(WORKSPACE_SCHEMA_REVISION);
+    // The migration chain has already lifted the document to the current schema; keep the
+    // revision stamp here as the invariant for paths that never pass through a file.
+    workspace.schema_revision = workspace.schema_revision.max(CURRENT_WORKSPACE_SCHEMA);
     for pane in workspace_panes(&mut workspace) {
-        sanitize_side_panels(pane, ticket_in_order_book);
+        sanitize_side_panels(pane);
         let Some(chart) = &mut pane.chart else {
             continue;
         };
@@ -509,22 +498,6 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     }
     super::layout_library::sanitize_saved_layouts(&mut workspace);
     workspace
-}
-
-/// The panes of every open tab and of every saved layout's arrangement.
-fn workspace_panes(
-    workspace: &mut WorkspaceState,
-) -> impl Iterator<Item = &mut WorkspacePaneState> {
-    workspace
-        .workspace_tabs
-        .iter_mut()
-        .chain(
-            workspace
-                .saved_layouts
-                .iter_mut()
-                .filter_map(|layout| layout.tab.as_mut()),
-        )
-        .flat_map(|tab| tab.panes.iter_mut())
 }
 
 /// A loaded workspace as the desktop restores it. Unlike `sanitize_workspace`, which also runs
@@ -947,8 +920,11 @@ mod tests {
     fn write_workspace_artifact(path: &Path, workspace: &WorkspaceState) {
         let parent = path.parent().expect("workspace artifact parent");
         std::fs::create_dir_all(parent).expect("workspace artifact directory");
-        std::fs::write(path, sanitize_workspace(workspace.clone()).encode_to_vec())
-            .expect("workspace artifact writes");
+        // A released 1.x artifact is the bare payload at the payload revision those builds
+        // wrote; this build writes the envelope instead.
+        let mut artifact = sanitize_workspace(workspace.clone());
+        artifact.schema_revision = 2;
+        std::fs::write(path, artifact.encode_to_vec()).expect("workspace artifact writes");
     }
 
     fn price_alert(instrument: InstallProviderInstrument) -> WorkspacePriceAlertState {
@@ -1516,18 +1492,18 @@ mod tests {
         closed_book.side_panel_visibility = 0b010;
         legacy.workspace_tabs[0].panes.push(closed_book);
 
-        let migrated = sanitize_workspace(legacy);
+        let migrated = workspace_migrations::migrate_workspace(legacy, 1);
 
-        assert_eq!(migrated.schema_revision, WORKSPACE_SCHEMA_REVISION);
+        assert_eq!(migrated.schema_revision, CURRENT_WORKSPACE_SCHEMA);
         let panes = &migrated.workspace_tabs[0].panes;
         assert_eq!(panes[0].side_panel_visibility, 0b1011);
         assert_eq!(panes[1].side_panel_visibility, 0b010);
 
         let mut current = migrated;
         current.workspace_tabs[0].panes[0].side_panel_visibility = 0b001;
-        let resanitized = sanitize_workspace(current);
+        let remigrated = workspace_migrations::migrate_workspace(current, CURRENT_WORKSPACE_SCHEMA);
         assert_eq!(
-            resanitized.workspace_tabs[0].panes[0].side_panel_visibility, 0b001,
+            remigrated.workspace_tabs[0].panes[0].side_panel_visibility, 0b001,
             "a current workspace may keep the order book open without the ticket"
         );
     }
@@ -1684,14 +1660,15 @@ mod tests {
         let (restored, from_file) = load_workspace_with_origin(&path);
         assert!(from_file);
         assert_eq!(
-            restored, current,
-            "a released version's bare workspace file is the primary"
+            restored,
+            sanitize_workspace(current.clone()),
+            "a released version's bare workspace file is the primary, migrated in memory"
         );
 
         std::fs::write(&path, b"corrupt current").expect("corrupt current writes");
         assert_eq!(
             load_workspace_with_origin(&path),
-            (previous.clone(), true),
+            (sanitize_workspace(previous.clone()), true),
             "a corrupt destination falls back to the released version's backup"
         );
         assert!(
@@ -1704,7 +1681,10 @@ mod tests {
                 .expect("quarantined primary"),
             b"corrupt current"
         );
-        assert_eq!(load_workspace_with_origin(&path), (previous, true));
+        assert_eq!(
+            load_workspace_with_origin(&path),
+            (sanitize_workspace(previous), true)
+        );
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace cleanup");
     }
@@ -1743,14 +1723,26 @@ mod tests {
     fn a_workspace_written_by_a_newer_version_opens_read_only_and_is_never_replaced() {
         let path = temporary_workspace_path();
         save_workspace_to_path(&workspace_with_revision(41), &path).expect("workspace saves");
-        let newer = DurableContainer::new(path.clone(), MAXIMUM_WORKSPACE_FILE_BYTES, 2);
+        let newer = DurableContainer::new(
+            path.clone(),
+            MAXIMUM_WORKSPACE_FILE_BYTES,
+            CURRENT_WORKSPACE_SCHEMA + 1,
+        );
         newer
-            .write(2, &workspace_with_revision(42).encode_to_vec())
+            .write(
+                CURRENT_WORKSPACE_SCHEMA + 1,
+                &workspace_with_revision(42).encode_to_vec(),
+            )
             .expect("a newer schema writes");
         let written = std::fs::read(&path).expect("newer primary");
 
         let restored = restore_workspace(&path);
-        assert_eq!(restored.outcome, RestoreOutcome::NewerVersion { found: 2 });
+        assert_eq!(
+            restored.outcome,
+            RestoreOutcome::NewerVersion {
+                found: CURRENT_WORKSPACE_SCHEMA + 1
+            }
+        );
         assert_eq!(restored.workspace, super::default_workspace());
         assert_eq!(std::fs::read(&path).expect("primary"), written);
         assert!(
@@ -1951,6 +1943,8 @@ mod tests {
         let pane_count = workspace.workspace_tabs[0].panes.len();
         std::fs::create_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace directory");
+        // A released 1.x artifact is the bare payload at the payload revision those builds wrote.
+        workspace.schema_revision = 2;
         std::fs::write(&path, workspace.encode_to_vec()).expect("released workspace writes");
 
         let restored = load_workspace_from_path(&path).expect("workspace reloads");
@@ -2187,12 +2181,16 @@ mod tests {
         let parent = current.parent().expect("temporary workspace parent");
         std::fs::create_dir_all(parent).expect("temporary workspace directory");
         let legacy_path = parent.join(LEGACY_WORKSPACE_FILE);
-        let workspace = default_workspace();
-        let envelope = LegacyWorkspaceEnvelope {
-            protocol_version: LEGACY_WORKSPACE_PROTOCOL_VERSION,
-            payload: Some(legacy_workspace_envelope::Payload::WorkspaceState(
-                workspace.clone(),
-            )),
+        let mut legacy_document = default_workspace();
+        // A frame-era payload carries the revision its release wrote.
+        legacy_document.schema_revision = 1;
+        let envelope = workspace_migrations::LegacyWorkspaceEnvelope {
+            protocol_version: workspace_migrations::LEGACY_WORKSPACE_PROTOCOL_VERSION,
+            payload: Some(
+                workspace_migrations::legacy_workspace_envelope::Payload::WorkspaceState(
+                    legacy_document.clone(),
+                ),
+            ),
         };
         let payload = envelope.encode_to_vec();
         let length = u32::try_from(payload.len()).expect("legacy payload fits");
@@ -2200,16 +2198,26 @@ mod tests {
         framed.extend_from_slice(&payload);
         std::fs::write(&legacy_path, framed).expect("legacy workspace writes");
 
-        let restored =
+        let (restored, raw_payload) =
             load_legacy_workspace_from_path(&legacy_path).expect("legacy workspace migrates");
-        assert_eq!(restored, workspace);
+        let expected = sanitize_workspace(workspace_migrations::migrate_workspace(
+            legacy_document.clone(),
+            0,
+        ));
+        assert_eq!(restored, expected);
+        assert_eq!(raw_payload, payload);
 
         let restored = restore_workspace(&current);
         assert_eq!(restored.outcome, RestoreOutcome::Migrated { from: 0 });
-        assert_eq!(restored.workspace, workspace);
+        assert_eq!(restored.workspace, expected);
         assert!(
-            !legacy_path.exists(),
-            "the migrated legacy frame is retired"
+            legacy_path.exists(),
+            "the migrated legacy frame stays for manual recovery"
+        );
+        assert_eq!(
+            std::fs::read(parent.join("workspace-state.pb.pre-v3")).expect("pre-migration copy"),
+            payload,
+            "the raw frame payload is preserved before the first schema 3 write"
         );
         assert_eq!(
             restore_workspace(&current).outcome,
@@ -2217,6 +2225,77 @@ mod tests {
             "the migrated document opens as the current schema"
         );
 
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn the_first_schema_3_save_preserves_a_pre_migration_copy_once() {
+        let path = temporary_workspace_path();
+        let artifact = workspace_with_revision(12);
+        write_workspace_artifact(&path, &artifact);
+        let raw = std::fs::read(&path).expect("released artifact bytes");
+        let copy_path = path.with_file_name("workspace-state.pb.pre-v3");
+
+        save_workspace_to_path(&workspace_with_revision(13), &path).expect("schema 3 saves");
+        assert_eq!(
+            std::fs::read(&copy_path).expect("pre-migration copy"),
+            raw,
+            "the first schema 3 write preserves the pre-migration payload"
+        );
+        assert!(
+            std::fs::read(&path)
+                .expect("enveloped workspace")
+                .starts_with(&aeris_platform_runtime::DURABLE_CONTAINER_MAGIC),
+            "the workspace is enveloped at the current schema"
+        );
+
+        std::fs::write(&copy_path, b"manual recovery copy").expect("copy replaced");
+        save_workspace_to_path(&workspace_with_revision(14), &path).expect("workspace saves");
+        assert_eq!(
+            std::fs::read(&copy_path).expect("pre-migration copy"),
+            b"manual recovery copy",
+            "the copy is written once and never overwritten"
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn a_bare_payload_beyond_the_released_revision_is_rejected() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("temporary workspace directory");
+        // No released build wrote a bare payload past revision 2; a newer build's document
+        // always carries the envelope, so this shape is unrecognizable rather than newer.
+        let mut impossible = default_workspace();
+        impossible.schema_revision = CURRENT_WORKSPACE_SCHEMA;
+        std::fs::write(&path, impossible.encode_to_vec()).expect("bare payload writes");
+
+        let restored = restore_workspace(&path);
+        assert!(
+            matches!(restored.outcome, RestoreOutcome::Defaulted { .. }),
+            "the payload is rejected: {:?}",
+            restored.outcome
+        );
+        assert!(workspace_container(&path).quarantine_path(1).exists());
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn an_enveloped_schema_1_development_file_migrates() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("temporary workspace directory");
+        let mut payload = workspace_with_revision(21);
+        payload.schema_revision = 2;
+        DurableContainer::new(path.clone(), MAXIMUM_WORKSPACE_FILE_BYTES, 1)
+            .write(1, &payload.encode_to_vec())
+            .expect("development envelope writes");
+
+        let restored = restore_workspace(&path);
+        assert_eq!(restored.outcome, RestoreOutcome::Migrated { from: 1 });
+        assert_eq!(restored.workspace.schema_revision, CURRENT_WORKSPACE_SCHEMA);
+        assert_eq!(restored.workspace.workspace_revision, 21);
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
     }
 }

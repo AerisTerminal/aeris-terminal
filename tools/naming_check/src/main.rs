@@ -539,10 +539,10 @@ const COLOR_LITERAL_ALLOWLIST: &[(&str, usize, &str)] = &[
         "the picker's hue spectrum and transparent gradient stops, which span every color",
     ),
     (
-        "apps/desktop/src/desktop/workspace_surface.rs",
+        "apps/desktop/src/desktop/workspace_migrations.rs",
         3,
-        "Aeris Charts fallbacks that layouts written before color provenance pinned; restore \
-         recognizes them, they are never painted",
+        "Aeris Charts fallbacks that layouts written before color provenance pinned; the \
+         schema 3 migration recognizes them, they are never painted",
     ),
 ];
 
@@ -2414,6 +2414,12 @@ mod tests {
             "apps/desktop/build.rs",
             "fs::write(",
             "Cargo build output is generated inside OUT_DIR",
+        ),
+        (
+            "apps/desktop/src/desktop/local_state.rs",
+            "fs::write(",
+            "the write-once workspace pre-migration copy is created only when absent beside the \
+             container-owned workspace file",
         ),
         (
             "crates/platform_runtime/build.rs",
