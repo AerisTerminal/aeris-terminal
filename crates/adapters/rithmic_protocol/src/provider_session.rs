@@ -3975,9 +3975,19 @@ mod tests {
             abort
                 .register(Arc::clone(&stream))
                 .expect("register active fixture socket");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("fixture read polls");
             ready_tx.send(()).expect("publish fixture readiness");
             let mut byte = [0_u8; 1];
-            let _ = (&*stream).read(&mut byte);
+            // Session reads poll like `DeadlineTcpStream`, so the abort's
+            // shutdown ends them within one interval.
+            while (&*stream).read(&mut byte).is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+            }) {}
         });
         let (mut driver, _events) =
             RithmicProviderDriver::with_task(config(), callback_limits(4, 4_096), task);

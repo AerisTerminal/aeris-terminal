@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-55 of 90 items are fully done (2026-10-28).
+56 of 90 items are fully done (2026-10-28).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -41,7 +41,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 1 / 12 | 12 |
+| M8 lifecycle and trim | 2 / 12 | 10 |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -537,7 +537,7 @@ still wait on the GUI checks and the remaining work on their lines.
     a configured signer. naming_check rejects PowerShell in `release_lifecycle` production.
   - Left:
     - Check: a development desktop start spawns no launcher child (process list); not run here.
-- [ ] M8.3 Remaining FFI moves to `platform_sys`
+- [x] M8.3 Remaining FFI moves to `platform_sys`
   - Landed: `display_timing.rs` (display inventory, QPC and DWM composition probes) is deleted
     with its `Win32_Graphics_Dwm` and `Win32_System_Performance` features and its
     `display-info`, `wayland-client` and `wayland-protocols` dependencies (also dropped from the
@@ -555,15 +555,22 @@ still wait on the GUI checks and the remaining work on their lines.
     `platform_sys::network::InterfaceChangeRegistration` (Windows power-manager and
     connectivity-hint callbacks; macOS `IOKit` and `SCNetworkReachability` run-loop threads),
     which also own `PowerEvent` and `NetworkEvent`. The coalescing event streams, cancellation and
-    the Linux logind/NetworkManager backends stay in `platform_runtime`, whose windows-sys
-    features shrink to `CancelIoEx`'s. The macOS reachability thread now runs its run loop in
+    the Linux logind/NetworkManager backends stay in `platform_runtime`. The macOS reachability
+    thread now runs its run loop in
     one-second slices, so a stop requested just before the loop starts is no longer lost. Both
     interim unsafe allowlist entries are removed. Checked: Windows tests and clippy; macOS
     `platform_sys` clippy with `--target aarch64-apple-darwin`. macOS `platform_runtime`
-    cannot be cross-checked here (`ring` needs a C compiler) and nothing ran on macOS.
-  - Left: the `CancelIoEx` FFI.
-  - Restore `forbid(unsafe_code)` in `platform_runtime`. Closes PL-02.
-  - The logoff flush check is maintainer-only.
+    cannot be cross-checked here (`ring` needs a C compiler) and nothing ran on macOS; the next
+    macOS preview lane is its first macOS build.
+  - Landed: `CancelIoEx` (`io_cancellation.rs`) is deleted. The new Rithmic abort-latency test
+    blocks a session read on a silent local peer and aborts it five times: `shutdown(Both)` plus
+    the 100 ms read poll ended every read within 87 ms (bound: twice the poll interval). The
+    driver-stop fixture now reads with that poll, as session reads do, instead of a raw blocking
+    read only `CancelIoEx` could end. `platform_runtime` inherits the workspace
+    `unsafe_code = "forbid"` and has no windows-sys dependency; the interim allowlist is gone, and
+    naming_check rejects any manifest other than `platform_sys` that lowers `unsafe_code`.
+    Closes PL-02.
+  - Maintainer-only: the logoff flush test that would allow deleting `NativeSessionShutdownGuard`.
 - [ ] M8.4 Account runtime vault and lock fixes
   - Left:
     - AC-02: a 2,560-byte secret cap with a precheck.

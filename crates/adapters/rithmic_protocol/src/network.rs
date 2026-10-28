@@ -1,5 +1,4 @@
 use crate::{RithmicSessionError, RithmicSessionLimits, endpoint::RithmicEndpoint};
-use aeris_platform_runtime::cancel_tcp_stream_io;
 use rustls::{ClientConfig, RootCertStore};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -72,7 +71,6 @@ impl ConnectionAbort {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            let _ = cancel_tcp_stream_io(&stream);
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
@@ -339,6 +337,51 @@ mod tests {
         assert_eq!(
             connect_attempt_timeout(Duration::from_millis(600), 2),
             Duration::from_millis(300)
+        );
+    }
+
+    #[test]
+    fn abort_unblocks_a_pending_read_within_the_poll_interval() {
+        use std::{
+            net::{Ipv4Addr, TcpListener},
+            sync::mpsc,
+        };
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let mut slowest = Duration::ZERO;
+        for _ in 0..5 {
+            let stream = Arc::new(TcpStream::connect(address).expect("client connects"));
+            // The silent peer stays open so only the abort can end the read.
+            let (peer, _) = listener.accept().expect("listener accepts");
+            let abort = ConnectionAbort::default();
+            abort
+                .register(Arc::clone(&stream))
+                .expect("stream registers");
+            let mut reader = DeadlineTcpStream {
+                stream,
+                deadline: Instant::now() + Duration::from_secs(30),
+                stop: None,
+            };
+            let (returned, returned_at) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let mut buffer = [0_u8; 16];
+                let _ = reader.read(&mut buffer);
+                let _ = returned.send(Instant::now());
+            });
+            thread::sleep(Duration::from_millis(250));
+            let aborted_at = Instant::now();
+            abort.abort();
+            let returned_at = returned_at
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the pending read returns after the abort");
+            slowest = slowest.max(returned_at.saturating_duration_since(aborted_at));
+            worker.join().expect("reader joins");
+            drop(peer);
+        }
+        assert!(
+            slowest <= NETWORK_POLL_INTERVAL * 2,
+            "abort latency {slowest:?} exceeds the read poll interval"
         );
     }
 }

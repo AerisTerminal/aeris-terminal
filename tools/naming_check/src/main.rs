@@ -2351,11 +2351,6 @@ mod tests {
         }
     }
 
-    const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[(&str, &str)] = &[(
-        "crates/platform_runtime/src/io_cancellation.rs",
-        "existing Windows CancelIoEx boundary awaits the M8.3 abort-latency decision",
-    )];
-
     fn contains_unsafe_code(source: &str) -> bool {
         source.contains("allow(unsafe_code)")
             || source.contains("unsafe {")
@@ -2368,9 +2363,6 @@ mod tests {
     fn unsafe_location_is_allowed(relative: &str) -> bool {
         relative.starts_with("crates/platform_sys/src/windows/")
             || relative.starts_with("crates/platform_sys/src/macos/")
-            || INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES
-                .iter()
-                .any(|(path, reason)| *path == relative && !reason.trim().is_empty())
     }
 
     fn declares_platform_sys_dependency(manifest: &str) -> bool {
@@ -2475,7 +2467,13 @@ mod tests {
             "crates/platform_sys/src/windows/fs.rs"
         ));
         assert!(unsafe_location_is_allowed(
-            "crates/platform_runtime/src/io_cancellation.rs"
+            "crates/platform_sys/src/macos/power.rs"
+        ));
+        assert!(!unsafe_location_is_allowed(
+            "crates/platform_sys/src/power.rs"
+        ));
+        assert!(!unsafe_location_is_allowed(
+            "crates/platform_runtime/src/power_notifications.rs"
         ));
         assert!(!unsafe_location_is_allowed(
             "crates/market_runtime/src/provider.rs"
@@ -2489,8 +2487,7 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_is_isolated_to_platform_sys_and_the_interim_exact_allowlist() {
-        let mut interim = BTreeSet::new();
+    fn unsafe_is_isolated_to_platform_sys_ffi() {
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path).expect("source");
             let production = production_prefix(&contents);
@@ -2502,24 +2499,28 @@ mod tests {
                 unsafe_location_is_allowed(&relative),
                 "{relative} contains unsafe code outside the platform FFI boundary"
             );
-            if relative.starts_with("crates/platform_runtime/") {
-                interim.insert(relative);
-            }
         }
-        assert_eq!(
-            interim,
-            INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES
+    }
+
+    #[test]
+    fn only_platform_sys_lowers_the_workspace_unsafe_forbid() {
+        for path in workspace_manifests() {
+            let relative = relative_string(&path);
+            if !["apps/", "crates/", "tools/"]
                 .iter()
-                .map(|(path, reason)| {
-                    assert!(
-                        !reason.trim().is_empty(),
-                        "{path} requires an explicit reason"
-                    );
-                    (*path).to_string()
-                })
-                .collect(),
-            "the temporary platform_runtime FFI allowlist must stay exact until M8.3"
-        );
+                .any(|root| relative.starts_with(root))
+            {
+                continue;
+            }
+            let overrides_unsafe = fs::read_to_string(&path)
+                .expect("manifest")
+                .lines()
+                .any(|line| line.trim_start().starts_with("unsafe_code"));
+            assert!(
+                !overrides_unsafe || relative == "crates/platform_sys/Cargo.toml",
+                "{relative} must inherit the workspace unsafe_code = \"forbid\" lint"
+            );
+        }
     }
 
     #[test]

@@ -204,8 +204,9 @@ violations and missing verification explicitly, and never describe them as satis
   not mutate GPUI state directly.
 - `unsafe` is isolated to target-specific FFI under `crates/platform_sys/src/windows/` and
   `crates/platform_sys/src/macos/`, whose blocks require documented, single-operation safety
-  justifications. Until the M8.3 FFI consolidation, only the exact `platform_runtime` FFI files
-  allowlisted by `tools/naming_check` are additional exceptions.
+  justifications. Every other crate inherits the workspace `unsafe_code = "forbid"`; only
+  `platform_sys` may lower it in its manifest. `platform_runtime` keeps the safe event streams
+  over the `platform_sys` power, network and session-shutdown registrations.
 - `platform_sys` is a leaf crate. Only `platform_runtime`, `trading_runtime`, and `observability`
   may depend on it directly.
 - `release_lifecycle` (`crates/release_lifecycle`) owns the signed install, update, rollback and

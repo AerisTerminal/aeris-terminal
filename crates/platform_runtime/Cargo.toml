@@ -29,11 +29,6 @@ notify-rust.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_IO"] }
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "warn"
-pedantic = "warn"
+[lints]
+workspace = true
