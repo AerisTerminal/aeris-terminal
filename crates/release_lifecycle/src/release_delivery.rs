@@ -14,7 +14,9 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+#[cfg(any(test, feature = "producer"))]
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use crate::ReleaseManifest;
@@ -116,6 +118,7 @@ impl Error for ReleaseDeliveryError {}
 /// # Errors
 /// Returns an error for malformed/bounds-violating plans, source/target
 /// mismatches, or an encoded signed envelope that exceeds the metadata bound.
+#[cfg(any(test, feature = "producer"))]
 pub fn sign_block_plan(
     plan: BlockPlan,
     source: &ReleaseManifest,

@@ -208,6 +208,14 @@ violations and missing verification explicitly, and never describe them as satis
   allowlisted by `tools/naming_check` are additional exceptions.
 - `platform_sys` is a leaf crate. Only `platform_runtime`, `trading_runtime`, and `observability`
   may depend on it directly.
+- `release_lifecycle` (`crates/release_lifecycle`) owns the signed install, update, rollback and
+  uninstall lifecycle, release delivery plans, rollout policy, the compiled release identity and the
+  stable `aeris_launcher` binary; `platform_runtime` carries none of it and no `ed25519-dalek`,
+  `semver`, `same-file` or `sysinfo`. Only the desktop and `tools/release_packager` may depend on
+  it. The manifest and block-plan signers compile only under `cfg(test)` or its `producer` feature,
+  which only `tools/release_packager` and the crate's own dev-dependency (for the launcher tests)
+  enable. `platform_runtime::data_root` owns the owned-root safety check and legacy data-root
+  migration that the lifecycle reuses.
 - Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
   derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
   non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.

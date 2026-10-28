@@ -10,15 +10,11 @@ publish.workspace = true
 aeris_observability = { path = "../observability" }
 aeris_platform_sys = { path = "../platform_sys" }
 base64.workspace = true
-ed25519-dalek.workspace = true
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-semver.workspace = true
 rustls.workspace = true
-same-file.workspace = true
 sha2.workspace = true
-sysinfo.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
 webpki-roots.workspace = true
@@ -54,9 +50,6 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[build-dependencies]
-embed-resource.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"

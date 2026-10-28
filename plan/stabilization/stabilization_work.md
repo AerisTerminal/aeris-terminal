@@ -460,10 +460,22 @@ only on the guarded GUI checks on their lines.
 ### M8 lifecycle and trim
 
 - [ ] M8.1 Release code moves into a `release_lifecycle` crate
-  - Left: move lifecycle, delivery, rollout, release identity and the launcher binary out of
-    `platform_runtime`.
-  - Put the signers behind a `producer` feature, and add a naming_check dependency rule.
-  - Kept, not deleted (D2). Closes PL-01.
+  - Landed: `crates/release_lifecycle` (`aeris_release_lifecycle`) holds `lifecycle.rs`,
+    `release_delivery.rs`, `rollout.rs`, `release_identity.rs`, the `aeris_launcher` binary and
+    its icon `build.rs`, moved unchanged apart from imports. `sign_release_manifest` and
+    `sign_block_plan` compile only under `cfg(test)` or the `producer` feature, which the
+    crate's own dev-dependency enables for the launcher tests. `ed25519-dalek`, `semver`,
+    `same-file`, `sysinfo` and `embed-resource` left `platform_runtime`; `cargo tree -i` shows
+    `ed25519-dalek` and `semver` reach only `release_lifecycle` and the desktop, never an
+    adapter. The owned-root safety check moved into `platform_runtime::data_root`, which now
+    reports its own `DataRootError` (`UnsafeOwnedRoot`, `StateMigrationFailed`) instead of the
+    lifecycle's error, and the two legacy-merge tests moved with it. The desktop imports release
+    identity, install root and publisher verification from the new crate. New naming_check rule
+    `release_lifecycle_has_only_allowed_dependents_and_signers`: only the desktop,
+    `tools/release_packager` and the crate itself may depend on it, only the packager and the
+    crate may enable `producer`, the moved dependencies and files cannot return to
+    `platform_runtime`, and the signers stay gated. Kept, not deleted (D2). Closes PL-01.
+  - Left: the CI workspace run on this commit.
 - [ ] M8.2 Launcher hygiene and trust
   - Left:
     - LC-01: dispatch commands before loading the key.

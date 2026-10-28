@@ -15,13 +15,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aeris_platform_runtime::{
-    ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, CredentialVault, InstallationInventory,
-    LifecycleHooks, MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, NativeCredentialVault,
-    RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer, ReleaseFile, ReleaseInstaller,
-    ReleasePolicy, SignedBlockPlan, SignedReleaseManifest, VaultEntry, current_release_identity,
-    decode_and_verify_block_plan, native_install_root, native_installation_inventory,
-    replace_file_atomically, rollout_eligible, verify_release_file, verify_release_manifest,
+use aeris_platform_runtime::{CredentialVault, NativeCredentialVault, replace_file_atomically};
+use aeris_release_lifecycle::{
+    ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
+    MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer,
+    ReleaseFile, ReleaseInstaller, ReleasePolicy, SignedBlockPlan, SignedReleaseManifest,
+    VaultEntry, current_release_identity, decode_and_verify_block_plan, native_install_root,
+    native_installation_inventory, rollout_eligible, verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -1483,7 +1483,7 @@ fn validate_closed_content_range(
 }
 
 fn verify_block_payload(
-    block: &aeris_platform_runtime::BlockDescriptor,
+    block: &aeris_release_lifecycle::BlockDescriptor,
     bytes: &[u8],
 ) -> Result<(), String> {
     let expected = URL_SAFE_NO_PAD
@@ -2286,7 +2286,7 @@ fn redacted<E>(_error: E) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_platform_runtime::{
+    use aeris_release_lifecycle::{
         BLOCK_PLAN_BLOCK_BYTES, BlockDescriptor, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
         ReleaseInstallerMetadata, ReleaseManifest, RolloutMetadata, sign_release_manifest,
     };

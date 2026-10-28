@@ -2407,6 +2407,39 @@ mod tests {
         .contains(&relative)
     }
 
+    fn declares_release_lifecycle_dependency(manifest: &str) -> bool {
+        manifest
+            .lines()
+            .map(str::trim)
+            .any(|line| line.starts_with("aeris_release_lifecycle") && line.contains('='))
+    }
+
+    fn release_lifecycle_dependent_is_allowed(relative: &str) -> bool {
+        [
+            "apps/desktop/Cargo.toml",
+            // The crate's own dev-dependency enables `producer` for its launcher tests.
+            "crates/release_lifecycle/Cargo.toml",
+            "tools/release_packager/Cargo.toml",
+        ]
+        .contains(&relative)
+    }
+
+    fn enables_release_producer(manifest: &str) -> bool {
+        manifest.lines().map(str::trim).any(|line| {
+            line.starts_with("aeris_release_lifecycle")
+                && line.contains('=')
+                && line.contains("\"producer\"")
+        })
+    }
+
+    fn release_producer_is_allowed(relative: &str) -> bool {
+        [
+            "crates/release_lifecycle/Cargo.toml",
+            "tools/release_packager/Cargo.toml",
+        ]
+        .contains(&relative)
+    }
+
     const RAW_FILE_MUTATION_ALLOWLIST: &[(&str, &str, &str)] = &[
         (
             "apps/desktop/build.rs",
@@ -2420,16 +2453,6 @@ mod tests {
              container-owned workspace file",
         ),
         (
-            "crates/platform_runtime/build.rs",
-            "fs::write(",
-            "Cargo build output is generated inside OUT_DIR",
-        ),
-        (
-            "crates/platform_runtime/src/bin/aeris_launcher.rs",
-            "fs::rename(",
-            "launcher self-replacement stages an executable before the platform replacement boundary",
-        ),
-        (
             "crates/platform_runtime/src/data_root.rs",
             "fs::rename(",
             "owned legacy data migration moves entries without replacing files",
@@ -2438,6 +2461,16 @@ mod tests {
             "crates/platform_sys/src/fs.rs",
             "fs::rename(",
             "platform_sys owns the raw move and atomic replacement implementations",
+        ),
+        (
+            "crates/release_lifecycle/build.rs",
+            "fs::write(",
+            "Cargo build output is generated inside OUT_DIR",
+        ),
+        (
+            "crates/release_lifecycle/src/bin/aeris_launcher.rs",
+            "fs::rename(",
+            "launcher self-replacement stages an executable before the platform replacement boundary",
         ),
         (
             "crates/ui/design_system/build.rs",
@@ -2569,6 +2602,95 @@ mod tests {
                     "{relative} must not depend directly on aeris_platform_sys"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn release_lifecycle_dependent_rule_accepts_and_rejects_fixtures() {
+        assert!(declares_release_lifecycle_dependency(
+            "aeris_release_lifecycle = { path = \"../../crates/release_lifecycle\" }"
+        ));
+        assert!(!declares_release_lifecycle_dependency(
+            "aeris_platform_runtime = { path = \"../platform_runtime\" }"
+        ));
+        assert!(release_lifecycle_dependent_is_allowed(
+            "apps/desktop/Cargo.toml"
+        ));
+        assert!(!release_lifecycle_dependent_is_allowed(
+            "crates/market_runtime/Cargo.toml"
+        ));
+        assert!(enables_release_producer(
+            "aeris_release_lifecycle = { path = \".\", features = [\"producer\"] }"
+        ));
+        assert!(!enables_release_producer(
+            "aeris_release_lifecycle = { path = \"../../crates/release_lifecycle\" }"
+        ));
+        assert!(!release_producer_is_allowed("apps/desktop/Cargo.toml"));
+    }
+
+    #[test]
+    fn release_lifecycle_has_only_allowed_dependents_and_signers() {
+        for path in workspace_manifests() {
+            let contents = fs::read_to_string(&path).expect("manifest");
+            let relative = relative_string(&path);
+            if declares_release_lifecycle_dependency(&contents) {
+                assert!(
+                    release_lifecycle_dependent_is_allowed(&relative),
+                    "{relative} must not depend on aeris_release_lifecycle"
+                );
+            }
+            if enables_release_producer(&contents) {
+                assert!(
+                    release_producer_is_allowed(&relative),
+                    "{relative} must not enable the release signing producer feature"
+                );
+            }
+        }
+        let platform = manifest("crates/platform_runtime/Cargo.toml");
+        for moved in [
+            "ed25519-dalek",
+            "semver",
+            "same-file",
+            "sysinfo",
+            "embed-resource",
+        ] {
+            assert!(
+                !platform
+                    .lines()
+                    .any(|line| line.trim().starts_with(&format!("{moved}."))
+                        || line.trim().starts_with(&format!("{moved} "))),
+                "platform_runtime must not depend on {moved}; release code lives in release_lifecycle"
+            );
+        }
+        for retired in [
+            "crates/platform_runtime/src/lifecycle.rs",
+            "crates/platform_runtime/src/release_delivery.rs",
+            "crates/platform_runtime/src/rollout.rs",
+            "crates/platform_runtime/src/release_identity.rs",
+            "crates/platform_runtime/src/bin/aeris_launcher.rs",
+            "crates/platform_runtime/build.rs",
+        ] {
+            assert!(
+                !repository_root().join(retired).exists(),
+                "release code returned to platform_runtime: {retired}"
+            );
+        }
+        for (owner, signer) in [
+            (
+                "crates/release_lifecycle/src/lifecycle.rs",
+                "sign_release_manifest",
+            ),
+            (
+                "crates/release_lifecycle/src/release_delivery.rs",
+                "sign_block_plan",
+            ),
+        ] {
+            assert!(
+                manifest(owner).contains(&format!(
+                    "#[cfg(any(test, feature = \"producer\"))]\npub fn {signer}("
+                )),
+                "{signer} must compile only for tests or the producer feature"
+            );
         }
     }
 
@@ -3708,7 +3830,7 @@ mod tests {
                 .to_string(),
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
-            "crates/platform_runtime/src/lifecycle.rs::LifecycleHooks".to_string(),
+            "crates/release_lifecycle/src/lifecycle.rs::LifecycleHooks".to_string(),
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
             // The sole trading owner receives injectable wall and monotonic time.
             "crates/trading_runtime/src/clock.rs::Clock".to_string(),
@@ -4551,8 +4673,8 @@ mod tests {
     }
 
     #[test]
-    fn signed_transactional_lifecycle_remains_platform_owned() {
-        let lifecycle = manifest("crates/platform_runtime/src/lifecycle.rs");
+    fn signed_transactional_lifecycle_remains_release_lifecycle_owned() {
+        let lifecycle = manifest("crates/release_lifecycle/src/lifecycle.rs");
         for contract in [
             "key.verify(&canonical, &signature)",
             "current_version < minimum_version",
@@ -4566,10 +4688,10 @@ mod tests {
         ] {
             assert!(
                 lifecycle.contains(contract),
-                "platform lifecycle lost {contract}"
+                "release lifecycle lost {contract}"
             );
         }
-        let launcher = manifest("crates/platform_runtime/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
         for contract in [
             "--check-update",
             "--prepare-update",
@@ -4742,7 +4864,7 @@ mod tests {
 
     #[test]
     fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
-        let launcher = manifest("crates/platform_runtime/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
         for contract in [
             "rollout_eligible",
             "current_update_check_report",
@@ -4781,7 +4903,7 @@ mod tests {
     fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
         for path in [
             "apps/desktop/src/main.rs",
-            "crates/platform_runtime/src/bin/aeris_launcher.rs",
+            "crates/release_lifecycle/src/bin/aeris_launcher.rs",
         ] {
             assert!(
                 manifest(path).contains("windows_subsystem = \"windows\""),
@@ -5555,7 +5677,7 @@ jobs:
     }
     #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
-        let launcher = manifest("crates/platform_runtime/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
         // The launcher runs from inside the tree uninstall deletes, and
         // Windows refuses to delete a running executable: uninstall must
         // rename the image to a sibling staging dir first so the original

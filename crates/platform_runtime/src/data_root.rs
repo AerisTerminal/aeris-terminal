@@ -1,6 +1,5 @@
 //! Process-wide data-root selection and single-instance ownership.
 
-use crate::LifecycleError;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
@@ -88,6 +87,8 @@ pub enum DataRootError {
     AlreadyInitialized,
     RootUnavailable,
     AlreadyRunning,
+    UnsafeOwnedRoot,
+    StateMigrationFailed,
 }
 
 impl std::fmt::Display for DataRootError {
@@ -102,6 +103,8 @@ impl std::fmt::Display for DataRootError {
             Self::AlreadyInitialized => "the process data folder was already initialized",
             Self::RootUnavailable => "the selected data folder is unavailable",
             Self::AlreadyRunning => "Aeris is already running for this data folder",
+            Self::UnsafeOwnedRoot => "an Aeris-owned folder path is unsafe to own",
+            Self::StateMigrationFailed => "legacy local state migration did not complete",
         })
     }
 }
@@ -334,27 +337,31 @@ pub fn native_production_data_root() -> Result<PathBuf, DataRootError> {
 /// # Errors
 /// Returns an error when no platform production root is available and no policy
 /// has been initialized.
-pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
+pub fn native_data_root() -> Result<PathBuf, DataRootError> {
     if let Some(root) = ACTIVE_DATA_ROOT.get() {
         return Ok(root.path.clone());
     }
-    native_production_data_root().map_err(|_| LifecycleError::InvalidInventory)
+    native_production_data_root()
 }
 
-pub(crate) fn native_legacy_data_root(product: &str) -> Result<PathBuf, LifecycleError> {
+/// Resolves the per-user data folder an earlier product name used.
+///
+/// # Errors
+/// Returns an error when the platform's per-user data directory is unavailable.
+pub fn native_legacy_data_root(product: &str) -> Result<PathBuf, DataRootError> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .map(|root| root.join(product))
-            .ok_or(LifecycleError::InvalidInventory)
+            .ok_or(DataRootError::ProductionRootUnavailable)
     }
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .map(|root| root.join("Library/Application Support").join(product))
-            .ok_or(LifecycleError::InvalidInventory)
+            .ok_or(DataRootError::ProductionRootUnavailable)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -364,7 +371,7 @@ pub(crate) fn native_legacy_data_root(product: &str) -> Result<PathBuf, Lifecycl
                 std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
             })
             .map(|root| root.join(product.to_ascii_lowercase()))
-            .ok_or(LifecycleError::InvalidInventory)
+            .ok_or(DataRootError::ProductionRootUnavailable)
     }
 }
 
@@ -372,57 +379,110 @@ pub(crate) fn native_legacy_data_root(product: &str) -> Result<PathBuf, Lifecycl
 ///
 /// # Errors
 /// Returns an error when owned roots are unsafe or migration cannot complete.
-pub fn migrate_legacy_native_data_root() -> Result<(), LifecycleError> {
+pub fn migrate_legacy_native_data_root() -> Result<(), DataRootError> {
     if ACTIVE_DATA_ROOT.get().is_some_and(DataRoot::is_validation) {
         return Ok(());
     }
     let current = native_data_root()?;
-    crate::lifecycle::validate_owned_root(&current)?;
+    validate_owned_root(&current)?;
     for product in ["TradingPlot", "Axiusflow"] {
         let legacy = native_legacy_data_root(product)?;
         if legacy == current || !legacy.exists() {
             continue;
         }
-        crate::lifecycle::validate_owned_root(&legacy)?;
+        validate_owned_root(&legacy)?;
         if let Ok(metadata) = fs::symlink_metadata(&current)
             && (!metadata.is_dir() || metadata.file_type().is_symlink())
         {
-            return Err(LifecycleError::StateMigrationFailed);
+            return Err(DataRootError::StateMigrationFailed);
         }
         merge_legacy_owned_directory(&legacy, &current)?;
     }
     Ok(())
 }
 
-pub(crate) fn merge_legacy_owned_directory(
-    source: &Path,
-    destination: &Path,
-) -> Result<(), LifecycleError> {
+/// Accepts only an exact Aeris-owned folder: absolute, at least three components deep,
+/// not a broad per-user or temporary root, and without a symbolic link on its path.
+///
+/// # Errors
+/// Returns [`DataRootError::UnsafeOwnedRoot`] when the path could reach outside Aeris's data.
+pub fn validate_owned_root(path: &Path) -> Result<(), DataRootError> {
+    if !path.is_absolute()
+        || path.components().count() < 3
+        || path.parent().is_none()
+        || path == Path::new("/")
+        || broad_native_root(path)
+    {
+        return Err(DataRootError::UnsafeOwnedRoot);
+    }
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DataRootError::UnsafeOwnedRoot);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(DataRootError::UnsafeOwnedRoot),
+        }
+    }
+    Ok(())
+}
+
+fn broad_native_root(path: &Path) -> bool {
+    if path == std::env::temp_dir() {
+        return true;
+    }
+    for variable in [
+        "HOME",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        if std::env::var_os(variable).is_some_and(|root| path.as_os_str() == root) {
+            return true;
+        }
+    }
+    std::env::var_os("HOME").is_some_and(|home| {
+        let home = PathBuf::from(home);
+        [
+            home.join(".local/share"),
+            home.join(".cache"),
+            home.join("Library/Application Support"),
+            home.join("Library/Caches"),
+        ]
+        .iter()
+        .any(|root| path == root)
+    })
+}
+
+fn merge_legacy_owned_directory(source: &Path, destination: &Path) -> Result<(), DataRootError> {
     let source_metadata =
-        fs::symlink_metadata(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
+        fs::symlink_metadata(source).map_err(|_| DataRootError::StateMigrationFailed)?;
     if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
-        return Err(LifecycleError::StateMigrationFailed);
+        return Err(DataRootError::StateMigrationFailed);
     }
-    fs::create_dir_all(destination).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    fs::create_dir_all(destination).map_err(|_| DataRootError::StateMigrationFailed)?;
     let destination_metadata =
-        fs::symlink_metadata(destination).map_err(|_| LifecycleError::StateMigrationFailed)?;
+        fs::symlink_metadata(destination).map_err(|_| DataRootError::StateMigrationFailed)?;
     if !destination_metadata.is_dir() || destination_metadata.file_type().is_symlink() {
-        return Err(LifecycleError::StateMigrationFailed);
+        return Err(DataRootError::StateMigrationFailed);
     }
-    for entry in fs::read_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)? {
-        let entry = entry.map_err(|_| LifecycleError::StateMigrationFailed)?;
+    for entry in fs::read_dir(source).map_err(|_| DataRootError::StateMigrationFailed)? {
+        let entry = entry.map_err(|_| DataRootError::StateMigrationFailed)?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let source_type = entry
             .file_type()
-            .map_err(|_| LifecycleError::StateMigrationFailed)?;
+            .map_err(|_| DataRootError::StateMigrationFailed)?;
         if source_type.is_symlink() {
-            return Err(LifecycleError::StateMigrationFailed);
+            return Err(DataRootError::StateMigrationFailed);
         }
         match fs::symlink_metadata(&destination_path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::rename(&source_path, &destination_path)
-                    .map_err(|_| LifecycleError::StateMigrationFailed)?;
+                    .map_err(|_| DataRootError::StateMigrationFailed)?;
             }
             Ok(destination_metadata)
                 if source_type.is_dir()
@@ -432,14 +492,14 @@ pub(crate) fn merge_legacy_owned_directory(
                 merge_legacy_owned_directory(&source_path, &destination_path)?;
             }
             Ok(_) => {}
-            Err(_) => return Err(LifecycleError::StateMigrationFailed),
+            Err(_) => return Err(DataRootError::StateMigrationFailed),
         }
     }
-    let mut remaining = fs::read_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    let mut remaining = fs::read_dir(source).map_err(|_| DataRootError::StateMigrationFailed)?;
     let empty = remaining.next().is_none();
     drop(remaining);
     if empty {
-        fs::remove_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
+        fs::remove_dir(source).map_err(|_| DataRootError::StateMigrationFailed)?;
     }
     Ok(())
 }
@@ -611,5 +671,59 @@ mod tests {
         }
         assert_eq!(production_invocations, 3);
         fs::remove_dir_all(validation_parent).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_state_merge_preserves_current_files_and_moves_missing_state() {
+        let root = temp_root("legacy-state-merge");
+        let legacy = root.join("Axiusflow");
+        let current = root.join("Aeris");
+        fs::create_dir_all(legacy.join("desktop")).expect("legacy desktop directory");
+        fs::create_dir_all(&current).expect("current state directory");
+        fs::write(legacy.join("workspace-state.pb"), b"legacy-workspace")
+            .expect("legacy workspace");
+        fs::write(current.join("workspace-state.pb"), b"current-workspace")
+            .expect("current workspace");
+        fs::write(legacy.join("desktop/chart-chrome"), b"legacy-chart-chrome")
+            .expect("legacy chart chrome");
+
+        merge_legacy_owned_directory(&legacy, &current).expect("legacy state merges");
+
+        assert_eq!(
+            fs::read(current.join("workspace-state.pb")).expect("current workspace reads"),
+            b"current-workspace"
+        );
+        assert_eq!(
+            fs::read(current.join("desktop/chart-chrome")).expect("migrated chart chrome reads"),
+            b"legacy-chart-chrome"
+        );
+        assert_eq!(
+            fs::read(legacy.join("workspace-state.pb")).expect("conflicting legacy state remains"),
+            b"legacy-workspace"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn tradingplot_state_merges_without_replacing_newer_aeris_state() {
+        let root = temp_root("tradingplot-migration");
+        let previous = root.join("TradingPlot");
+        let current = root.join("Aeris");
+        fs::create_dir_all(&previous).expect("previous state directory");
+        fs::create_dir_all(&current).expect("current state directory");
+        fs::write(previous.join("workspace-state.pb"), b"previous").expect("previous workspace");
+        fs::write(current.join("workspace-state.pb"), b"current").expect("current workspace");
+        fs::write(previous.join("chart-chrome"), b"previous-chrome").expect("previous preferences");
+
+        merge_legacy_owned_directory(&previous, &current).expect("state merges");
+        assert_eq!(
+            fs::read(current.join("workspace-state.pb")).expect("current workspace reads"),
+            b"current"
+        );
+        assert_eq!(
+            fs::read(current.join("chart-chrome")).expect("preferences read"),
+            b"previous-chrome"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }

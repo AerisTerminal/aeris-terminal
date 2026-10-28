@@ -12,14 +12,10 @@ mod durable_container;
 mod file_manager;
 mod http_client;
 mod io_cancellation;
-mod lifecycle;
 mod live_market_gate;
 mod market_socket;
 mod network_notifications;
 mod power_notifications;
-mod release_delivery;
-mod release_identity;
-mod rollout;
 mod session_shutdown;
 mod user_notifications;
 
@@ -48,18 +44,6 @@ pub use durable_container::{
 pub use file_manager::reveal_in_file_manager;
 pub use http_client::CancellableHttpClient;
 pub use io_cancellation::cancel_tcp_stream_io;
-#[cfg(target_os = "windows")]
-pub use lifecycle::verify_windows_publisher_signature;
-pub use lifecycle::{
-    ActiveRelease, CURRENT_STATE_COMPATIBILITY_EPOCH, InstallationInventory, LifecycleError,
-    LifecycleHooks, RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION,
-    ROLLBACK_COMPATIBILITY_FILENAME, ROLLBACK_COMPATIBILITY_SCHEMA_VERSION, ReleaseChannelPointer,
-    ReleaseFile, ReleaseFileRole, ReleaseInstaller, ReleaseInstallerMetadata, ReleaseManifest,
-    ReleasePolicy, RollbackCompatibilityMetadata, RolloutMetadata, SignedReleaseManifest,
-    UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
-    native_installation_inventory, sign_release_manifest, verify_release_file,
-    verify_release_manifest, verify_release_manifest_signature,
-};
 pub use live_market_gate::{
     LIVE_MARKET_GATE_EVIDENCE_SCOPE, LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES,
     LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,
@@ -76,15 +60,6 @@ pub use network_notifications::{
 pub use power_notifications::{
     NativePowerMonitor, NativePowerMonitorCancellation, PowerEvent, PowerNotificationError,
 };
-pub use release_delivery::{
-    BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_FILENAME, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor,
-    BlockFilePlan, BlockPlan, MAXIMUM_BLOCK_PLAN_BLOCKS, MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS,
-    MAXIMUM_BLOCK_PLAN_FILES, MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, ReleaseDeliveryError,
-    SignedBlockPlan, decode_and_verify_block_plan, sign_block_plan, validate_block_plan_binding,
-    verify_block_plan,
-};
-pub use release_identity::{ReleaseIdentity, current_release_identity};
-pub use rollout::rollout_eligible;
 pub use session_shutdown::{
     NativeSessionShutdownCancellation, NativeSessionShutdownMonitor, SessionShutdownError,
 };

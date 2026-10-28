@@ -21,11 +21,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use crate::data_root::merge_legacy_owned_directory;
-use crate::data_root::{native_data_root, native_legacy_data_root};
+use aeris_platform_runtime::data_root::{
+    DataRootError, native_data_root, native_legacy_data_root, validate_owned_root,
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+#[cfg(any(test, feature = "producer"))]
+use ed25519_dalek::{Signer as _, SigningKey};
 use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -277,7 +279,6 @@ pub enum LifecycleError {
     UninstallPendingCleanup,
     ExternalArtifactRemaining,
     JournalCorrupt,
-    StateMigrationFailed,
 }
 
 impl fmt::Display for LifecycleError {
@@ -298,17 +299,23 @@ impl fmt::Display for LifecycleError {
             Self::UninstallPendingCleanup => "uninstall is pending local-artifact cleanup",
             Self::ExternalArtifactRemaining => "an external Aeris artifact remains",
             Self::JournalCorrupt => "lifecycle recovery journal is invalid",
-            Self::StateMigrationFailed => "legacy local state migration did not complete",
         })
     }
 }
 
 impl Error for LifecycleError {}
 
+impl From<DataRootError> for LifecycleError {
+    fn from(_: DataRootError) -> Self {
+        Self::InvalidInventory
+    }
+}
+
 /// Signs one validated manifest. The signing key stays in release packaging.
 ///
 /// # Errors
 /// Returns an error if the manifest cannot be validated or serialized.
+#[cfg(any(test, feature = "producer"))]
 pub fn sign_release_manifest(
     manifest: ReleaseManifest,
     key: &SigningKey,
@@ -595,8 +602,10 @@ impl ReleaseInstaller {
                 .file_name()
                 .into_string()
                 .map_err(|_| LifecycleError::JournalCorrupt)?;
-            if aeris_platform_sys::fs::staged_temporary_destination_name(entry.file_name().as_ref())
-                .is_some()
+            if aeris_platform_runtime::fs::staged_temporary_destination_name(
+                entry.file_name().as_ref(),
+            )
+            .is_some()
             {
                 continue;
             }
@@ -1104,7 +1113,7 @@ impl ReleaseInstaller {
             self.lifecycle_root.join("active"),
             self.lifecycle_root.join("manifests"),
         ] {
-            aeris_platform_sys::fs::remove_stale_temporaries(&directory, &name)
+            aeris_platform_runtime::fs::remove_stale_temporaries(&directory, &name)
                 .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
         }
         Ok(())
@@ -1671,57 +1680,6 @@ pub fn native_installation_inventory(
     })
 }
 
-pub(crate) fn validate_owned_root(path: &Path) -> Result<(), LifecycleError> {
-    if !path.is_absolute()
-        || path.components().count() < 3
-        || path.parent().is_none()
-        || path == Path::new("/")
-        || broad_native_root(path)
-    {
-        return Err(LifecycleError::InvalidInventory);
-    }
-    for ancestor in path.ancestors() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(LifecycleError::InvalidInventory);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(LifecycleError::InvalidInventory),
-        }
-    }
-    Ok(())
-}
-
-fn broad_native_root(path: &Path) -> bool {
-    if path == std::env::temp_dir() {
-        return true;
-    }
-    for variable in [
-        "HOME",
-        "USERPROFILE",
-        "LOCALAPPDATA",
-        "APPDATA",
-        "XDG_DATA_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        if std::env::var_os(variable).is_some_and(|root| path.as_os_str() == root) {
-            return true;
-        }
-    }
-    std::env::var_os("HOME").is_some_and(|home| {
-        let home = PathBuf::from(home);
-        [
-            home.join(".local/share"),
-            home.join(".cache"),
-            home.join("Library/Application Support"),
-            home.join("Library/Caches"),
-        ]
-        .iter()
-        .any(|root| path == root)
-    })
-}
-
 fn safe_bundle_file(bundle_root: &Path, relative: &Path) -> Result<PathBuf, LifecycleError> {
     if !bundle_root.is_absolute() || !safe_relative_path(relative) {
         return Err(LifecycleError::StagingFailed);
@@ -2060,7 +2018,7 @@ fn write_json_atomic<T: Serialize>(
         return Err(LifecycleError::JournalCorrupt);
     }
     let destination = directory.join(name);
-    aeris_platform_sys::fs::write_file_durably(&destination, &bytes)
+    aeris_platform_runtime::fs::write_file_durably(&destination, &bytes)
         .map_err(|_| LifecycleError::StagingFailed)
 }
 
@@ -2137,7 +2095,7 @@ fn count_release_record_entries(path: &Path) -> Result<usize, LifecycleError> {
             let entry = entry.map_err(|_| LifecycleError::UpdatePendingCleanup)?;
             Ok(count
                 + usize::from(
-                    aeris_platform_sys::fs::staged_temporary_destination_name(
+                    aeris_platform_runtime::fs::staged_temporary_destination_name(
                         entry.file_name().as_ref(),
                     )
                     .is_none(),
@@ -2913,7 +2871,7 @@ mod tests {
             .join("active")
             .join(pointer_name(&uncommitted));
         let mut staged =
-            aeris_platform_sys::fs::StagedFile::create(&destination).expect("stage pointer");
+            aeris_platform_runtime::fs::StagedFile::create(&destination).expect("stage pointer");
         staged
             .write_all(&serde_json::to_vec(&uncommitted).expect("pointer encodes"))
             .expect("stage pointer bytes");
@@ -2956,7 +2914,7 @@ mod tests {
             installer.lifecycle_root.join("active"),
             installer.lifecycle_root.join("manifests"),
         ] {
-            let mut staged = aeris_platform_sys::fs::StagedFile::create(&directory.join(&name))
+            let mut staged = aeris_platform_runtime::fs::StagedFile::create(&directory.join(&name))
                 .expect("stage release record");
             staged
                 .write_all(b"partial release record")
@@ -2981,7 +2939,7 @@ mod tests {
                 fs::read_dir(directory)
                     .expect("release record directory")
                     .all(
-                        |entry| aeris_platform_sys::fs::staged_temporary_destination_name(
+                        |entry| aeris_platform_runtime::fs::staged_temporary_destination_name(
                             entry.expect("release record entry").file_name().as_ref()
                         ) != Some(name.as_str())
                     ),
@@ -3953,60 +3911,6 @@ mod tests {
                 expected.display()
             );
         }
-        let _ = remove_owned_path(&root);
-    }
-
-    #[test]
-    fn legacy_state_merge_preserves_current_files_and_moves_missing_state() {
-        let root = temporary_root("legacy-state-merge");
-        let legacy = root.join("Axiusflow");
-        let current = root.join("Aeris");
-        fs::create_dir_all(legacy.join("desktop")).expect("legacy desktop directory");
-        fs::create_dir_all(&current).expect("current state directory");
-        fs::write(legacy.join("workspace-state.pb"), b"legacy-workspace")
-            .expect("legacy workspace");
-        fs::write(current.join("workspace-state.pb"), b"current-workspace")
-            .expect("current workspace");
-        fs::write(legacy.join("desktop/chart-chrome"), b"legacy-chart-chrome")
-            .expect("legacy chart chrome");
-
-        merge_legacy_owned_directory(&legacy, &current).expect("legacy state merges");
-
-        assert_eq!(
-            fs::read(current.join("workspace-state.pb")).expect("current workspace reads"),
-            b"current-workspace"
-        );
-        assert_eq!(
-            fs::read(current.join("desktop/chart-chrome")).expect("migrated chart chrome reads"),
-            b"legacy-chart-chrome"
-        );
-        assert_eq!(
-            fs::read(legacy.join("workspace-state.pb")).expect("conflicting legacy state remains"),
-            b"legacy-workspace"
-        );
-        let _ = remove_owned_path(&root);
-    }
-
-    #[test]
-    fn tradingplot_state_merges_without_replacing_newer_aeris_state() {
-        let root = temporary_root("tradingplot-migration");
-        let previous = root.join("TradingPlot");
-        let current = root.join("Aeris");
-        fs::create_dir_all(&previous).expect("previous state directory");
-        fs::create_dir_all(&current).expect("current state directory");
-        fs::write(previous.join("workspace-state.pb"), b"previous").expect("previous workspace");
-        fs::write(current.join("workspace-state.pb"), b"current").expect("current workspace");
-        fs::write(previous.join("chart-chrome"), b"previous-chrome").expect("previous preferences");
-
-        merge_legacy_owned_directory(&previous, &current).expect("state merges");
-        assert_eq!(
-            fs::read(current.join("workspace-state.pb")).expect("current workspace reads"),
-            b"current"
-        );
-        assert_eq!(
-            fs::read(current.join("chart-chrome")).expect("preferences read"),
-            b"previous-chrome"
-        );
         let _ = remove_owned_path(&root);
     }
 

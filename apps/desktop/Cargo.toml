@@ -24,6 +24,7 @@ aeris_study_sdk = { path = "../../crates/study_sdk" }
 aeris_contracts = { path = "../../crates/contracts" }
 aeris_observability = { path = "../../crates/observability" }
 aeris_platform_runtime = { path = "../../crates/platform_runtime" }
+aeris_release_lifecycle = { path = "../../crates/release_lifecycle" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true

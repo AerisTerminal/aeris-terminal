@@ -3941,7 +3941,7 @@ fn run_desktop_readiness_command(
         if status.providers.is_empty() {
             return Err("candidate market service did not reach readiness".to_string());
         }
-        let release = aeris_platform_runtime::current_release_identity();
+        let release = aeris_release_lifecycle::current_release_identity();
         let trading_status = trading.status()?;
         if trading_status.schema_version == 0 {
             return Err("candidate trading service did not reach readiness".to_string());

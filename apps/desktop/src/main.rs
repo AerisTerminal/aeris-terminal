@@ -75,7 +75,7 @@ fn main() {
             return;
         }
     };
-    let release = aeris_platform_runtime::current_release_identity();
+    let release = aeris_release_lifecycle::current_release_identity();
     if let Err(error) = aeris_observability::install_panic_hook(
         &logs_directory,
         release.release_identity,

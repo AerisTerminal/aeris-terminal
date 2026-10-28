@@ -88,9 +88,10 @@ PLATFORM
   aeris_platform_runtime -> platform_sys, observability  forbid(unsafe) from M8.3 (interim allowlist until then); vault, sockets, http, dns, browser,
                                                          notifications, power/network event streams, DataRoot,
                                                          InstanceLock, DurableDocument container
-  aeris_release_lifecycle NEW (M8.1 target) crates/release_lifecycle -> platform_sys, platform_runtime, observability
+  aeris_release_lifecycle NEW (M8.1) crates/release_lifecycle -> platform_runtime, observability (durable writes
+                                                         through the platform_runtime::fs re-export, not platform_sys)
                                                          lifecycle, release_delivery, rollout, release_identity,
-                                                         release_config, ReadinessReport, bin aeris_launcher
+                                                         bin aeris_launcher; release_config (M8.2), ReadinessReport (M8.5)
 ADAPTERS (unchanged edges)
 RUNTIMES
   aeris_market_engine -> market_data, instruments
@@ -1066,12 +1067,12 @@ the frame loop and the 100 ms timer. Test: production gate opens no browser, mak
 
 ### 3.8 `release_lifecycle` and account runtime fixes (M8; AC-01/AC-05 in M1)
 
-M8.1 target (the crate does not exist yet): new crate `crates/release_lifecycle` (`aeris_release_lifecycle`): `lifecycle.rs` (minus `native_data_root`, which
+M8.1 created the crate; release_config arrives with M8.2 and ReadinessReport with M8.5. New crate `crates/release_lifecycle` (`aeris_release_lifecycle`): `lifecycle.rs` (minus `native_data_root`, which
 became `platform_runtime::DataRoot` in M1), `release_delivery.rs`, `rollout.rs`, `release_identity.rs`, new
 `release_config.rs` (one `build.rs`-validated reader of `AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,
 `AERIS_BOOTSTRAP_MIN_GENERATION`, `AERIS_RELEASE_IDENTITY`/`AERIS_INSTALL_GENERATION`, `AERIS_AUTHENTICODE_CERT_SHA1`,
 `AERIS_AUTH_ISSUER`; any set -> all required), shared `ReadinessReport`, and `src/bin/aeris_launcher.rs` (moved from
-`platform_runtime/src/bin`). `ed25519-dalek`, `semver`, `same-file` leave `platform_runtime`. Signers move behind a
+`platform_runtime/src/bin`). `ed25519-dalek`, `semver`, `same-file` and `sysinfo` leave `platform_runtime`; the owned-root check stays in `platform_runtime::data_root`. Signers move behind a
 `producer` feature. Nothing is deleted for being dormant; the "kept and sound" items in `07_platform_design.md` A2 stay.
 
 Fixes, one commit each or small batches: LC-01 command-first dispatch (uninstall/identity never need the key);

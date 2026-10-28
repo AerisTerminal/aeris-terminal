@@ -267,6 +267,7 @@ dependencies = [
  "aeris_market_runtime",
  "aeris_observability",
  "aeris_platform_runtime",
+ "aeris_release_lifecycle",
  "aeris_study_sdk",
  "aeris_terminal_ui",
  "aeris_trading",
@@ -364,19 +365,14 @@ dependencies = [
  "aeris_platform_sys",
  "base64 0.23.1",
  "display-info",
- "ed25519-dalek",
- "embed-resource",
  "getrandom 0.4.3",
  "keyring",
  "notify-rust",
  "rustls",
- "same-file",
- "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "signal-hook",
- "sysinfo 0.39.6",
  "tungstenite",
  "ureq",
  "wayland-client",
@@ -415,6 +411,25 @@ dependencies = [
 [[package]]
 name = "aeris_provider_history"
 version = "1.2.0"
+
+[[package]]
+name = "aeris_release_lifecycle"
+version = "1.2.0"
+dependencies = [
+ "aeris_observability",
+ "aeris_platform_runtime",
+ "aeris_release_lifecycle",
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "embed-resource",
+ "same-file",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo 0.39.6",
+ "ureq",
+]
 
 [[package]]
 name = "aeris_rithmic_protocol_adapter"

@@ -381,7 +381,7 @@ fn run_update_worker(requests: &Receiver<UpdateRequest>, results: &SyncSender<Up
 
 fn stable_launcher() -> Result<PathBuf, String> {
     let install_root =
-        aeris_platform_runtime::native_install_root().map_err(|error| error.to_string())?;
+        aeris_release_lifecycle::native_install_root().map_err(|error| error.to_string())?;
     let launcher = install_root.join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
     let metadata = std::fs::symlink_metadata(&launcher)
         .map_err(|_| "installed Aeris launcher is unavailable".to_string())?;
@@ -392,7 +392,7 @@ fn stable_launcher() -> Result<PathBuf, String> {
     {
         return Err("installed Aeris launcher is invalid".to_string());
     }
-    let release = aeris_platform_runtime::current_release_identity();
+    let release = aeris_release_lifecycle::current_release_identity();
     if release.install_generation == 0
         || release.release_identity.is_empty()
         || release.release_identity.len() > 128
@@ -418,11 +418,11 @@ fn stable_launcher() -> Result<PathBuf, String> {
 
 fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
-    let active = aeris_platform_runtime::current_release_identity();
+    let active = aeris_release_lifecycle::current_release_identity();
     #[cfg(target_os = "windows")]
     {
         launcher_is_trusted_with(launcher, active_signed_launcher, |path| {
-            if aeris_platform_runtime::verify_windows_publisher_signature(path).is_err() {
+            if aeris_release_lifecycle::verify_windows_publisher_signature(path).is_err() {
                 return false;
             }
             launcher_identity(path).is_ok_and(|launcher| {
@@ -619,7 +619,7 @@ fn run_launcher_report(
 }
 
 fn validate_launcher_report(report: LauncherUpdateCheck) -> Result<LauncherUpdateCheck, String> {
-    let current = aeris_platform_runtime::current_release_identity().install_generation;
+    let current = aeris_release_lifecycle::current_release_identity().install_generation;
     if report.schema_version != 2
         || report.current_generation != current
         || report.latest_generation < report.current_generation
@@ -1016,7 +1016,7 @@ mod tests {
     }
 
     fn update_report(update_available: bool) -> LauncherUpdateCheck {
-        let current = aeris_platform_runtime::current_release_identity().install_generation;
+        let current = aeris_release_lifecycle::current_release_identity().install_generation;
         LauncherUpdateCheck {
             schema_version: 2,
             current_generation: current,
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn launcher_report_requires_generation_consistency() {
-        let current = aeris_platform_runtime::current_release_identity().install_generation;
+        let current = aeris_release_lifecycle::current_release_identity().install_generation;
         let valid = LauncherUpdateCheck {
             schema_version: 2,
             current_generation: current,
