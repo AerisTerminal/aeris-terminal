@@ -70,13 +70,11 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chrome_overlay == Some(ChromeOverlay::Accounts)
-            && self.chrome_overlay_phase != ChromeOverlayPhase::Closing
-        {
+        if self.chrome.is_overlay_open(ChromeOverlay::Accounts) {
             self.select_accounts_tab(tab, window, cx);
             return;
         }
-        self.menu_state.accounts_tab = tab;
+        self.chrome.set_accounts_tab(tab);
         self.open_chrome_overlay(ChromeOverlay::Accounts, window, cx);
     }
 
@@ -88,10 +86,9 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.menu_state.accounts_tab == tab {
+        if !self.chrome.set_accounts_tab(tab) {
             return;
         }
-        self.menu_state.accounts_tab = tab;
         self.trading_pnl.account_creator = None;
         self.trading_pnl.account_delete_confirmation = None;
         window.dispatch_action(Box::new(CancelProviderLogin), cx);
@@ -105,7 +102,7 @@ impl WorkspaceSurface {
         pointer: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.menu_state.accounts_placement.follow(pointer) {
+        if self.chrome.accounts_placement_mut().follow(pointer) {
             cx.notify();
         }
     }
@@ -130,8 +127,8 @@ pub(super) fn accounts_panel_bounds(
     let panel_size = accounts_panel_size(extent);
     let origin = chart_context_menus::clamp_floating_panel_origin(
         app_state
-            .menu_state
-            .accounts_placement
+            .chrome
+            .accounts_placement()
             .origin
             .unwrap_or_else(|| {
                 chart_context_menus::centered_floating_panel_origin(viewport, panel_size)
@@ -150,7 +147,7 @@ pub(super) fn accounts_panel_content(
     panel_size: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let tab = app_state.menu_state.accounts_tab;
+    let tab = app_state.chrome.accounts_tab();
     let groups = match tab {
         AccountsTab::Connections => connections_groups(connections, theme),
         AccountsTab::TradingAccounts => trading_account_groups(app_state, app, working_set, theme),
@@ -201,7 +198,7 @@ fn panel_title_bar(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl I
         .cursor(FLOATING_PANEL_MOVE_CURSOR)
         .on_drag(AccountsPanelMoveDrag, move |drag, offset, _, cx| {
             grab.update(cx, |surface, _| {
-                surface.menu_state.accounts_placement.grab(offset);
+                surface.chrome.accounts_placement_mut().grab(offset);
             });
             cx.new(|_| drag.clone())
         })

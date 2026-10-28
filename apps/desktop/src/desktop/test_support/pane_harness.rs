@@ -4124,7 +4124,7 @@ fn pane_harness_rithmic_product_opens_its_front_month_from_the_empty_query_listi
             pane.symbol_selector_status(),
             "1 product · choose one for its front month"
         );
-        pane.chrome_selection = 0;
+        pane.chrome.set_selection(0);
         assert!(
             pane.submit_symbol_input(cx),
             "Enter on a product opens its front month"

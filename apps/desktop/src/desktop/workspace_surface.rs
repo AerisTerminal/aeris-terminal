@@ -5,6 +5,7 @@ use super::context_panel_controller::ContextPanelController;
 use super::order_flow_presenter::{
     ChartTradeProjection, OrderBookDemandChange, OrderFlowPresenter,
 };
+use super::pane_chrome_state::{PaneChromeState, TimeframeFlyoutChange};
 use super::studies_controller::{StudiesController, StudySettingsRequest};
 use super::*;
 use aeris_observability::diagnostic;
@@ -137,10 +138,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chart_time_zone: init.chart_time_zone,
         pending_chart_sync_events: VecDeque::new(),
         pending_linked_instrument: None,
-        side_panels: SidePanelVisibility::default(),
-        side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
-        side_panel_split_basis_points: 5_000,
-        menu_state: WorkspaceMenuState::default(),
+        chrome: PaneChromeState::default(),
         scrolls: WorkspaceScrollHandles::default(),
         chart_state: init.startup.chart_state,
         chart_failure: init.startup.chart_failure,
@@ -174,17 +172,6 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         time_zone_input: init.time_zone_input,
         studies: init.studies,
         indicator_settings_dialog: None,
-        chrome_overlay: None,
-        chrome_overlay_phase: ChromeOverlayPhase::Opening,
-        chrome_overlay_generation: 0,
-        chrome_overlay_trigger_position: None,
-        timeframe_menu_flyout: None,
-        timeframe_flyout_close_token: 0,
-        timeframe_hover_regions: 0,
-        timeframe_trigger_bounds: None,
-        chart_type_trigger_bounds: None,
-        time_zone_trigger_bounds: None,
-        chrome_selection: 0,
         chrome_focus: init.chrome_focus,
         provider: init.startup.provider,
         product: init.startup.product,
@@ -2136,14 +2123,14 @@ impl WorkspaceSurface {
     }
 
     fn sync_timeframe_menu_selection(&mut self) {
-        self.timeframe_menu_flyout = None;
-        self.menu_state.timeframe_flyout_keyboard = false;
-        self.timeframe_hover_regions = 0;
+        self.chrome.reset_timeframe_flyout();
         let selected_group = timeframe_interval_group(self.selected_interval());
-        self.chrome_selection = timeframe_menu_groups(self.available_intervals())
-            .iter()
-            .position(|group| *group == selected_group)
-            .unwrap_or(0);
+        self.chrome.set_selection(
+            timeframe_menu_groups(self.available_intervals())
+                .iter()
+                .position(|group| *group == selected_group)
+                .unwrap_or(0),
+        );
     }
 
     pub(super) fn open_timeframe_group(
@@ -2152,36 +2139,29 @@ impl WorkspaceSurface {
         from_keyboard: bool,
         cx: &mut Context<Self>,
     ) {
-        self.retain_timeframe_flyout();
-        let already_open = self.timeframe_menu_flyout == Some(group);
-        if !already_open {
-            self.timeframe_menu_flyout = Some(group);
-            self.chrome_selection = timeframe_group_intervals(group, self.available_intervals())
-                .iter()
-                .position(|interval| *interval == self.selected_interval())
-                .unwrap_or(0);
+        match self.chrome.show_timeframe_flyout(group, from_keyboard) {
+            TimeframeFlyoutChange::Opened => {
+                self.chrome.set_selection(
+                    timeframe_group_intervals(group, self.available_intervals())
+                        .iter()
+                        .position(|interval| *interval == self.selected_interval())
+                        .unwrap_or(0),
+                );
+                cx.notify();
+            }
+            TimeframeFlyoutChange::Navigation => cx.notify(),
+            TimeframeFlyoutChange::Unchanged => {}
         }
-        if self.menu_state.timeframe_flyout_keyboard != from_keyboard || !already_open {
-            self.menu_state.timeframe_flyout_keyboard = from_keyboard;
-            cx.notify();
-        }
-    }
-
-    fn retain_timeframe_flyout(&mut self) {
-        self.timeframe_flyout_close_token = self.timeframe_flyout_close_token.saturating_add(1);
     }
 
     fn arm_timeframe_flyout_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.retain_timeframe_flyout();
-        let token = self.timeframe_flyout_close_token;
+        let token = self.chrome.arm_timeframe_flyout_close();
         cx.spawn_in(window, async move |app, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(120))
                 .await;
             if let Err(error) = app.update_in(cx, |app, _, app_cx| {
-                if app.chrome_overlay == Some(ChromeOverlay::Timeframe)
-                    && app.timeframe_flyout_close_token == token
-                {
+                if app.chrome.timeframe_flyout_close_due(token) {
                     app.close_timeframe_flyout(app_cx);
                 }
             }) && app.upgrade().is_some()
@@ -2199,34 +2179,27 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         if hovered {
-            self.timeframe_hover_regions = self.timeframe_hover_regions.saturating_add(1);
-            self.retain_timeframe_flyout();
-            return;
-        }
-        if self.timeframe_hover_regions == 0 {
-            return;
-        }
-        self.timeframe_hover_regions -= 1;
-        if self.timeframe_hover_regions == 0 {
+            self.chrome.enter_timeframe_menu_region();
+        } else if self.chrome.leave_timeframe_menu_region() {
             self.arm_timeframe_flyout_close(window, cx);
         }
     }
 
     fn close_timeframe_flyout(&mut self, cx: &mut Context<Self>) {
-        let Some(group) = self.timeframe_menu_flyout.take() else {
+        let Some(group) = self.chrome.close_timeframe_flyout() else {
             return;
         };
-        self.menu_state.timeframe_flyout_keyboard = false;
-        self.timeframe_hover_regions = 0;
-        self.chrome_selection = timeframe_menu_groups(self.available_intervals())
-            .iter()
-            .position(|item| *item == group)
-            .unwrap_or(0);
+        self.chrome.set_selection(
+            timeframe_menu_groups(self.available_intervals())
+                .iter()
+                .position(|item| *item == group)
+                .unwrap_or(0),
+        );
         cx.notify();
     }
 
     fn timeframe_menu_keyboard_count(&self) -> usize {
-        if let Some(group) = self.timeframe_menu_flyout {
+        if let Some(group) = self.chrome.timeframe_flyout() {
             timeframe_group_intervals(group, self.available_intervals()).len()
         } else {
             timeframe_menu_groups(self.available_intervals()).len()
@@ -2235,15 +2208,17 @@ impl WorkspaceSurface {
 
     fn sync_chart_type_menu_selection(&mut self, cx: &App) {
         let selected = self.chart_type(cx);
-        self.chrome_selection = super::provider_chart_types(self.provider)
-            .iter()
-            .position(|chart_type| *chart_type == selected)
-            .unwrap_or(0);
+        self.chrome.set_selection(
+            super::provider_chart_types(self.provider)
+                .iter()
+                .position(|chart_type| *chart_type == selected)
+                .unwrap_or(0),
+        );
     }
 
     fn apply_highlighted_chart_type(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(chart_type) = super::provider_chart_types(self.provider)
-            .get(self.chrome_selection)
+            .get(self.chrome.selection())
             .copied()
         {
             self.set_chart_type(chart_type, cx);
@@ -2299,11 +2274,12 @@ impl WorkspaceSurface {
 
     fn sync_time_zone_menu_selection(&mut self, cx: &App) {
         let selected = self.chart_time_zone_id();
-        self.chrome_selection = self
+        let selection = self
             .time_zone_matches(cx)
             .iter()
             .position(|zone| *zone == selected)
             .unwrap_or(0);
+        self.chrome.set_selection(selection);
     }
 
     pub(super) fn set_chart_time_zone(&mut self, time_zone: &str, cx: &mut Context<Self>) -> bool {
@@ -2384,7 +2360,7 @@ impl WorkspaceSurface {
     ) {
         if let Some(time_zone) = self
             .time_zone_matches(cx)
-            .get(self.chrome_selection)
+            .get(self.chrome.selection())
             .copied()
             && self.set_chart_time_zone(time_zone, cx)
         {
@@ -2395,7 +2371,7 @@ impl WorkspaceSurface {
     pub(super) fn sync_quick_timeframe_selection(&mut self, cx: &App) {
         let query = self.timeframe_input.read(cx).value();
         let intervals = self.quick_timeframe_matches(cx);
-        self.chrome_selection = intervals
+        let selection = intervals
             .iter()
             .position(|interval| interval.label() == query.as_ref())
             .or_else(|| {
@@ -2404,6 +2380,7 @@ impl WorkspaceSurface {
                     .position(|interval| *interval == self.selected_interval())
             })
             .unwrap_or(0);
+        self.chrome.set_selection(selection);
     }
 
     /// Applies the typed quick timeframe. A query that matches no offered interval, or an
@@ -2416,20 +2393,18 @@ impl WorkspaceSurface {
             let message = format!(
                 "\u{201c}{query}\u{201d} is not an available timeframe. Try 1m, 5m, 1H or 1D."
             );
-            self.menu_state.quick_timeframe_error = Some(QuickTimeframeError { query, message });
+            self.chrome.reject_quick_timeframe(query, message);
             cx.notify();
             return;
         }
         self.apply_highlighted_interval(&intervals, window, cx);
-        let still_open = self.chrome_overlay == Some(ChromeOverlay::QuickTimeframe)
-            && self.chrome_overlay_phase != ChromeOverlayPhase::Closing;
-        if still_open {
+        if self.chrome.is_overlay_open(ChromeOverlay::QuickTimeframe) {
             let message = if self.series_message.is_empty() {
                 "This timeframe could not be applied.".to_string()
             } else {
                 self.series_message.clone()
             };
-            self.menu_state.quick_timeframe_error = Some(QuickTimeframeError { query, message });
+            self.chrome.reject_quick_timeframe(query, message);
             cx.notify();
         }
     }
@@ -2440,7 +2415,7 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(interval) = intervals.get(self.chrome_selection).copied()
+        if let Some(interval) = intervals.get(self.chrome.selection()).copied()
             && self.select_interval(interval, cx)
         {
             self.close_chrome_overlay(window, cx);
@@ -2587,12 +2562,12 @@ impl WorkspaceSurface {
         if self.market_state.symbol_selection_pending {
             return;
         }
-        self.menu_state.symbol_provider_menu = SymbolProviderMenu::Closed;
+        self.chrome.close_symbol_provider_menu();
         if self.symbol_browser.set_scope(scope) {
             self.chart_chrome.symbol_search_scope = scope;
             self.save_chart_chrome_preferences(cx);
             self.pending_mnemonic_symbol = None;
-            self.chrome_selection = 0;
+            self.chrome.set_selection(0);
         }
         // An empty query opens each provider's own listing: its markets, or its
         // products, each of which opens its front month.
@@ -2606,7 +2581,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn toggle_symbol_provider_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu_state.symbol_provider_menu = self.menu_state.symbol_provider_menu.toggled();
+        self.chrome.toggle_symbol_provider_menu();
         cx.notify();
     }
 
@@ -2618,13 +2593,7 @@ impl WorkspaceSurface {
         provider: Option<ProviderId>,
         cx: &mut Context<Self>,
     ) {
-        let next = match (self.menu_state.symbol_provider_menu, provider) {
-            (SymbolProviderMenu::Closed, _) => return,
-            (_, Some(provider)) => SymbolProviderMenu::Flyout(provider),
-            (_, None) => SymbolProviderMenu::Open,
-        };
-        if self.menu_state.symbol_provider_menu != next {
-            self.menu_state.symbol_provider_menu = next;
+        if self.chrome.set_symbol_scope_flyout(provider) {
             cx.notify();
         }
     }
@@ -2683,50 +2652,33 @@ impl WorkspaceSurface {
         }
     }
 
-    fn activate_chrome_list_keyboard(&mut self) {
-        if matches!(
-            self.chrome_overlay,
-            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator | ChromeOverlay::TimeZone)
-        ) {
-            self.menu_state.chrome_list_keyboard = true;
-        }
-    }
-
-    /// The indicator menu has no current item, so nothing is highlighted until the user types
-    /// or presses an arrow; that first arrow lands on the top row.
-    const fn indicator_menu_awaits_keyboard(&self) -> bool {
-        matches!(self.chrome_overlay, Some(ChromeOverlay::Indicator))
-            && !self.menu_state.chrome_list_keyboard
-    }
-
     fn scroll_chrome_selection_into_view(&self, cx: &App) {
-        match self.chrome_overlay {
+        let selection = self.chrome.selection();
+        match self.chrome.overlay() {
             Some(ChromeOverlay::Instrument) if self.symbol_browser.has_results() => {
-                self.scrolls
-                    .instrument
-                    .scroll_to_item(self.chrome_selection);
+                self.scrolls.instrument.scroll_to_item(selection);
             }
             Some(ChromeOverlay::Indicator) => {
-                if let Some(item) = indicator_menu_scroll_item(
-                    &self.indicator_menu_entries(cx),
-                    self.chrome_selection,
-                ) {
+                if let Some(item) =
+                    indicator_menu_scroll_item(&self.indicator_menu_entries(cx), selection)
+                {
                     self.scrolls.indicator.scroll_to_item(item);
                 }
             }
             Some(ChromeOverlay::TimeZone) if !self.time_zone_matches(cx).is_empty() => {
-                self.scrolls.time_zone.scroll_to_item(self.chrome_selection);
+                self.scrolls.time_zone.scroll_to_item(selection);
             }
             _ => {}
         }
     }
 
     fn sync_instrument_menu_keyboard(&mut self, cx: &App) {
-        if self.menu_state.chrome_list_keyboard {
+        if self.chrome.list_keyboard_active() {
             return;
         }
-        self.chrome_selection =
-            current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0);
+        self.chrome.set_selection(
+            current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0),
+        );
     }
 
     pub(super) fn select_instrument(
@@ -2833,28 +2785,19 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chrome_overlay == Some(overlay)
-            && self.chrome_overlay_phase != ChromeOverlayPhase::Closing
-        {
+        if self.chrome.is_overlay_open(overlay) {
             self.close_chrome_overlay(window, cx);
             return;
         }
         if overlay == ChromeOverlay::Instrument {
             self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }
-        if overlay == ChromeOverlay::Accounts {
-            self.menu_state.accounts_placement =
-                chart_context_menus::FloatingPanelPlacement::default();
-        }
         if matches!(overlay, ChromeOverlay::Instrument | ChromeOverlay::Accounts) {
             // Both surfaces present the broker connections; the runtime check reads the
             // local credential vault in the background and never blocks this frame.
             window.dispatch_action(Box::new(RefreshBrokerConnections), cx);
         }
-        self.chrome_overlay_trigger_position = trigger_position;
-        self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
-        self.chrome_overlay_phase = ChromeOverlayPhase::Opening;
-        self.chrome_overlay = Some(overlay);
+        self.chrome.open(overlay, trigger_position);
         if overlay != ChromeOverlay::QuickTimeframe {
             self.timeframe_input.update(cx, |input, input_cx| {
                 input.set_value("", window, input_cx);
@@ -2865,34 +2808,16 @@ impl WorkspaceSurface {
                 input.set_value("", window, input_cx);
             });
         }
-        if overlay != ChromeOverlay::Timeframe {
-            self.timeframe_menu_flyout = None;
-            self.menu_state.timeframe_flyout_keyboard = false;
-            self.timeframe_hover_regions = 0;
+        match overlay {
+            ChromeOverlay::Timeframe => self.sync_timeframe_menu_selection(),
+            ChromeOverlay::ChartType => self.sync_chart_type_menu_selection(cx),
+            ChromeOverlay::QuickTimeframe => self.sync_quick_timeframe_selection(cx),
+            ChromeOverlay::Instrument => self.chrome.set_selection(
+                current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0),
+            ),
+            ChromeOverlay::Indicator | ChromeOverlay::Accounts => self.chrome.set_selection(0),
+            ChromeOverlay::TimeZone => self.sync_time_zone_menu_selection(cx),
         }
-        self.menu_state.chrome_list_keyboard = false;
-        self.chrome_selection = match overlay {
-            ChromeOverlay::Timeframe => {
-                self.sync_timeframe_menu_selection();
-                self.chrome_selection
-            }
-            ChromeOverlay::ChartType => {
-                self.sync_chart_type_menu_selection(cx);
-                self.chrome_selection
-            }
-            ChromeOverlay::QuickTimeframe => {
-                self.sync_quick_timeframe_selection(cx);
-                self.chrome_selection
-            }
-            ChromeOverlay::Instrument => {
-                current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0)
-            }
-            ChromeOverlay::Indicator | ChromeOverlay::Accounts => 0,
-            ChromeOverlay::TimeZone => {
-                self.sync_time_zone_menu_selection(cx);
-                self.chrome_selection
-            }
-        };
         match overlay {
             ChromeOverlay::Instrument => {
                 self.scrolls.instrument.set_offset(point(px(0.0), px(0.0)));
@@ -2924,12 +2849,11 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn close_chrome_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chrome_overlay.is_none() || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
-        {
+        let Some(overlay) = self.chrome.open_overlay() else {
             return;
-        }
-        if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
-            self.menu_state.symbol_provider_menu = SymbolProviderMenu::Closed;
+        };
+        if overlay == ChromeOverlay::Instrument {
+            self.chrome.close_symbol_provider_menu();
             self.symbol_selection_target = instrument_target_after_close(
                 self.symbol_selection_target,
                 self.market_state.symbol_selection_pending,
@@ -2940,64 +2864,45 @@ impl WorkspaceSurface {
                 });
             }
         }
-        match self.chrome_overlay {
-            Some(ChromeOverlay::Indicator) => {
+        match overlay {
+            ChromeOverlay::Indicator => {
                 self.indicator_input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
             }
-            Some(ChromeOverlay::QuickTimeframe) => {
-                self.menu_state.quick_timeframe_error = None;
+            ChromeOverlay::QuickTimeframe => {
+                self.chrome.clear_quick_timeframe_error();
                 self.timeframe_input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
             }
-            Some(ChromeOverlay::TimeZone) => {
+            ChromeOverlay::TimeZone => {
                 self.time_zone_input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
             }
-            Some(ChromeOverlay::Accounts) => {
+            ChromeOverlay::Accounts => {
                 // An unfinished form or confirmation never outlives the panel that owns it.
                 self.trading_pnl.account_creator = None;
                 self.trading_pnl.account_delete_confirmation = None;
                 window.dispatch_action(Box::new(CancelProviderLogin), cx);
             }
-            Some(
-                ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType,
-            )
-            | None => {}
+            ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {}
         }
         self.chrome_focus.focus(window, cx);
         if cx.reduce_motion() {
-            self.chrome_overlay = None;
-            self.timeframe_menu_flyout = None;
-            self.menu_state.timeframe_flyout_keyboard = false;
-            self.menu_state.chrome_list_keyboard = false;
-            self.timeframe_hover_regions = 0;
+            self.chrome.dismiss();
             cx.notify();
             return;
         }
 
-        self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
-        self.chrome_overlay_phase = ChromeOverlayPhase::Closing;
-        let generation = self.chrome_overlay_generation;
+        let closing = self.chrome.begin_close();
         cx.spawn_in(window, async move |app, cx| {
             cx.background_executor()
                 .timer(CHROME_OVERLAY_EXIT_DURATION)
                 .await;
             if let Err(error) = app.update_in(cx, |app, _, app_cx| {
-                if should_finish_chrome_overlay_close(
-                    app.chrome_overlay_phase,
-                    app.chrome_overlay_generation,
-                    generation,
-                ) {
-                    app.chrome_overlay = None;
-                    app.timeframe_menu_flyout = None;
-                    app.menu_state.timeframe_flyout_keyboard = false;
-                    app.menu_state.chrome_list_keyboard = false;
-                    app.timeframe_hover_regions = 0;
-                    app.chrome_overlay_phase = ChromeOverlayPhase::Opening;
+                if app.chrome.finish_close(closing) {
                     app_cx.notify();
                 }
             }) && app.upgrade().is_some()
@@ -3012,7 +2917,7 @@ impl WorkspaceSurface {
     /// Whether the surface lets chart shortcuts act: it has a chart and no chrome overlay or
     /// modal is open. Keyboard focus is the workspace's to judge.
     pub(super) fn chart_shortcuts_unblocked(&self) -> bool {
-        self.chrome_overlay.is_none()
+        self.chrome.overlay().is_none()
             && self.trading_pnl.account_creator.is_none()
             && self.trading_pnl.account_delete_confirmation.is_none()
             && self.indicator_settings_dialog.is_none()
@@ -3092,77 +2997,53 @@ impl WorkspaceSurface {
         if self.consume_chrome_typeahead(event, workspace_focused, window, cx) {
             return true;
         }
-        if self.chrome_overlay.is_none() || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
-        {
+        let Some(overlay) = self.chrome.open_overlay() else {
             return false;
-        }
+        };
+        let timeframe_menu = overlay == ChromeOverlay::Timeframe;
         match event.keystroke.key.as_str() {
             "escape" => {
-                if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
-                    && self.timeframe_menu_flyout.is_some()
-                {
+                if timeframe_menu && self.chrome.timeframe_flyout().is_some() {
                     self.close_timeframe_flyout(cx);
                 } else {
                     self.close_chrome_overlay(window, cx);
                 }
             }
             "up" => {
-                if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
-                    && self.timeframe_menu_flyout.is_some()
-                    && !self.menu_state.timeframe_flyout_keyboard
-                {
-                    self.menu_state.timeframe_flyout_keyboard = true;
+                if timeframe_menu && self.chrome.focus_timeframe_flyout_keyboard() {
                     cx.notify();
                     return true;
                 }
-                let first_keyboard_step = self.indicator_menu_awaits_keyboard();
-                self.activate_chrome_list_keyboard();
-                self.chrome_selection = if first_keyboard_step {
-                    0
-                } else {
-                    self.chrome_selection.saturating_sub(1)
-                };
+                self.chrome.select_previous_row();
                 self.scroll_chrome_selection_into_view(cx);
                 cx.notify();
             }
             "down" => {
-                if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
-                    && self.timeframe_menu_flyout.is_some()
-                    && !self.menu_state.timeframe_flyout_keyboard
-                {
-                    self.menu_state.timeframe_flyout_keyboard = true;
+                if timeframe_menu && self.chrome.focus_timeframe_flyout_keyboard() {
                     cx.notify();
                     return true;
                 }
-                let count = match self.chrome_overlay {
-                    Some(ChromeOverlay::Instrument) => self.instrument_entries(cx).len(),
-                    Some(ChromeOverlay::Indicator) => self.indicator_menu_entries(cx).len(),
-                    Some(ChromeOverlay::Timeframe) => self.timeframe_menu_keyboard_count(),
-                    Some(ChromeOverlay::ChartType) => {
-                        super::provider_chart_types(self.provider).len()
-                    }
-                    Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
-                    Some(ChromeOverlay::TimeZone) => self.time_zone_matches(cx).len(),
+                let count = match overlay {
+                    ChromeOverlay::Instrument => self.instrument_entries(cx).len(),
+                    ChromeOverlay::Indicator => self.indicator_menu_entries(cx).len(),
+                    ChromeOverlay::Timeframe => self.timeframe_menu_keyboard_count(),
+                    ChromeOverlay::ChartType => super::provider_chart_types(self.provider).len(),
+                    ChromeOverlay::QuickTimeframe => self.quick_timeframe_matches(cx).len(),
+                    ChromeOverlay::TimeZone => self.time_zone_matches(cx).len(),
                     // The Accounts panel is a form, not a keyboard-navigated list.
-                    Some(ChromeOverlay::Accounts) | None => 0,
+                    ChromeOverlay::Accounts => 0,
                 };
-                let first_keyboard_step = self.indicator_menu_awaits_keyboard();
-                self.activate_chrome_list_keyboard();
-                self.chrome_selection = if first_keyboard_step {
-                    0
-                } else {
-                    (self.chrome_selection + 1).min(count.saturating_sub(1))
-                };
+                self.chrome.select_next_row(count);
                 self.scroll_chrome_selection_into_view(cx);
                 cx.notify();
             }
-            "left" if self.chrome_overlay == Some(ChromeOverlay::Timeframe) => {
+            "left" if timeframe_menu => {
                 self.close_timeframe_flyout(cx);
             }
-            "right" if self.chrome_overlay == Some(ChromeOverlay::Timeframe) => {
-                if self.timeframe_menu_flyout.is_none()
+            "right" if timeframe_menu => {
+                if self.chrome.timeframe_flyout().is_none()
                     && let Some(group) = timeframe_menu_groups(self.available_intervals())
-                        .get(self.chrome_selection)
+                        .get(self.chrome.selection())
                         .copied()
                 {
                     self.open_timeframe_group(group, true, cx);
@@ -3175,19 +3056,18 @@ impl WorkspaceSurface {
     }
 
     fn handle_chrome_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        match self.chrome_overlay {
+        match self.chrome.overlay() {
             Some(ChromeOverlay::Timeframe) => {
-                if let Some(group) = self.timeframe_menu_flyout {
-                    if self.menu_state.timeframe_flyout_keyboard {
+                if let Some(group) = self.chrome.timeframe_flyout() {
+                    if self.chrome.focus_timeframe_flyout_keyboard() {
+                        cx.notify();
+                    } else {
                         let intervals =
                             timeframe_group_intervals(group, self.available_intervals());
                         self.apply_highlighted_interval(&intervals, window, cx);
-                    } else {
-                        self.menu_state.timeframe_flyout_keyboard = true;
-                        cx.notify();
                     }
                 } else if let Some(group) = timeframe_menu_groups(self.available_intervals())
-                    .get(self.chrome_selection)
+                    .get(self.chrome.selection())
                     .copied()
                 {
                     self.open_timeframe_group(group, true, cx);
@@ -3219,7 +3099,7 @@ impl WorkspaceSurface {
         if chrome_typeahead_blocked(event) {
             return false;
         }
-        if self.chrome_overlay_phase == ChromeOverlayPhase::Closing {
+        if self.chrome.is_overlay_closing() {
             return false;
         }
         if self.drawing_toolbar_state(cx).active_tool == Some(ChartDrawingKind::Text) {
@@ -3237,10 +3117,10 @@ impl WorkspaceSurface {
         };
         // A key typed into a text field outside the workspace's own focus (order quantity,
         // ticket ticks) belongs to that field and must never open typeahead.
-        if self.chrome_overlay.is_none() && (event.is_held || !workspace_focused) {
+        if self.chrome.overlay().is_none() && (event.is_held || !workspace_focused) {
             return false;
         }
-        match self.chrome_overlay {
+        match self.chrome.overlay() {
             None if typed.is_ascii_digit() => {
                 self.begin_quick_timeframe(typed, window, cx);
                 true
@@ -6210,7 +6090,7 @@ impl WorkspaceSurface {
                     .iter()
                     .position(|entry| entry.action == InstrumentMenuAction::Select(selection))
                 {
-                    self.chrome_selection = row;
+                    self.chrome.set_selection(row);
                 }
                 self.select_instrument(selection, SymbolSelectionTarget::Chart, cx)
             }
@@ -6253,7 +6133,7 @@ impl WorkspaceSurface {
 
     pub(super) fn submit_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.instrument_entries(cx);
-        match symbol_submit_decision(entries.len(), self.chrome_selection) {
+        match symbol_submit_decision(entries.len(), self.chrome.selection()) {
             SymbolSubmitDecision::Select(index) => entries.get(index).is_some_and(|entry| {
                 self.activate_instrument_entry(&entry.action, self.symbol_selection_target, cx)
             }),
@@ -6289,9 +6169,7 @@ impl WorkspaceSurface {
                     };
                     self.pending_watchlist_instrument = Some(instrument);
                     self.pending_symbol_selection_target = None;
-                    if self.chrome_overlay != Some(ChromeOverlay::Instrument)
-                        || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                    {
+                    if !self.chrome.is_overlay_open(ChromeOverlay::Instrument) {
                         self.symbol_selection_target = SymbolSelectionTarget::Chart;
                     }
                     self.market_state.symbol_selection_pending = false;
@@ -6346,12 +6224,12 @@ impl WorkspaceSurface {
         if self.select_opened_product(cx) || self.resolve_pending_mnemonic(cx) {
             return;
         }
-        if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
-            if self.menu_state.chrome_list_keyboard
-                && !self.symbol_input_query(cx).trim().is_empty()
+        if self.chrome.overlay() == Some(ChromeOverlay::Instrument) {
+            if self.chrome.list_keyboard_active() && !self.symbol_input_query(cx).trim().is_empty()
             {
-                self.chrome_selection =
-                    first_selectable_instrument_index(&self.instrument_entries(cx)).unwrap_or(0);
+                self.chrome.set_selection(
+                    first_selectable_instrument_index(&self.instrument_entries(cx)).unwrap_or(0),
+                );
             } else {
                 self.sync_instrument_menu_keyboard(cx);
             }
@@ -6378,9 +6256,7 @@ impl WorkspaceSurface {
                 rejection.reason
             );
             self.pending_symbol_selection_target = None;
-            if self.chrome_overlay != Some(ChromeOverlay::Instrument)
-                || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
-            {
+            if !self.chrome.is_overlay_open(ChromeOverlay::Instrument) {
                 self.symbol_selection_target = SymbolSelectionTarget::Chart;
             }
             self.market_state.symbol_selection_pending = false;
@@ -6425,7 +6301,7 @@ impl WorkspaceSurface {
         if panel.requires_market() && !self.has_market_selection() {
             return;
         }
-        let visible = !self.side_panels.contains(panel);
+        let visible = !self.chrome.side_panels().contains(panel);
         self.set_side_panel_visible(panel, visible, cx);
     }
 
@@ -6451,12 +6327,8 @@ impl WorkspaceSurface {
         visible: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.side_panels.contains(panel) == visible {
+        if !self.chrome.set_side_panel_visible(panel, visible) {
             return;
-        }
-        self.side_panels.set(panel, visible);
-        if panel == SidePanel::OrderBook && !visible {
-            self.menu_state.order_book_column_open = false;
         }
         self.sync_order_book_demand(cx);
         self.chart_persistence_dirty = true;
@@ -6467,7 +6339,7 @@ impl WorkspaceSurface {
     /// right-edge book or its depth heatmap need depth, and the docked book's queue column
     /// also needs each price's resting orders.
     fn order_book_detail(&self, cx: &App) -> OrderBookDetail {
-        let depth = self.side_panels.needs_order_book()
+        let depth = self.chrome.side_panels().needs_order_book()
             || self.chart.as_ref().is_some_and(|chart| {
                 let settings = chart.read(cx).order_flow_settings();
                 settings.order_book_depth.is_some_and(|book| book.visible)
@@ -6477,7 +6349,7 @@ impl WorkspaceSurface {
             });
         if !depth {
             OrderBookDetail::Hidden
-        } else if self.side_panels.contains(SidePanel::OrderBook)
+        } else if self.chrome.side_panels().contains(SidePanel::OrderBook)
             && self
                 .order_book
                 .read(cx)
@@ -6719,13 +6591,12 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn toggle_order_book_column_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu_state.order_book_column_open = !self.menu_state.order_book_column_open;
+        self.chrome.toggle_order_book_column_menu();
         cx.notify();
     }
 
     pub(super) fn close_order_book_column_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu_state.order_book_column_open {
-            self.menu_state.order_book_column_open = false;
+        if self.chrome.close_order_book_column_menu() {
             cx.notify();
         }
     }
@@ -6735,21 +6606,14 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn set_side_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        let width = clamped_side_panel_width(width);
-        if (width - self.side_panel_width).abs() > f32::EPSILON {
-            self.side_panel_width = width;
+        if self.chrome.set_side_panel_width(width) {
             self.chart_persistence_dirty = true;
             cx.notify();
         }
     }
 
     pub(super) fn set_side_panel_split_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
-        let basis_points = (ratio.clamp(0.05, 0.95) * 10_000.0)
-            .round()
-            .to_u32()
-            .unwrap_or(5_000);
-        if basis_points != self.side_panel_split_basis_points {
-            self.side_panel_split_basis_points = basis_points;
+        if self.chrome.set_side_panel_split_ratio(ratio) {
             self.chart_persistence_dirty = true;
             cx.notify();
         }
@@ -6972,9 +6836,8 @@ impl WorkspaceSurface {
         };
         self.indicator_settings_dialog = Some(dialog);
         Self::clear_indicator_failure(kind, cx);
-        self.chrome_overlay = None;
-        self.timeframe_menu_flyout = None;
-        self.chrome_selection = 0;
+        self.chrome.dismiss();
+        self.chrome.set_selection(0);
         cx.notify();
     }
 

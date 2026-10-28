@@ -86,8 +86,13 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
     ),
     (
         "apps/desktop/src/desktop.rs",
-        2,
-        "chrome overlay closing token and independent summary worker initial binding",
+        1,
+        "independent summary worker initial binding",
+    ),
+    (
+        "apps/desktop/src/desktop/pane_chrome_state.rs",
+        1,
+        "chrome overlay closing token",
     ),
     (
         "apps/desktop/src/desktop/workspace_tabs.rs",

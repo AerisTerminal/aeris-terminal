@@ -9,7 +9,7 @@ pub(super) fn chrome_overlay_layer(
     viewport: gpui::Size<Pixels>,
     cx: &App,
 ) -> Option<AnyElement> {
-    let overlay = app_state.chrome_overlay?;
+    let overlay = app_state.chrome.overlay()?;
     let compact_panel = matches!(
         overlay,
         ChromeOverlay::Timeframe
@@ -34,8 +34,8 @@ pub(super) fn chrome_overlay_layer(
     let menu_left = compact_menu_left(overlay, app_state, viewport);
     let animation_origin =
         chrome_overlay_animation_origin(overlay, app_state, menu_left, viewport, floating);
-    let phase = app_state.chrome_overlay_phase;
-    let generation = app_state.chrome_overlay_generation;
+    let phase = app_state.chrome.overlay_phase();
+    let generation = app_state.chrome.overlay_generation();
     let closing = phase == ChromeOverlayPhase::Closing;
     let panel = chrome_overlay_content(app_state, app, overlay, connections, extent, theme, cx);
     let close_app = app.clone();
@@ -110,24 +110,19 @@ fn chrome_overlay_animation_origin(
     viewport: gpui::Size<Pixels>,
     floating: Option<Bounds<Pixels>>,
 ) -> PopupAnimationOrigin {
-    let trigger = app_state
-        .chrome_overlay_trigger_position
-        .or_else(|| match overlay {
-            ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe => app_state
-                .timeframe_trigger_bounds
-                .map(|bounds| bounds.center()),
-            ChromeOverlay::ChartType => app_state
-                .chart_type_trigger_bounds
-                .map(|bounds| bounds.center()),
-            ChromeOverlay::TimeZone => app_state
-                .time_zone_trigger_bounds
-                .map(|bounds| bounds.center()),
-            ChromeOverlay::Accounts => app_state
-                .menu_state
-                .accounts_trigger_bounds
-                .map(|bounds| bounds.center()),
-            ChromeOverlay::Instrument | ChromeOverlay::Indicator => None,
-        });
+    let trigger = app_state.chrome.overlay_trigger_position().or_else(|| {
+        let trigger = match overlay {
+            ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe => ChromeTrigger::Timeframe,
+            ChromeOverlay::ChartType => ChromeTrigger::ChartType,
+            ChromeOverlay::TimeZone => ChromeTrigger::TimeZone,
+            ChromeOverlay::Accounts => ChromeTrigger::Accounts,
+            ChromeOverlay::Instrument | ChromeOverlay::Indicator => return None,
+        };
+        app_state
+            .chrome
+            .trigger_bounds(trigger)
+            .map(|bounds| bounds.center())
+    });
     let Some(trigger) = trigger else {
         return PopupAnimationOrigin::new(0.5, 0.0);
     };
@@ -135,7 +130,7 @@ fn chrome_overlay_animation_origin(
     let (left, width) = match overlay {
         ChromeOverlay::Timeframe => {
             let groups = timeframe_menu_groups(app_state.available_intervals());
-            let flyout = app_state.timeframe_menu_flyout.and_then(|group| {
+            let flyout = app_state.chrome.timeframe_flyout().and_then(|group| {
                 let index = groups.iter().position(|item| *item == group)?;
                 Some((
                     index,
@@ -179,22 +174,28 @@ pub(super) fn compact_menu_left(
     viewport: gpui::Size<Pixels>,
 ) -> Pixels {
     let (trigger, width) = match overlay {
-        ChromeOverlay::ChartType => (app_state.chart_type_trigger_bounds, TIMEFRAME_MENU_WIDTH),
-        ChromeOverlay::TimeZone => (app_state.time_zone_trigger_bounds, TIME_ZONE_MENU_WIDTH),
+        ChromeOverlay::ChartType => (
+            app_state.chrome.trigger_bounds(ChromeTrigger::ChartType),
+            TIMEFRAME_MENU_WIDTH,
+        ),
+        ChromeOverlay::TimeZone => (
+            app_state.chrome.trigger_bounds(ChromeTrigger::TimeZone),
+            TIME_ZONE_MENU_WIDTH,
+        ),
         ChromeOverlay::Timeframe => {
             let intervals = app_state.available_intervals();
             let groups = timeframe_menu_groups(intervals);
-            let flyout = app_state.timeframe_menu_flyout.and_then(|group| {
+            let flyout = app_state.chrome.timeframe_flyout().and_then(|group| {
                 let index = groups.iter().position(|item| *item == group)?;
                 Some((index, timeframe_group_intervals(group, intervals).len()))
             });
             (
-                app_state.timeframe_trigger_bounds,
+                app_state.chrome.trigger_bounds(ChromeTrigger::Timeframe),
                 timeframe_overlay_extent(groups.len(), flyout).0,
             )
         }
         ChromeOverlay::QuickTimeframe => (
-            app_state.timeframe_trigger_bounds,
+            app_state.chrome.trigger_bounds(ChromeTrigger::Timeframe),
             QUICK_TIMEFRAME_POPUP_WIDTH,
         ),
         ChromeOverlay::Instrument | ChromeOverlay::Indicator | ChromeOverlay::Accounts => {
@@ -242,8 +243,8 @@ pub(super) fn chrome_overlay_content(
                 provider: app_state.provider,
                 scope: app_state.symbol_browser.scope(),
                 menu: InstrumentSelectorMenu {
-                    keyboard_selection: app_state.chrome_selection,
-                    keyboard_active: app_state.menu_state.chrome_list_keyboard,
+                    keyboard_selection: app_state.chrome.selection(),
+                    keyboard_active: app_state.chrome.list_keyboard_active(),
                 },
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
@@ -251,8 +252,8 @@ pub(super) fn chrome_overlay_content(
                     .symbol_browser
                     .scoped_provider()
                     .filter(|provider| connections.data.disconnected(*provider)),
-                provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
-                flyout_provider: app_state.menu_state.symbol_provider_menu.flyout_provider(),
+                provider_menu_open: app_state.chrome.symbol_provider_menu_open(),
+                flyout_provider: app_state.chrome.symbol_scope_flyout_provider(),
                 learned_exchanges: app_state.symbol_browser.learned_exchanges().to_vec(),
                 search_categories: app_state.chart_chrome.symbol_search_categories,
             },
@@ -264,8 +265,8 @@ pub(super) fn chrome_overlay_content(
             IndicatorDialogState {
                 extent,
                 input: &app_state.indicator_input,
-                keyboard_selection: app_state.chrome_selection,
-                keyboard_active: app_state.menu_state.chrome_list_keyboard,
+                keyboard_selection: app_state.chrome.selection(),
+                keyboard_active: app_state.chrome.list_keyboard_active(),
                 scroll: &app_state.scrolls.indicator,
             },
             theme,
@@ -277,9 +278,9 @@ pub(super) fn chrome_overlay_content(
             app_state.available_intervals(),
             TimeframeOverlayState {
                 selected: app_state.selected_interval(),
-                flyout: app_state.timeframe_menu_flyout,
-                keyboard_selection: app_state.chrome_selection,
-                keyboard_active: app_state.menu_state.timeframe_flyout_keyboard,
+                flyout: app_state.chrome.timeframe_flyout(),
+                keyboard_selection: app_state.chrome.selection(),
+                keyboard_active: app_state.chrome.timeframe_flyout_keyboard(),
                 pending,
             },
             theme,
@@ -287,11 +288,7 @@ pub(super) fn chrome_overlay_content(
         .into_any_element(),
         ChromeOverlay::QuickTimeframe => quick_timeframe_overlay_content(
             &app_state.timeframe_input,
-            app_state
-                .menu_state
-                .quick_timeframe_error
-                .as_ref()
-                .map(|error| error.message.as_str()),
+            app_state.chrome.quick_timeframe_error(),
             theme,
         )
         .into_any_element(),
@@ -299,7 +296,7 @@ pub(super) fn chrome_overlay_content(
             app,
             &super::provider_chart_types(app_state.provider),
             app_state.chart_type(cx),
-            app_state.chrome_selection,
+            app_state.chrome.selection(),
             theme,
         )
         .into_any_element(),
@@ -663,7 +660,7 @@ pub(super) fn time_zone_overlay_content(
             .unwrap_or_else(|| "UTC".to_string());
         // The UTC badge and the current-zone check share the trailing slot.
         MenuRow::compact(("time_zone_row", index), display_name, theme)
-            .highlighted(app_state.chrome_selection == index)
+            .highlighted(app_state.chrome.selection() == index)
             .on_click(move |_, window, cx| {
                 row_app.update(cx, |app, app_cx| {
                     if app.set_chart_time_zone(time_zone, app_cx) {

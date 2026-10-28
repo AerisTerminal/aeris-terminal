@@ -45,8 +45,8 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
-can close several items together. Then M6 needs its milestone full gate and closeout, followed by
-M7 and M8 in order.
+can close several items together. The M6 full gate and CI closeout are recorded; M7 and M8 follow in
+order.
 
 ## 3. Work items
 
@@ -176,8 +176,9 @@ M7 and M8 in order.
     - Closes TR-10 and UI-10.
 - [x] M6.12 No unhandled discards in desktop production code; deny lints (34698887)
 
-M6 closeout (after the items above): run the full gate on the M6 head, confirm CI is green there, and
-record it on this line.
+M6 closeout: the full gate (fmt, workspace clippy, workspace tests) passed locally on 1b85770e, and
+CI run 40624566453 passed on 93e0bd21, which contains all M6 code. The open M6 items still wait
+only on the guarded GUI checks on their lines.
 
 ### M7 desktop structure
 
@@ -219,7 +220,12 @@ record it on this line.
     `desktop/order_flow_presenter.rs` owns the accepted trade tape and its ordering, the sweep
     highlights, the Time & Sales filter and rows, the chart trade projection and the order-book
     demand the market worker accepted behind private fields.
-  - Left: `PaneChromeState` and `PanePersistence`, each with private fields.
+    `desktop/pane_chrome_state.rs` owns the open header overlay (one enum with its phase,
+    trigger and list navigation), the selected row, the timeframe flyout and its hover close,
+    trigger anchors, the Accounts section and placement, the quick-timeframe rejection, the
+    scope menu and the docked side-panel layout behind private fields, with enums instead of
+    the former menu bools.
+  - Left: `PanePersistence`, with private fields.
   - Remove the `too_many_lines` allow.
   - GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
 - [ ] M7.5 `TerminalApp` split into app controllers

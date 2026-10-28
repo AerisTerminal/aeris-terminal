@@ -78,6 +78,9 @@ mod order_flow_presenter;
 mod order_quantity;
 #[path = "components/order_ticket.rs"]
 mod order_ticket;
+#[path = "desktop/pane_chrome_state.rs"]
+mod pane_chrome_state;
+use pane_chrome_state::{ChromeOverlay, ChromeOverlayPhase, ChromeTrigger};
 #[path = "components/platform_menu.rs"]
 mod platform_menu;
 #[path = "components/price_alert_dialog.rs"]
@@ -908,10 +911,7 @@ struct WorkspaceSurface {
     chart_time_zone: String,
     pending_chart_sync_events: VecDeque<aeris_chart_integration::ChartSyncEvent>,
     pending_linked_instrument: Option<InstallProviderInstrument>,
-    side_panels: SidePanelVisibility,
-    side_panel_width: f32,
-    side_panel_split_basis_points: u32,
-    menu_state: WorkspaceMenuState,
+    chrome: pane_chrome_state::PaneChromeState,
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_failure: Option<ChartFailure>,
@@ -946,17 +946,6 @@ struct WorkspaceSurface {
     time_zone_input: Entity<InputState>,
     studies: studies_controller::StudiesController,
     indicator_settings_dialog: Option<IndicatorSettingsDialog>,
-    chrome_overlay: Option<ChromeOverlay>,
-    chrome_overlay_phase: ChromeOverlayPhase,
-    chrome_overlay_generation: u64,
-    chrome_overlay_trigger_position: Option<gpui::Point<Pixels>>,
-    timeframe_menu_flyout: Option<TimeframeMenuGroup>,
-    timeframe_flyout_close_token: u64,
-    timeframe_hover_regions: u32,
-    timeframe_trigger_bounds: Option<Bounds<Pixels>>,
-    chart_type_trigger_bounds: Option<Bounds<Pixels>>,
-    time_zone_trigger_bounds: Option<Bounds<Pixels>>,
-    chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: ProviderId,
     product: Option<InstallProviderInstrument>,
@@ -1254,59 +1243,6 @@ struct StudySettingsDialogState {
 }
 
 #[derive(Default)]
-struct WorkspaceMenuState {
-    order_book_column_open: bool,
-    timeframe_flyout_keyboard: bool,
-    chrome_list_keyboard: bool,
-    /// Header Accounts trigger, measured each frame so its panel opens out of it.
-    accounts_trigger_bounds: Option<Bounds<Pixels>>,
-    /// The Accounts panel section shown when it opens; kept across openings.
-    accounts_tab: accounts_panel::AccountsTab,
-    /// Where the Accounts panel was dragged; every fresh open starts centered.
-    accounts_placement: chart_context_menus::FloatingPanelPlacement,
-    /// Why the last quick-timeframe submission was rejected; cleared by an edit or close.
-    quick_timeframe_error: Option<QuickTimeframeError>,
-    /// The symbol menu's search-scope dropdown, opened from the search-field logo.
-    symbol_provider_menu: SymbolProviderMenu,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum SymbolProviderMenu {
-    #[default]
-    Closed,
-    Open,
-    /// Open with a provider's exchange and category flyout shown beside it.
-    Flyout(ProviderId),
-}
-
-impl SymbolProviderMenu {
-    const fn is_open(self) -> bool {
-        !matches!(self, Self::Closed)
-    }
-
-    const fn flyout_provider(self) -> Option<ProviderId> {
-        match self {
-            Self::Flyout(provider) => Some(provider),
-            Self::Closed | Self::Open => None,
-        }
-    }
-
-    const fn toggled(self) -> Self {
-        match self {
-            Self::Closed => Self::Open,
-            Self::Open | Self::Flyout(_) => Self::Closed,
-        }
-    }
-}
-
-/// A rejected quick-timeframe submission. The rejected text is kept so only a real edit
-/// clears the error: the input also reports a change when Enter submits unchanged text.
-struct QuickTimeframeError {
-    query: String,
-    message: String,
-}
-
-#[derive(Default)]
 struct WorkspaceMarketState {
     symbol_selection_pending: bool,
 }
@@ -1396,17 +1332,6 @@ fn provider_ready_message(provider: ProviderId, product: &InstallProviderInstrum
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChromeOverlay {
-    Instrument,
-    Indicator,
-    Timeframe,
-    QuickTimeframe,
-    ChartType,
-    TimeZone,
-    Accounts,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TimeframeMenuGroup {
     Ticks,
     Seconds,
@@ -1431,27 +1356,12 @@ impl TimeframeMenuGroup {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum ChromeOverlayPhase {
-    #[default]
-    Opening,
-    Closing,
-}
-
 fn chrome_overlay_progress(phase: ChromeOverlayPhase, delta: f32) -> f32 {
     let delta = delta.clamp(0.0, 1.0);
     match phase {
         ChromeOverlayPhase::Opening => delta,
         ChromeOverlayPhase::Closing => 1.0 - delta,
     }
-}
-
-const fn should_finish_chrome_overlay_close(
-    phase: ChromeOverlayPhase,
-    current_generation: u64,
-    closing_generation: u64,
-) -> bool {
-    matches!(phase, ChromeOverlayPhase::Closing) && current_generation == closing_generation
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4418,9 +4328,7 @@ fn subscribe_symbol_input(
             match symbol_input_action(event) {
                 SymbolInputAction::Submit => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::Instrument)
-                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                        {
+                        if !app.chrome.is_overlay_open(ChromeOverlay::Instrument) {
                             return;
                         }
                         if app.submit_symbol_input(app_cx)
@@ -4432,21 +4340,20 @@ fn subscribe_symbol_input(
                 }
                 SymbolInputAction::Search => {
                     terminal.update(cx, |app, cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::Instrument)
-                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                        {
+                        if !app.chrome.is_overlay_open(ChromeOverlay::Instrument) {
                             return;
                         }
                         let typed = app
                             .symbol_input
                             .as_ref()
                             .is_some_and(|input| !input.read(cx).value().trim().is_empty());
-                        app.menu_state.chrome_list_keyboard = typed;
-                        app.chrome_selection = if typed {
+                        app.chrome.set_list_keyboard(typed);
+                        let selection = if typed {
                             0
                         } else {
                             current_instrument_menu_index(&app.instrument_entries(cx)).unwrap_or(0)
                         };
+                        app.chrome.set_selection(selection);
                         app.scrolls.instrument.set_offset(point(px(0.0), px(0.0)));
                         app.search_symbol_input(cx);
                         cx.notify();
@@ -4481,11 +4388,11 @@ fn subscribe_indicator_input(
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     // Enter adds only the highlighted row; with nothing highlighted it is a no-op.
                     let entry = terminal.update(cx, |app, cx| {
-                        app.menu_state
-                            .chrome_list_keyboard
+                        app.chrome
+                            .list_keyboard_active()
                             .then(|| {
                                 app.indicator_menu_entries(cx)
-                                    .get(app.chrome_selection)
+                                    .get(app.chrome.selection())
                                     .copied()
                             })
                             .flatten()
@@ -4502,8 +4409,8 @@ fn subscribe_indicator_input(
                 } else if matches!(event, InputEvent::Change) {
                     let typed = !input.read(cx).value().trim().is_empty();
                     terminal.update(cx, |app, cx| {
-                        app.menu_state.chrome_list_keyboard = typed;
-                        app.chrome_selection = 0;
+                        app.chrome.set_list_keyboard(typed);
+                        app.chrome.set_selection(0);
                         app.scrolls.indicator.set_offset(point(px(0.0), px(0.0)));
                         cx.notify();
                     });
@@ -4528,9 +4435,7 @@ fn subscribe_timeframe_input(
             move |_, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe)
-                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                        {
+                        if !app.chrome.is_overlay_open(ChromeOverlay::QuickTimeframe) {
                             return;
                         }
                         app.submit_quick_timeframe(window, app_cx);
@@ -4538,22 +4443,12 @@ fn subscribe_timeframe_input(
                 }
                 InputEvent::Change => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe)
-                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                        {
+                        if !app.chrome.is_overlay_open(ChromeOverlay::QuickTimeframe) {
                             return;
                         }
                         let query = input.read(app_cx).value();
-                        // Only a real edit retracts the rejection; Enter also reports a
-                        // change while the rejected text is still in place.
-                        if app
-                            .menu_state
-                            .quick_timeframe_error
-                            .as_ref()
-                            .is_some_and(|error| error.query != query.as_ref())
-                        {
-                            app.menu_state.quick_timeframe_error = None;
-                        }
+                        app.chrome
+                            .retract_quick_timeframe_error_after_edit(query.as_ref());
                         if query.is_empty() {
                             app.close_chrome_overlay(window, app_cx);
                             return;
@@ -4590,9 +4485,7 @@ fn subscribe_time_zone_input(
             move |_, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::TimeZone)
-                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                        {
+                        if !app.chrome.is_overlay_open(ChromeOverlay::TimeZone) {
                             return;
                         }
                         app.apply_highlighted_time_zone(window, app_cx);
@@ -4600,12 +4493,10 @@ fn subscribe_time_zone_input(
                 }
                 InputEvent::Change => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::TimeZone)
-                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
-                        {
+                        if !app.chrome.is_overlay_open(ChromeOverlay::TimeZone) {
                             return;
                         }
-                        app.chrome_selection = 0;
+                        app.chrome.set_selection(0);
                         app.scrolls.time_zone.set_offset(point(px(0.0), px(0.0)));
                         app_cx.notify();
                     });
@@ -4863,16 +4754,7 @@ fn workspace_surface_entity(
     subscribe_order_book_trading(&workspace, &order_book, window, cx);
     if let Some((visibility, width, split)) = restored.side_panel {
         workspace.update(cx, |surface, surface_cx| {
-            surface.side_panel_width = width
-                .to_f32()
-                .filter(|width| *width > 0.0)
-                .unwrap_or(SIDE_PANEL_INITIAL_WIDTH)
-                .clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH);
-            surface.side_panel_split_basis_points = if split == 0 {
-                5_000
-            } else {
-                split.clamp(500, 9_500)
-            };
+            surface.chrome.restore_side_panel_size(width, split);
             surface.apply_side_panels(SidePanelVisibility::from_persisted(visibility), surface_cx);
             surface.chart_persistence_dirty = false;
         });
@@ -5429,9 +5311,14 @@ fn workspace_tab_state(workspace: &WorkspaceTab, cx: &App) -> WorkspaceTabState 
                         .unwrap_or(1),
                     generation: workspace.generation.max(1),
                     chart: surface.workspace_chart_state(cx),
-                    side_panel_visibility: u32::from(surface.side_panels.0),
-                    side_panel_width: surface.side_panel_width.round().to_u32().unwrap_or(400),
-                    side_panel_split_basis_points: surface.side_panel_split_basis_points,
+                    side_panel_visibility: u32::from(surface.chrome.side_panels().0),
+                    side_panel_width: surface
+                        .chrome
+                        .side_panel_width()
+                        .round()
+                        .to_u32()
+                        .unwrap_or(400),
+                    side_panel_split_basis_points: surface.chrome.side_panel_split_basis_points(),
                     interval: surface.interval.label().to_string(),
                 })
             })

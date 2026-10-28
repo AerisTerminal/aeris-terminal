@@ -1263,14 +1263,14 @@ pub(super) fn series_selector(
             canvas(
                 move |bounds, _, cx| {
                     bounds_app.update(cx, |app, app_cx| {
-                        if app.timeframe_trigger_bounds == Some(bounds) {
-                            return;
-                        }
-                        app.timeframe_trigger_bounds = Some(bounds);
-                        if matches!(
-                            app.chrome_overlay,
-                            Some(ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe)
-                        ) {
+                        if app
+                            .chrome
+                            .record_trigger_bounds(ChromeTrigger::Timeframe, bounds)
+                            && matches!(
+                                app.chrome.overlay(),
+                                Some(ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe)
+                            )
+                        {
                             app_cx.notify();
                         }
                     });
@@ -1315,11 +1315,11 @@ pub(super) fn chart_type_selector(
             canvas(
                 move |bounds, _, cx| {
                     bounds_app.update(cx, |app, app_cx| {
-                        if app.chart_type_trigger_bounds == Some(bounds) {
-                            return;
-                        }
-                        app.chart_type_trigger_bounds = Some(bounds);
-                        if app.chrome_overlay == Some(ChromeOverlay::ChartType) {
+                        if app
+                            .chrome
+                            .record_trigger_bounds(ChromeTrigger::ChartType, bounds)
+                            && app.chrome.overlay() == Some(ChromeOverlay::ChartType)
+                        {
                             app_cx.notify();
                         }
                     });
@@ -1365,11 +1365,11 @@ pub(super) fn time_zone_selector(
             canvas(
                 move |bounds, _, cx| {
                     bounds_app.update(cx, |app, app_cx| {
-                        if app.time_zone_trigger_bounds == Some(bounds) {
-                            return;
-                        }
-                        app.time_zone_trigger_bounds = Some(bounds);
-                        if app.chrome_overlay == Some(ChromeOverlay::TimeZone) {
+                        if app
+                            .chrome
+                            .record_trigger_bounds(ChromeTrigger::TimeZone, bounds)
+                            && app.chrome.overlay() == Some(ChromeOverlay::TimeZone)
+                        {
                             app_cx.notify();
                         }
                     });
@@ -1420,11 +1420,11 @@ fn accounts_selector(
             canvas(
                 move |bounds, _, cx| {
                     bounds_app.update(cx, |app, app_cx| {
-                        if app.menu_state.accounts_trigger_bounds == Some(bounds) {
-                            return;
-                        }
-                        app.menu_state.accounts_trigger_bounds = Some(bounds);
-                        if app.chrome_overlay == Some(ChromeOverlay::Accounts) {
+                        if app
+                            .chrome
+                            .record_trigger_bounds(ChromeTrigger::Accounts, bounds)
+                            && app.chrome.overlay() == Some(ChromeOverlay::Accounts)
+                        {
                             app_cx.notify();
                         }
                     });

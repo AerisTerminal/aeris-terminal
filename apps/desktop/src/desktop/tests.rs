@@ -25,11 +25,11 @@ use super::{
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, project_provider_catalog_event,
     publication_chart_state, reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
-    should_finish_chrome_overlay_close, stabilized_connection_state, symbol_input_action,
-    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
-    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
-    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
-    timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    stabilized_connection_state, symbol_input_action, symbol_submit_decision,
+    timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
+    timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
+    timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
+    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
     workspace_maximize_transition, workspace_split_ratio, workspace_switch,
     wrapped_workspace_index,
@@ -257,25 +257,6 @@ fn chrome_overlay_motion_opens_and_closes_in_opposite_directions() {
 }
 
 #[test]
-fn stale_close_completion_cannot_remove_a_reopened_overlay() {
-    assert!(should_finish_chrome_overlay_close(
-        ChromeOverlayPhase::Closing,
-        7,
-        7
-    ));
-    assert!(!should_finish_chrome_overlay_close(
-        ChromeOverlayPhase::Opening,
-        8,
-        7
-    ));
-    assert!(!should_finish_chrome_overlay_close(
-        ChromeOverlayPhase::Closing,
-        8,
-        7
-    ));
-}
-
-#[test]
 fn timeframe_overlay_uses_the_trigger_left_edge() {
     let trigger = Bounds::new(point(px(214.0), px(52.0)), size(px(64.0), px(32.0)));
     assert_eq!(timeframe_overlay_left(Some(trigger)), px(214.0));
@@ -499,9 +480,10 @@ mod timeframe_input {
             let surface = self.0.read(cx);
             let input = surface.timeframe_input.clone();
             let ticket = surface.order_quantity.ticket_input().clone();
-            let quick = surface.chrome_overlay == Some(ChromeOverlay::QuickTimeframe);
-            let symbol = (surface.chrome_overlay == Some(ChromeOverlay::Instrument)
-                && surface.chrome_overlay_phase != ChromeOverlayPhase::Closing)
+            let quick = surface.chrome.overlay() == Some(ChromeOverlay::QuickTimeframe);
+            let symbol = surface
+                .chrome
+                .is_overlay_open(ChromeOverlay::Instrument)
                 .then(|| surface.symbol_input.clone())
                 .flatten();
             let practice_name = surface
@@ -1017,14 +999,16 @@ mod timeframe_input {
         cx.simulate_keystrokes("enter");
         cx.read(|cx| {
             let surface = surface.read(cx);
-            assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::QuickTimeframe));
-            assert_ne!(surface.chrome_overlay_phase, ChromeOverlayPhase::Closing);
             assert!(
                 surface
-                    .menu_state
-                    .quick_timeframe_error
-                    .as_ref()
-                    .is_some_and(|error| error.message.contains("9x")),
+                    .chrome
+                    .is_overlay_open(ChromeOverlay::QuickTimeframe)
+            );
+            assert!(
+                surface
+                    .chrome
+                    .quick_timeframe_error()
+                    .is_some_and(|message| message.contains("9x")),
                 "an unmatched timeframe is reported, not silently ignored"
             );
         });
@@ -1037,9 +1021,12 @@ mod timeframe_input {
         cx.simulate_keystrokes("backspace");
         cx.read(|cx| {
             let surface = surface.read(cx);
-            assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::QuickTimeframe));
+            assert_eq!(
+                surface.chrome.overlay(),
+                Some(ChromeOverlay::QuickTimeframe)
+            );
             assert!(
-                surface.menu_state.quick_timeframe_error.is_none(),
+                surface.chrome.quick_timeframe_error().is_none(),
                 "editing the text clears the error"
             );
         });
@@ -1051,9 +1038,9 @@ mod timeframe_input {
         cx.update(|window, cx| {
             surface.update(cx, |surface, surface_cx| {
                 surface.open_chrome_overlay(ChromeOverlay::ChartType, window, surface_cx);
-                assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::ChartType));
+                assert_eq!(surface.chrome.overlay(), Some(ChromeOverlay::ChartType));
                 surface.open_chrome_overlay(ChromeOverlay::ChartType, window, surface_cx);
-                assert_eq!(surface.chrome_overlay_phase, ChromeOverlayPhase::Closing);
+                assert_eq!(surface.chrome.overlay_phase(), ChromeOverlayPhase::Closing);
             });
         });
     }
@@ -1133,9 +1120,9 @@ mod timeframe_input {
             let name = cx.new(|input_cx| InputState::new(window, input_cx));
             let equity = cx.new(|input_cx| InputState::new(window, input_cx));
             surface.update(cx, |surface, surface_cx| {
-                assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::Accounts));
+                assert_eq!(surface.chrome.overlay(), Some(ChromeOverlay::Accounts));
                 assert_eq!(
-                    surface.menu_state.accounts_tab,
+                    surface.chrome.accounts_tab(),
                     accounts_panel::AccountsTab::TradingAccounts
                 );
                 surface.trading_pnl.account_creator =
@@ -1151,12 +1138,12 @@ mod timeframe_input {
         cx.read(|cx| {
             let surface = surface.read(cx);
             assert_eq!(
-                surface.chrome_overlay,
+                surface.chrome.overlay(),
                 Some(ChromeOverlay::Accounts),
                 "switching tabs keeps the panel open"
             );
             assert_eq!(
-                surface.menu_state.accounts_tab,
+                surface.chrome.accounts_tab(),
                 accounts_panel::AccountsTab::Connections
             );
             assert!(
@@ -1199,8 +1186,8 @@ mod timeframe_input {
         cx.update(|_, cx| {
             surface.update(cx, |surface, surface_cx| {
                 surface
-                    .menu_state
-                    .accounts_placement
+                    .chrome
+                    .accounts_placement_mut()
                     .grab(point(px(40.0), px(10.0)));
                 surface.move_accounts_panel(point(px(240.0), px(110.0)), surface_cx);
             });
@@ -1268,7 +1255,7 @@ mod timeframe_input {
         cx.simulate_keystrokes("5");
 
         cx.read(|cx| {
-            assert_eq!(surface.read(cx).chrome_overlay, None);
+            assert_eq!(surface.read(cx).chrome.overlay(), None);
             assert!(
                 ticket.read(cx).value().contains('5'),
                 "the digit lands in the quantity field"
@@ -1295,7 +1282,7 @@ mod timeframe_input {
 
         cx.read(|cx| {
             let surface = surface.read(cx);
-            assert_eq!(surface.chrome_overlay, None);
+            assert_eq!(surface.chrome.overlay(), None);
             let creator = surface
                 .trading_pnl
                 .account_creator

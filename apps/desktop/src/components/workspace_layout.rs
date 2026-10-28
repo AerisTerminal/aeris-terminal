@@ -430,18 +430,19 @@ pub(super) fn workspace_market_area(
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
     let order_book_frame = surface.order_book.read(cx).frame().cloned();
-    let side_panel = surface.side_panels.any().then(|| {
+    let side_panels = surface.chrome.side_panels();
+    let side_panel = side_panels.any().then(|| {
         workspace_side_panel(WorkspaceSidePanelState {
             app: active_surface.clone(),
             terminal: terminal.clone(),
             workspace_id: workspace.id,
-            visible: surface.side_panels,
-            width: surface.side_panel_width,
-            split_basis_points: surface.side_panel_split_basis_points,
+            visible: side_panels,
+            width: surface.chrome.side_panel_width(),
+            split_basis_points: surface.chrome.side_panel_split_basis_points(),
             order_book: OrderBookPanelState {
                 app: active_surface,
                 order_book: &surface.order_book,
-                column_menu_open: surface.menu_state.order_book_column_open,
+                column_menu_open: surface.chrome.order_book_column_menu_open(),
                 columns: surface.order_book.read(cx).columns(),
                 theme,
             },
@@ -474,7 +475,7 @@ pub(super) fn workspace_market_area(
     let panel_sidebar = super::terminal_chrome::panel_sidebar(
         active_surface,
         super::terminal_chrome::PanelSidebarState {
-            side_panels: surface.side_panels,
+            side_panels,
             context_visible: surface.context_panel.is_visible(),
             market_selected: surface.has_market_selection(),
         },

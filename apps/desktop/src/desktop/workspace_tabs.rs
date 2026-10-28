@@ -478,7 +478,8 @@ impl TerminalApp {
         let watchlist_visible = self
             .active_surface()
             .read(cx)
-            .side_panels
+            .chrome
+            .side_panels()
             .contains(SidePanel::Watchlist);
 
         let tab_instruments = self.workspaces.iter().filter_map(|workspace| {
@@ -982,20 +983,17 @@ impl TerminalApp {
 
         let previous = workspace.panes[workspace.active_pane].surface.clone();
         let next = workspace.panes[index].surface.clone();
-        let (side_panels, side_panel_width, side_panel_split) =
-            previous.read_with(cx, |surface, _| {
-                (
-                    surface.side_panels,
-                    surface.side_panel_width,
-                    surface.side_panel_split_basis_points,
-                )
-            });
+        let (side_panels, side_panel_size) = previous.read_with(cx, |surface, _| {
+            (
+                surface.chrome.side_panels(),
+                surface.chrome.side_panel_size(),
+            )
+        });
         previous.update(cx, |surface, surface_cx| {
             surface.apply_side_panels(SidePanelVisibility::default(), surface_cx);
         });
         next.update(cx, |surface, surface_cx| {
-            surface.side_panel_width = side_panel_width;
-            surface.side_panel_split_basis_points = side_panel_split;
+            surface.chrome.set_side_panel_size(side_panel_size);
             surface.apply_side_panels(side_panels, surface_cx);
         });
 
@@ -3195,7 +3193,7 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let (product, interval, drawing_tool, side_panels, side_panel_width, side_panel_split) = {
+        let (product, interval, drawing_tool, side_panels, side_panel_size) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.product.clone() else {
                 self.workspace_error = Some("The active pane has no market to copy".to_string());
@@ -3207,9 +3205,8 @@ impl TerminalApp {
                 source.interval,
                 self.drawing_tool_menu
                     .armed_choice(source.drawing_toolbar_state(cx).active_tool),
-                source.side_panels,
-                source.side_panel_width,
-                source.side_panel_split_basis_points,
+                source.chrome.side_panels(),
+                source.chrome.side_panel_size(),
             )
         };
         let source_surface = workspace.panes[workspace.active_pane].surface.clone();
@@ -3238,8 +3235,7 @@ impl TerminalApp {
             surface.set_market_resource_class(ConsumerResourceClass::Foreground, surface_cx);
             surface.set_market_message_wake(self.market_frame_wake.callback());
             surface.select_drawing_tool(drawing_tool, surface_cx);
-            surface.side_panel_width = side_panel_width;
-            surface.side_panel_split_basis_points = side_panel_split;
+            surface.chrome.set_side_panel_size(side_panel_size);
             surface.apply_side_panels(side_panels, surface_cx);
         });
         cx.observe(&surface, |app, surface, cx| {
@@ -3319,14 +3315,12 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let (removed_side_panels, removed_side_panel_width, removed_side_panel_split) = workspace
-            .panes[workspace.active_pane]
+        let (removed_side_panels, removed_side_panel_size) = workspace.panes[workspace.active_pane]
             .surface
             .read_with(cx, |surface, _| {
                 (
-                    surface.side_panels,
-                    surface.side_panel_width,
-                    surface.side_panel_split_basis_points,
+                    surface.chrome.side_panels(),
+                    surface.chrome.side_panel_size(),
                 )
             });
         let removed = workspace.panes.remove(workspace.active_pane);
@@ -3354,8 +3348,7 @@ impl TerminalApp {
         workspace.panes[recipient]
             .surface
             .update(cx, |surface, surface_cx| {
-                surface.side_panel_width = removed_side_panel_width;
-                surface.side_panel_split_basis_points = removed_side_panel_split;
+                surface.chrome.set_side_panel_size(removed_side_panel_size);
                 surface.apply_side_panels(removed_side_panels, surface_cx);
             });
         self.focus_workspace(window, cx);
