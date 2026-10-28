@@ -730,6 +730,7 @@ still wait on the GUI checks and the remaining work on their lines.
     capture crate that no target builds; `tiny-skia 0.12` comes from Aeris Charts.
   - TR-12 order plant: not unused. `market_runtime::rithmic_venue` opens it for broker orders, so
     it stays in the default build.
+  - Verified: workspace gate locally and CI run 40728456359 on `d54352cb` (Windows and Ubuntu) green.
   - Left: GUI smoke test (charts, drawing stamps and image export after the `resvg` move), including
     a signed-in avatar check. Not run.
 - [ ] M8.11 Vendor and tooling trim
