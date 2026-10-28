@@ -95,7 +95,7 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "chrome overlay closing token",
     ),
     (
-        "apps/desktop/src/desktop/workspace_tabs.rs",
+        "apps/desktop/src/desktop/chart_menus.rs",
         1,
         "copy feedback token",
     ),

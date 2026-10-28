@@ -142,19 +142,24 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.command_palette_input.update(cx, |input, input_cx| {
-            input.set_value("", window, input_cx);
-            input.focus_handle(input_cx).focus(window, input_cx);
-        });
-        self.command_palette_open = true;
-        self.command_palette_selection = 0;
-        self.command_palette_message = None;
+        self.overlays
+            .command_palette_input()
+            .update(cx, |input, input_cx| {
+                input.set_value("", window, input_cx);
+                input.focus_handle(input_cx).focus(window, input_cx);
+            });
+        if self
+            .overlays
+            .open_command_palette()
+            .is_some_and(OverlayKind::pins_title_bar)
+        {
+            self.release_frameless_title_bar(window, cx);
+        }
         cx.notify();
     }
 
     pub(super) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.command_palette_open = false;
-        self.command_palette_message = None;
+        self.overlays.close(OverlayKind::CommandPalette);
         self.chrome_focus.focus(window, cx);
         cx.notify();
     }
@@ -267,7 +272,12 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let query = self.command_palette_input.read(cx).value().to_string();
+        let query = self
+            .overlays
+            .command_palette_input()
+            .read(cx)
+            .value()
+            .to_string();
         if let Some(mnemonic) = command_registry::parse_mnemonic(&query) {
             if let Some(chart) = mnemonic.chart {
                 self.execute_registered_command(chart, window, cx);
@@ -280,8 +290,8 @@ impl TerminalApp {
                     surface.search_mnemonic_symbol(symbol, window, surface_cx)
                 });
                 if !dispatched {
-                    self.command_palette_message =
-                        Some("Symbol search could not start".to_string());
+                    self.overlays
+                        .set_command_palette_message("Symbol search could not start");
                     cx.notify();
                     return;
                 }
@@ -290,11 +300,14 @@ impl TerminalApp {
             return;
         }
         let results = command_registry::search(&query, 8);
-        let Some(command) = results
-            .get(self.command_palette_selection)
+        let Some(command) = self
+            .overlays
+            .command_palette_selection()
+            .and_then(|selection| results.get(selection))
             .map(|spec| spec.id)
         else {
-            self.command_palette_message = Some("No matching command".to_string());
+            self.overlays
+                .set_command_palette_message("No matching command");
             cx.notify();
             return;
         };
@@ -404,12 +417,12 @@ impl TerminalApp {
     }
 
     fn rendered_command_palette(&self, terminal: &Entity<Self>, cx: &App) -> Option<AnyElement> {
-        self.command_palette_open.then(|| {
+        self.overlays.command_palette_selection().map(|selection| {
             command_palette_layer(
                 terminal,
-                &self.command_palette_input,
-                self.command_palette_selection,
-                self.command_palette_message.clone(),
+                self.overlays.command_palette_input(),
+                selection,
+                self.overlays.command_palette_message().map(str::to_string),
                 &self.theme,
                 cx,
             )
@@ -799,7 +812,7 @@ impl TerminalApp {
 impl TerminalApp {
     pub(super) fn trading_hotkeys_enabled(&self, window: &Window, cx: &App) -> bool {
         self.pages.view == market_screener::AppView::Terminal
-            && !self.keyboard_shortcuts_open
+            && !self.overlays.is_open(OverlayKind::KeyboardShortcuts)
             && self.workspace_keyboard_focused(window, cx)
     }
 
@@ -1501,9 +1514,9 @@ fn terminal_shell_root(
             move |_, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     palette_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.command_palette_selection = 0;
-                        terminal.command_palette_message = None;
-                        terminal_cx.notify();
+                        if terminal.overlays.command_query_changed() {
+                            terminal_cx.notify();
+                        }
                     });
                 }
             },

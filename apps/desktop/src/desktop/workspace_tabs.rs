@@ -221,22 +221,13 @@ impl TerminalApp {
             workspace_error: init.workspace_notice,
             watchlist_drag: None,
             watchlist_scroll: ScrollHandle::new(),
-            chart_context_menu: None,
-            chart_context_copy_feedback_generation: 0,
-            chart_settings_menu: None,
-            chart_settings_placement: chart_context_menus::FloatingPanelPlacement::default(),
-            chart_settings_section: ChartSettingsSection::Symbol,
-            chart_settings_color_picker: None,
-            chart_settings_select: None,
-            chart_settings_template_overlay: ChartSettingsTemplateOverlay::Closed,
-            chart_settings_template_name: None,
-            chart_settings_template_error: None,
+            chart_menus: ChartMenus::default(),
             chart_settings_templates: init.chart_settings_templates,
             chart_settings_persistence_dirty: false,
             drawing_templates: init.drawing_templates,
             drawing_templates_persistence_dirty: false,
             drawing_context_toolbar: DrawingContextToolbar::default(),
-            platform_menu_anchor: None,
+            overlays: OverlayStack::new(command_palette_input),
             pages: app_navigation::AppPages::default(),
             frameless_title_bar: FramelessTitleBar::default(),
             fullscreen_hint: FullscreenHint::default(),
@@ -244,12 +235,7 @@ impl TerminalApp {
             chart_fullscreen: None,
             bottom_panel: bottom_panel::BottomPanelState::default(),
             profile_refresh_on_activation: false,
-            command_palette_input,
-            command_palette_open: false,
-            command_palette_selection: 0,
-            command_palette_message: None,
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
-            keyboard_shortcuts_open: false,
             data_connections: DataConnections::default(),
             provider_login: provider_login::ProviderLoginFlow::default(),
             linked_sync_revisions: BTreeMap::new(),
@@ -1164,26 +1150,26 @@ impl TerminalApp {
     ) {
         menu.copy_feedback = None;
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
-        self.close_chart_settings_menu(cx);
-        self.chart_settings_color_picker = None;
-        self.chart_context_menu = Some(menu);
+        self.show_chart_context_menu(menu, cx);
         cx.notify();
     }
 
+    /// Shows `menu` as the context menu; a settings panel it replaces resumes its charts.
+    fn show_chart_context_menu(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
+        if let Some(workspace_id) = self.chart_menus.open_context(menu) {
+            self.set_workspace_chart_pointers_suspended(workspace_id, false, cx);
+        }
+    }
+
     pub(super) fn close_chart_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.chart_context_menu.take().is_some() {
+        if self.chart_menus.close_context() {
             cx.notify();
         }
     }
 
     pub(super) fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(menu) = self.chart_settings_menu.take() {
-            self.set_workspace_chart_pointers_suspended(menu.workspace_id, false, cx);
-            self.chart_settings_color_picker = None;
-            self.chart_settings_select = None;
-            self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
-            self.chart_settings_template_name = None;
-            self.chart_settings_template_error = None;
+        if let Some(workspace_id) = self.chart_menus.close_settings() {
+            self.set_workspace_chart_pointers_suspended(workspace_id, false, cx);
             cx.notify();
         }
     }
@@ -1247,23 +1233,13 @@ impl TerminalApp {
         section: ChartSettingsSection,
         cx: &mut Context<Self>,
     ) {
-        if self.chart_settings_section != section {
-            self.chart_settings_section = section;
-            self.chart_settings_color_picker = None;
-            self.chart_settings_select = None;
-            self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        if self.chart_menus.set_settings_section(section) {
             cx.notify();
         }
     }
 
     pub(super) fn dismiss_chart_settings_overlays(&mut self, cx: &mut Context<Self>) {
-        let color_was_open = self.chart_settings_color_picker.take().is_some();
-        let select_was_open = self.chart_settings_select.take().is_some();
-        let template_was_open = self.chart_settings_template_overlay.menu_open();
-        if template_was_open {
-            self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
-        }
-        if color_was_open || select_was_open || template_was_open {
+        if self.chart_menus.dismiss_settings_popovers() {
             cx.notify();
         }
     }
@@ -1275,10 +1251,9 @@ impl TerminalApp {
         id: &'static str,
         cx: &mut Context<Self>,
     ) {
-        self.chart_settings_color_picker = None;
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
-        self.chart_settings_select = (self.chart_settings_select != Some(id)).then_some(id);
-        cx.notify();
+        if self.chart_menus.toggle_settings_select(id) {
+            cx.notify();
+        }
     }
 
     /// Applies a dropdown choice and closes its dropdown.
@@ -1288,7 +1263,7 @@ impl TerminalApp {
         action: ChartSettingsAction,
         cx: &mut Context<Self>,
     ) {
-        self.chart_settings_select = None;
+        self.chart_menus.close_settings_select();
         self.apply_chart_settings_action(menu, action, cx);
         cx.notify();
     }
@@ -1300,29 +1275,22 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chart_settings_select = None;
-        if self
-            .chart_settings_color_picker
-            .as_ref()
-            .is_some_and(|picker| picker.setting == color)
-        {
-            self.chart_settings_color_picker = None;
+        let changed = if self.chart_menus.color_picker_shows(color) {
+            self.chart_menus.close_color_picker()
         } else {
             let input = cx.new(|input_cx| InputState::new(window, input_cx));
             input.update(cx, |input, input_cx| {
                 input.set_value(current.to_ascii_uppercase(), window, input_cx);
             });
-            self.chart_settings_color_picker = Some(ChartColorPickerState {
-                setting: color,
-                input,
-                error: None,
-            });
+            self.chart_menus.open_color_picker(color, input)
+        };
+        if changed {
+            cx.notify();
         }
-        cx.notify();
     }
 
     pub(super) fn close_chart_color_picker(&mut self, cx: &mut Context<Self>) {
-        if self.chart_settings_color_picker.take().is_some() {
+        if self.chart_menus.close_color_picker() {
             cx.notify();
         }
     }
@@ -1335,11 +1303,10 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let Some(color) = normalize_hex_color(color) else {
-            if let Some(picker) = &mut self.chart_settings_color_picker
-                && picker.setting == setting
-            {
-                picker.error = Some("Enter a hex color such as #2962FF or #2962FF80.".to_string());
-            }
+            self.chart_menus.set_color_error(
+                setting,
+                Some("Enter a hex color such as #2962FF or #2962FF80.".to_string()),
+            );
             cx.notify();
             return;
         };
@@ -1367,11 +1334,7 @@ impl TerminalApp {
             };
             Self::apply_chart_appearance_color(&surface, appearance, setting, color, cx);
         }
-        if let Some(picker) = &mut self.chart_settings_color_picker
-            && picker.setting == setting
-        {
-            picker.error = None;
-        }
+        self.chart_menus.set_color_error(setting, None);
         cx.notify();
     }
 
@@ -1631,9 +1594,7 @@ impl TerminalApp {
                 surface.set_chart_legend_options(ChartLegendOptions::default(), surface_cx);
             });
         }
-        self.chart_settings_color_picker = None;
-        self.chart_settings_select = None;
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        self.chart_menus.close_settings_popover();
         cx.notify();
     }
 
@@ -1701,14 +1662,9 @@ impl TerminalApp {
     }
 
     pub(super) fn toggle_chart_settings_template_menu(&mut self, cx: &mut Context<Self>) {
-        self.chart_settings_color_picker = None;
-        self.chart_settings_select = None;
-        self.chart_settings_template_overlay = if self.chart_settings_template_overlay.menu_open() {
-            ChartSettingsTemplateOverlay::Closed
-        } else {
-            ChartSettingsTemplateOverlay::Menu
-        };
-        cx.notify();
+        if self.chart_menus.toggle_template_menu() {
+            cx.notify();
+        }
     }
 
     /// Shows the saved-templates flyout while its row is hovered; other rows hide it.
@@ -1717,16 +1673,7 @@ impl TerminalApp {
         open: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.chart_settings_template_overlay.menu_open() {
-            return;
-        }
-        let next = if open {
-            ChartSettingsTemplateOverlay::TemplatesFlyout
-        } else {
-            ChartSettingsTemplateOverlay::Menu
-        };
-        if self.chart_settings_template_overlay != next {
-            self.chart_settings_template_overlay = next;
+        if self.chart_menus.show_templates_flyout(open) {
             cx.notify();
         }
     }
@@ -1736,22 +1683,21 @@ impl TerminalApp {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if index < self.chart_settings_templates.len() {
-            self.chart_settings_template_overlay =
-                ChartSettingsTemplateOverlay::DeleteDialog(index);
+        if index < self.chart_settings_templates.len()
+            && self.chart_menus.confirm_template_delete(index)
+        {
             cx.notify();
         }
     }
 
     pub(super) fn cancel_chart_settings_template_delete(&mut self, cx: &mut Context<Self>) {
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::TemplatesFlyout;
-        cx.notify();
+        if self.chart_menus.show_saved_templates() {
+            cx.notify();
+        }
     }
 
     pub(super) fn delete_chart_settings_template(&mut self, cx: &mut Context<Self>) {
-        let ChartSettingsTemplateOverlay::DeleteDialog(index) =
-            self.chart_settings_template_overlay
-        else {
+        let Some(index) = self.chart_menus.take_template_delete() else {
             return;
         };
         if index < self.chart_settings_templates.len() {
@@ -1759,7 +1705,6 @@ impl TerminalApp {
             self.chart_settings_persistence_dirty = true;
             self.persist_workspace_layout_if_changed(cx);
         }
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::TemplatesFlyout;
         cx.notify();
     }
 
@@ -1771,17 +1716,15 @@ impl TerminalApp {
         let input =
             cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Template name"));
         input.update(cx, |input, input_cx| input.focus(window, input_cx));
-        self.chart_settings_template_name = Some(input);
-        self.chart_settings_template_error = None;
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::SaveDialog;
-        cx.notify();
+        if self.chart_menus.open_template_save(input) {
+            cx.notify();
+        }
     }
 
     pub(super) fn cancel_chart_settings_template_save(&mut self, cx: &mut Context<Self>) {
-        self.chart_settings_template_name = None;
-        self.chart_settings_template_error = None;
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Menu;
-        cx.notify();
+        if self.chart_menus.show_template_menu() {
+            cx.notify();
+        }
     }
 
     pub(super) fn save_chart_settings_template(
@@ -1789,7 +1732,11 @@ impl TerminalApp {
         menu: &ChartContextMenu,
         cx: &mut Context<Self>,
     ) {
-        let Some(input) = &self.chart_settings_template_name else {
+        let Some(input) = self
+            .chart_menus
+            .settings()
+            .and_then(ChartSettingsPanel::template_name)
+        else {
             return;
         };
         let name = input.read(cx).value().trim().to_string();
@@ -1797,8 +1744,8 @@ impl TerminalApp {
             || name.len() > local_state::MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
             || name.chars().any(char::is_control)
         {
-            self.chart_settings_template_error =
-                Some("Use a name between 1 and 64 characters.".to_string());
+            self.chart_menus
+                .set_template_error("Use a name between 1 and 64 characters.");
             cx.notify();
             return;
         }
@@ -1816,14 +1763,12 @@ impl TerminalApp {
         {
             self.chart_settings_templates.push(template);
         } else {
-            self.chart_settings_template_error =
-                Some("You can save up to 32 chart templates.".to_string());
+            self.chart_menus
+                .set_template_error("You can save up to 32 chart templates.");
             cx.notify();
             return;
         }
-        self.chart_settings_template_name = None;
-        self.chart_settings_template_error = None;
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Menu;
+        self.chart_menus.show_template_menu();
         self.chart_settings_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
@@ -1839,7 +1784,7 @@ impl TerminalApp {
             return;
         };
         self.apply_chart_settings_template_to_surface(menu, &template, cx);
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        self.chart_menus.close_templates();
         cx.notify();
     }
 
@@ -1870,7 +1815,7 @@ impl TerminalApp {
             };
             self.apply_chart_settings_template_to_surface(&target, &template, cx);
         }
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        self.chart_menus.close_templates();
         cx.notify();
     }
 
@@ -1881,15 +1826,12 @@ impl TerminalApp {
         anchor: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.platform_menu_anchor = match self.platform_menu_anchor {
-            Some(_) => None,
-            None => Some(anchor),
-        };
+        self.overlays.toggle_platform_menu(anchor);
         cx.notify();
     }
 
     pub(super) fn close_platform_menu(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.platform_menu_anchor.take().is_some() {
+        if self.overlays.close(OverlayKind::PlatformMenu) {
             self.release_frameless_title_bar(window, cx);
             cx.notify();
         }
@@ -1897,8 +1839,9 @@ impl TerminalApp {
 
     /// Menus and drags that start in the frameless title bar keep it on screen until they end.
     fn frameless_title_bar_pinned(&self) -> bool {
-        self.platform_menu_anchor.is_some()
-            || self.app_navigation_open()
+        self.overlays
+            .kind()
+            .is_some_and(OverlayKind::pins_title_bar)
             || self.tabs.is_dragging()
             || self.window_move_pending
     }
@@ -2100,7 +2043,7 @@ impl TerminalApp {
             self.cancel_update_restart_after_persistence_failure(error, cx);
             return;
         }
-        self.platform_menu_anchor = None;
+        self.overlays.close(OverlayKind::PlatformMenu);
         self.claim_close(cx);
         self.lifecycle.quit_after_shutdown(cx);
         // `quit_after_shutdown` synchronously installs its own account quiesce
@@ -2217,7 +2160,7 @@ impl TerminalApp {
         viewport: gpui::Size<Pixels>,
         cx: &App,
     ) -> Option<AnyElement> {
-        let anchor = self.platform_menu_anchor?;
+        let anchor = self.overlays.platform_menu_anchor()?;
         let account = self
             .lifecycle
             .account()
@@ -2304,13 +2247,13 @@ impl TerminalApp {
                 if let Some(price) = menu.copy_price.as_deref() {
                     cx.write_to_clipboard(ClipboardItem::new_string(price.to_string()));
                 }
-                self.chart_context_menu = Some(menu);
+                self.show_chart_context_menu(menu, cx);
                 self.show_chart_copy_feedback(action, window, cx);
                 return;
             }
             ChartContextAction::CaptureMenu => {
                 menu.capture_flyout_open = true;
-                self.chart_context_menu = Some(menu);
+                self.show_chart_context_menu(menu, cx);
             }
             ChartContextAction::CopyCapture => {
                 let mut copied = None;
@@ -2320,22 +2263,17 @@ impl TerminalApp {
                     cx,
                 );
                 let Some(copied) = copied else {
-                    self.chart_context_menu = None;
+                    self.chart_menus.close_context();
                     cx.notify();
                     return;
                 };
                 // The menu stays open while the capture renders off the UI thread, then confirms
                 // on the same row as Copy price does.
-                self.chart_context_menu = Some(menu.clone());
+                self.show_chart_context_menu(menu.clone(), cx);
                 cx.spawn_in(window, async move |terminal, cx| {
                     let copied = copied.await;
                     if let Err(error) = terminal.update_in(cx, |terminal, window, terminal_cx| {
-                        let still_open = terminal.chart_context_menu.as_ref().is_some_and(|open| {
-                            open.workspace_id == menu.workspace_id
-                                && open.pane_id == menu.pane_id
-                                && open.position == menu.position
-                        });
-                        if !still_open {
+                        if !terminal.chart_menus.context_shows(&menu) {
                             return;
                         }
                         if copied {
@@ -2351,41 +2289,35 @@ impl TerminalApp {
                 .detach();
             }
             ChartContextAction::SaveCapture => {
-                self.chart_context_menu = None;
+                self.chart_menus.close_context();
                 self.update_context_menu_pane(&menu, WorkspaceSurface::save_chart_capture, cx);
             }
             ChartContextAction::Reset => {
-                self.chart_context_menu = None;
+                self.chart_menus.close_context();
                 self.update_context_menu_pane(&menu, WorkspaceSurface::reset_chart_view, cx);
             }
             ChartContextAction::ClearDrawings => {
-                self.chart_context_menu = None;
+                self.chart_menus.close_context();
                 self.update_context_menu_pane(&menu, WorkspaceSurface::clear_drawings, cx);
             }
             ChartContextAction::ClearIndicators => {
-                self.chart_context_menu = None;
+                self.chart_menus.close_context();
                 self.update_context_menu_pane(&menu, WorkspaceSurface::clear_indicators, cx);
             }
             ChartContextAction::Split(direction) => {
-                self.chart_context_menu = None;
+                self.chart_menus.close_context();
                 self.split_active_pane(direction, window, cx);
             }
             ChartContextAction::Close => {
-                self.chart_context_menu = None;
+                self.chart_menus.close_context();
                 self.close_active_pane(&ClosePane, window, cx);
             }
             ChartContextAction::Settings => {
-                self.chart_context_menu = None;
-                self.set_workspace_chart_pointers_suspended(menu.workspace_id, true, cx);
-                self.chart_settings_section = ChartSettingsSection::Symbol;
-                self.chart_settings_color_picker = None;
-                self.chart_settings_select = None;
-                self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
-                self.chart_settings_template_name = None;
-                self.chart_settings_template_error = None;
-                self.chart_settings_placement =
-                    chart_context_menus::FloatingPanelPlacement::default();
-                self.chart_settings_menu = Some(menu);
+                let workspace_id = menu.workspace_id;
+                if let Some(replaced) = self.chart_menus.open_settings(menu) {
+                    self.set_workspace_chart_pointers_suspended(replaced, false, cx);
+                }
+                self.set_workspace_chart_pointers_suspended(workspace_id, true, cx);
             }
         }
         cx.notify();
@@ -2399,24 +2331,16 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = &mut self.chart_context_menu else {
+        let Some(generation) = self.chart_menus.begin_copy_feedback(action) else {
             return;
         };
-        self.chart_context_copy_feedback_generation = self
-            .chart_context_copy_feedback_generation
-            .saturating_add(1);
-        let generation = self.chart_context_copy_feedback_generation;
-        menu.copy_feedback = Some(ChartCopyFeedback { action, generation });
         cx.notify();
         cx.spawn_in(window, async move |terminal, cx| {
             cx.background_executor()
                 .timer(CHART_COPY_FEEDBACK_DURATION)
                 .await;
             if let Err(error) = terminal.update_in(cx, |terminal, _, terminal_cx| {
-                if Self::chart_context_copy_feedback_is_current(
-                    terminal.chart_context_menu.as_ref(),
-                    generation,
-                ) {
+                if terminal.chart_menus.copy_feedback_is_current(generation) {
                     terminal.close_chart_context_menu(terminal_cx);
                 }
             }) && terminal.upgrade().is_some()
@@ -2425,14 +2349,6 @@ impl TerminalApp {
             }
         })
         .detach();
-    }
-
-    pub(super) fn chart_context_copy_feedback_is_current(
-        menu: Option<&ChartContextMenu>,
-        generation: u64,
-    ) -> bool {
-        menu.and_then(|menu| menu.copy_feedback)
-            .is_some_and(|feedback| feedback.generation == generation)
     }
 
     fn update_context_menu_pane(
@@ -2511,13 +2427,8 @@ impl TerminalApp {
         ) {
             self.broadcast_indicator_chrome(menu, cx);
         }
-        if let PriceAxisMenuAction::SetLeft(next_left) = action
-            && let Some(open) = &mut self.chart_context_menu
-            && let ChartContextKind::PriceAxis {
-                left: open_left, ..
-            } = &mut open.kind
-        {
-            *open_left = next_left;
+        if let PriceAxisMenuAction::SetLeft(next_left) = action {
+            self.chart_menus.set_price_axis_left(next_left);
         }
         cx.notify();
     }
@@ -2525,10 +2436,7 @@ impl TerminalApp {
     /// Hovering a chart menu row opens the capture chart submenu on its own row and closes it on
     /// any other, so the submenu follows the pointer without a dismiss timer.
     pub(super) fn set_chart_capture_flyout(&mut self, open: bool, cx: &mut Context<Self>) {
-        if let Some(menu) = &mut self.chart_context_menu
-            && menu.capture_flyout_open != open
-        {
-            menu.capture_flyout_open = open;
+        if self.chart_menus.set_capture_flyout(open) {
             cx.notify();
         }
     }
@@ -2538,12 +2446,7 @@ impl TerminalApp {
         flyout: PriceAxisMenuFlyout,
         cx: &mut Context<Self>,
     ) {
-        if let Some(menu) = &mut self.chart_context_menu {
-            menu.flyout = if menu.flyout == flyout {
-                PriceAxisMenuFlyout::None
-            } else {
-                flyout
-            };
+        if self.chart_menus.toggle_price_axis_flyout(flyout) {
             cx.notify();
         }
     }
@@ -3465,15 +3368,16 @@ impl TerminalApp {
         match event.keystroke.key.as_str() {
             "escape" => self.close_command_palette(window, cx),
             "up" => {
-                self.command_palette_selection = self.command_palette_selection.saturating_sub(1);
-                cx.notify();
+                if self.overlays.select_previous_command() {
+                    cx.notify();
+                }
             }
             "down" => {
-                let query = self.command_palette_input.read(cx).value();
+                let query = self.overlays.command_palette_input().read(cx).value();
                 let count = aeris_desktop::command_registry::search(&query, 8).len();
-                self.command_palette_selection =
-                    (self.command_palette_selection + 1).min(count.saturating_sub(1));
-                cx.notify();
+                if self.overlays.select_next_command(count) {
+                    cx.notify();
+                }
             }
             "enter" => self.execute_command_palette_query(window, cx),
             _ => return false,
@@ -3487,14 +3391,14 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.command_palette_open {
+        if self.overlays.is_open(OverlayKind::CommandPalette) {
             if self.command_palette_key_down(event, window, cx) {
                 window.prevent_default();
                 cx.stop_propagation();
             }
             return;
         }
-        if self.keyboard_shortcuts_open {
+        if self.overlays.is_open(OverlayKind::KeyboardShortcuts) {
             if event.keystroke.key.as_str() == "escape" {
                 self.close_keyboard_shortcuts(window, cx);
                 window.prevent_default();
@@ -3517,7 +3421,8 @@ impl TerminalApp {
             }
             return;
         }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.platform_menu_anchor.is_some()
+        if event.keystroke.key.eq_ignore_ascii_case("escape")
+            && self.overlays.is_open(OverlayKind::PlatformMenu)
         {
             self.close_platform_menu(window, cx);
             cx.stop_propagation();
@@ -3542,9 +3447,7 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key.as_str() == "escape"
-            && (self.chart_context_menu.is_some() || self.chart_settings_menu.is_some())
-        {
+        if event.keystroke.key.as_str() == "escape" && self.chart_menus.is_open() {
             self.close_chart_context_menu(cx);
             self.close_chart_settings_menu(cx);
             cx.stop_propagation();
@@ -3561,8 +3464,7 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if self.chart_context_menu.is_some()
-            || self.chart_settings_menu.is_some()
+        if self.chart_menus.is_open()
             || self.pages.view != market_screener::AppView::Terminal
             || self.layouts_ui.start_page_shown()
         {
@@ -3850,7 +3752,7 @@ impl TerminalApp {
         viewport: gpui::Size<Pixels>,
         cx: &App,
     ) -> (Option<AnyElement>, Option<AnyElement>) {
-        let context_menu = self.chart_context_menu.clone().map(|menu| {
+        let context_menu = self.chart_menus.context().cloned().map(|menu| {
             if let ChartContextKind::PriceAxis { pane, left } = menu.kind {
                 let state = self
                     .context_menu_price_axis_state(&menu, pane, left, cx)
@@ -3894,20 +3796,21 @@ impl TerminalApp {
                 &self.theme,
             )
         });
-        let settings_menu = self.chart_settings_menu.clone().and_then(|menu| {
-            self.chart_settings_snapshot(&menu, cx).map(|snapshot| {
+        let settings_menu = self.chart_menus.settings().and_then(|panel| {
+            let menu = panel.target();
+            self.chart_settings_snapshot(menu, cx).map(|snapshot| {
                 chart_settings_menu_layer(
                     terminal,
-                    &menu,
+                    menu,
                     ChartSettingsView {
-                        section: self.chart_settings_section,
+                        section: panel.section(),
                         snapshot: &snapshot,
-                        color_picker: self.chart_settings_color_picker.as_ref(),
-                        open_select: self.chart_settings_select,
+                        color_picker: panel.color_picker(),
+                        open_select: panel.open_select(),
                         templates: ChartSettingsTemplateView {
-                            overlay: self.chart_settings_template_overlay,
-                            name_input: self.chart_settings_template_name.as_ref(),
-                            error: self.chart_settings_template_error.as_deref(),
+                            overlay: panel.template_overlay(),
+                            name_input: panel.template_name(),
+                            error: panel.template_error(),
                             templates: &self.chart_settings_templates,
                             apply_to_all: self
                                 .tabs
@@ -3916,7 +3819,7 @@ impl TerminalApp {
                                 .is_some_and(|workspace| workspace.panes.len() > 1),
                         },
                     },
-                    self.chart_settings_placement.origin,
+                    panel.origin(),
                     viewport,
                     &self.theme,
                 )

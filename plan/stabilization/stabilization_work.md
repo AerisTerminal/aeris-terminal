@@ -236,8 +236,15 @@ only on the guarded GUI checks on their lines.
     the same tab and report what changed, and `TerminalApp` drops from 68 to 66 fields.
     `desktop/symbol_entry.rs` owns each pane's search field, catalog browser, menu target and
     the pending typed-symbol, product-opening and watchlist-install state behind private fields.
-  - Left: one `OverlayStack` and `ChartMenus`.
-  - Bring `TerminalApp` to 15 fields or fewer and remove `struct_excessive_bools`.
+    `desktop/overlay_stack.rs` holds the one open app overlay (profile menu, page menu,
+    keyboard shortcuts or command palette, with the palette's highlight and message) in one
+    enum slot; opening one replaces the other. `desktop/chart_menus.rs` owns the chart context
+    menu, the copy-feedback fence and the settings panel with its placement, section and one
+    popover enum (dropdown, color picker, template menu or dialog) behind private fields.
+    `TerminalApp` drops from 66 to 52 fields.
+  - Left: bring `TerminalApp` to 15 fields or fewer and remove `struct_excessive_bools`
+    (8 bools remain): window state, frame wakes, watchlist, layout persistence, style
+    templates, drawing chrome, services and provider connections still sit on it directly.
   - Turn `#[path]` modules into directories, keeping the `LayoutLibrary` rules.
   - GUI check of tabs, search and menus. Part of UI-07.
 - [ ] M7.6 Dirty-source `FrameScheduler`

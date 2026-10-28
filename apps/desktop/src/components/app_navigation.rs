@@ -8,12 +8,10 @@ const APP_NAVIGATION_MENU_WIDTH: f32 = 200.0;
 const APP_NAVIGATION_MENU_GAP: f32 = 4.0;
 const APP_NAVIGATION_ICON_SIZE: f32 = 16.0;
 
-/// The page shown under the title bar, the open page menu, and the pages besides the terminal.
+/// The page shown under the title bar and the pages besides the terminal.
 #[derive(Default)]
 pub(super) struct AppPages {
     pub(super) view: AppView,
-    /// Navigation button click point the open page menu is anchored under.
-    navigation_anchor: Option<gpui::Point<Pixels>>,
     pub(super) screener: MarketScreener,
 }
 
@@ -129,22 +127,19 @@ impl TerminalApp {
         anchor: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.pages.navigation_anchor = match self.pages.navigation_anchor {
-            Some(_) => None,
-            None => Some(anchor),
-        };
+        self.overlays.toggle_app_navigation(anchor);
         cx.notify();
     }
 
     pub(super) fn close_app_navigation(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.pages.navigation_anchor.take().is_some() {
+        if self.overlays.close(OverlayKind::AppNavigation) {
             self.release_frameless_title_bar(window, cx);
             cx.notify();
         }
     }
 
-    pub(super) const fn app_navigation_open(&self) -> bool {
-        self.pages.navigation_anchor.is_some()
+    pub(super) fn app_navigation_open(&self) -> bool {
+        self.overlays.is_open(OverlayKind::AppNavigation)
     }
 
     /// Switches the page under the title bar. Workspaces, charts and their market demand stay
@@ -190,7 +185,7 @@ impl TerminalApp {
         terminal: &Entity<Self>,
         viewport: gpui::Size<Pixels>,
     ) -> Option<AnyElement> {
-        let anchor = self.pages.navigation_anchor?;
+        let anchor = self.overlays.app_navigation_anchor()?;
         Some(app_navigation_layer(
             terminal,
             self.pages.view,

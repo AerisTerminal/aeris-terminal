@@ -892,11 +892,11 @@ impl TerminalApp {
         pointer: gpui::Point<Pixels>,
         origin: gpui::Point<Pixels>,
     ) {
-        self.chart_settings_placement.grab(pointer - origin);
+        self.chart_menus.grab_settings_panel(pointer - origin);
     }
 
     fn move_chart_settings(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        if self.chart_settings_placement.follow(pointer) {
+        if self.chart_menus.move_settings_panel(pointer) {
             cx.notify();
         }
     }

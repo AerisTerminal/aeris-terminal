@@ -12,24 +12,35 @@ const KEYCAP_HEIGHT: f32 = 20.0;
 
 impl TerminalApp {
     pub(super) fn open_keyboard_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_platform_menu(window, cx);
-        self.keyboard_shortcuts_open = true;
+        if self
+            .overlays
+            .open_keyboard_shortcuts()
+            .is_some_and(OverlayKind::pins_title_bar)
+        {
+            self.release_frameless_title_bar(window, cx);
+        }
         // The shell's key handler closes the dialog on Escape, so it needs keyboard focus.
         self.chrome_focus.focus(window, cx);
         cx.notify();
     }
 
     pub(super) fn close_keyboard_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.keyboard_shortcuts_open) {
+        if self.overlays.close(OverlayKind::KeyboardShortcuts) {
             self.focus_workspace(window, cx);
             cx.notify();
         }
     }
 
     pub(super) fn keyboard_shortcuts_layer(&self, terminal: &Entity<Self>) -> Option<AnyElement> {
-        self.keyboard_shortcuts_open.then(|| {
-            keyboard_shortcuts_dialog(terminal, self.chart_chrome.trading_shortcuts, &self.theme)
-        })
+        self.overlays
+            .is_open(OverlayKind::KeyboardShortcuts)
+            .then(|| {
+                keyboard_shortcuts_dialog(
+                    terminal,
+                    self.chart_chrome.trading_shortcuts,
+                    &self.theme,
+                )
+            })
     }
 }
 

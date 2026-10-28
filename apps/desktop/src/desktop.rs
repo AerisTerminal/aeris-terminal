@@ -15,6 +15,9 @@ mod big_trades_dialog;
 mod bottom_panel;
 #[path = "components/chart_context_menus.rs"]
 mod chart_context_menus;
+#[path = "desktop/chart_menus.rs"]
+mod chart_menus;
+use chart_menus::{ChartMenus, ChartSettingsPanel, ChartSettingsTemplateOverlay};
 #[path = "desktop/chart_pane_controller.rs"]
 mod chart_pane_controller;
 #[path = "desktop/context_panel_controller.rs"]
@@ -78,6 +81,9 @@ mod order_flow_presenter;
 mod order_quantity;
 #[path = "components/order_ticket.rs"]
 mod order_ticket;
+#[path = "desktop/overlay_stack.rs"]
+mod overlay_stack;
+use overlay_stack::{OverlayKind, OverlayStack};
 #[path = "desktop/pane_chrome_state.rs"]
 mod pane_chrome_state;
 #[path = "desktop/pane_persistence.rs"]
@@ -5113,24 +5119,6 @@ struct ChartSettingsSnapshot {
     legend: ChartLegendOptions,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum ChartSettingsTemplateOverlay {
-    #[default]
-    Closed,
-    Menu,
-    /// The menu with its saved-templates flyout beside it.
-    TemplatesFlyout,
-    SaveDialog,
-    /// Confirming deletion of the saved template at this index.
-    DeleteDialog(usize),
-}
-
-impl ChartSettingsTemplateOverlay {
-    const fn menu_open(self) -> bool {
-        matches!(self, Self::Menu | Self::TemplatesFlyout)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceShellKind {
     Window,
@@ -5144,8 +5132,7 @@ struct ChartFullscreen {
     restores_window: bool,
 }
 
-/// Shell menus are small booleans by design; the account dropdown joins the
-/// two chart-menu options rather than growing a separate menu stack.
+// The window, persistence and update-restart flags are still separate fields here.
 #[allow(clippy::struct_excessive_bools)]
 struct TerminalApp {
     tabs: TabStrip,
@@ -5176,25 +5163,14 @@ struct TerminalApp {
     workspace_error: Option<String>,
     watchlist_drag: Option<WatchlistDragState>,
     watchlist_scroll: ScrollHandle,
-    chart_context_menu: Option<ChartContextMenu>,
-    chart_context_copy_feedback_generation: u64,
-    chart_settings_menu: Option<ChartContextMenu>,
-    chart_settings_placement: chart_context_menus::FloatingPanelPlacement,
-    chart_settings_section: ChartSettingsSection,
-    chart_settings_color_picker: Option<ChartColorPickerState>,
-    /// The settings dropdown that is open, by its row id.
-    chart_settings_select: Option<&'static str>,
-    chart_settings_template_overlay: ChartSettingsTemplateOverlay,
-    chart_settings_template_name: Option<Entity<InputState>>,
-    chart_settings_template_error: Option<String>,
+    chart_menus: ChartMenus,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     chart_settings_persistence_dirty: bool,
     /// User-named drawing style templates of every kind, shared by every chart.
     drawing_templates: Vec<WorkspaceDrawingTemplateState>,
     drawing_templates_persistence_dirty: bool,
     drawing_context_toolbar: DrawingContextToolbar,
-    /// Avatar click point the open platform menu is anchored under.
-    platform_menu_anchor: Option<gpui::Point<Pixels>>,
+    overlays: OverlayStack,
     pages: app_navigation::AppPages,
     frameless_title_bar: FramelessTitleBar,
     fullscreen_hint: FullscreenHint,
@@ -5204,12 +5180,7 @@ struct TerminalApp {
     chart_fullscreen: Option<ChartFullscreen>,
     bottom_panel: bottom_panel::BottomPanelState,
     profile_refresh_on_activation: bool,
-    command_palette_input: Entity<InputState>,
-    command_palette_open: bool,
-    command_palette_selection: usize,
-    command_palette_message: Option<String>,
     keyboard_trading: trading_hotkeys::KeyboardTrading,
-    keyboard_shortcuts_open: bool,
     data_connections: DataConnections,
     provider_login: provider_login::ProviderLoginFlow,
     linked_sync_revisions: BTreeMap<String, u64>,

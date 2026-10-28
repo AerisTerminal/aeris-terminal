@@ -1690,8 +1690,14 @@ mod timeframe_input {
         let (terminal, cx) = terminal_harness(cx);
         let surface = cx.read(|cx| terminal.read(cx).active_surface());
         publish_snapshot(&surface, cx);
-        let shortcuts_open =
-            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).keyboard_shortcuts_open);
+        let shortcuts_open = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .overlays
+                    .is_open(OverlayKind::KeyboardShortcuts)
+            })
+        };
         let confirming = |cx: &mut VisualTestContext| {
             cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
         };
@@ -4320,35 +4326,6 @@ fn chart_context_remove_actions_use_destructive_color() {
         .map(|item| item.icon)
         .collect::<Vec<_>>();
     assert_eq!(trash, [super::HugeIcon::Trash, super::HugeIcon::Trash]);
-}
-
-#[test]
-fn copy_feedback_generation_fences_stale_close_timers() {
-    let menu = super::ChartContextMenu {
-        workspace_id: 1,
-        pane_id: 2,
-        position: point(px(20.0), px(20.0)),
-        kind: super::ChartContextKind::Pane,
-        flyout: super::PriceAxisMenuFlyout::None,
-        capture_flyout_open: true,
-        copy_price: Some("123.45".into()),
-        copy_feedback: Some(super::ChartCopyFeedback {
-            action: super::ChartContextAction::CopyCapture,
-            generation: 7,
-        }),
-    };
-
-    assert!(super::TerminalApp::chart_context_copy_feedback_is_current(
-        Some(&menu),
-        7
-    ));
-    assert!(!super::TerminalApp::chart_context_copy_feedback_is_current(
-        Some(&menu),
-        6
-    ));
-    assert!(!super::TerminalApp::chart_context_copy_feedback_is_current(
-        None, 7
-    ));
 }
 
 #[test]
