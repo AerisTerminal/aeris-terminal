@@ -4999,7 +4999,9 @@ mod tests {
         let packager = manifest("tools/release_packager/Cargo.toml");
         for network in ["ureq", "reqwest", "tungstenite", "rustls"] {
             assert!(
-                !packager.lines().any(|line| line.trim().starts_with(network)),
+                !packager
+                    .lines()
+                    .any(|line| line.trim().starts_with(network)),
                 "the release packager writes local files only and must not depend on {network}"
             );
         }
@@ -5024,9 +5026,7 @@ mod tests {
             .find("pub fn read_signing_key(")
             .expect("the packager reads its signing key from a file");
         let reader_end = library[reader..]
-            .find("
-}
-")
+            .find("\n}\n")
             .map(|offset| reader + offset)
             .expect("signing key reader boundary");
         assert!(
