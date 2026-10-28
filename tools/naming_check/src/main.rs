@@ -3776,6 +3776,21 @@ mod tests {
     }
 
     #[test]
+    fn rust_sources_carry_no_axiusflow_wire_tokens() {
+        // The former product name survives only in mixed-case legacy install, data-root and
+        // vault paths that cleanup still recognizes; upper-case tokens were wire identifiers.
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            assert!(
+                !contents.contains("AXIUSFLOW"),
+                "{} contains a retired AXIUSFLOW token; use the AERIS_*_V1 tokens",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
     fn production_diagnostics_never_panic_on_a_closed_stderr() {
         // `eprintln!` panics when stderr is a closed pipe. On the GPUI main thread that panic
         // cannot unwind out of the window procedure and aborts the desktop; on a runtime worker

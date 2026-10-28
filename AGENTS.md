@@ -698,7 +698,10 @@ new copy under `target/`, and GPUI debug builds have grown it past 70 GB in a fe
 ## Release workflow
 
 Do not publish, install, or point clients at the former Axiusflow endpoint, and the retired
-publication workflow must not be restored. Releases reach users through the website download page:
+publication workflow must not be restored. The launcher and desktop update-restart handshake uses
+the `AERIS_UPDATE_RESTART_READY_V1` and `AERIS_UPDATE_RESTART_COMMIT_V1` lines from
+`aeris_release_lifecycle`, and block plans sign under `AERIS_RELEASE_BLOCK_PLAN_V1`;
+`tools/naming_check` rejects any `AXIUSFLOW` token in Rust sources under `apps/` and `crates/`. Releases reach users through the website download page:
 after the fix is pushed to `main`, run both preview lanes with `-f rithmic_kit=true`, check that
 each smoke test passed, download `Aeris-Terminal-<version>.dmg` from the
 `aeris-terminal-rithmic-macos-arm64-preview` artifact and `Aeris-Terminal-Setup-<version>.exe` from

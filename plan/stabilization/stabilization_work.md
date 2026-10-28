@@ -607,14 +607,17 @@ still wait on the GUI checks and the remaining work on their lines.
     exited 0 and created no database. The launcher-driven readiness of an installed candidate is
     covered by M8.7's end-to-end harness.
 - [ ] M8.6 Release wire protocol v1 and Axiusflow residue
+  - Landed: LC-04. The update-restart lines are `AERIS_UPDATE_RESTART_READY_V1` and
+    `AERIS_UPDATE_RESTART_COMMIT_V1`, defined once in `aeris_release_lifecycle` for the launcher
+    and the desktop; the transitional aliases are deleted. Block plans sign under
+    `AERIS_RELEASE_BLOCK_PLAN_V1`. naming_check rejects `AXIUSFLOW` in Rust sources (PL-16
+    tokens part). No launcher has shipped, so no old token is still accepted.
   - Left:
     - LC-03: a domain-separated raw-bytes signature with `deny_unknown_fields`.
-    - LC-04: `AERIS_*_V1` tokens replacing `AXIUSFLOW_*`.
     - LC-19: `LAUNCHER_PROTOCOL_VERSION`.
     - LC-08: typed block errors.
     - LC-12: a "Remove my Aeris data" uninstall choice, with the Axiusflow lines removed from
       `tools/windows/aeris_setup.iss`.
-    - A naming_check rule. Also covers the PL-16 tokens part.
 - [ ] M8.7 Release packager and end-to-end lifecycle harness
   - Left: `tools/release_packager`, with the key from a file and no publishing.
   - A `ReleaseSource` seam: HTTPS in production, a directory in tests.

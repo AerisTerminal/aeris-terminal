@@ -24,10 +24,10 @@ use aeris_release_lifecycle::{
     ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
     MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReadinessReport,
     ReleaseChannelPointer, ReleaseConfig, ReleaseFile, ReleaseInstaller, ReleasePolicy,
-    ReleaseUninstaller, SignedBlockPlan, SignedReleaseManifest, VaultEntry,
-    current_release_identity, decode_and_verify_block_plan, native_install_root,
-    native_installation_inventory, release_config, rollout_eligible, verify_release_file,
-    verify_release_manifest,
+    ReleaseUninstaller, SignedBlockPlan, SignedReleaseManifest, UPDATE_RESTART_COMMIT,
+    UPDATE_RESTART_READY, VaultEntry, current_release_identity, decode_and_verify_block_plan,
+    native_install_root, native_installation_inventory, release_config, rollout_eligible,
+    verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -39,12 +39,6 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const RESTART_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
-// Stable launcher/desktop wire tokens. Continue emitting the pre-rename values
-// for compatibility with installed desktops, while accepting the transient
-// Aeris commit token emitted by rename-transition builds.
-const UPDATE_RESTART_READY: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
-const UPDATE_RESTART_COMMIT: &str = "AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
-const TRANSITIONAL_UPDATE_RESTART_COMMIT: &str = "AERIS_UPDATE_RESTART_COMMIT_V1\n";
 const MAXIMUM_UPDATE_RESTART_COMMIT_BYTES: usize = 128;
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
@@ -929,7 +923,7 @@ fn verify_prepared_channel_with_policy(
 fn announce_update_restart_ready() -> Result<(), String> {
     let mut stdout = std::io::stdout().lock();
     stdout
-        .write_all(UPDATE_RESTART_READY)
+        .write_all(UPDATE_RESTART_READY.as_bytes())
         .and_then(|()| stdout.flush())
         .map_err(|_| "update restart acknowledgement could not be written".to_string())
 }
@@ -961,7 +955,7 @@ fn read_update_restart_commit(input: impl std::io::BufRead) -> Result<(), String
         .map_err(|_| "update restart commit could not be read".to_string())?;
     if count == 0
         || line.len() > MAXIMUM_UPDATE_RESTART_COMMIT_BYTES
-        || (line != UPDATE_RESTART_COMMIT && line != TRANSITIONAL_UPDATE_RESTART_COMMIT)
+        || line != UPDATE_RESTART_COMMIT
     {
         return Err("update restart was not committed".to_string());
     }
@@ -2818,18 +2812,12 @@ mod tests {
             read_update_restart_commit(std::io::Cursor::new(UPDATE_RESTART_COMMIT.as_bytes()))
                 .is_ok()
         );
-        assert!(
-            read_update_restart_commit(std::io::Cursor::new(
-                TRANSITIONAL_UPDATE_RESTART_COMMIT.as_bytes()
-            ))
-            .is_ok()
-        );
         for invalid in [
             b"".as_slice(),
-            UPDATE_RESTART_READY,
-            b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1".as_slice(),
-            b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\r\n".as_slice(),
-            b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V2\n".as_slice(),
+            UPDATE_RESTART_READY.as_bytes(),
+            b"AERIS_UPDATE_RESTART_COMMIT_V1".as_slice(),
+            b"AERIS_UPDATE_RESTART_COMMIT_V1\r\n".as_slice(),
+            b"AERIS_UPDATE_RESTART_COMMIT_V2\n".as_slice(),
         ] {
             assert!(read_update_restart_commit(std::io::Cursor::new(invalid)).is_err());
         }

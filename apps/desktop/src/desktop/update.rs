@@ -33,12 +33,7 @@ const RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const RESTART_CHILD_STABILITY_WINDOW: Duration = Duration::from_millis(150);
 const MAXIMUM_RESTART_ACK_BYTES: usize = 128;
 const MAXIMUM_LAUNCHER_BYTES: u64 = 64 * 1024 * 1024;
-// Stable launcher/desktop wire tokens. Emit the legacy values so both old and
-// renamed launchers can complete an update; accept the short-lived renamed
-// values below for compatibility with builds produced during the transition.
-const UPDATE_RESTART_READY: &str = "AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
-const TRANSITIONAL_UPDATE_RESTART_READY: &str = "AERIS_UPDATE_RESTART_READY_V2\n";
-const UPDATE_RESTART_COMMIT: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
+use aeris_release_lifecycle::{UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY};
 
 static UPDATE_RESTART_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 const UPDATE_BACKEND_CONFIGURED: bool = false;
@@ -810,7 +805,7 @@ fn release_restart_slot(in_flight: &AtomicBool) {
 }
 
 fn validate_restart_acknowledgement(line: &str) -> Result<(), String> {
-    if line == UPDATE_RESTART_READY || line == TRANSITIONAL_UPDATE_RESTART_READY {
+    if line == UPDATE_RESTART_READY {
         Ok(())
     } else {
         Err("update restart was not accepted".to_string())
@@ -823,7 +818,7 @@ fn send_restart_commit(child: &mut Child) -> Result<(), String> {
         .take()
         .ok_or_else(|| "update restart commit channel is unavailable".to_string())?;
     stdin
-        .write_all(UPDATE_RESTART_COMMIT)
+        .write_all(UPDATE_RESTART_COMMIT.as_bytes())
         .map_err(|_| "update restart could not be committed".to_string())
 }
 
@@ -998,7 +993,7 @@ mod tests {
                 "-NonInteractive",
                 "-Command",
                 &format!(
-                    "[Console]::Error.WriteLine('READY'); $null=[Console]::In.ReadLine(); [Console]::Out.Write(\"AXIUSFLOW_UPDATE_RESTART_READY_V2`n\"){tail}"
+                    "[Console]::Error.WriteLine('READY'); $null=[Console]::In.ReadLine(); [Console]::Out.Write(\"AERIS_UPDATE_RESTART_READY_V1`n\"){tail}"
                 ),
             ])
             .stdin(Stdio::piped())
@@ -1029,7 +1024,7 @@ mod tests {
         Command::new("sh")
             .args([
                 "-c",
-                &format!("printf 'AXIUSFLOW_UPDATE_RESTART_READY_V2\\n'{tail}"),
+                &format!("printf 'AERIS_UPDATE_RESTART_READY_V1\\n'{tail}"),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1044,7 +1039,7 @@ mod tests {
             .args([
                 "-NoProfile",
                 "-Command",
-                "$line=[Console]::In.ReadLine(); if ($line -ceq 'AXIUSFLOW_UPDATE_RESTART_COMMIT_V1') { exit 0 } else { exit 7 }",
+                "$line=[Console]::In.ReadLine(); if ($line -ceq 'AERIS_UPDATE_RESTART_COMMIT_V1') { exit 0 } else { exit 7 }",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1058,7 +1053,7 @@ mod tests {
         Command::new("sh")
             .args([
                 "-c",
-                "IFS= read -r line; [ \"$line\" = 'AXIUSFLOW_UPDATE_RESTART_COMMIT_V1' ]",
+                "IFS= read -r line; [ \"$line\" = 'AERIS_UPDATE_RESTART_COMMIT_V1' ]",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1287,13 +1282,12 @@ mod tests {
     #[test]
     fn restart_acknowledgement_is_exact_and_bounded_by_the_reader() {
         assert!(validate_restart_acknowledgement(super::UPDATE_RESTART_READY).is_ok());
-        assert!(validate_restart_acknowledgement(super::TRANSITIONAL_UPDATE_RESTART_READY).is_ok());
         for invalid in [
             "",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V2",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V2\r\n",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V1\n",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V2\nextra",
+            "AERIS_UPDATE_RESTART_READY_V1",
+            "AERIS_UPDATE_RESTART_READY_V1\r\n",
+            "AERIS_UPDATE_RESTART_READY_V2\n",
+            "AERIS_UPDATE_RESTART_READY_V1\nextra",
         ] {
             assert!(validate_restart_acknowledgement(invalid).is_err());
         }
