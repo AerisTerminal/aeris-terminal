@@ -14,6 +14,9 @@ mod bottom_panel;
 mod chart_context_menus;
 #[path = "desktop/chart_pane_controller.rs"]
 mod chart_pane_controller;
+#[path = "desktop/context_panel_controller.rs"]
+mod context_panel_controller;
+use context_panel_controller::{ContextCredentialDialogState, ContextPanelTab};
 #[path = "components/chart_surface.rs"]
 mod chart_surface;
 #[path = "components/chart_toolbar_menus.rs"]
@@ -134,7 +137,7 @@ use aeris_chart_integration::{
     PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
     chart_color_hex, classify_order_flow_sweeps,
 };
-use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
+use aeris_context_runtime::{ContextSnapshot, ContextSource};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
@@ -540,9 +543,6 @@ const SIDE_PANEL_INITIAL_WIDTH: f32 = 400.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 360.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 480.0;
 const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
-const CONTEXT_PANEL_INITIAL_HEIGHT: f32 = 248.0;
-const CONTEXT_PANEL_MINIMUM_HEIGHT: f32 = 140.0;
-const CONTEXT_PANEL_MAXIMUM_HEIGHT: f32 = 640.0;
 /// Chart area always left above the context panel while resizing.
 const CONTEXT_PANEL_MINIMUM_CHART_HEIGHT: f32 = 160.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
@@ -895,14 +895,7 @@ struct WorkspaceSurface {
     trade_tape: Option<aeris_market_runtime::MarketTradeTapeSnapshot>,
     trade_sweeps: Arc<[OrderFlowSweep]>,
     time_sales: TimeSalesState,
-    context_view: Option<ContextView>,
-    context_snapshot: Arc<ContextSnapshot>,
-    context_panel_visible: bool,
-    context_panel_tab: ContextPanelTab,
-    context_panel_height: f32,
-    context_credential_dialog: Option<ContextCredentialDialogState>,
-    context_credential_message: Option<String>,
-    economic_event_risk_message: Option<String>,
+    context_panel: context_panel_controller::ContextPanelController,
     chart_link_group: u8,
     chart_link_flags: u8,
     /// The trader's selected IANA chart time zone. The surface owns it so every chart this
@@ -1011,10 +1004,6 @@ enum PaneNoticeEvent {
 
 impl gpui::EventEmitter<PaneNoticeEvent> for WorkspaceSurface {}
 
-struct ContextCredentialDialogState {
-    inputs: Vec<(ContextSource, Entity<InputState>)>,
-}
-
 /// Pane-only choices and feedback. Runtime-derived facts stay in the shared store.
 #[derive(Default)]
 struct TradingPaneState {
@@ -1027,57 +1016,6 @@ struct TradingPaneState {
     )>,
     account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum ContextPanelTab {
-    #[default]
-    Calendar,
-    Energy,
-    Commitments,
-    Agriculture,
-    Macro,
-}
-
-impl ContextPanelTab {
-    const ALL: [Self; 5] = [
-        Self::Calendar,
-        Self::Energy,
-        Self::Commitments,
-        Self::Agriculture,
-        Self::Macro,
-    ];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Calendar => "Calendar",
-            Self::Energy => "Energy",
-            Self::Commitments => "COT",
-            Self::Agriculture => "Agriculture",
-            Self::Macro => "Macro",
-        }
-    }
-
-    const fn persisted(self) -> u32 {
-        match self {
-            Self::Calendar => 0,
-            Self::Energy => 1,
-            Self::Commitments => 2,
-            Self::Agriculture => 3,
-            Self::Macro => 4,
-        }
-    }
-
-    const fn from_persisted(value: u32) -> Option<Self> {
-        match value {
-            0 => Some(Self::Calendar),
-            1 => Some(Self::Energy),
-            2 => Some(Self::Commitments),
-            3 => Some(Self::Agriculture),
-            4 => Some(Self::Macro),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3439,10 +3377,6 @@ const fn symbol_menu_closes_after_selection(target: SymbolSelectionTarget) -> bo
 
 fn clamped_side_panel_width(width: f32) -> f32 {
     width.clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
-}
-
-fn clamped_context_panel_height(height: f32) -> f32 {
-    height.clamp(CONTEXT_PANEL_MINIMUM_HEIGHT, CONTEXT_PANEL_MAXIMUM_HEIGHT)
 }
 
 #[cfg(test)]

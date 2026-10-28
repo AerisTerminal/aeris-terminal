@@ -1781,9 +1781,9 @@ mod instrument_drawings {
                 show_execution_marks: false,
                 extend_order_lines_left: false,
             };
-            surface.context_panel_visible = true;
-            surface.context_panel_tab = ContextPanelTab::Energy;
-            surface.context_panel_height = 320.0;
+            surface.context_panel.set_visible(true);
+            surface.context_panel.set_tab(ContextPanelTab::Energy);
+            surface.context_panel.set_height(320.0);
             surface.chart_link_group = 2;
             surface.chart_link_flags = 1;
         });

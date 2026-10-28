@@ -475,7 +475,7 @@ pub(super) fn workspace_market_area(
         active_surface,
         super::terminal_chrome::PanelSidebarState {
             side_panels: surface.side_panels,
-            context_visible: surface.context_panel_visible,
+            context_visible: surface.context_panel.is_visible(),
             market_selected: surface.has_market_selection(),
         },
         theme,
@@ -543,21 +543,22 @@ fn workspace_context_panel(
     entity: &Entity<WorkspaceSurface>,
     theme: &AerisTheme,
 ) -> Option<AnyElement> {
-    surface.context_panel_visible.then(|| {
+    let panel = &surface.context_panel;
+    panel.is_visible().then(|| {
         context_panel(ContextPanelState {
             app: entity.clone(),
-            height: surface.context_panel_height,
-            snapshot: &surface.context_snapshot,
-            tab: surface.context_panel_tab,
+            height: panel.height(),
+            snapshot: panel.snapshot(),
+            tab: panel.tab(),
             now_unix_seconds: surface
                 .lifecycle
                 .clock()
                 .wall_unix_nanos()
                 .div_euclid(1_000_000_000),
             scroll: surface.scrolls.context.clone(),
-            credential_dialog: surface.context_credential_dialog.as_ref(),
-            credential_message: surface.context_credential_message.as_deref(),
-            risk_message: surface.economic_event_risk_message.as_deref(),
+            credential_dialog: panel.credential_dialog(),
+            credential_message: panel.credential_message(),
+            risk_message: panel.risk_message(),
             theme,
         })
         .into_any_element()

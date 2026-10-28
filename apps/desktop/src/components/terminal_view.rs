@@ -327,7 +327,10 @@ impl TerminalApp {
                         .max()
                 })
                 .unwrap_or(0);
-            (Arc::clone(&surface.context_snapshot), maximum_lead_seconds)
+            (
+                Arc::clone(surface.context_panel.snapshot()),
+                maximum_lead_seconds,
+            )
         };
         if maximum_lead_seconds == 0 {
             return;
@@ -364,9 +367,11 @@ impl TerminalApp {
         cx.spawn(async move |_, cx| {
             let result = dispatch.await;
             surface.update(cx, |surface, surface_cx| {
-                surface.economic_event_risk_message = result
-                    .err()
-                    .map(|error| format!("Economic-event risk action unavailable: {error}"));
+                surface.context_panel.set_risk_message(
+                    result
+                        .err()
+                        .map(|error| format!("Economic-event risk action unavailable: {error}")),
+                );
                 surface_cx.notify();
             });
         })

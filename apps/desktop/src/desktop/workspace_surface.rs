@@ -1,5 +1,6 @@
 //! Workspace surface.
 
+use super::context_panel_controller::ContextPanelController;
 use super::*;
 use aeris_observability::diagnostic;
 
@@ -49,13 +50,7 @@ fn restored_chart_time_zone(restored: Option<&WorkspaceChartState>) -> String {
         .to_string()
 }
 
-fn restored_context_and_link_state(
-    restored: Option<&WorkspaceChartState>,
-) -> (bool, ContextPanelTab, u8, u8) {
-    let context_visible = restored.is_some_and(|state| state.context_panel_visible);
-    let context_tab = restored
-        .and_then(|state| ContextPanelTab::from_persisted(state.context_panel_tab))
-        .unwrap_or_default();
+fn restored_link_state(restored: Option<&WorkspaceChartState>) -> (u8, u8) {
     let link_group = restored
         .and_then(|state| u8::try_from(state.chart_link_group).ok())
         .filter(|group| *group <= 4)
@@ -63,15 +58,7 @@ fn restored_context_and_link_state(
     let link_flags = restored
         .and_then(|state| u8::try_from(state.chart_link_flags).ok())
         .map_or(0b11, |flags| flags & 0b11);
-    (context_visible, context_tab, link_group, link_flags)
-}
-
-pub(super) fn restored_context_panel_height(restored: Option<&WorkspaceChartState>) -> f32 {
-    restored
-        .map(|state| state.context_panel_height)
-        .filter(|height| *height != 0)
-        .and_then(|height| height.to_f32())
-        .map_or(CONTEXT_PANEL_INITIAL_HEIGHT, clamped_context_panel_height)
+    (link_group, link_flags)
 }
 
 pub(super) fn restored_chart_trading_visibility(
@@ -111,11 +98,7 @@ struct WorkspaceSurfaceInitialization {
     price_alert_restore_status: PriceAlertRestoreStatus,
     bridge_label: String,
     order_book: Entity<ReadOnlyOrderBookView>,
-    context_view: Option<ContextView>,
-    context_snapshot: Arc<ContextSnapshot>,
-    context_panel_visible: bool,
-    context_panel_tab: ContextPanelTab,
-    context_panel_height: f32,
+    context_panel: ContextPanelController,
     chart_link_group: u8,
     chart_link_flags: u8,
     chart_time_zone: String,
@@ -146,14 +129,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         trade_tape: None,
         trade_sweeps: Arc::from([]),
         time_sales: TimeSalesState::default(),
-        context_view: init.context_view,
-        context_snapshot: init.context_snapshot,
-        context_panel_visible: init.context_panel_visible,
-        context_panel_tab: init.context_panel_tab,
-        context_panel_height: init.context_panel_height,
-        context_credential_dialog: None,
-        context_credential_message: None,
-        economic_event_risk_message: None,
+        context_panel: init.context_panel,
         chart_link_group: init.chart_link_group,
         chart_link_flags: init.chart_link_flags,
         chart_time_zone: init.chart_time_zone,
@@ -1995,9 +1971,7 @@ impl PanePersistence<'_> {
         state.show_execution_marks = Some(surface.chart_trading_visibility.show_execution_marks);
         state.extend_order_lines_left =
             Some(surface.chart_trading_visibility.extend_order_lines_left);
-        state.context_panel_visible = surface.context_panel_visible;
-        state.context_panel_tab = surface.context_panel_tab.persisted();
-        state.context_panel_height = surface.context_panel_height.round().to_u32().unwrap_or(0);
+        surface.context_panel.persist_into(state);
         state.chart_link_group = u32::from(surface.chart_link_group);
         state.chart_link_flags = u32::from(surface.chart_link_flags);
     }
@@ -2197,14 +2171,12 @@ impl WorkspaceSurface {
             order_book.set_order_queues_offered(order_queues_offered, cx);
             order_book
         });
-        let context_view = lifecycle.context_view();
-        let context_snapshot = context_view.as_ref().map_or_else(
-            || Arc::new(ContextSnapshot::empty(1)),
-            ContextView::snapshot,
+        let context_panel = ContextPanelController::restore(
+            lifecycle.context_view(),
+            restored_chart_state.as_ref(),
         );
-        let (context_panel_visible, context_panel_tab, chart_link_group, chart_link_flags) =
-            restored_context_and_link_state(restored_chart_state.as_ref());
-        let context_panel_height = restored_context_panel_height(restored_chart_state.as_ref());
+        let (chart_link_group, chart_link_flags) =
+            restored_link_state(restored_chart_state.as_ref());
         let chart_time_zone = restored_chart_time_zone(restored_chart_state.as_ref());
         let chart_trading_visibility =
             restored_chart_trading_visibility(restored_chart_state.as_ref());
@@ -2229,11 +2201,7 @@ impl WorkspaceSurface {
             price_alert_restore_status,
             bridge_label,
             order_book,
-            context_view,
-            context_snapshot,
-            context_panel_visible,
-            context_panel_tab,
-            context_panel_height,
+            context_panel,
             chart_link_group,
             chart_link_flags,
             chart_time_zone,
@@ -5466,14 +5434,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn poll_market_worker(&mut self, cx: &mut Context<Self>) -> usize {
-        let context_changed = self.context_view.as_ref().is_some_and(|view| {
-            let snapshot = view.snapshot();
-            if snapshot.revision == self.context_snapshot.revision {
-                return false;
-            }
-            self.context_snapshot = snapshot;
-            true
-        });
+        let context_changed = self.context_panel.refresh_snapshot();
         if context_changed {
             cx.notify();
         }
@@ -6833,34 +6794,29 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<Self>) {
-        self.set_context_panel_visible(!self.context_panel_visible, cx);
+        self.set_context_panel_visible(!self.context_panel.is_visible(), cx);
     }
 
     pub(super) fn set_context_panel_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.context_panel_visible == visible {
-            return;
-        }
-        self.context_panel_visible = visible;
-        self.chart_persistence_dirty = true;
-        cx.notify();
+        let changed = self.context_panel.set_visible(visible);
+        self.context_panel_layout_changed(changed, cx);
     }
 
     pub(super) fn set_context_panel_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        let height = clamped_context_panel_height(height);
-        if (height - self.context_panel_height).abs() > f32::EPSILON {
-            self.context_panel_height = height;
-            self.chart_persistence_dirty = true;
-            cx.notify();
-        }
+        let changed = self.context_panel.set_height(height);
+        self.context_panel_layout_changed(changed, cx);
     }
 
     pub(super) fn set_context_panel_tab(&mut self, tab: ContextPanelTab, cx: &mut Context<Self>) {
-        if self.context_panel_tab == tab {
-            return;
+        let changed = self.context_panel.set_tab(tab);
+        self.context_panel_layout_changed(changed, cx);
+    }
+
+    fn context_panel_layout_changed(&mut self, changed: bool, cx: &mut Context<Self>) {
+        if changed {
+            self.chart_persistence_dirty = true;
+            cx.notify();
         }
-        self.context_panel_tab = tab;
-        self.chart_persistence_dirty = true;
-        cx.notify();
     }
 
     pub(super) fn toggle_context_credential_dialog(
@@ -6868,8 +6824,8 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.context_credential_dialog.take().is_none() {
-            let inputs = [
+        self.context_panel.toggle_credential_dialog(|| {
+            [
                 ContextSource::Eia,
                 ContextSource::Usda,
                 ContextSource::UsdaFas,
@@ -6884,15 +6840,13 @@ impl WorkspaceSurface {
                 });
                 (source, input)
             })
-            .collect();
-            self.context_credential_dialog = Some(ContextCredentialDialogState { inputs });
-            self.context_credential_message = None;
-        }
+            .collect()
+        });
         cx.notify();
     }
 
     pub(super) fn save_context_api_keys(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = self.context_credential_dialog.take() else {
+        let Some(dialog) = self.context_panel.take_credential_dialog() else {
             return;
         };
         let entries = dialog
@@ -6904,18 +6858,19 @@ impl WorkspaceSurface {
             })
             .collect::<Vec<_>>();
         if entries.is_empty() {
-            self.context_credential_message =
-                Some("No keys were entered; existing keys are unchanged.".to_string());
+            self.context_panel
+                .set_credential_message("No keys were entered; existing keys are unchanged.");
             cx.notify();
             return;
         }
         let Some(service) = self.lifecycle.context_service() else {
-            self.context_credential_message = Some("Context runtime is unavailable.".to_string());
+            self.context_panel
+                .set_credential_message("Context runtime is unavailable.");
             cx.notify();
             return;
         };
-        self.context_credential_message =
-            Some("Saving keys to the native credential vault…".to_string());
+        self.context_panel
+            .set_credential_message("Saving keys to the native credential vault…");
         let save = cx.background_executor().spawn(async move {
             for (source, value) in entries {
                 service.store_api_key(source, value)?;
@@ -6925,7 +6880,7 @@ impl WorkspaceSurface {
         cx.spawn(async move |surface, cx| {
             let result = save.await;
             if let Err(error) = surface.update(cx, |surface, surface_cx| {
-                surface.context_credential_message = Some(match result {
+                surface.context_panel.set_credential_message(match result {
                     Ok(()) => "Keys saved; source refreshes were scheduled.".to_string(),
                     Err(error) => format!("Keys could not be saved: {error}"),
                 });
