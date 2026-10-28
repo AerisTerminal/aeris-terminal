@@ -2,6 +2,7 @@
 
 use super::alerts_controller::AlertsController;
 use super::context_panel_controller::ContextPanelController;
+use super::studies_controller::{StudiesController, StudySettingsRequest};
 use super::*;
 use aeris_observability::diagnostic;
 
@@ -94,7 +95,7 @@ struct WorkspaceSurfaceInitialization {
     restored_viewport: Option<(i64, i64)>,
     interval: ChartInterval,
     symbol_browser: SymbolBrowser,
-    studies: RuntimeStudiesState,
+    studies: StudiesController,
     alerts: AlertsController,
     bridge_label: String,
     order_book: Entity<ReadOnlyOrderBookView>,
@@ -1142,100 +1143,6 @@ fn restored_volume_settings(state: &WorkspaceVolumeSettingsState) -> Option<Volu
     })
 }
 
-fn runtime_study_count(studies: &RuntimeStudiesState) -> usize {
-    studies
-        .active
-        .iter()
-        .filter(|state| {
-            !studies.removing.contains(&state.study_id)
-                && !studies.automatic_removals.contains(&state.study_id)
-        })
-        .count()
-        + studies
-            .pending
-            .values()
-            .filter(|state| !state.remove_on_registration)
-            .count()
-        + studies.deferred.len()
-}
-
-fn persisted_runtime_study_states(
-    studies: &RuntimeStudiesState,
-    mut visible: impl FnMut(StudyInstanceId) -> Option<bool>,
-) -> Vec<WorkspaceChartStudyState> {
-    let mut persisted = studies
-        .active
-        .iter()
-        .filter(|state| !studies.automatic_removals.contains(&state.study_id))
-        .map(|state| {
-            let mut persisted = state.persisted.clone();
-            persisted.visible = visible(state.study_id).unwrap_or(persisted.visible);
-            persisted
-        })
-        .chain(
-            studies
-                .pending
-                .values()
-                .filter(|state| !state.remove_on_registration)
-                .map(|state| state.persisted.clone()),
-        )
-        .chain(
-            studies
-                .deferred
-                .iter()
-                .filter(|state| !state.remove_on_registration)
-                .map(|state| state.persisted.clone()),
-        )
-        .collect::<Vec<_>>();
-    persisted.sort_by_key(|state| state.local_id);
-    persisted
-}
-
-fn dispatch_automatic_study_removals(
-    studies: &mut RuntimeStudiesState,
-    mut try_remove: impl FnMut(StudyInstanceId) -> Result<(), TrySendError<StudyInstanceId>>,
-) -> bool {
-    let mut retry = studies
-        .automatic_removals
-        .iter()
-        .filter(|study_id| !studies.removing.contains(study_id))
-        .copied()
-        .collect::<Vec<_>>();
-    retry.sort_unstable();
-    for study_id in retry {
-        match try_remove(study_id) {
-            Ok(()) => {
-                studies.removing.insert(study_id);
-            }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => return false,
-        }
-    }
-    true
-}
-
-fn study_removal_failed(studies: &mut RuntimeStudiesState, study_id: StudyInstanceId) -> bool {
-    studies.removing.remove(&study_id);
-    studies.automatic_removals.contains(&study_id)
-}
-
-fn discard_unregistered_runtime_studies(studies: &mut RuntimeStudiesState) -> bool {
-    let changed = !studies.deferred.is_empty()
-        || studies
-            .pending
-            .values()
-            .any(|state| !state.remove_on_registration);
-    for pending in studies.pending.values_mut() {
-        pending.remove_on_registration = true;
-    }
-    studies.deferred.clear();
-    studies.registration_retry = None;
-    changed
-}
-
-fn next_deferred_runtime_study_index(studies: &RuntimeStudiesState) -> Option<usize> {
-    studies.deferred.iter().position(|state| !state.blocked)
-}
-
 fn runtime_study_registration(
     state: &WorkspaceChartStudyState,
     current_series: &BarSeriesKey,
@@ -1881,29 +1788,11 @@ fn persisted_runtime_studies(
         .collect()
 }
 
-fn restored_runtime_studies(
-    restored_chart_state: Option<&WorkspaceChartState>,
-) -> RuntimeStudiesState {
-    let deferred = persisted_runtime_studies(restored_chart_state);
-    let next_local_id = deferred
-        .iter()
-        .map(|state| state.persisted.local_id)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .unwrap_or(0);
-    RuntimeStudiesState {
-        deferred,
-        next_local_id,
-        ..RuntimeStudiesState::default()
-    }
-}
-
 fn restored_workspace_records(
     restored_chart_state: Option<&WorkspaceChartState>,
     market_worker: &MarketDataWorker,
-) -> (RuntimeStudiesState, AlertsController) {
-    let studies = restored_runtime_studies(restored_chart_state);
+) -> (StudiesController, AlertsController) {
+    let studies = StudiesController::restore(persisted_runtime_studies(restored_chart_state));
     let alerts = restore_price_alerts(restored_chart_state, market_worker);
     (studies, alerts)
 }
@@ -2096,9 +1985,9 @@ impl WorkspaceSurface {
                 precision: state.precision.map(u32::from),
             });
         let indicators = persisted_legacy_indicator_states(chart.indicator_states());
-        let studies = persisted_runtime_study_states(&self.studies, |study_id| {
-            chart.study_visible(study_id.get())
-        });
+        let studies = self
+            .studies
+            .persisted_states(|study_id| chart.study_visible(study_id.get()));
         let mut state = WorkspaceChartState {
             chart_type: chart.chart_type().identifier().to_string(),
             chart_state_json: String::new(),
@@ -4525,9 +4414,8 @@ impl WorkspaceSurface {
 
     fn retry_automatic_study_removals(&mut self) -> bool {
         let market_worker = &self.market_worker;
-        dispatch_automatic_study_removals(&mut self.studies, |study_id| {
-            market_worker.try_remove_study(study_id)
-        })
+        self.studies
+            .dispatch_automatic_removals(|study_id| market_worker.try_remove_study(study_id))
     }
 
     fn dispatch_runtime_study(
@@ -4547,7 +4435,7 @@ impl WorkspaceSurface {
         let registration = match runtime_study_registration(
             &state.persisted,
             &current_series,
-            &self.studies.active,
+            self.studies.active(),
         ) {
             Ok(registration) => registration,
             Err(error) => {
@@ -4559,7 +4447,7 @@ impl WorkspaceSurface {
             runtime_study_uses_current_chart(&state.persisted).then_some(current_series);
         match self.market_worker.try_register_study(registration) {
             Ok(sequence) => {
-                self.studies.pending.insert(sequence, state);
+                self.studies.insert_pending(sequence, state);
                 Ok(sequence)
             }
             Err(TrySendError::Full(_)) => Err(Box::new((
@@ -4574,10 +4462,10 @@ impl WorkspaceSurface {
     }
 
     fn dispatch_deferred_runtime_studies(&mut self, cx: &mut Context<Self>) {
-        if self.chart.is_none() || !self.studies.pending.is_empty() {
+        if self.chart.is_none() || self.studies.has_pending() {
             return;
         }
-        let Some(index) = next_deferred_runtime_study_index(&self.studies) else {
+        let Some(index) = self.studies.next_deferred_index() else {
             return;
         };
         let series = self.current_runtime_series().ok();
@@ -4585,10 +4473,12 @@ impl WorkspaceSurface {
         if !self.studies.registration_due(series.as_ref(), now) {
             return;
         }
-        let state = self.studies.deferred.remove(index);
+        let Some(state) = self.studies.take_deferred(index) else {
+            return;
+        };
         match self.dispatch_runtime_study(state) {
             Ok(_) => {
-                self.studies.registration_retry = None;
+                self.studies.registration_succeeded();
                 cx.notify();
             }
             Err(error) => {
@@ -4596,7 +4486,7 @@ impl WorkspaceSurface {
                 // A blocked study is never retried, so its one failure is reported now;
                 // anything else waits before the same series is tried again.
                 let report = state.blocked || self.studies.defer_registration(series, now);
-                self.studies.deferred.insert(index, state);
+                self.studies.return_deferred(index, state);
                 if report {
                     diagnostic!("Aeris study could not be queued: {reason}");
                     Self::post_indicator_failure(
@@ -4620,12 +4510,10 @@ impl WorkspaceSurface {
         }
         let persisted = self
             .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == study_id)
+            .active_study(study_id)
             .map(|state| state.persisted.clone())
             .ok_or_else(|| "study is no longer active".to_string())?;
-        let registration = runtime_study_registration(&persisted, &series, &self.studies.active)?;
+        let registration = runtime_study_registration(&persisted, &series, self.studies.active())?;
         match self
             .market_worker
             .try_reinitialize_study(study_id, registration)
@@ -4658,20 +4546,7 @@ impl WorkspaceSurface {
         let now = Instant::now();
         let stale = self
             .studies
-            .active
-            .iter()
-            .filter(|state| {
-                runtime_study_uses_current_chart(&state.persisted)
-                    && state.resolved_chart_series.as_ref() != Some(&series)
-                    && !self.studies.removing.contains(&state.study_id)
-                    && !self.studies.automatic_removals.contains(&state.study_id)
-                    && !self.studies.reinitializing.contains_key(&state.study_id)
-                    && self
-                        .studies
-                        .reinitialization_due(state.study_id, &series, now)
-            })
-            .map(|state| state.study_id)
-            .collect::<Vec<_>>();
+            .stale_studies(&series, now, runtime_study_uses_current_chart);
         for study_id in stale {
             if let Err(reason) = self.queue_runtime_study_reinitialization(study_id, series.clone())
                 && self
@@ -4695,7 +4570,7 @@ impl WorkspaceSurface {
         study_id: StudyInstanceId,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.studies.pending.remove(&request_sequence) else {
+        let Some(state) = self.studies.take_pending(request_sequence) else {
             return;
         };
         let runtime_state = RuntimeStudyState {
@@ -4704,10 +4579,9 @@ impl WorkspaceSurface {
             resolved_chart_series: state.resolved_chart_series,
         };
         if state.remove_on_registration {
-            self.studies.active.push(runtime_state);
-            self.studies.automatic_removals.insert(study_id);
+            self.studies.activate_for_removal(runtime_state);
             if !self.retry_automatic_study_removals() {
-                // The pending removal stays owned by RuntimeStudiesState and
+                // The pending removal stays owned by StudiesController and
                 // subsequent study synchronization retries it.
                 diagnostic!("Automatic study removal is waiting for market worker capacity");
             }
@@ -4715,7 +4589,7 @@ impl WorkspaceSurface {
             cx.notify();
             return;
         }
-        self.studies.active.push(runtime_state);
+        self.studies.activate(runtime_state);
         if state.persist_on_registration {
             self.chart_persistence_dirty = true;
         }
@@ -4737,7 +4611,7 @@ impl WorkspaceSurface {
         _message: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.studies.pending.remove(&request_sequence) else {
+        let Some(state) = self.studies.take_pending(request_sequence) else {
             return;
         };
         if state.persist_on_registration {
@@ -4748,9 +4622,7 @@ impl WorkspaceSurface {
             return;
         }
         if !state.persist_on_registration {
-            let mut state = state;
-            state.blocked = true;
-            self.studies.deferred.insert(0, state);
+            self.studies.push_front_blocked(state);
         }
         Self::post_indicator_failure(
             "study",
@@ -4828,7 +4700,7 @@ impl WorkspaceSurface {
     }
 
     fn apply_study_removal_failure(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
-        if !study_removal_failed(&mut self.studies, study_id) {
+        if !self.studies.removal_failed(study_id) {
             Self::post_indicator_failure(
                 "study",
                 "Study unavailable",
@@ -4855,34 +4727,23 @@ impl WorkspaceSurface {
             .study_visible(snapshot.study_id.get())
             .or_else(|| {
                 self.studies
-                    .active
-                    .iter()
-                    .find(|state| state.study_id == snapshot.study_id)
+                    .active_study(snapshot.study_id)
                     .map(|state| state.persisted.visible)
             });
         // Every study has host-owned style settings, so the legend always offers them.
         let settings_available = true;
-        let line_width = self
-            .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == snapshot.study_id)
-            .map_or_else(
-                || default_study_line_width(&snapshot.study_identifier),
-                |state| persisted_study_line_width(&state.persisted),
-            );
+        let line_width = self.studies.active_study(snapshot.study_id).map_or_else(
+            || default_study_line_width(&snapshot.study_identifier),
+            |state| persisted_study_line_width(&state.persisted),
+        );
         let output_colors = self
             .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == snapshot.study_id)
+            .active_study(snapshot.study_id)
             .map(|state| persisted_study_output_colors(&state.persisted))
             .unwrap_or_default();
         let pane_key = self
             .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == snapshot.study_id)
+            .active_study(snapshot.study_id)
             .map(|state| state.persisted.local_id);
         chart.update(cx, |chart, chart_cx| {
             if let Some(key) = pane_key {
@@ -5608,11 +5469,8 @@ impl WorkspaceSurface {
         if let Some(chart) = &self.chart
             && chart.read(cx).has_market_data()
         {
-            for state in &mut self.studies.active {
-                if let Some(visible) = chart.read(cx).study_visible(state.study_id.get()) {
-                    state.persisted.visible = visible;
-                }
-            }
+            self.studies
+                .retain_visibility(|study_id| chart.read(cx).study_visible(study_id.get()));
             self.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
             self.retained_chart_presentation.price_precision =
                 chart.read(cx).selected_price_precision();
@@ -7091,19 +6949,11 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.studies.removing.contains(&study_id)
-            || self.studies.reinitializing.contains_key(&study_id)
-        {
+        if self.studies.is_busy(study_id) {
             Self::post_study_failure("Study settings are busy. Try again.", cx);
             return;
         }
-        let Some(active) = self
-            .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == study_id)
-            .cloned()
-        else {
+        let Some(active) = self.studies.active_study(study_id).cloned() else {
             Self::post_study_failure("This study is no longer active.", cx);
             return;
         };
@@ -7112,7 +6962,7 @@ impl WorkspaceSurface {
             return;
         };
         let Ok(registration) =
-            runtime_study_registration(&active.persisted, &series, &self.studies.active)
+            runtime_study_registration(&active.persisted, &series, self.studies.active())
         else {
             Self::post_study_failure("Study settings could not be loaded.", cx);
             return;
@@ -7384,22 +7234,15 @@ impl WorkspaceSurface {
         output_colors: &[String],
         cx: &mut Context<Self>,
     ) {
-        let Some(active) = self
-            .studies
-            .active
-            .iter_mut()
-            .find(|state| state.study_id == study_id)
+        let Some((changed, persisted)) =
+            self.studies.set_style(study_id, line_width, output_colors)
         else {
             return;
         };
-        if active.persisted.line_width != line_width
-            || active.persisted.output_colors != output_colors
-        {
-            active.persisted.line_width = line_width;
-            active.persisted.output_colors = output_colors.to_vec();
+        let width = persisted_study_line_width(persisted);
+        if changed {
             self.chart_persistence_dirty = true;
         }
-        let width = persisted_study_line_width(&active.persisted);
         let colors = output_colors
             .iter()
             .map(|color| (!color.is_empty()).then(|| color.clone()))
@@ -7424,12 +7267,7 @@ impl WorkspaceSurface {
         };
         self.indicator_settings_dialog = None;
         // A study removed while the dialog was open has nothing left to restore.
-        if self
-            .studies
-            .active
-            .iter()
-            .any(|state| state.study_id == study_id)
-        {
+        if self.studies.is_active(study_id) {
             self.apply_study_style(study_id, original.line_width, &original.output_colors, cx);
             if self
                 .request_study_settings(study_id, original.settings)
@@ -7446,15 +7284,10 @@ impl WorkspaceSurface {
         study_id: StudyInstanceId,
         cx: &mut Context<Self>,
     ) {
-        if self.studies.removing.contains(&study_id) {
+        if self.studies.is_removing(study_id) {
             return;
         }
-        if !self
-            .studies
-            .active
-            .iter()
-            .any(|state| state.study_id == study_id)
-        {
+        if !self.studies.is_active(study_id) {
             Self::post_indicator_failure(
                 "study",
                 "Study unavailable",
@@ -7465,7 +7298,7 @@ impl WorkspaceSurface {
         }
         match self.market_worker.try_remove_study(study_id) {
             Ok(()) => {
-                self.studies.removing.insert(study_id);
+                self.studies.mark_removing(study_id);
                 if self
                     .study_settings_dialog()
                     .is_some_and(|dialog| dialog.study_id == study_id)
@@ -7526,9 +7359,7 @@ impl WorkspaceSurface {
         };
         let default_line_width = self
             .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == dialog.study_id)
+            .active_study(dialog.study_id)
             .map_or(DEFAULT_STUDY_LINE_WIDTH, |state| {
                 default_study_line_width(&state.persisted.identifier)
             });
@@ -7578,9 +7409,7 @@ impl WorkspaceSurface {
         let study_id = dialog.study_id;
         let Some(output_count) = self
             .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == study_id)
+            .active_study(study_id)
             .map(|state| state.persisted.output_identifiers.len())
         else {
             return Err("Study is no longer active".to_string());
@@ -7611,33 +7440,15 @@ impl WorkspaceSurface {
         study_id: StudyInstanceId,
         settings: Vec<WorkspaceStudySettingState>,
     ) -> Result<(), String> {
-        let Some(active) = self
-            .studies
-            .active
-            .iter()
-            .find(|state| state.study_id == study_id)
-        else {
-            return Err("Study is no longer active".to_string());
-        };
-        if let Some(pending) = self.studies.reinitializing.get(&study_id) {
-            let target = pending
-                .replacement_settings
-                .as_ref()
-                .unwrap_or(&active.persisted.settings);
-            if *target == settings {
-                self.studies.queued_settings.remove(&study_id);
-            } else {
-                self.studies.queued_settings.insert(study_id, settings);
+        let replacement = match self.studies.request_settings(study_id, settings) {
+            StudySettingsRequest::Inactive => {
+                return Err("Study is no longer active".to_string());
             }
-            return Ok(());
-        }
-        if active.persisted.settings == settings {
-            return Ok(());
-        }
-        let mut replacement = active.persisted.clone();
-        replacement.settings = settings;
+            StudySettingsRequest::Waiting | StudySettingsRequest::Unchanged => return Ok(()),
+            StudySettingsRequest::Reinitialize(replacement) => replacement,
+        };
         let (series, registration) = self.current_runtime_series().and_then(|series| {
-            runtime_study_registration(&replacement, &series, &self.studies.active)
+            runtime_study_registration(&replacement, &series, self.studies.active())
                 .map(|registration| (series, registration))
         })?;
         if !self.retry_automatic_study_removals() {
@@ -7666,7 +7477,7 @@ impl WorkspaceSurface {
 
     /// Sends the settings that waited for a study's previous reinitialization to finish.
     fn send_queued_study_settings(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
-        let Some(settings) = self.studies.queued_settings.remove(&study_id) else {
+        let Some(settings) = self.studies.take_queued_settings(study_id) else {
             return;
         };
         let Err(message) = self.request_study_settings(study_id, settings) else {
@@ -8134,17 +7945,10 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn clear_indicators(&mut self, cx: &mut Context<Self>) {
-        let study_ids = self
-            .studies
-            .active
-            .iter()
-            .filter(|state| !self.studies.removing.contains(&state.study_id))
-            .map(|state| state.study_id)
-            .collect::<Vec<_>>();
-        for study_id in study_ids {
+        for study_id in self.studies.removable_ids() {
             match self.market_worker.try_remove_study(study_id) {
                 Ok(()) => {
-                    self.studies.removing.insert(study_id);
+                    self.studies.mark_removing(study_id);
                 }
                 Err(_) => {
                     Self::post_indicator_failure(
@@ -8156,7 +7960,7 @@ impl WorkspaceSurface {
                 }
             }
         }
-        let unregistered_removed = discard_unregistered_runtime_studies(&mut self.studies);
+        let unregistered_removed = self.studies.discard_unregistered();
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 if chart.clear_indicators() {
@@ -8172,9 +7976,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn has_removable_indicators(&self, cx: &App) -> bool {
-        !self.studies.active.is_empty()
-            || !self.studies.pending.is_empty()
-            || !self.studies.deferred.is_empty()
+        self.studies.has_any()
             || self
                 .chart
                 .as_ref()
@@ -8191,8 +7993,7 @@ impl WorkspaceSurface {
             return false;
         };
         if let Some(maximum) = aeris_desktop::account::plan_policy().studies_per_chart
-            && chart.read(cx).indicator_states().len() + runtime_study_count(&self.studies)
-                >= maximum
+            && chart.read(cx).indicator_states().len() + self.studies.count() >= maximum
         {
             Self::post_study_failure("This chart has reached its indicator limit.", cx);
             return false;

@@ -52,6 +52,8 @@ mod keyboard_shortcuts;
 mod layouts_view;
 #[path = "desktop/local_state.rs"]
 mod local_state;
+#[path = "desktop/studies_controller.rs"]
+mod studies_controller;
 #[cfg(test)]
 pub(super) fn default_workspace_for_test() -> WorkspaceState {
     local_state::default_workspace()
@@ -279,7 +281,7 @@ use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     pin::Pin,
     rc::Rc,
     sync::{
@@ -942,7 +944,7 @@ struct WorkspaceSurface {
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
     time_zone_input: Entity<InputState>,
-    studies: RuntimeStudiesState,
+    studies: studies_controller::StudiesController,
     indicator_settings_dialog: Option<IndicatorSettingsDialog>,
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
@@ -1078,9 +1080,9 @@ fn instruments_with_activity<'a>(
     orders: &'a [aeris_trading::Order],
     positions: &'a [aeris_trading_runtime::PositionPnl],
     selected: Option<&aeris_trading::TradingAccountId>,
-) -> HashSet<&'a str> {
+) -> std::collections::HashSet<&'a str> {
     let Some(account_id) = selected else {
-        return HashSet::new();
+        return std::collections::HashSet::new();
     };
     let orders = orders
         .iter()
@@ -1312,209 +1314,6 @@ struct StudySettingsDialogState {
     /// The setting whose dropdown is open.
     menu: Option<String>,
     message: Option<String>,
-}
-
-struct RuntimeStudiesState {
-    active: Vec<RuntimeStudyState>,
-    pending: HashMap<u64, PendingRuntimeStudyState>,
-    reinitializing: HashMap<StudyInstanceId, PendingStudyReinitialization>,
-    /// The newest user settings for a study whose reinitialization is still in flight. Only the
-    /// latest replaces an earlier one, and it is sent once the runtime answers, so editing a
-    /// setting keeps at most one request per study in flight.
-    queued_settings: HashMap<StudyInstanceId, Vec<WorkspaceStudySettingState>>,
-    /// Rejected automatic reinitializations: the chart series each targeted and
-    /// when it may be retried.
-    reinitialization_retries: HashMap<StudyInstanceId, (BarSeriesKey, Instant)>,
-    suppressing_outputs: HashSet<StudyInstanceId>,
-    automatic_removals: HashSet<StudyInstanceId>,
-    removing: HashSet<StudyInstanceId>,
-    deferred: Vec<PendingRuntimeStudyState>,
-    /// The chart series (none when the selection cannot form one) whose deferred
-    /// registration last failed to queue, and when it may be tried again.
-    registration_retry: Option<(Option<BarSeriesKey>, Instant)>,
-    next_local_id: u64,
-}
-
-impl Default for RuntimeStudiesState {
-    fn default() -> Self {
-        Self {
-            active: Vec::new(),
-            pending: HashMap::new(),
-            reinitializing: HashMap::new(),
-            queued_settings: HashMap::new(),
-            reinitialization_retries: HashMap::new(),
-            suppressing_outputs: HashSet::new(),
-            automatic_removals: HashSet::new(),
-            removing: HashSet::new(),
-            deferred: Vec::new(),
-            registration_retry: None,
-            next_local_id: 1,
-        }
-    }
-}
-
-impl RuntimeStudiesState {
-    fn allocate_local_id(&mut self) -> Option<u64> {
-        let local_id = self.next_local_id;
-        if local_id == 0 {
-            return None;
-        }
-        self.next_local_id = self.next_local_id.checked_add(1).unwrap_or(0);
-        Some(local_id)
-    }
-
-    fn begin_reinitialization(
-        &mut self,
-        study_id: StudyInstanceId,
-        pending: PendingStudyReinitialization,
-    ) {
-        self.reinitializing.insert(study_id, pending);
-        self.suppressing_outputs.insert(study_id);
-    }
-
-    fn complete_reinitialization(&mut self, study_id: StudyInstanceId) -> Option<bool> {
-        let pending = self.reinitializing.remove(&study_id)?;
-        self.reinitialization_retries.remove(&study_id);
-        let mut persisted_changed = false;
-        if let Some(state) = self
-            .active
-            .iter_mut()
-            .find(|state| state.study_id == study_id)
-        {
-            state.resolved_chart_series = Some(pending.series);
-            if let Some(settings) = pending.replacement_settings {
-                state.persisted.settings = settings;
-                persisted_changed = true;
-            }
-        }
-        Some(persisted_changed)
-    }
-
-    /// Cancels a rejected reinitialization. An automatic one (no settings
-    /// replacement) waits before it is retried for the same series, so a runtime
-    /// that keeps rejecting it is not asked again on every market update.
-    fn reject_reinitialization(&mut self, study_id: StudyInstanceId, now: Instant) {
-        self.suppressing_outputs.remove(&study_id);
-        if let Some(pending) = self.reinitializing.remove(&study_id)
-            && pending.replacement_settings.is_none()
-        {
-            self.reinitialization_retries
-                .insert(study_id, (pending.series, now + STUDY_RETRY_DELAY));
-        }
-    }
-
-    /// Holds back an automatic reinitialization the pane could not queue. Returns
-    /// whether the series had not already failed, so the failure is reported once
-    /// instead of on every market poll.
-    fn defer_reinitialization(
-        &mut self,
-        study_id: StudyInstanceId,
-        series: BarSeriesKey,
-        now: Instant,
-    ) -> bool {
-        let first = self
-            .reinitialization_retries
-            .get(&study_id)
-            .is_none_or(|(failed, _)| *failed != series);
-        self.reinitialization_retries
-            .insert(study_id, (series, now + STUDY_RETRY_DELAY));
-        first
-    }
-
-    /// Holds back deferred registrations after one could not be queued. Returns
-    /// whether the series had not already failed, so the failure is reported once
-    /// instead of on every market poll.
-    fn defer_registration(&mut self, series: Option<BarSeriesKey>, now: Instant) -> bool {
-        let first = self
-            .registration_retry
-            .as_ref()
-            .is_none_or(|(failed, _)| *failed != series);
-        self.registration_retry = Some((series, now + STUDY_RETRY_DELAY));
-        first
-    }
-
-    fn registration_due(&self, series: Option<&BarSeriesKey>, now: Instant) -> bool {
-        self.registration_retry
-            .as_ref()
-            .is_none_or(|(failed, retry_at)| failed.as_ref() != series || now >= *retry_at)
-    }
-
-    fn reinitialization_due(
-        &self,
-        study_id: StudyInstanceId,
-        series: &BarSeriesKey,
-        now: Instant,
-    ) -> bool {
-        self.reinitialization_retries
-            .get(&study_id)
-            .is_none_or(|(rejected, retry_at)| rejected != series || now >= *retry_at)
-    }
-
-    fn invalidate_study_outputs(&mut self, study_ids: &[StudyInstanceId]) {
-        for study_id in study_ids {
-            if !self.reinitializing.contains_key(study_id) {
-                self.suppressing_outputs.remove(study_id);
-            }
-        }
-    }
-
-    fn suppresses_output(&self, study_id: StudyInstanceId) -> bool {
-        self.suppressing_outputs.contains(&study_id) || self.automatic_removals.contains(&study_id)
-    }
-
-    fn remove_runtime_subtree(&mut self, study_ids: &[StudyInstanceId]) -> bool {
-        let removed_runtime_ids = study_ids.iter().copied().collect::<HashSet<_>>();
-        let mut removed_local_ids = self
-            .active
-            .iter()
-            .filter(|state| removed_runtime_ids.contains(&state.study_id))
-            .map(|state| state.persisted.local_id)
-            .collect::<HashSet<_>>();
-
-        loop {
-            let previous_len = removed_local_ids.len();
-            for state in self.pending.values().chain(self.deferred.iter()) {
-                if state.persisted.dependencies.iter().any(|dependency| {
-                    WorkspaceStudyDependencyKind::try_from(dependency.kind).is_ok_and(|kind| {
-                        kind == WorkspaceStudyDependencyKind::StudyOutput
-                            && removed_local_ids.contains(&dependency.study_local_id)
-                    })
-                }) {
-                    removed_local_ids.insert(state.persisted.local_id);
-                }
-            }
-            if removed_local_ids.len() == previous_len {
-                break;
-            }
-        }
-
-        self.queued_settings
-            .retain(|study_id, _| !removed_runtime_ids.contains(study_id));
-        let previous_len = self.active.len();
-        self.active
-            .retain(|state| !removed_runtime_ids.contains(&state.study_id));
-        let mut changed = self.active.len() != previous_len;
-        for state in self.pending.values_mut() {
-            if removed_local_ids.contains(&state.persisted.local_id)
-                && !state.remove_on_registration
-            {
-                state.remove_on_registration = true;
-                changed = true;
-            }
-        }
-        let previous_deferred_len = self.deferred.len();
-        self.deferred
-            .retain(|state| !removed_local_ids.contains(&state.persisted.local_id));
-        changed |= self.deferred.len() != previous_deferred_len;
-        for study_id in study_ids {
-            self.reinitializing.remove(study_id);
-            self.reinitialization_retries.remove(study_id);
-            self.suppressing_outputs.remove(study_id);
-            self.automatic_removals.remove(study_id);
-            self.removing.remove(study_id);
-        }
-        changed
-    }
 }
 
 #[derive(Default)]

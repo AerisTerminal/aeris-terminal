@@ -214,7 +214,9 @@ record it on this line.
     (an enum), tab, height, API-key dialog and risk message behind change-reporting setters.
     `desktop/alerts_controller.rs` owns the alert list, create dialog, restore-failure notice and
     the 8-entry announcement ring; the surface only relays accepted lists to the market worker.
-  - Left: `OrderFlowPresenter`, `StudiesController`, `PaneChromeState` and `PanePersistence`,
+    `desktop/studies_controller.rs` owns the active, pending and deferred runtime studies, their
+    reinitializations, removals, queued settings and retry pacing behind private fields.
+  - Left: `OrderFlowPresenter`, `PaneChromeState` and `PanePersistence`,
     each with private fields.
   - Remove the `too_many_lines` allow.
   - GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.

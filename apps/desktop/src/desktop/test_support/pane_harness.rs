@@ -2801,7 +2801,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
         let product = pane.product.as_ref().expect("selected instrument");
         let series = engine_market_worker::series_key(product, ChartInterval::Minute1)
             .expect("selected series");
-        pane.studies.active.push(RuntimeStudyState {
+        pane.studies.activate(RuntimeStudyState {
             study_id,
             persisted: original.clone(),
             resolved_chart_series: Some(series.clone()),
@@ -2825,9 +2825,9 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
         .expect("reinitialization failure");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
-        assert_eq!(pane.studies.active[0].persisted, original);
-        assert!(!pane.studies.reinitializing.contains_key(&study_id));
-        assert!(!pane.studies.suppressing_outputs.contains(&study_id));
+        assert_eq!(pane.studies.active()[0].persisted, original);
+        assert!(!pane.studies.is_reinitializing(study_id));
+        assert!(!pane.studies.suppresses_output(study_id));
     });
     harness.pane.update(cx, |pane, _| {
         let product = pane.product.as_ref().expect("selected instrument");
@@ -2852,8 +2852,8 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
         .expect("reinitialization success");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
-        assert_eq!(pane.studies.active[0].persisted, replacement);
-        assert!(!pane.studies.reinitializing.contains_key(&study_id));
+        assert_eq!(pane.studies.active()[0].persisted, replacement);
+        assert!(!pane.studies.is_reinitializing(study_id));
         assert!(pane.chart_persistence_dirty);
     });
 }
@@ -2880,7 +2880,7 @@ fn reinitialized_sma_periods(harness: &PaneHarness) -> Vec<i64> {
 }
 
 fn persisted_sma_period(pane: &WorkspaceSurface) -> Option<i64> {
-    pane.studies.active[0]
+    pane.studies.active()[0]
         .persisted
         .settings
         .iter()
@@ -2923,7 +2923,7 @@ fn pane_harness_study_dialog_previews_edits_one_request_at_a_time_and_cancel_res
         let product = pane.product.as_ref().expect("selected instrument");
         let series = engine_market_worker::series_key(product, ChartInterval::Minute1)
             .expect("selected series");
-        pane.studies.active.push(RuntimeStudyState {
+        pane.studies.activate(RuntimeStudyState {
             study_id,
             persisted: original.clone(),
             resolved_chart_series: Some(series),
@@ -2954,7 +2954,8 @@ fn pane_harness_study_dialog_previews_edits_one_request_at_a_time_and_cancel_res
         harness.pane.update(cx, |pane, cx| {
             pane.set_study_settings_line_width(4, cx);
             assert_eq!(
-                pane.studies.active[0].persisted.line_width, 4,
+                pane.studies.active()[0].persisted.line_width,
+                4,
                 "a style edit applies at once"
             );
         });
@@ -2999,7 +3000,10 @@ fn pane_harness_study_dialog_previews_edits_one_request_at_a_time_and_cancel_res
     cx.read(|cx| {
         let pane = harness.pane.read(cx);
         assert!(pane.study_settings_dialog().is_none());
-        assert_eq!(pane.studies.active[0].persisted.line_width, original_width);
+        assert_eq!(
+            pane.studies.active()[0].persisted.line_width,
+            original_width
+        );
     });
     complete_study_reinitialization(&harness, study_id, cx);
     assert_eq!(
@@ -3010,8 +3014,8 @@ fn pane_harness_study_dialog_previews_edits_one_request_at_a_time_and_cancel_res
     complete_study_reinitialization(&harness, study_id, cx);
     cx.read(|cx| {
         let pane = harness.pane.read(cx);
-        assert_eq!(pane.studies.active[0].persisted, original);
-        assert!(pane.studies.reinitializing.is_empty());
+        assert_eq!(pane.studies.active()[0].persisted, original);
+        assert!(!pane.studies.has_reinitializations());
     });
 }
 
@@ -3072,7 +3076,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
     });
     let study_id = StudyInstanceId::try_from_u64(3).expect("study identity");
     harness.pane.update(cx, |pane, _| {
-        pane.studies.active.push(RuntimeStudyState {
+        pane.studies.activate(RuntimeStudyState {
             study_id,
             persisted: workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
                 .expect("study fixture"),
@@ -3100,7 +3104,7 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(
-            pane.studies.active.len(),
+            pane.studies.active().len(),
             1,
             "retired removal cannot mutate pane"
         );
@@ -3111,7 +3115,10 @@ fn pane_harness_retired_study_removal_cannot_delete_current_study(cx: &mut TestA
         .expect("committed removal");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
-        assert!(pane.studies.active.is_empty(), "current removal is applied");
+        assert!(
+            pane.studies.active().is_empty(),
+            "current removal is applied"
+        );
     });
 }
 
@@ -4794,7 +4801,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     let (harness, cx) = PaneHarness::open(cx);
     for sequence in 1..=2 {
         harness.pane.update(cx, |pane, _| {
-            pane.studies.pending.insert(
+            pane.studies.insert_pending(
                 sequence,
                 PendingRuntimeStudyState {
                     persisted: workspace_surface::legacy_runtime_study(
@@ -4840,7 +4847,7 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
     });
     assert!(cx.debug_bounds("toast").is_some(), "study failure rendered");
     harness.pane.update(cx, |pane, _| {
-        pane.studies.pending.insert(
+        pane.studies.insert_pending(
             3,
             PendingRuntimeStudyState {
                 persisted: workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
@@ -4867,8 +4874,8 @@ fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut T
             .expect("retired study outcome enters mailbox");
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1);
-            assert!(pane.studies.pending.contains_key(&3));
-            assert_eq!(pane.studies.active.len(), 0);
+            assert!(pane.studies.pending().contains_key(&3));
+            assert_eq!(pane.studies.active().len(), 0);
         });
     }
     harness
@@ -4929,10 +4936,10 @@ fn pane_harness_deferred_study_registers_on_a_selected_rithmic_market(cx: &mut T
     let requests = harness.commands.take().expect("command receiver");
     requests.try_iter().for_each(drop);
     harness.pane.update(cx, |pane, cx| {
-        pane.studies.deferred.push(deferred_sma_study());
+        pane.studies.push_deferred(deferred_sma_study());
         pane.poll_market_worker(cx);
-        assert_eq!(pane.studies.deferred, [] as [PendingRuntimeStudyState; 0]);
-        assert_eq!(pane.studies.pending.len(), 1);
+        assert_eq!(pane.studies.deferred(), [] as [PendingRuntimeStudyState; 0]);
+        assert_eq!(pane.studies.pending().len(), 1);
     });
     assert!(
         requests
@@ -4967,12 +4974,12 @@ fn pane_harness_unqueueable_deferred_study_reports_once_instead_of_every_poll(
             .expect("product")
             .entitlement_id
             .clear();
-        pane.studies.deferred.push(deferred_sma_study());
+        pane.studies.push_deferred(deferred_sma_study());
         for _ in 0..3 {
             pane.poll_market_worker(cx);
         }
-        assert_eq!(pane.studies.deferred.len(), 1);
-        assert!(pane.studies.pending.is_empty());
+        assert_eq!(pane.studies.deferred().len(), 1);
+        assert!(pane.studies.pending().is_empty());
     });
     cx.run_until_parked();
     assert_eq!(study_posts.get(), 1);

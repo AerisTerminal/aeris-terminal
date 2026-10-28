@@ -696,26 +696,23 @@ fn missing_custom_package_does_not_starve_later_independent_study_restore() {
         output_identifiers: vec!["value".to_string()],
     };
     let builtin = legacy_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
-    let studies = RuntimeStudiesState {
-        deferred: vec![
-            PendingRuntimeStudyState {
-                persisted: missing,
-                resolved_chart_series: None,
-                blocked: true,
-                remove_on_registration: false,
-                persist_on_registration: false,
-            },
-            PendingRuntimeStudyState {
-                persisted: builtin,
-                resolved_chart_series: None,
-                blocked: false,
-                remove_on_registration: false,
-                persist_on_registration: false,
-            },
-        ],
-        ..RuntimeStudiesState::default()
-    };
-    assert_eq!(next_deferred_runtime_study_index(&studies), Some(1));
+    let studies = StudiesController::restore(vec![
+        PendingRuntimeStudyState {
+            persisted: missing,
+            resolved_chart_series: None,
+            blocked: true,
+            remove_on_registration: false,
+            persist_on_registration: false,
+        },
+        PendingRuntimeStudyState {
+            persisted: builtin,
+            resolved_chart_series: None,
+            blocked: false,
+            remove_on_registration: false,
+            persist_on_registration: false,
+        },
+    ]);
+    assert_eq!(studies.next_deferred_index(), Some(1));
 }
 
 #[test]
@@ -756,14 +753,12 @@ fn failed_study_setting_reinitialization_preserves_durable_configuration() {
         period: aeris_market_data::BarPeriod::time(60).expect("minute series"),
         definition_version: 1,
     };
-    let mut studies = RuntimeStudiesState {
-        active: vec![RuntimeStudyState {
-            study_id,
-            persisted: original.clone(),
-            resolved_chart_series: Some(series.clone()),
-        }],
-        ..RuntimeStudiesState::default()
-    };
+    let mut studies = StudiesController::default();
+    studies.activate(RuntimeStudyState {
+        study_id,
+        persisted: original.clone(),
+        resolved_chart_series: Some(series.clone()),
+    });
     studies.begin_reinitialization(
         study_id,
         PendingStudyReinitialization {
@@ -776,9 +771,9 @@ fn failed_study_setting_reinitialization_preserves_durable_configuration() {
     // durable configuration is not replaced until success is acknowledged.
     let now = std::time::Instant::now();
     studies.reject_reinitialization(study_id, now);
-    assert_eq!(studies.active[0].persisted, original);
-    assert!(!studies.suppressing_outputs.contains(&study_id));
-    let series = studies.active[0]
+    assert_eq!(studies.active()[0].persisted, original);
+    assert!(!studies.suppresses_output(study_id));
+    let series = studies.active()[0]
         .resolved_chart_series
         .clone()
         .expect("resolved series");
@@ -793,7 +788,7 @@ fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_seri
     let study_id = StudyInstanceId::try_from_u64(1).expect("study id");
     let rejected = custom_package_series("instrument:rithmic:CME:MNQ");
     let other = custom_package_series("instrument:rithmic:CME:ES");
-    let mut studies = RuntimeStudiesState::default();
+    let mut studies = StudiesController::default();
     studies.begin_reinitialization(
         study_id,
         PendingStudyReinitialization {
@@ -804,7 +799,7 @@ fn rejected_automatic_study_reinitialization_waits_before_retrying_the_same_seri
     let now = std::time::Instant::now();
     studies.reject_reinitialization(study_id, now);
 
-    assert!(!studies.reinitializing.contains_key(&study_id));
+    assert!(!studies.is_reinitializing(study_id));
     assert!(!studies.reinitialization_due(study_id, &rejected, now));
     assert!(studies.reinitialization_due(study_id, &other, now));
     assert!(studies.reinitialization_due(study_id, &rejected, now + STUDY_RETRY_DELAY));
@@ -827,7 +822,7 @@ fn unqueued_study_work_reports_once_and_waits_before_retrying_the_same_series() 
     let other = custom_package_series("instrument:rithmic:CME:ES");
     let now = std::time::Instant::now();
     let later = now + STUDY_RETRY_DELAY;
-    let mut studies = RuntimeStudiesState::default();
+    let mut studies = StudiesController::default();
 
     assert!(studies.registration_due(Some(&failed), now));
     assert!(studies.defer_registration(Some(failed.clone()), now));
@@ -838,7 +833,7 @@ fn unqueued_study_work_reports_once_and_waits_before_retrying_the_same_series() 
     assert!(!studies.defer_registration(Some(failed.clone()), later));
     assert!(studies.defer_registration(None, later));
     assert!(!studies.registration_due(None, later));
-    assert!(!discard_unregistered_runtime_studies(&mut studies));
+    assert!(!studies.discard_unregistered());
     assert!(studies.registration_due(None, later));
 
     assert!(studies.defer_reinitialization(study_id, failed.clone(), now));
@@ -850,7 +845,7 @@ fn unqueued_study_work_reports_once_and_waits_before_retrying_the_same_series() 
 }
 
 fn reinitializing_dependency_chain() -> (
-    RuntimeStudiesState,
+    StudiesController,
     StudyInstanceId,
     StudyInstanceId,
     BarSeriesKey,
@@ -868,21 +863,17 @@ fn reinitializing_dependency_chain() -> (
         output_identifier: aeris_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
         ..WorkspaceStudyDependencyState::default()
     });
-    let mut studies = RuntimeStudiesState {
-        active: vec![
-            RuntimeStudyState {
-                study_id: root_id,
-                persisted: root,
-                resolved_chart_series: Some(old_series.clone()),
-            },
-            RuntimeStudyState {
-                study_id: downstream_id,
-                persisted: downstream,
-                resolved_chart_series: Some(old_series),
-            },
-        ],
-        ..RuntimeStudiesState::default()
-    };
+    let mut studies = StudiesController::default();
+    studies.activate(RuntimeStudyState {
+        study_id: root_id,
+        persisted: root,
+        resolved_chart_series: Some(old_series.clone()),
+    });
+    studies.activate(RuntimeStudyState {
+        study_id: downstream_id,
+        persisted: downstream,
+        resolved_chart_series: Some(old_series),
+    });
     studies.begin_reinitialization(
         root_id,
         PendingStudyReinitialization {
@@ -941,8 +932,8 @@ fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_un
     assert_eq!(chart.study_visible(downstream_id.get()), Some(true));
 
     assert_eq!(studies.complete_reinitialization(root_id), Some(false));
-    assert!(!studies.reinitializing.contains_key(&root_id));
-    assert!(studies.reinitializing.contains_key(&downstream_id));
+    assert!(!studies.is_reinitializing(root_id));
+    assert!(studies.is_reinitializing(downstream_id));
     assert!(studies.suppresses_output(root_id));
     assert!(studies.suppresses_output(downstream_id));
 
@@ -950,7 +941,7 @@ fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_un
     chart.remove_study_outputs(&[root_id.get(), downstream_id.get()]);
     assert!(!studies.suppresses_output(root_id));
     assert!(studies.suppresses_output(downstream_id));
-    assert!(studies.reinitializing.contains_key(&downstream_id));
+    assert!(studies.is_reinitializing(downstream_id));
     assert_eq!(chart.study_visible(downstream_id.get()), None);
 
     if !studies.suppresses_output(downstream_id) {
@@ -966,7 +957,7 @@ fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_un
         studies.complete_reinitialization(downstream_id),
         Some(false)
     );
-    assert!(studies.reinitializing.is_empty());
+    assert!(!studies.has_reinitializations());
     assert!(studies.suppresses_output(downstream_id));
     studies.invalidate_study_outputs(&[downstream_id]);
     assert!(!studies.suppresses_output(downstream_id));
@@ -974,7 +965,7 @@ fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_un
     assert_eq!(chart.study_visible(downstream_id.get()), Some(true));
     assert!(
         studies
-            .active
+            .active()
             .iter()
             .all(|state| state.resolved_chart_series.as_ref() == Some(&new_series))
     );
@@ -1005,44 +996,37 @@ fn pending_runtime_study(
     }
 }
 
-fn runtime_subtree_removal_fixture() -> (RuntimeStudiesState, StudyInstanceId, StudyInstanceId) {
+fn runtime_subtree_removal_fixture() -> (StudiesController, StudyInstanceId, StudyInstanceId) {
     let root_id = StudyInstanceId::try_from_u64(1).expect("root study id");
     let downstream_id = StudyInstanceId::try_from_u64(2).expect("downstream study id");
     let unrelated_id = StudyInstanceId::try_from_u64(3).expect("unrelated study id");
-    let mut studies = RuntimeStudiesState {
-        active: vec![
-            RuntimeStudyState {
-                study_id: root_id,
-                persisted: legacy_runtime_study(1, ChartIndicator::Sma, true).expect("root study"),
-                resolved_chart_series: None,
-            },
-            RuntimeStudyState {
-                study_id: downstream_id,
-                persisted: dependent_legacy_study(2, 1),
-                resolved_chart_series: None,
-            },
-            RuntimeStudyState {
-                study_id: unrelated_id,
-                persisted: legacy_runtime_study(3, ChartIndicator::Wma, true)
-                    .expect("unrelated study"),
-                resolved_chart_series: None,
-            },
-        ],
-        pending: HashMap::from([(
-            7,
-            pending_runtime_study(dependent_legacy_study(4, 2), false),
-        )]),
-        deferred: vec![
-            pending_runtime_study(dependent_legacy_study(5, 4), true),
-            pending_runtime_study(
-                legacy_runtime_study(6, ChartIndicator::Wma, true)
-                    .expect("unrelated deferred study"),
-                false,
-            ),
-        ],
-        ..RuntimeStudiesState::default()
-    };
-    studies.removing.insert(root_id);
+    let mut studies = StudiesController::restore(vec![
+        pending_runtime_study(dependent_legacy_study(5, 4), true),
+        pending_runtime_study(
+            legacy_runtime_study(6, ChartIndicator::Wma, true).expect("unrelated deferred study"),
+            false,
+        ),
+    ]);
+    studies.activate(RuntimeStudyState {
+        study_id: root_id,
+        persisted: legacy_runtime_study(1, ChartIndicator::Sma, true).expect("root study"),
+        resolved_chart_series: None,
+    });
+    studies.activate(RuntimeStudyState {
+        study_id: downstream_id,
+        persisted: dependent_legacy_study(2, 1),
+        resolved_chart_series: None,
+    });
+    studies.activate(RuntimeStudyState {
+        study_id: unrelated_id,
+        persisted: legacy_runtime_study(3, ChartIndicator::Wma, true).expect("unrelated study"),
+        resolved_chart_series: None,
+    });
+    studies.insert_pending(
+        7,
+        pending_runtime_study(dependent_legacy_study(4, 2), false),
+    );
+    studies.mark_removing(root_id);
     studies.begin_reinitialization(
         downstream_id,
         PendingStudyReinitialization {
@@ -1057,7 +1041,8 @@ fn runtime_subtree_removal_fixture() -> (RuntimeStudiesState, StudyInstanceId, S
 fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cleanup() {
     let (mut studies, root_id, downstream_id) = runtime_subtree_removal_fixture();
 
-    let persisted_before_ack = persisted_runtime_study_states(&studies, |_| None)
+    let persisted_before_ack = studies
+        .persisted_states(|_| None)
         .into_iter()
         .map(|state| state.local_id)
         .collect::<Vec<_>>();
@@ -1067,10 +1052,11 @@ fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cle
         "queuing manual runtime removal must retain the durable root and every descendant until runtime ACK"
     );
 
-    assert!(!study_removal_failed(&mut studies, root_id));
-    assert!(!studies.removing.contains(&root_id));
+    assert!(!studies.removal_failed(root_id));
+    assert!(!studies.is_removing(root_id));
     assert_eq!(
-        persisted_runtime_study_states(&studies, |_| None)
+        studies
+            .persisted_states(|_| None)
             .into_iter()
             .map(|state| state.local_id)
             .collect::<Vec<_>>(),
@@ -1078,9 +1064,10 @@ fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cle
         "manual removal failure leaves the ordinary durable graph unchanged"
     );
 
-    studies.removing.insert(root_id);
+    studies.mark_removing(root_id);
     assert_eq!(
-        persisted_runtime_study_states(&studies, |_| None)
+        studies
+            .persisted_states(|_| None)
             .into_iter()
             .map(|state| state.local_id)
             .collect::<Vec<_>>(),
@@ -1091,7 +1078,7 @@ fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cle
     assert!(studies.remove_runtime_subtree(&[root_id, downstream_id]));
     assert_eq!(
         studies
-            .active
+            .active()
             .iter()
             .map(|state| state.persisted.local_id)
             .collect::<Vec<_>>(),
@@ -1099,30 +1086,31 @@ fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cle
     );
     assert!(
         studies
-            .pending
+            .pending()
             .get(&7)
             .is_some_and(|state| state.remove_on_registration)
     );
     assert_eq!(
         studies
-            .deferred
+            .deferred()
             .iter()
             .map(|state| state.persisted.local_id)
             .collect::<Vec<_>>(),
         vec![6]
     );
-    assert_eq!(runtime_study_count(&studies), 2);
+    assert_eq!(studies.count(), 2);
     assert_eq!(
-        persisted_runtime_study_states(&studies, |_| None)
+        studies
+            .persisted_states(|_| None)
             .into_iter()
             .map(|state| state.local_id)
             .collect::<Vec<_>>(),
         vec![3, 6],
         "persisted graph excludes the removed runtime subtree and every pending/deferred durable descendant"
     );
-    assert!(!studies.removing.contains(&root_id));
-    assert!(!studies.reinitializing.contains_key(&downstream_id));
-    assert!(!studies.suppressing_outputs.contains(&downstream_id));
+    assert!(!studies.is_removing(root_id));
+    assert!(!studies.is_reinitializing(downstream_id));
+    assert!(!studies.suppresses_output(downstream_id));
 }
 
 #[test]
@@ -1420,24 +1408,20 @@ fn volume_settings_round_trip_through_the_layout_and_reject_damaged_values() {
 fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() {
     let first = StudyInstanceId::try_from_u64(1).expect("first study id");
     let removing = StudyInstanceId::try_from_u64(2).expect("removing study id");
-    let mut studies = RuntimeStudiesState {
-        active: vec![
-            RuntimeStudyState {
-                study_id: first,
-                persisted: legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
-                resolved_chart_series: None,
-            },
-            RuntimeStudyState {
-                study_id: removing,
-                persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
-                    .expect("Bollinger study"),
-                resolved_chart_series: None,
-            },
-        ],
-        ..RuntimeStudiesState::default()
-    };
-    studies.removing.insert(removing);
-    studies.pending.insert(
+    let mut studies = StudiesController::default();
+    studies.activate(RuntimeStudyState {
+        study_id: first,
+        persisted: legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
+        resolved_chart_series: None,
+    });
+    studies.activate(RuntimeStudyState {
+        study_id: removing,
+        persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
+            .expect("Bollinger study"),
+        resolved_chart_series: None,
+    });
+    studies.mark_removing(removing);
+    studies.insert_pending(
         3,
         PendingRuntimeStudyState {
             persisted: legacy_runtime_study(3, ChartIndicator::Wma, true).expect("WMA study"),
@@ -1447,7 +1431,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
             blocked: false,
         },
     );
-    studies.pending.insert(
+    studies.insert_pending(
         4,
         PendingRuntimeStudyState {
             persisted: legacy_runtime_study(4, ChartIndicator::Bollinger, true)
@@ -1458,7 +1442,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
             blocked: false,
         },
     );
-    studies.deferred.push(PendingRuntimeStudyState {
+    studies.push_deferred(PendingRuntimeStudyState {
         persisted: legacy_runtime_study(5, ChartIndicator::Bollinger, true)
             .expect("Bollinger study"),
         resolved_chart_series: None,
@@ -1467,96 +1451,85 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
         blocked: false,
     });
 
-    assert_eq!(runtime_study_count(&studies), 3);
+    assert_eq!(studies.count(), 3);
 }
 
 #[test]
 fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_or_persistence() {
     let study_id = StudyInstanceId::try_from_u64(9).expect("study id");
-    let mut studies = RuntimeStudiesState {
-        active: vec![RuntimeStudyState {
-            study_id,
-            persisted: legacy_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
-            resolved_chart_series: None,
-        }],
-        ..RuntimeStudiesState::default()
-    };
-    studies.automatic_removals.insert(study_id);
+    let mut studies = StudiesController::default();
+    studies.activate_for_removal(RuntimeStudyState {
+        study_id,
+        persisted: legacy_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
+        resolved_chart_series: None,
+    });
 
     let mut attempts = 0;
-    assert!(!dispatch_automatic_study_removals(
-        &mut studies,
-        |received| {
-            attempts += 1;
-            Err(TrySendError::Full(received))
-        }
-    ));
+    assert!(!studies.dispatch_automatic_removals(|received| {
+        attempts += 1;
+        Err(TrySendError::Full(received))
+    }));
     assert_eq!(attempts, 1);
-    assert!(studies.automatic_removals.contains(&study_id));
-    assert!(!studies.removing.contains(&study_id));
+    assert!(studies.is_automatic_removal(study_id));
+    assert!(!studies.is_removing(study_id));
     assert!(studies.suppresses_output(study_id));
-    assert_eq!(runtime_study_count(&studies), 0);
+    assert_eq!(studies.count(), 0);
     assert_eq!(
-        persisted_runtime_study_states(&studies, |_| None),
+        studies.persisted_states(|_| None),
         [] as [aeris_contracts::WorkspaceChartStudyState; 0]
     );
 
-    assert!(dispatch_automatic_study_removals(
-        &mut studies,
-        |received| {
-            attempts += 1;
-            assert_eq!(received, study_id);
-            Ok(())
-        }
-    ));
+    assert!(studies.dispatch_automatic_removals(|received| {
+        attempts += 1;
+        assert_eq!(received, study_id);
+        Ok(())
+    }));
     assert_eq!(attempts, 2);
-    assert!(studies.removing.contains(&study_id));
-    assert!(dispatch_automatic_study_removals(&mut studies, |_| panic!(
+    assert!(studies.is_removing(study_id));
+    assert!(studies.dispatch_automatic_removals(|_| panic!(
         "an in-flight automatic removal must not be queued twice"
     )));
 
     assert!(studies.remove_runtime_subtree(&[study_id]));
-    assert_eq!(studies.active, [] as [RuntimeStudyState; 0]);
-    assert!(!studies.automatic_removals.contains(&study_id));
-    assert!(!studies.removing.contains(&study_id));
+    assert_eq!(studies.active(), [] as [RuntimeStudyState; 0]);
+    assert!(!studies.is_automatic_removal(study_id));
+    assert!(!studies.is_removing(study_id));
 }
 
 #[test]
 fn automatic_study_removal_retries_after_runtime_failure() {
     let study_id = StudyInstanceId::try_from_u64(10).expect("study id");
-    let mut studies = RuntimeStudiesState::default();
-    studies.automatic_removals.insert(study_id);
+    let mut studies = StudiesController::default();
+    studies.activate_for_removal(RuntimeStudyState {
+        study_id,
+        persisted: legacy_runtime_study(10, ChartIndicator::Sma, true).expect("SMA study"),
+        resolved_chart_series: None,
+    });
 
-    assert!(dispatch_automatic_study_removals(
-        &mut studies,
-        |received| {
-            assert_eq!(received, study_id);
-            Ok(())
-        }
-    ));
-    assert!(studies.removing.contains(&study_id));
-    assert!(study_removal_failed(&mut studies, study_id));
-    assert!(!studies.removing.contains(&study_id));
-    assert!(studies.automatic_removals.contains(&study_id));
+    assert!(studies.dispatch_automatic_removals(|received| {
+        assert_eq!(received, study_id);
+        Ok(())
+    }));
+    assert!(studies.is_removing(study_id));
+    assert!(studies.removal_failed(study_id));
+    assert!(!studies.is_removing(study_id));
+    assert!(studies.is_automatic_removal(study_id));
 
     let mut retries = 0;
-    assert!(dispatch_automatic_study_removals(
-        &mut studies,
-        |received| {
-            retries += 1;
-            assert_eq!(received, study_id);
-            Ok(())
-        }
-    ));
+    assert!(studies.dispatch_automatic_removals(|received| {
+        retries += 1;
+        assert_eq!(received, study_id);
+        Ok(())
+    }));
     assert_eq!(retries, 1);
-    assert!(studies.removing.contains(&study_id));
-    assert!(studies.automatic_removals.contains(&study_id));
+    assert!(studies.is_removing(study_id));
+    assert!(studies.is_automatic_removal(study_id));
 }
 
 #[test]
 fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work() {
-    let mut studies = RuntimeStudiesState::default();
-    studies.pending.insert(
+    let mut studies = StudiesController::default();
+    studies.insert_pending(
         1,
         PendingRuntimeStudyState {
             persisted: legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
@@ -1566,7 +1539,7 @@ fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work
             blocked: false,
         },
     );
-    studies.deferred.push(PendingRuntimeStudyState {
+    studies.push_deferred(PendingRuntimeStudyState {
         persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
             .expect("Bollinger study"),
         resolved_chart_series: None,
@@ -1575,15 +1548,15 @@ fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work
         blocked: false,
     });
 
-    assert!(discard_unregistered_runtime_studies(&mut studies));
-    assert_eq!(studies.deferred, [] as [PendingRuntimeStudyState; 0]);
+    assert!(studies.discard_unregistered());
+    assert_eq!(studies.deferred(), [] as [PendingRuntimeStudyState; 0]);
     assert!(
         studies
-            .pending
+            .pending()
             .values()
             .all(|state| state.remove_on_registration)
     );
-    assert!(!discard_unregistered_runtime_studies(&mut studies));
+    assert!(!studies.discard_unregistered());
 }
 
 #[test]
