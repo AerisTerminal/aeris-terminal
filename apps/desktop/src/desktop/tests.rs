@@ -3683,8 +3683,9 @@ fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
         .expect("restored workspace builds the production boot plan");
 
     assert_eq!(shell_plan.active_workspace_id, 42);
-    assert_eq!(shell_plan.workspace_revision, 9);
-    assert_eq!(shell_plan.layout_generation, 17);
+    // The revisions stay on the restored document, which seeds the writer directly.
+    assert_eq!(restored.workspace_revision, 9);
+    assert_eq!(restored.layout_generation, 17);
     assert_eq!(shell_plan.workspace_tabs[0].active_pane_id, 8);
     assert_eq!(
         shell_plan.workspace_tabs[0].layout,

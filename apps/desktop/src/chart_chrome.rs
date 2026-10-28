@@ -672,11 +672,6 @@ impl DesktopPersistence {
     pub fn workspace_path(&self) -> PathBuf {
         self.root.join("workspace-state.pb")
     }
-
-    #[must_use]
-    pub fn chart_chrome_path(&self) -> PathBuf {
-        chart_chrome_path(&self.root)
-    }
 }
 
 /// The legacy chart-chrome key=value file under one desktop data root.
@@ -772,13 +767,9 @@ mod tests {
             root.join("workspace-state.pb")
         );
         assert_eq!(
-            persistence.chart_chrome_path(),
             chart_chrome_path(&root),
-            "the owner and the migration fold share one chrome path convention"
-        );
-        assert_eq!(
-            persistence.chart_chrome_path(),
-            root.join("desktop").join("chart-chrome")
+            root.join("desktop").join("chart-chrome"),
+            "the migration fold reads the legacy chrome file from its released location"
         );
     }
 

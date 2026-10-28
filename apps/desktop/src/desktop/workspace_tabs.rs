@@ -178,8 +178,7 @@ impl TerminalApp {
             ))
         .then(|| {
             WorkspaceLayoutPersistence::new(
-                init.workspace_revision,
-                init.layout_generation,
+                init.workspace_document.clone(),
                 lifecycle.persistence(),
                 dirty.source_wake(AppSource::PersistenceReceipts),
             )

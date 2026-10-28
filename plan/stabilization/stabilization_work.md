@@ -358,8 +358,21 @@ only on the guarded GUI checks on their lines.
     request wakes a pending wait immediately). Golden tests cover the 1.2.0 chrome file
     byte-for-byte, the read-only fold, a missing file, restart survival without the legacy
     file, chrome saving through the one writer and the condvar wake.
-  - Left: the writer thread owns `WorkspaceDocument` (instead of re-reading the file per
-    save) and the readiness dry run.
+  - Landed (writer-owned document, readiness dry run): the writer thread is seeded with the
+    restored document at startup and owns it in memory (`TerminalShellInit.workspace_document`);
+    each save applies the request's sections via `apply_workspace_save` (tagged by layout
+    generation) and writes — the per-save `load_workspace` read-modify-write is deleted and
+    `load_workspace` is test-only. `RestoredWorkspaceShellPlan` no longer carries the
+    revisions (they live on the document), and the redundant
+    `DesktopPersistence::chart_chrome_path` method is gone (the fold keeps the free path
+    function). Readiness is documented and locked in as the write-free dry run of the real
+    load: full decode + chain (including the chrome fold) + sanitize, no envelope upgrade,
+    no pre-migration copy, no quarantine; an unmigratable legacy frame or unrecognizable
+    payload fails readiness before activation. Tests: a save survives the on-disk file
+    turning to garbage without losing writer-owned sections or revision arithmetic, and the
+    readiness dry run returns exactly the document startup would restore while leaving every
+    file byte-identical.
+  - Left: the GUI checks below.
   - GUI checks: a corrupt workspace shows the notice with Open folder and the layout is not
     silently replaced; a newer-version workspace shows the read-only notice; a copied real
     workspace migrates intact.

@@ -4269,22 +4269,7 @@ mod tests {
         }
         let local = manifest("apps/desktop/src/desktop/local_state.rs");
         assert!(local.contains("active_workspace_id") && local.contains("save_workspace"));
-        let persistence = manifest("apps/desktop/src/desktop/workspace_persistence.rs");
-        for contract in [
-            "active_workspace_id",
-            "shutdown_wait_observes_latest_active_workspace_durability_without_stealing_ui_result",
-            "shutdown_wait_surfaces_current_persistence_failure",
-            "shutdown_wait_is_captured_without_waiting_on_the_ui_owner",
-            "shutdown_wait_rejects_a_newer_layout_request_before_commit",
-            "request.chart_chrome",
-            "a_newer_request_wakes_a_pending_shutdown_wait_through_the_condvar",
-            "chrome_changes_save_through_the_one_workspace_writer",
-        ] {
-            assert!(
-                persistence.contains(contract),
-                "local workspace persistence lost {contract}"
-            );
-        }
+        workspace_writer_owns_the_document_without_read_modify_write();
         let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
         assert!(
             !workspace_tabs.contains("persistence.flush(")
@@ -4354,6 +4339,32 @@ mod tests {
         let local = manifest("apps/desktop/src/desktop/local_state.rs");
         assert!(local.contains("WorkspaceState::decode") && local.contains("encode_to_vec"));
         assert!(local.contains("LEGACY_WORKSPACE_FILE"));
+    }
+
+    fn workspace_writer_owns_the_document_without_read_modify_write() {
+        let persistence = manifest("apps/desktop/src/desktop/workspace_persistence.rs");
+        for contract in [
+            "active_workspace_id",
+            "shutdown_wait_observes_latest_active_workspace_durability_without_stealing_ui_result",
+            "shutdown_wait_surfaces_current_persistence_failure",
+            "shutdown_wait_is_captured_without_waiting_on_the_ui_owner",
+            "shutdown_wait_rejects_a_newer_layout_request_before_commit",
+            "request.chart_chrome",
+            "a_newer_request_wakes_a_pending_shutdown_wait_through_the_condvar",
+            "chrome_changes_save_through_the_one_workspace_writer",
+            "fn apply_workspace_save",
+            "a_save_never_reads_the_document_back_from_the_file",
+        ] {
+            assert!(
+                persistence.contains(contract),
+                "local workspace persistence lost {contract}"
+            );
+        }
+        let persistence_production = production_prefix(&persistence);
+        assert!(
+            !persistence_production.contains("load_workspace("),
+            "the writer thread owns the document; a save never read-modify-writes the file"
+        );
     }
 
     #[test]
@@ -5927,7 +5938,7 @@ jobs:
         assert!(desktop.contains("DesktopServices::new("));
         assert!(desktop.contains("trading,\n        account_service,\n        persistence,"));
         assert!(!super::has_process_global_desktop_persistence(
-            "fn save(services: &DesktopServices) { services.persistence.chart_chrome_path(); }\n\
+            "fn save(services: &DesktopServices) { services.persistence.workspace_path(); }\n\
              #[cfg(test)] mod tests { static CHART_CHROME_SAVE_STATE: u8 = 0; }\n"
         ));
     }

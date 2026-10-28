@@ -1,4 +1,7 @@
-//! Coalesced asynchronous workspace layout persistence.
+//! Coalesced asynchronous workspace layout persistence. The writer thread owns the
+//! authoritative workspace document in memory: UI section updates arrive tagged with their
+//! layout generation, the writer replaces those sections and saves, and a save never
+//! re-reads the file.
 
 use super::*;
 use std::{sync::atomic::AtomicU64, time::Instant};
@@ -128,12 +131,15 @@ pub(super) struct WorkspaceLayoutPersistence {
 }
 
 impl WorkspaceLayoutPersistence {
+    /// Starts the writer thread with the restored document it owns from then on; a save
+    /// applies section requests to that in-memory copy and never re-reads the file.
     pub(super) fn new(
-        workspace_revision: u64,
-        layout_generation: u64,
+        workspace: WorkspaceState,
         persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
         completion_wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
+        let workspace_revision = workspace.workspace_revision;
+        let layout_generation = workspace.layout_generation;
         let latest = Arc::new(Mutex::new(None));
         let (wake_tx, wake_rx) = mpsc::sync_channel(1);
         let result = Arc::new(Mutex::new(None));
@@ -148,6 +154,7 @@ impl WorkspaceLayoutPersistence {
             .name("aeris-workspace-layout-client".to_string())
             .spawn(move || {
                 run_workspace_layout_persistence(
+                    workspace,
                     &worker_latest,
                     &wake_rx,
                     &worker_result,
@@ -299,7 +306,39 @@ impl WorkspaceLayoutPersistence {
     }
 }
 
+/// Replaces the document's UI-owned sections with the request's content, tagged by its
+/// layout generation. The writer owns every other section; a save never re-reads the file.
+fn apply_workspace_save(document: &mut WorkspaceState, request: WorkspaceLayoutRequest) {
+    document.workspace_revision = document.workspace_revision.saturating_add(1);
+    document.layout_generation = request
+        .layout_generation
+        .max(document.layout_generation.saturating_add(1));
+    document.active_workspace_id = request.active_workspace_id;
+    document.workspace_tabs = request.workspace_tabs;
+    document.chart_settings_templates = request.chart_settings_templates;
+    document.default_chart_settings = None;
+    document.watchlist = request
+        .watchlist_entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .instrument
+                .as_ref()
+                .map(|instrument| instrument.display_symbol.clone())
+        })
+        .collect();
+    document.watchlist_entries = request.watchlist_entries;
+    document.drawing_templates = request.drawing_templates;
+    document.saved_layouts = request
+        .saved_layouts
+        .iter()
+        .map(|layout| WorkspaceSavedLayoutState::clone(layout))
+        .collect();
+    document.chart_chrome = Some(request.chart_chrome);
+}
+
 fn run_workspace_layout_persistence(
+    mut document: WorkspaceState,
     latest: &Mutex<Option<WorkspaceLayoutRequest>>,
     wake: &Receiver<()>,
     result: &Mutex<Option<WorkspaceLayoutCompletion>>,
@@ -307,6 +346,7 @@ fn run_workspace_layout_persistence(
     persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
     completion_wake: &(dyn Fn() + Send + Sync),
 ) {
+    let path = persistence.workspace_path();
     while wake.recv().is_ok() {
         while wake.recv_timeout(Duration::from_millis(100)).is_ok() {}
         let Some(request) = latest
@@ -317,35 +357,8 @@ fn run_workspace_layout_persistence(
             continue;
         };
         let request_generation = request.layout_generation;
-        let path = persistence.workspace_path();
-        let mut current = local_state::load_workspace(&path);
-        current.workspace_revision = current.workspace_revision.saturating_add(1);
-        current.layout_generation = request
-            .layout_generation
-            .max(current.layout_generation.saturating_add(1));
-        current.active_workspace_id = request.active_workspace_id;
-        current.workspace_tabs = request.workspace_tabs;
-        current.chart_settings_templates = request.chart_settings_templates;
-        current.default_chart_settings = None;
-        current.watchlist = request
-            .watchlist_entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .instrument
-                    .as_ref()
-                    .map(|instrument| instrument.display_symbol.clone())
-            })
-            .collect();
-        current.watchlist_entries = request.watchlist_entries;
-        current.drawing_templates = request.drawing_templates;
-        current.saved_layouts = request
-            .saved_layouts
-            .iter()
-            .map(|layout| WorkspaceSavedLayoutState::clone(layout))
-            .collect();
-        current.chart_chrome = Some(request.chart_chrome);
-        let completed = local_state::save_workspace(&current, &path).map(|()| current);
+        apply_workspace_save(&mut document, request);
+        let completed = local_state::save_workspace(&document, &path).map(|()| document.clone());
         publish_durability(
             durability,
             Some(WorkspaceLayoutDurability {
@@ -643,8 +656,12 @@ mod tests {
     fn chrome_changes_save_through_the_one_workspace_writer() {
         let root = temporary_workspace_root("chrome-writer");
         let owner = aeris_desktop::chart_chrome::DesktopPersistence::new(root.clone());
-        let writer = WorkspaceLayoutPersistence::new(1, 1, &owner, Arc::new(|| {}))
-            .expect("workspace writer starts");
+        let writer = WorkspaceLayoutPersistence::new(
+            local_state::default_workspace(),
+            &owner,
+            Arc::new(|| {}),
+        )
+        .expect("workspace writer starts");
         let chrome = aeris_desktop::chart_chrome::ChartChromePreferences {
             chart_type: aeris_chart_integration::ChartType::Line,
             ..aeris_desktop::chart_chrome::ChartChromePreferences::default()
@@ -673,6 +690,49 @@ mod tests {
             saved.chart_chrome,
             Some(chrome),
             "chrome preferences persist inside the workspace document"
+        );
+        std::fs::remove_dir_all(&root).expect("fixture root removed");
+    }
+
+    #[test]
+    fn a_save_never_reads_the_document_back_from_the_file() {
+        let root = temporary_workspace_root("writer-owned-document");
+        let owner = aeris_desktop::chart_chrome::DesktopPersistence::new(root.clone());
+        let mut seed = local_state::default_workspace();
+        // Legacy sections no request carries stay under the writer's ownership.
+        seed.provider = "seeded-provider".to_string();
+        seed.market = "SEEDED".to_string();
+        let seed_revision = seed.workspace_revision;
+        let writer = WorkspaceLayoutPersistence::new(seed, &owner, Arc::new(|| {}))
+            .expect("workspace writer starts");
+
+        writer
+            .request(1, local_state::default_workspace().workspace_tabs)
+            .expect("first save requests");
+        writer
+            .shutdown_wait()
+            .wait(Duration::from_secs(10))
+            .expect("first save drains");
+
+        // The file changing underneath the writer (here: unusable bytes) must not feed the
+        // next save; the writer's in-memory document is authoritative.
+        std::fs::write(owner.workspace_path(), b"no-longer-a-workspace")
+            .expect("on-disk replacement writes");
+        writer
+            .request(1, local_state::default_workspace().workspace_tabs)
+            .expect("second save requests");
+        writer
+            .shutdown_wait()
+            .wait(Duration::from_secs(10))
+            .expect("second save drains from the owned document");
+
+        let saved = local_state::load_workspace(&owner.workspace_path());
+        assert_eq!(saved.provider, "seeded-provider");
+        assert_eq!(saved.market, "SEEDED");
+        assert_eq!(
+            saved.workspace_revision,
+            seed_revision + 2,
+            "revisions advance on the owned document, not on a re-read file"
         );
         std::fs::remove_dir_all(&root).expect("fixture root removed");
     }

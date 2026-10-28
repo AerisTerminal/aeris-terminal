@@ -123,9 +123,12 @@ violations and missing verification explicitly, and never describe them as satis
 - Desktop workspace persistence paths come from the instance's `DesktopServices` persistence
   owner, and chart chrome is one `WorkspaceState` section saved through the window's one
   workspace writer; the legacy chart-chrome file is read-only fold input to the migration
-  chain and is never written again. No separate chart-chrome writer, save receipt,
-  process-global chart-chrome save state or implicit process-wide workspace path lookup
-  may return.
+  chain and is never written again. The writer thread owns the restored document in memory:
+  UI section updates arrive tagged with their layout generation, the writer replaces those
+  sections and saves, and a save never re-reads the file (no read-modify-write). The
+  readiness gate runs the full decode + migration + sanitize path as a write-free dry run.
+  No separate chart-chrome writer, save receipt, process-global chart-chrome save state or
+  implicit process-wide workspace path lookup may return.
 - Saved layouts are owned by the desktop `LayoutLibrary` (bounded at 100; creating past the
   bound is refused, never evicts a user layout). Every workspace tab shows one saved layout, and
   a layout's chart drawings are one per-instrument `LayoutDrawings` set shared by every pane of

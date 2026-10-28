@@ -76,6 +76,7 @@ pub(super) fn restore_workspace(path: &Path) -> RestoredWorkspace {
     })
 }
 
+#[cfg(test)]
 pub(super) fn load_workspace(path: &Path) -> WorkspaceState {
     restore_workspace(path).workspace
 }
@@ -89,12 +90,12 @@ pub(super) fn load_workspace_with_origin(path: &Path) -> (WorkspaceState, bool) 
     (restored.workspace, from_file)
 }
 
-/// Loads persisted workspace state for the release activation readiness gate.
-///
-/// Unlike normal interactive startup this path is fallible and deliberately
-/// does not rewrite legacy persistence; the in-memory migration chain runs so
-/// a candidate must prove it can read the user's current state before it can
-/// pass activation health.
+/// Dry run of the real load for the release activation readiness gate: the full
+/// decode + migration chain + sanitize path runs exactly as startup would run it
+/// (including the legacy chart-chrome fold), but nothing is written — no envelope
+/// upgrade, no pre-migration copy, no quarantine. Unlike interactive startup the
+/// result is fallible, so a document the chain cannot migrate fails readiness here
+/// instead of at the first real load.
 pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState, String> {
     let load = workspace_container(path).inspect(decode_workspace_candidate);
     report_workspace_rejections(&load);
@@ -2292,6 +2293,10 @@ mod tests {
         impossible.schema_revision = CURRENT_WORKSPACE_SCHEMA;
         std::fs::write(&path, impossible.encode_to_vec()).expect("bare payload writes");
 
+        assert!(
+            load_workspace_for_readiness(&path).is_err(),
+            "readiness refuses an unrecognizable payload before activation"
+        );
         let restored = restore_workspace(&path);
         assert!(
             matches!(restored.outcome, RestoreOutcome::Defaulted { .. }),
@@ -2386,6 +2391,74 @@ mod tests {
             .as_ref()
             .expect("chrome survives the restart");
         assert_eq!(chrome.chart_type, "bars");
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn the_readiness_dry_run_runs_the_full_chain_without_writing() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        let chrome_path = aeris_desktop::chart_chrome::chart_chrome_path(parent);
+        std::fs::create_dir_all(chrome_path.parent().expect("chrome directory"))
+            .expect("chrome directory");
+        std::fs::write(&chrome_path, "chart_type=bars\n").expect("legacy chrome file writes");
+        write_workspace_artifact(&path, &workspace_with_revision(9));
+        let artifact_bytes = std::fs::read(&path).expect("released artifact bytes");
+
+        let dry_run = load_workspace_for_readiness(&path).expect("readiness dry run migrates");
+        assert_eq!(dry_run.schema_revision, CURRENT_WORKSPACE_SCHEMA);
+        assert_eq!(dry_run.workspace_revision, 9);
+        assert_eq!(
+            dry_run
+                .chart_chrome
+                .as_ref()
+                .map(|chrome| chrome.chart_type.as_str()),
+            Some("bars"),
+            "the dry run folds the legacy chrome file like a real load"
+        );
+        assert_eq!(
+            dry_run,
+            restore_workspace(&path).workspace,
+            "readiness sees exactly the document startup would restore"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("artifact unchanged"),
+            artifact_bytes,
+            "the dry run never rewrites the file"
+        );
+        assert!(
+            !path.with_file_name("workspace-state.pb.pre-v3").exists(),
+            "the dry run never writes the pre-migration copy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&chrome_path).expect("chrome file unchanged"),
+            "chart_type=bars\n"
+        );
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn the_readiness_dry_run_surfaces_a_migration_failure() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("temporary workspace directory");
+        let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
+        std::fs::write(&legacy, b"not-a-legacy-frame").expect("legacy frame writes");
+
+        let error = load_workspace_for_readiness(&path)
+            .expect_err("readiness refuses a frame the chain cannot migrate");
+        assert!(
+            error.contains("legacy"),
+            "the failure names the frame: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&legacy).expect("frame untouched"),
+            b"not-a-legacy-frame"
+        );
+        assert!(
+            !path.exists(),
+            "the dry run never creates the workspace file"
+        );
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
     }
 }

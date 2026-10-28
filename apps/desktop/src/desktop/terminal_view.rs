@@ -1481,8 +1481,8 @@ pub(super) fn terminal_root(
                 focus: cx.focus_handle(),
             }],
             active_workspace_id: Some(1),
-            workspace_revision: 0,
-            layout_generation: 1,
+            // The window shell never starts the workspace writer; the seed is inert.
+            workspace_document: local_state::default_workspace(),
             workspace_factory,
             workspace_shell: WorkspaceShellKind::Window,
             chart_chrome,
@@ -1502,8 +1502,9 @@ pub(super) fn terminal_root(
 pub(super) struct TerminalShellInit {
     pub(super) workspaces: Vec<WorkspaceTab>,
     pub(super) active_workspace_id: Option<u64>,
-    pub(super) workspace_revision: u64,
-    pub(super) layout_generation: u64,
+    /// The restored document the workspace writer owns from startup; a save never
+    /// re-reads the file.
+    pub(super) workspace_document: WorkspaceState,
     pub(super) workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     pub(super) workspace_shell: WorkspaceShellKind,
     pub(super) chart_chrome: chart_chrome::ChartChromePreferences,
@@ -1573,8 +1574,6 @@ fn terminal_shell_root(
 
 pub(super) struct RestoredWorkspaceShellPlan<'a> {
     pub(super) active_workspace_id: u64,
-    pub(super) workspace_revision: u64,
-    pub(super) layout_generation: u64,
     pub(super) workspace_tabs: &'a [WorkspaceTabState],
 }
 
@@ -1583,8 +1582,6 @@ pub(super) fn restored_workspace_shell_plan(
 ) -> RestoredWorkspaceShellPlan<'_> {
     RestoredWorkspaceShellPlan {
         active_workspace_id: restored.active_workspace_id,
-        workspace_revision: restored.workspace_revision,
-        layout_generation: restored.layout_generation,
         workspace_tabs: &restored.workspace_tabs,
     }
 }
@@ -1687,8 +1684,7 @@ pub(super) fn workspace_tabs_root(
         TerminalShellInit {
             workspaces,
             active_workspace_id: Some(plan.active_workspace_id),
-            workspace_revision: plan.workspace_revision,
-            layout_generation: plan.layout_generation,
+            workspace_document: restored.state.clone(),
             workspace_factory: Some(workspace_factory),
             workspace_shell: WorkspaceShellKind::Tabs,
             chart_chrome,
