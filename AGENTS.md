@@ -500,6 +500,11 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
   `AerisChartView` as `ChartHostEvent`s (`view/host_events.rs`) that the desktop subscribes to per
   chart. `chart_host_requests_are_emitted_events_not_pending_polls` rejects chart-side `pending_*`
   request fields and `take_*_request` drains in chart integration and desktop production source.
+- Hollow candle bodies are the engine's `CandleBody` series style: Terminal selects it through
+  `set_candle_body` and supplies only theme colors through the appearance APIs; a hollow direction
+  leaves its body unfilled while the frame and wick carry the direction color.
+  `chart_integration_candle_bodies_are_engine_owned` rejects the retired host transform names
+  `hollow_appearance` and `hollow_base` in chart integration and desktop production source.
 - When a chart feature needs more from Terminal than data, product policy, or a platform-only effect, the
   missing operation belongs in Aeris Charts. Add it there first (a coordinated two-repository task), push
   it, then bump the pinned revision here; never compensate with Terminal-side wiring.

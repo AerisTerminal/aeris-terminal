@@ -2713,7 +2713,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "8924f8d0609da964380b97ebb37235ab624c0be7";
+        let expected_revision = "50bde982233a6f7e3dff09b8bc7bb4635fa5f635";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",
@@ -2862,6 +2862,26 @@ mod tests {
         }
         let host_events = manifest("crates/ui/chart_integration/src/view/host_events.rs");
         assert!(host_events.contains("impl gpui::EventEmitter<ChartHostEvent> for AerisChartView"));
+    }
+
+    /// Hollow candle bodies are an engine-owned `CandleBody` series style: the host selects it
+    /// through `set_candle_body` and supplies only colors. The retired host transform that
+    /// rewrote body colors into transparent sentinels and pinned the frame must not return.
+    #[test]
+    fn chart_integration_candle_bodies_are_engine_owned() {
+        let chart_sources = production_sources_under("crates/ui/chart_integration/src");
+        let desktop_sources = production_sources_under("apps/desktop/src");
+        for path in chart_sources.into_iter().chain(desktop_sources) {
+            let relative = relative_string(&path);
+            let contents = fs::read_to_string(&path).expect("chart source");
+            let production = production_prefix(&contents);
+            for name in ["hollow_appearance", "hollow_base"] {
+                assert!(
+                    !contains_identifier(&production, name),
+                    "{relative} uses `{name}`; hollow candles are the engine's `CandleBody` style"
+                );
+            }
+        }
     }
 
     #[test]

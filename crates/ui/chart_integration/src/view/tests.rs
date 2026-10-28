@@ -1443,7 +1443,7 @@ fn line_with_markers_survives_replay_and_appearance_reset_without_leaking_to_oth
 }
 
 #[test]
-fn hollow_candles_are_transparent_bodies_that_never_leak_into_the_user_appearance() {
+fn hollow_candles_are_engine_owned_and_never_leak_into_the_user_appearance() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
@@ -1462,15 +1462,18 @@ fn hollow_candles_are_transparent_bodies_that_never_leak_into_the_user_appearanc
     chart.set_chart_type(ChartType::HollowCandlesBullish);
     let series = series_entry(&chart, 0);
     assert_eq!(series.kind, aeris_charts_engine::SeriesKind::Candlestick);
-    assert_eq!(series.up_color.as_deref(), Some("transparent"));
-    let bullish = solid.effective_up_color(chart.engine_theme());
     assert_eq!(
-        series.border_up_color.as_deref(),
-        Some(bullish.as_str()),
-        "the frame is pinned to the bullish color, not left to follow the hollow body"
+        chart.engine.candle_body(0),
+        Some(aeris_charts_engine::CandleBody::HollowBullish)
     );
-    assert_eq!(series.wick_up_color.as_deref(), Some(bullish.as_str()));
-    assert_ne!(series.down_color.as_deref(), Some("transparent"));
+    assert_eq!(
+        series.up_color, None,
+        "the engine owns the hollow body; the series keeps no transparent sentinel"
+    );
+    assert_eq!(
+        series.border_up_color, None,
+        "an unset frame follows the direction's solid body color inside the engine"
+    );
     assert_eq!(
         chart.appearance_settings(),
         solid,
@@ -1479,38 +1482,73 @@ fn hollow_candles_are_transparent_bodies_that_never_leak_into_the_user_appearanc
 
     chart.set_chart_type(ChartType::HollowCandles);
     assert_eq!(
-        series_entry(&chart, 0).up_color.as_deref(),
-        Some("transparent")
-    );
-    assert_eq!(
-        series_entry(&chart, 0).down_color.as_deref(),
-        Some("transparent")
+        chart.engine.candle_body(0),
+        Some(aeris_charts_engine::CandleBody::Hollow)
     );
 
-    // A theme switch re-pins the frame to the new theme's candle colors.
+    // The rendered frame: bodies stay unfilled while each frame carries its direction color.
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    chart.engine.fit_content();
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    let up = aeris_charts_render::color::Color::parse_css(
+        &solid.effective_up_color(chart.engine_theme()),
+    )
+    .expect("theme color parses");
+    let down = aeris_charts_render::color::Color::parse_css(
+        &solid.effective_down_color(chart.engine_theme()),
+    )
+    .expect("theme color parses");
+    let frame = chart.engine.build_frame();
+    let main = &frame.panes[0].main;
+    assert!(
+        main.iter()
+            .any(|prim| matches!(prim, Prim::Rect { rect, color } if rect.w > 2 && color.a() == 0)),
+        "hollow bodies stay unfilled"
+    );
+    assert!(
+        main.iter().any(
+            |prim| matches!(prim, Prim::RectFrame { color, .. } if *color == up || *color == down)
+        ),
+        "the body frame carries the direction color"
+    );
+    assert!(
+        !main.iter().any(|prim| matches!(prim, Prim::Rect { rect, color } if rect.w > 2 && (*color == up || *color == down))),
+        "no solid body fill survives a hollow chart type"
+    );
+
+    // A theme switch needs no host re-pinning: the engine resolves the new theme's colors.
     let other_theme = chart.platform.toggled();
-    let other = chart_theme(other_theme.mode);
     chart.set_theme(other_theme);
+    let series = series_entry(&chart, 0);
+    assert_eq!(series.up_color, None);
+    assert_eq!(series.border_down_color, None);
     assert_eq!(
-        series_entry(&chart, 0).border_down_color.as_deref(),
-        Some(solid.effective_down_color(other).as_str())
-    );
-    assert_eq!(
-        series_entry(&chart, 0).up_color.as_deref(),
-        Some("transparent")
+        chart.engine.candle_body(0),
+        Some(aeris_charts_engine::CandleBody::Hollow)
     );
 
-    // A user color edit while hollow becomes the frame color and is kept for solid candles.
+    // A user color edit while hollow is stored as the body color; the engine paints it on the
+    // frame and wick, and solid candles keep it.
     let mut edited = chart.appearance_settings();
     edited.up_color = aeris_charts_engine::AppearanceColor::Custom("#123456".into());
     assert!(chart.set_series_appearance_settings(&edited));
-    assert_eq!(
-        series_entry(&chart, 0).border_up_color.as_deref(),
-        Some("#123456")
+    assert_eq!(series_entry(&chart, 0).up_color.as_deref(), Some("#123456"));
+    let frame = chart.engine.build_frame();
+    assert!(
+        frame.panes[0].main.iter().any(|prim| matches!(prim, Prim::RectFrame { color, .. } if *color == aeris_charts_render::color::Color::rgb(0x12, 0x34, 0x56))),
+        "a body color edit while hollow becomes the frame color"
     );
     chart.set_chart_type(ChartType::Candles);
     assert_eq!(series_entry(&chart, 0).up_color.as_deref(), Some("#123456"));
     assert_eq!(chart.appearance_settings().up_color, edited.up_color);
+    assert_eq!(
+        chart.engine.candle_body(0),
+        Some(aeris_charts_engine::CandleBody::Solid)
+    );
 }
 
 #[test]

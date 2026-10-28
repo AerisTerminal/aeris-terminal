@@ -287,6 +287,7 @@ pub(crate) fn install_product_price_series(
 
 fn apply_product_series_kind(engine: &mut ChartEngine, chart_type: ChartType) {
     engine.convert_series_kind(0, chart_type.series_kind());
+    engine.set_candle_body(0, chart_type.candle_body());
     apply_product_series_markers(engine, chart_type);
 }
 

@@ -13,7 +13,6 @@ use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
-use aeris_charts_engine::AppearanceColor;
 pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 #[cfg(test)]
 use aeris_charts_engine::FinancialThemeColors;
@@ -769,42 +768,6 @@ impl Default for ChartLegendOptions {
     }
 }
 
-/// The CSS keyword Aeris Charts reads as "no fill"; a candle body set to it is hollow.
-const HOLLOW_BODY: &str = "transparent";
-
-/// Hollow candles from the user's appearance: each hollow side gets a transparent body, and
-/// its border and wick are pinned to that side's visible color, because an unpinned part
-/// follows the body and would vanish with it. Colors the user pinned are kept, and borders
-/// stay on so the frame shows.
-fn hollow_appearance(
-    base: &ChartAppearanceSettings,
-    bullish: bool,
-    bearish: bool,
-    theme: ChartTheme,
-) -> ChartAppearanceSettings {
-    fn pinned(part: &AppearanceColor, body: &str) -> AppearanceColor {
-        match part {
-            AppearanceColor::Custom(color) => AppearanceColor::Custom(color.clone()),
-            AppearanceColor::Theme => AppearanceColor::Custom(body.to_string()),
-        }
-    }
-    let mut hollow = base.clone();
-    if bullish {
-        let body = base.effective_up_color(theme);
-        hollow.border_up_color = pinned(&base.border_up_color, &body);
-        hollow.wick_up_color = pinned(&base.wick_up_color, &body);
-        hollow.up_color = AppearanceColor::Custom(HOLLOW_BODY.to_string());
-    }
-    if bearish {
-        let body = base.effective_down_color(theme);
-        hollow.border_down_color = pinned(&base.border_down_color, &body);
-        hollow.wick_down_color = pinned(&base.wick_down_color, &body);
-        hollow.down_color = AppearanceColor::Custom(HOLLOW_BODY.to_string());
-    }
-    hollow.border_visible = true;
-    hollow
-}
-
 /// `appearance` with its chart-canvas fields taken from `canvas`; every series field is kept.
 fn with_canvas_of(
     mut appearance: ChartAppearanceSettings,
@@ -838,14 +801,14 @@ impl ChartType {
         )
     }
 
-    /// Which candle bodies are hollow, as `(bullish, bearish)`; `None` for every solid type.
-    /// Aeris Charts has no hollow series: a hollow body is a transparent body color.
-    const fn hollow_sides(self) -> Option<(bool, bool)> {
+    /// The engine candle-body presentation of this chart type; `Solid` for every non-hollow
+    /// type. Hollow bodies are engine-owned (`CandleBody`); the host supplies only colors.
+    pub(crate) const fn candle_body(self) -> aeris_charts_engine::CandleBody {
         match self {
-            Self::HollowCandles => Some((true, true)),
-            Self::HollowCandlesBullish => Some((true, false)),
-            Self::HollowCandlesBearish => Some((false, true)),
-            _ => None,
+            Self::HollowCandles => aeris_charts_engine::CandleBody::Hollow,
+            Self::HollowCandlesBullish => aeris_charts_engine::CandleBody::HollowBullish,
+            Self::HollowCandlesBearish => aeris_charts_engine::CandleBody::HollowBearish,
+            _ => aeris_charts_engine::CandleBody::Solid,
         }
     }
 
@@ -1029,9 +992,8 @@ pub struct AerisChartView {
     price_precision_override: Option<u8>,
     chart_type: ChartType,
     /// The user's own appearance while Aeris Charts paints a derived one: a preset palette
-    /// pins theme-following colors and a hollow chart type makes bodies transparent. This keeps
-    /// what the user chose, with its theme provenance, so readback, persistence, a preset
-    /// switch and a return to solid candles never see the derivation.
+    /// pins theme-following colors. This keeps what the user chose, with its theme
+    /// provenance, so readback, persistence and a preset switch never see the derivation.
     appearance_intent: Option<ChartAppearanceSettings>,
     /// Host-owned axis colors, painted after every engine theme or canvas change.
     axis_appearance: ChartAxisAppearance,
@@ -1363,7 +1325,7 @@ impl AerisChartView {
         self.platform = theme;
         self.palette = PresetPalette::for_platform(&theme);
         self.engine.set_theme(chart_theme(theme.mode));
-        // Preset colors and a hollow frame are pinned to the theme, so they follow a switch.
+        // Preset colors are pinned to the theme, so they follow a switch.
         self.sync_painted_appearance();
         apply_platform_chrome_contract(&mut self.engine, time_labels);
         self.sync_big_trades_options();
@@ -1934,25 +1896,19 @@ impl AerisChartView {
     }
 
     /// What Aeris Charts paints for the user's `intent`: theme-following colors pinned to
-    /// the preset palette, then transparent bodies for a hollow chart type.
+    /// the preset palette. A hollow chart type is engine-owned (`CandleBody`) and derives
+    /// nothing here.
     fn painted_appearance(&self, intent: &ChartAppearanceSettings) -> ChartAppearanceSettings {
-        let pinned = self
-            .palette
+        self.palette
             .as_ref()
-            .map_or_else(|| intent.clone(), |palette| palette.pin(intent));
-        match self.chart_type.hollow_sides() {
-            Some((bullish, bearish)) => {
-                hollow_appearance(&pinned, bullish, bearish, self.engine_theme())
-            }
-            None => pinned,
-        }
+            .map_or_else(|| intent.clone(), |palette| palette.pin(intent))
     }
 
-    /// Paints the derived appearance for the current palette and chart type, or restores the
+    /// Paints the derived appearance for the current palette, or restores the
     /// user's own appearance once nothing is derived. The engine's colors are replaced only
     /// while something is derived or when leaving that state.
     fn sync_painted_appearance(&mut self) {
-        let derived = self.palette.is_some() || self.chart_type.hollow_sides().is_some();
+        let derived = self.palette.is_some();
         match (self.appearance_intent.take(), derived) {
             (None, false) => {}
             (Some(intent), false) => {
@@ -2001,6 +1957,8 @@ impl AerisChartView {
         self.appearance_intent = None;
         self.axis_appearance = ChartAxisAppearance::default();
         self.sync_painted_appearance();
+        self.engine
+            .set_candle_body(0, self.chart_type.candle_body());
         apply_product_series_markers(&mut self.engine, self.chart_type);
         self.reapply_study_styles();
         // Volume colors are indicator settings, not chart appearance.

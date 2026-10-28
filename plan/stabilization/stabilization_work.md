@@ -379,10 +379,22 @@ only on the guarded GUI checks on their lines.
   - Workspaces written by 1.0.0-1.2.0 must open unchanged in meaning, including saved layouts,
     watchlist flags and pane heights. Closes UI-09 and PL-18.
 - [ ] M7.9 Hollow candles as an Aeris Charts series style
-  - Left: add the style in Aeris Charts and push it, then bump only the `aeris_charts_*` pins.
-  - Delete `hollow_appearance` and the host transform, and add a naming_check ban.
-  - Compare screenshots.
-  - Also decide the in-place cross-instrument data reset in Aeris Charts.
+  - Landed: aeris-charts `50bde98` (`feat(chart): engine-owned hollow candle bodies`) adds the
+    engine `CandleBody` style (`Solid`/`Hollow`/`HollowBullish`/`HollowBearish`) with
+    `set_candle_body`/`candle_body`; a hollow direction leaves its body unfilled while the frame
+    and wick carry the direction color. Terminal bumps the five `aeris_charts_*` pins to
+    `50bde982233a6f7e3dff09b8bc7bb4635fa5f635`, deletes the host `hollow_appearance`/`HOLLOW_BODY`
+    transform, applies `chart_type.candle_body()` in `apply_product_series_kind` and the
+    appearance-reset path, and naming_check bans `hollow_appearance`/`hollow_base`
+    (`chart_integration_candle_bodies_are_engine_owned`).
+  - Capability review: the in-place data reset M6.4 asked about already exists as
+    `ChartEngine::set_series_data` (full column replacement on the same series), and the
+    `PanePresentation` apply path reaches it through `install_product_price_series`; no new
+    engine operation was needed. No other unused engine capability arrived between `8924f8d`
+    and `50bde98` (the pin bump carries only the hollow-candle commit).
+  - Left: GUI check of the hollow style (screenshot comparison before/after). The wasm binding
+    and web demo keep the transparent-body color path; exposing `CandleBody` there is a possible
+    follow-up, not required by Terminal.
 - [ ] M7.10 Sweep classification and incremental tape in `market_runtime`
   - Left: move the sweep classification into the runtime, once per publication over the same
     512-trade window.
