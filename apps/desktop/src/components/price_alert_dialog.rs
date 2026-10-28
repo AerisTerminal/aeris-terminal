@@ -1,13 +1,7 @@
 use aeris_observability::diagnostic;
-use std::fmt::Write as _;
 
+use super::alerts_controller::{AlertTriggerOutcome, chart_price_scale, scaled_price};
 use super::*;
-
-const PRICE_SCALE_RIGHT: u32 = 0;
-const PRICE_SCALE_LEFT: u32 = 1;
-const PRICE_SCALE_OVERLAY: u32 = 2;
-/// Triggers a pane holds until the toaster takes them; older ones give way past this.
-const PENDING_ANNOUNCEMENTS: usize = 8;
 
 /// "NQZ6 crossed 31258.00" over "Last trade 31258.25", in the runtime's exact values.
 pub(super) fn price_alert_trigger_text(trigger: &MarketPriceAlertTrigger) -> (String, String) {
@@ -97,23 +91,6 @@ fn chart_alert_line(alert: &WorkspacePriceAlertState) -> Option<ChartAlertLine> 
     })
 }
 
-const fn chart_price_scale(value: u32) -> Option<ChartAlertPriceScale> {
-    match value {
-        PRICE_SCALE_RIGHT => Some(ChartAlertPriceScale::Right),
-        PRICE_SCALE_LEFT => Some(ChartAlertPriceScale::Left),
-        PRICE_SCALE_OVERLAY => Some(ChartAlertPriceScale::Overlay),
-        _ => None,
-    }
-}
-
-const fn persisted_price_scale(value: ChartAlertPriceScale) -> u32 {
-    match value {
-        ChartAlertPriceScale::Right => PRICE_SCALE_RIGHT,
-        ChartAlertPriceScale::Left => PRICE_SCALE_LEFT,
-        ChartAlertPriceScale::Overlay => PRICE_SCALE_OVERLAY,
-    }
-}
-
 const fn chart_condition(value: PriceAlertCondition) -> ChartAlertCondition {
     match value {
         PriceAlertCondition::Crossing => ChartAlertCondition::Crossing,
@@ -141,36 +118,6 @@ const fn chart_frequency(value: PriceAlertFrequency) -> ChartAlertFrequency {
     }
 }
 
-fn scaled_price(price: f64, scale: u32) -> Option<i64> {
-    if !price.is_finite() || scale > 18 {
-        return None;
-    }
-    (price * 10_f64.powi(i32::try_from(scale).ok()?))
-        .round()
-        .to_i64()
-}
-
-fn random_alert_id() -> Result<String, String> {
-    let mut random = [0_u8; 16];
-    getrandom::fill(&mut random).map_err(|_| "system CSPRNG is unavailable".to_string())?;
-    let mut id = String::with_capacity(32);
-    for byte in random {
-        write!(&mut id, "{byte:02x}")
-            .map_err(|_| "alert identity could not be built".to_string())?;
-    }
-    Ok(id)
-}
-
-fn new_alert_id(alerts: &[WorkspacePriceAlertState]) -> Result<String, String> {
-    for _ in 0..4 {
-        let id = random_alert_id()?;
-        if alerts.iter().all(|alert| alert.id != id) {
-            return Ok(id);
-        }
-    }
-    Err("a unique alert identity could not be allocated".to_string())
-}
-
 impl WorkspaceSurface {
     pub(super) fn apply_current_price_alert_sync(
         &self,
@@ -184,11 +131,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn emit_initial_price_alert_restore_notice(&mut self, cx: &mut Context<Self>) {
-        if std::mem::replace(
-            &mut self.price_alert_restore_status,
-            PriceAlertRestoreStatus::Handled,
-        ) == PriceAlertRestoreStatus::PendingFailure
-        {
+        if self.alerts.take_restore_failure() {
             Self::apply_price_alert_sync(false, cx);
         }
     }
@@ -251,7 +194,7 @@ impl WorkspaceSurface {
             );
             return;
         };
-        self.price_alert_dialog = Some(PriceAlertDialogState {
+        self.alerts.open_dialog(PriceAlertDialogState {
             instrument,
             condition: persisted_condition(request.condition),
             frequency: match request.frequency {
@@ -268,7 +211,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn close_price_alert_dialog(&mut self, cx: &mut Context<Self>) {
-        self.price_alert_dialog = None;
+        self.alerts.close_dialog();
         Self::clear_price_alert_action_notice(cx);
         cx.notify();
     }
@@ -278,7 +221,7 @@ impl WorkspaceSurface {
         condition: PriceAlertCondition,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.price_alert_dialog {
+        if let Some(dialog) = self.alerts.dialog_mut() {
             dialog.condition = condition;
             dialog.open_dropdown = None;
             Self::clear_price_alert_action_notice(cx);
@@ -291,7 +234,7 @@ impl WorkspaceSurface {
         frequency: PriceAlertFrequency,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.price_alert_dialog {
+        if let Some(dialog) = self.alerts.dialog_mut() {
             dialog.frequency = frequency;
             dialog.open_dropdown = None;
             Self::clear_price_alert_action_notice(cx);
@@ -304,14 +247,14 @@ impl WorkspaceSurface {
         dropdown: PriceAlertDropdown,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.price_alert_dialog {
+        if let Some(dialog) = self.alerts.dialog_mut() {
             dialog.open_dropdown = (dialog.open_dropdown != Some(dropdown)).then_some(dropdown);
             cx.notify();
         }
     }
 
     pub(super) fn close_price_alert_dropdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.price_alert_dialog
+        if let Some(dialog) = self.alerts.dialog_mut()
             && dialog.open_dropdown.take().is_some()
         {
             cx.notify();
@@ -319,46 +262,16 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn create_price_alert(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.price_alert_dialog.clone() else {
-            Self::post_price_alert_action_notice(
-                "Select a live market before creating an alert.",
-                cx,
-            );
-            return;
+        let next = match self
+            .alerts
+            .with_dialog_alert(self.lifecycle.clock().wall_unix_nanos())
+        {
+            Ok(next) => next,
+            Err(detail) => {
+                Self::post_price_alert_action_notice(detail, cx);
+                return;
+            }
         };
-        let instrument = dialog.instrument;
-        if self.price_alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER {
-            Self::post_price_alert_action_notice("This chart has reached its alert limit.", cx);
-            return;
-        }
-        let Some(price) = scaled_price(dialog.request.price, instrument.price_scale) else {
-            Self::post_price_alert_action_notice("The selected alert price is invalid.", cx);
-            return;
-        };
-        let Ok(id) = new_alert_id(&self.price_alerts) else {
-            Self::post_price_alert_action_notice(
-                "An alert identity could not be allocated. Try again.",
-                cx,
-            );
-            return;
-        };
-        let Ok(pane_index) = u32::try_from(dialog.request.pane_index) else {
-            Self::post_price_alert_action_notice("The selected chart pane is invalid.", cx);
-            return;
-        };
-        let alert = WorkspacePriceAlertState {
-            id,
-            instrument: Some(instrument.clone()),
-            price,
-            pane_index,
-            price_scale_side: persisted_price_scale(dialog.request.price_scale),
-            condition: dialog.condition as i32,
-            frequency: dialog.frequency as i32,
-            status: PriceAlertStatus::Active as i32,
-            created_at_unix_nanos: self.lifecycle.clock().wall_unix_nanos(),
-        };
-        let mut next = self.price_alerts.clone();
-        next.push(alert);
         if self
             .market_worker
             .try_replace_price_alerts(runtime_price_alerts(&next))
@@ -370,13 +283,12 @@ impl WorkspaceSurface {
             );
             return;
         }
-        self.price_alerts = next;
-        self.price_alert_dialog = None;
+        self.alerts.adopt_created(next);
         Self::clear_price_alert_action_notice(cx);
         self.chart_persistence_dirty = true;
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
-            &self.price_alerts,
+            self.alerts.alerts(),
             self.product.as_ref(),
             cx,
         );
@@ -384,11 +296,9 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn delete_price_alert(&mut self, alert_id: &str, cx: &mut Context<Self>) {
-        let mut next = self.price_alerts.clone();
-        next.retain(|alert| alert.id != alert_id);
-        if next.len() == self.price_alerts.len() {
+        let Some(next) = self.alerts.without_alert(alert_id) else {
             return;
-        }
+        };
         if self
             .market_worker
             .try_replace_price_alerts(runtime_price_alerts(&next))
@@ -400,12 +310,12 @@ impl WorkspaceSurface {
             );
             return;
         }
-        self.price_alerts = next;
+        self.alerts.adopt(next);
         self.chart_persistence_dirty = true;
         Self::clear_price_alert_action_notice(cx);
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
-            &self.price_alerts,
+            self.alerts.alerts(),
             self.product.as_ref(),
             cx,
         );
@@ -417,33 +327,27 @@ impl WorkspaceSurface {
         trigger: &MarketPriceAlertTrigger,
         cx: &mut Context<Self>,
     ) {
-        if let Some(alert) = self
-            .price_alerts
-            .iter_mut()
-            .find(|alert| alert.id == trigger.alert_id)
-        {
-            if !trigger.remains_active {
-                alert.status = PriceAlertStatus::Triggered as i32;
-                self.chart_persistence_dirty = true;
-            }
-            let (title, description) = price_alert_trigger_text(trigger);
-            if self.pending_price_alert_announcements.len() == PENDING_ANNOUNCEMENTS {
-                self.pending_price_alert_announcements.pop_front();
-            }
-            self.pending_price_alert_announcements
-                .push_back(PriceAlertAnnouncement { title, description });
-            replace_chart_price_alert_lines(
-                self.chart.as_ref(),
-                &self.price_alerts,
-                self.product.as_ref(),
-                cx,
-            );
-            cx.notify();
+        let (title, description) = price_alert_trigger_text(trigger);
+        let outcome = self
+            .alerts
+            .apply_trigger(trigger, PriceAlertAnnouncement { title, description });
+        if outcome == AlertTriggerOutcome::Unknown {
+            return;
         }
+        if outcome == AlertTriggerOutcome::Retired {
+            self.chart_persistence_dirty = true;
+        }
+        replace_chart_price_alert_lines(
+            self.chart.as_ref(),
+            self.alerts.alerts(),
+            self.product.as_ref(),
+            cx,
+        );
+        cx.notify();
     }
 
     pub(super) fn take_price_alert_announcements(&mut self) -> Vec<PriceAlertAnnouncement> {
-        self.pending_price_alert_announcements.drain(..).collect()
+        self.alerts.take_announcements()
     }
 }
 

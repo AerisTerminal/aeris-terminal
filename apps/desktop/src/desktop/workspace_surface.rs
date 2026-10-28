@@ -1,5 +1,6 @@
 //! Workspace surface.
 
+use super::alerts_controller::AlertsController;
 use super::context_panel_controller::ContextPanelController;
 use super::*;
 use aeris_observability::diagnostic;
@@ -94,8 +95,7 @@ struct WorkspaceSurfaceInitialization {
     interval: ChartInterval,
     symbol_browser: SymbolBrowser,
     studies: RuntimeStudiesState,
-    price_alerts: Vec<WorkspacePriceAlertState>,
-    price_alert_restore_status: PriceAlertRestoreStatus,
+    alerts: AlertsController,
     bridge_label: String,
     order_book: Entity<ReadOnlyOrderBookView>,
     context_panel: ContextPanelController,
@@ -208,10 +208,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chart_persistence_dirty: false,
         last_chart_user_state_revision: 0,
         order_book_demand: OrderBookDetail::Hidden,
-        price_alerts: init.price_alerts,
-        price_alert_dialog: None,
-        price_alert_restore_status: init.price_alert_restore_status,
-        pending_price_alert_announcements: VecDeque::new(),
+        alerts: init.alerts,
         #[cfg(feature = "diagnostics")]
         foreground_interactions: ForegroundInteractionDiagnostics::default(),
         #[cfg(feature = "diagnostics")]
@@ -224,20 +221,15 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
 fn restore_price_alerts(
     restored_chart_state: Option<&WorkspaceChartState>,
     market_worker: &MarketDataWorker,
-) -> (Vec<WorkspacePriceAlertState>, PriceAlertRestoreStatus) {
+) -> AlertsController {
     let alerts = restored_chart_state
         .map(|state| state.price_alerts.clone())
         .unwrap_or_default();
-    let failed = !alerts.is_empty()
-        && market_worker
+    let installed = alerts.is_empty()
+        || market_worker
             .try_replace_price_alerts(runtime_price_alerts(&alerts))
-            .is_err();
-    let status = if failed {
-        PriceAlertRestoreStatus::PendingFailure
-    } else {
-        PriceAlertRestoreStatus::Handled
-    };
-    (alerts, status)
+            .is_ok();
+    AlertsController::restore(alerts, installed)
 }
 
 fn chart_bridge_label(chart: Option<&Entity<AerisChartView>>, cx: &App) -> String {
@@ -1910,15 +1902,10 @@ fn restored_runtime_studies(
 fn restored_workspace_records(
     restored_chart_state: Option<&WorkspaceChartState>,
     market_worker: &MarketDataWorker,
-) -> (
-    RuntimeStudiesState,
-    Vec<WorkspacePriceAlertState>,
-    PriceAlertRestoreStatus,
-) {
+) -> (RuntimeStudiesState, AlertsController) {
     let studies = restored_runtime_studies(restored_chart_state);
-    let (price_alerts, price_alert_restore_status) =
-        restore_price_alerts(restored_chart_state, market_worker);
-    (studies, price_alerts, price_alert_restore_status)
+    let alerts = restore_price_alerts(restored_chart_state, market_worker);
+    (studies, alerts)
 }
 
 fn initialize_restored_chart(
@@ -2119,7 +2106,7 @@ impl WorkspaceSurface {
             price_axis,
             locked_drawing_ids: Vec::new(),
             crosshair_mode: u32::from(chart.crosshair_mode()),
-            price_alerts: self.price_alerts.clone(),
+            price_alerts: self.alerts.alerts().to_vec(),
             studies,
             appearance: Some(persisted_chart_appearance(
                 &chart.appearance_settings(),
@@ -2155,12 +2142,12 @@ impl WorkspaceSurface {
         let restored_viewport = loading.restored_viewport;
         let symbol_browser = SymbolBrowser::new(chart_chrome.symbol_search_scope);
         let startup_state = terminal_startup_state(startup);
-        let (studies, price_alerts, price_alert_restore_status) =
+        let (studies, alerts) =
             restored_workspace_records(restored_chart_state.as_ref(), &market_worker);
         initialize_restored_chart(startup_state.chart.as_ref(), chart_chrome, cx);
         replace_chart_price_alert_lines(
             startup_state.chart.as_ref(),
-            &price_alerts,
+            alerts.alerts(),
             startup_state.product.as_ref(),
             cx,
         );
@@ -2197,8 +2184,7 @@ impl WorkspaceSurface {
             interval,
             symbol_browser,
             studies,
-            price_alerts,
-            price_alert_restore_status,
+            alerts,
             bridge_label,
             order_book,
             context_panel,
@@ -3571,7 +3557,7 @@ impl WorkspaceSurface {
         self.apply_provider_trade_prints(&chart, cx);
         replace_chart_price_alert_lines(
             Some(&chart),
-            &self.price_alerts,
+            self.alerts.alerts(),
             self.product.as_ref(),
             cx,
         );

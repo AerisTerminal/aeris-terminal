@@ -4667,7 +4667,7 @@ fn pane_harness_alert_delete_queue_failure_renders_once_then_success_clears(
     for _ in 0..2 {
         harness.pane.update(cx, |pane, cx| {
             pane.delete_price_alert("restored-alert", cx);
-            assert_eq!(pane.price_alerts.len(), 1);
+            assert_eq!(pane.alerts.alerts().len(), 1);
         });
     }
     cx.run_until_parked();
@@ -4690,7 +4690,7 @@ fn pane_harness_alert_delete_queue_failure_renders_once_then_success_clears(
     while commands.try_recv().is_ok() {}
     harness.pane.update(cx, |pane, cx| {
         pane.delete_price_alert("restored-alert", cx);
-        assert_eq!(pane.price_alerts.len(), 0);
+        assert_eq!(pane.alerts.alerts().len(), 0);
     });
     cx.run_until_parked();
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));

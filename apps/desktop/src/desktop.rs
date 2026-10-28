@@ -2,6 +2,9 @@
 
 #[path = "components/accounts_panel.rs"]
 mod accounts_panel;
+#[path = "desktop/alerts_controller.rs"]
+mod alerts_controller;
+use alerts_controller::{PriceAlertAnnouncement, PriceAlertDialogState, PriceAlertDropdown};
 #[path = "components/app_navigation.rs"]
 mod app_navigation;
 #[path = "assets.rs"]
@@ -978,22 +981,13 @@ struct WorkspaceSurface {
     last_chart_user_state_revision: u64,
     /// The order-book detail the market worker last accepted for this pane.
     order_book_demand: OrderBookDetail,
-    price_alerts: Vec<WorkspacePriceAlertState>,
-    price_alert_dialog: Option<PriceAlertDialogState>,
-    price_alert_restore_status: PriceAlertRestoreStatus,
-    pending_price_alert_announcements: VecDeque<PriceAlertAnnouncement>,
+    alerts: alerts_controller::AlertsController,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PriceAlertRestoreStatus {
-    PendingFailure,
-    Handled,
 }
 
 /// Pane-originated notice changes are delivered to the window's single toast owner.
@@ -1173,28 +1167,6 @@ impl DataConnections {
                 .is_some_and(provider_login::ProviderLoginView::missing),
         }
     }
-}
-
-#[derive(Clone)]
-struct PriceAlertDialogState {
-    request: ChartAlertCreateRequest,
-    instrument: InstallProviderInstrument,
-    condition: PriceAlertCondition,
-    frequency: PriceAlertFrequency,
-    open_dropdown: Option<PriceAlertDropdown>,
-}
-
-/// A triggered alert waiting to be shown as a toast.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PriceAlertAnnouncement {
-    title: String,
-    description: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PriceAlertDropdown {
-    Condition,
-    Frequency,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

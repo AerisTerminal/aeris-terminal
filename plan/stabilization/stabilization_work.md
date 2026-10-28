@@ -212,8 +212,10 @@ record it on this line.
 - [ ] M7.4 `WorkspaceSurface` split into pane controllers
   - Landed: `desktop/context_panel_controller.rs` owns the context snapshot, panel visibility
     (an enum), tab, height, API-key dialog and risk message behind change-reporting setters.
-  - Left: `OrderFlowPresenter`, `StudiesController`, `AlertsController`, `PaneChromeState` and
-    `PanePersistence`, each with private fields.
+    `desktop/alerts_controller.rs` owns the alert list, create dialog, restore-failure notice and
+    the 8-entry announcement ring; the surface only relays accepted lists to the market worker.
+  - Left: `OrderFlowPresenter`, `StudiesController`, `PaneChromeState` and `PanePersistence`,
+    each with private fields.
   - Remove the `too_many_lines` allow.
   - GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
 - [ ] M7.5 `TerminalApp` split into app controllers
