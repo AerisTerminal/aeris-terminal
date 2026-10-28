@@ -210,8 +210,11 @@ violations and missing verification explicitly, and never describe them as satis
 - `platform_sys` is a leaf crate. Only `platform_runtime`, `trading_runtime`, and `observability`
   may depend on it directly.
 - `release_lifecycle` (`crates/release_lifecycle`) owns the signed install, update, rollback and
-  uninstall lifecycle, release delivery plans, rollout policy, the compiled release identity and the
-  stable `aeris_launcher` binary; `platform_runtime` carries none of it and no `ed25519-dalek`,
+  uninstall lifecycle, release delivery plans, rollout policy, the compiled release identity, the
+  release origin layout (`origin_layout.rs`, shared with the packager) and the launcher
+  (`launcher.rs`, run by the thin stable `aeris_launcher` binary). The launcher reads the origin
+  only through the `ReleaseSource` seam (`HttpsReleaseSource` in production); `platform_runtime`
+  carries none of it and no `ed25519-dalek`,
   `same-file` or `sysinfo`. Only the desktop and `tools/release_packager` may depend on
   it. The manifest and block-plan signers compile only under `cfg(test)` or its `producer` feature,
   which only `tools/release_packager` and the crate's own dev-dependency (for the launcher tests)
@@ -228,6 +231,16 @@ violations and missing verification explicitly, and never describe them as satis
   sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the
   install root; later launcher starts and the uninstaller delete it by that exact name, never
   through a generated batch file.
+- `tools/release_packager` (`aeris_release_packager`) packages one signed release into an
+  origin-shaped output tree (payload executables, rollback-compatibility data, signed manifest and,
+  against a predecessor, a signed block plan), writes the channel pointer and prints the Inno Setup
+  defines. It reads the Ed25519 signing key only from a key file through `read_signing_key`
+  (zeroized), never the environment, standard input or the command line, has no network dependency
+  and publishes nothing; `tools/naming_check` enforces this. Its `lifecycle_e2e` test runs
+  `run_launcher` against a local `DirectorySource` through install, update, readiness rejection,
+  block-plan delivery, activation, crash rollback and quarantine. The installed desktop and launcher
+  there are copies of the `aeris_lifecycle_fixture` binary; never copy a test executable into a
+  release, because antivirus heuristics quarantine a program that copies and runs its own image.
 - The release packaging variables (`AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,
   `AERIS_BOOTSTRAP_MIN_GENERATION`, `AERIS_RELEASE_IDENTITY`, `AERIS_INSTALL_GENERATION` and, for
   Windows targets only, `AERIS_AUTHENTICODE_CERT_SHA1`) are read only by

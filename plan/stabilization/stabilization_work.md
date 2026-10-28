@@ -635,10 +635,24 @@ still wait on the GUI checks and the remaining work on their lines.
   - Left: the manual install and uninstall on a Windows VM (F17), checking the prompt and that
     data is kept by default and removed only when ticked. Not run; maintainer-only.
 - [ ] M8.7 Release packager and end-to-end lifecycle harness
-  - Left: `tools/release_packager`, with the key from a file and no publishing.
-  - A `ReleaseSource` seam: HTTPS in production, a directory in tests.
-  - A CI test covering install, update, readiness, activation, rollback and quarantine.
-    Closes LC-02 and LC-21.
+  - Landed: LC-21. The launcher is library code (`aeris_release_lifecycle::launcher`,
+    `run_launcher`) behind a thin `aeris_launcher` binary. It reads the origin only through
+    `ReleaseSource` (channel, signed objects, byte ranges, artifact bodies);
+    `HttpsReleaseSource` is the production adapter, and `origin_layout` holds the channel and
+    release paths the launcher and the packager share.
+  - Landed: LC-02. `tools/release_packager` packages one release (payload executables,
+    rollback-compatibility data, signed manifest, and a signed block plan against a predecessor),
+    writes the channel pointer and prints the Inno Setup defines. The key comes only from a key
+    file, and the packager has no network dependency and publishes nothing; naming_check
+    enforces both.
+  - Landed: the `lifecycle_e2e` test runs the launcher against a `DirectorySource`: install,
+    a readiness-rejected update rolled back inside the update, a block-plan update that downloads
+    only the changed desktop block, activation, a crash on first launch that quarantines the
+    release and rolls back, an update that skips the quarantined offer, a later update and
+    recovery. The installed programs are copies of the `aeris_lifecycle_fixture` binary; copying
+    the test executable itself was quarantined by Windows Defender as `Bearfoos.A!ml`. Passed
+    three local runs on Windows. Probation, hang and schema-gated rollback join it in M8.8 (D23).
+  - Left: the test passing on the windows-latest CI run.
 - [ ] M8.8 Rollback safety
   - Left:
     - LC-05: a schema-gated rollback.
@@ -699,6 +713,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D20 | Readiness providers | (2026-10-28) Readiness keeps `provider_count > 0`. It counts providers registered with the market runtime, which needs no sign-in, login or network, so a fresh install passes; zero means a broken build. |
 | D21 | Readiness copy | (2026-10-28) The readiness copy is a file copy of the database and its sidecars, not `VACUUM INTO`: a read-only SQLite connection to a WAL database creates `-wal` and `-shm` beside it. The instance lock keeps the copied files consistent. |
 | D22 | Manifest decode | (2026-10-28) Reading a signed-manifest envelope decodes its exact bytes into the typed manifest before the key is known, so a manifest with an unknown field is refused as early as possible. No outcome depends on a field until `verify_release_manifest` has checked the signature over those bytes, and the private fields keep the decoded manifest equal to the signed bytes. |
+| D23 | Lifecycle harness scope | (2026-10-28) M8.7's end-to-end harness covers install, update, readiness rejection, activation, crash rollback and quarantine. The probation, hang and schema-gated rollback scenarios need LC-09's startup-complete marker and LC-05's manifest `max_store_schema`, so they are added to the same harness with those fixes in M8.8. Readiness on the database copy stays covered by the desktop's tests. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in

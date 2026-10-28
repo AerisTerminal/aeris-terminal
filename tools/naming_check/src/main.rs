@@ -2442,7 +2442,7 @@ mod tests {
             "Cargo build output is generated inside OUT_DIR",
         ),
         (
-            "crates/release_lifecycle/src/bin/aeris_launcher.rs",
+            "crates/release_lifecycle/src/launcher.rs",
             "fs::rename(",
             "launcher self-replacement stages an executable before the platform replacement boundary",
         ),
@@ -3909,6 +3909,9 @@ mod tests {
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
             "crates/release_lifecycle/src/lifecycle.rs::LifecycleHooks".to_string(),
+            // The launcher's release origin: HTTPS in production, a local directory in the
+            // end-to-end lifecycle test.
+            "crates/release_lifecycle/src/release_source.rs::ReleaseSource".to_string(),
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
             // The sole trading owner receives injectable wall and monotonic time.
             "crates/trading_runtime/src/clock.rs::Clock".to_string(),
@@ -4748,7 +4751,7 @@ mod tests {
             copy < trading && readiness.matches("start_trading_service(").count() == 1,
             "candidate readiness must never open or migrate the user's trading database"
         );
-        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
         assert!(
             readiness.contains("aeris_release_lifecycle::ReadinessReport {")
                 && !desktop.contains("ReadinessReport {\n    schema_version")
@@ -4800,9 +4803,9 @@ mod tests {
             !uninstaller.contains("VerifyingKey") && !uninstaller.contains("verify_release"),
             "uninstall must never need a release verifying key"
         );
-        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
         let keyless_start = launcher
-            .find("fn run_with_key_source(")
+            .find("pub fn run_launcher(")
             .expect("launcher dispatch");
         let keyless_end = launcher[keyless_start..]
             .find("LauncherCommand::Verified(command) =>")
@@ -4817,6 +4820,7 @@ mod tests {
             .expect("launcher uninstall boundary");
         assert!(
             !launcher[keyless_start..keyless_end].contains("verifying_key()")
+                && !launcher[keyless_start..keyless_end].contains("origin()")
                 && !launcher[uninstall_start..uninstall_end].contains("verifying_key"),
             "launcher identity and uninstall must dispatch before any verifying key loads"
         );
@@ -4991,8 +4995,51 @@ mod tests {
     }
 
     #[test]
+    fn release_packager_signs_only_with_a_key_file_and_publishes_nothing() {
+        let packager = manifest("tools/release_packager/Cargo.toml");
+        for network in ["ureq", "reqwest", "tungstenite", "rustls"] {
+            assert!(
+                !packager.lines().any(|line| line.trim().starts_with(network)),
+                "the release packager writes local files only and must not depend on {network}"
+            );
+        }
+        for path in production_sources_under("tools/release_packager/src") {
+            let relative = relative_string(&path);
+            let source = super::production_source_prefix(&manifest(&relative));
+            for secret_source in ["env::var", "var_os(", "read_line(", "stdin()"] {
+                assert!(
+                    !source.contains(secret_source),
+                    "{relative} must load the signing key only from its key file, not {secret_source}"
+                );
+            }
+            let constructs_key = source.contains("SigningKey::from_bytes(");
+            assert!(
+                !constructs_key || relative == "tools/release_packager/src/lib.rs",
+                "{relative} must obtain the signing key through read_signing_key"
+            );
+        }
+        let library = manifest("tools/release_packager/src/lib.rs");
+        let library = super::production_source_prefix(&library);
+        let reader = library
+            .find("pub fn read_signing_key(")
+            .expect("the packager reads its signing key from a file");
+        let reader_end = library[reader..]
+            .find("
+}
+")
+            .map(|offset| reader + offset)
+            .expect("signing key reader boundary");
+        assert!(
+            library.matches("SigningKey::from_bytes(").count() == 1
+                && library[reader..reader_end].contains("SigningKey::from_bytes(")
+                && library[reader..reader_end].contains("Zeroizing"),
+            "the packager constructs its signing key only from the zeroized key file seed"
+        );
+    }
+
+    #[test]
     fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
-        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
         for contract in [
             "rollout_eligible",
             "current_update_check_report",
@@ -5844,7 +5891,7 @@ jobs:
     }
     #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
-        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
+        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
         // The launcher runs from inside the tree uninstall deletes, and
         // Windows refuses to delete a running executable: uninstall must
         // rename the image to a sibling staging dir first so the original

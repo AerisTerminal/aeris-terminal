@@ -1,15 +1,23 @@
 //! Signed release lifecycle: install, update, rollback and uninstall mechanics,
 //! release delivery plans, rollout policy, the compiled release identity, the candidate
-//! readiness report and the stable `aeris_launcher` binary.
+//! readiness report, the release origin's layout and the `ReleaseSource` it is read through,
+//! and the stable launcher that the `aeris_launcher` binary runs.
 
+mod launcher;
 mod lifecycle;
+mod origin_layout;
 mod protocol;
 mod readiness;
 mod release_config;
 mod release_delivery;
 mod release_identity;
+mod release_source;
 mod rollout;
 
+pub use launcher::{
+    ReleaseOrigin, run_launcher, run_native_launcher, valid_release_identity,
+    validate_release_channel,
+};
 #[cfg(any(test, feature = "producer"))]
 pub use lifecycle::sign_release_manifest;
 #[cfg(target_os = "windows")]
@@ -22,6 +30,10 @@ pub use lifecycle::{
     ReleasePolicy, ReleaseUninstaller, RollbackCompatibilityMetadata, RolloutMetadata,
     SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
     native_installation_inventory, verify_release_file, verify_release_manifest,
+};
+pub use origin_layout::{
+    RELEASE_CHANNEL, RELEASE_MANIFEST_FILENAME, channel_pointer_path, installer_filename,
+    release_directory_path,
 };
 pub use protocol::{LAUNCHER_PROTOCOL_VERSION, UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY};
 pub use readiness::{
@@ -38,4 +50,5 @@ pub use release_delivery::{
     SignedBlockPlan, decode_and_verify_block_plan, validate_block_plan_binding, verify_block_plan,
 };
 pub use release_identity::{ReleaseIdentity, current_release_identity};
+pub use release_source::{ArtifactBody, ReleaseSource, ReleaseSourceError};
 pub use rollout::rollout_eligible;

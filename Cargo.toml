@@ -25,6 +25,7 @@ members = [
     "crates/ui/terminal_ui",
     "tools/naming_check",
     "tools/aeris_probes",
+    "tools/release_packager",
 ]
 exclude = ["third_party/gpui_base"]
 resolver = "3"

@@ -91,7 +91,8 @@ PLATFORM
   aeris_release_lifecycle NEW (M8.1) crates/release_lifecycle -> platform_runtime, observability (durable writes
                                                          through the platform_runtime::fs re-export, not platform_sys)
                                                          lifecycle, release_delivery, rollout, release_identity,
-                                                         bin aeris_launcher; release_config (M8.2), ReadinessReport (M8.5)
+                                                         launcher + thin bin aeris_launcher, release_source, origin_layout
+                                                         (M8.7); release_config (M8.2), ReadinessReport (M8.5)
 ADAPTERS (unchanged edges)
 RUNTIMES
   aeris_market_engine -> market_data, instruments
@@ -106,7 +107,7 @@ UI: unchanged edges; chart_integration and terminal_ui never depend on a runtime
 COMPOSITION ROOTS (may depend on several runtimes)
   aeris_desktop                         apps/desktop
   aeris_probes             NEW          tools/aeris_probes   (binaries, never shipped)
-  aeris_release_packager   NEW (M8.7 target) tools/release_packager -> release_lifecycle[producer]
+  aeris_release_packager   NEW (M8.7)   tools/release_packager -> release_lifecycle[producer], platform_runtime
   aeris_naming_check                    tools/naming_check (no internal deps)
 ```
 
@@ -123,7 +124,7 @@ Direction rules (enforced by `naming_check` from `Cargo.toml` files, section 3.9
    `market_runtime` never depends on `trading_runtime`. Only composition roots depend on both.
 4. Domain and leaf crates depend only on other domain/leaf crates.
 5. `chart_integration`, `terminal_ui`, `design_system` never depend on a runtime or adapter.
-6. Only `apps/desktop` and `tools/release_packager` depend on `release_lifecycle` (M8.1/M8.7 target; neither crate exists yet).
+6. Only `apps/desktop` and `tools/release_packager` depend on `release_lifecycle` (M8.1/M8.7).
 7. `rusqlite` appears only in `crates/trading_runtime`.
 8. `market_runtime` has no normal (non-dev) dependency on `study_sdk`. PL-13 is resolved as "accepted": `study_sdk` is
    a published-API facade above the in-process study runtime, consumed by the desktop's built-in study packages; it
@@ -1072,7 +1073,7 @@ became `platform_runtime::DataRoot` in M1), `release_delivery.rs`, `rollout.rs`,
 `release_config.rs` (one `build.rs`-validated reader of `AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,
 `AERIS_BOOTSTRAP_MIN_GENERATION`, `AERIS_RELEASE_IDENTITY`/`AERIS_INSTALL_GENERATION`, `AERIS_AUTHENTICODE_CERT_SHA1`,
 `AERIS_AUTH_ISSUER`; any set -> all required), shared `ReadinessReport`, and `src/bin/aeris_launcher.rs` (moved from
-`platform_runtime/src/bin`). `ed25519-dalek`, `semver`, `same-file` and `sysinfo` leave `platform_runtime`; the owned-root check stays in `platform_runtime::data_root`. Signers move behind a
+`platform_runtime/src/bin`; since M8.7 a thin binary over the library's `launcher.rs`). `ed25519-dalek`, `semver`, `same-file` and `sysinfo` leave `platform_runtime`; the owned-root check stays in `platform_runtime::data_root`. Signers move behind a
 `producer` feature. Nothing is deleted for being dormant; the "kept and sound" items in `07_platform_design.md` A2 stay.
 
 Fixes, one commit each or small batches: LC-01 command-first dispatch (uninstall/identity never need the key);
@@ -1086,10 +1087,11 @@ page "Remove my Aeris data" unchecked by default, Axiusflow lines deleted (`tool
 `*.retired-<pid>` sweep replaces the `.bat`; LC-14 `message_box`; LC-15 `platform_sys::process` replaces sysinfo
 polling (sysinfo removed if `cargo tree -i sysinfo` is empty); LC-16 promotion only for installed builds, child reaped;
 LC-18 readiness outcome journaled before `Activated`, orphans moved to `orphaned/<ts>/`; LC-19
-`LAUNCHER_PROTOCOL_VERSION`; LC-20 `release_config`; LC-02/LC-21 `tools/release_packager` (M8.7 target; emits signed manifest,
+`LAUNCHER_PROTOCOL_VERSION`; LC-20 `release_config`; LC-02/LC-21 `tools/release_packager` (M8.7; emits signed manifest,
 block plan, channel pointer, rollback data, Inno invocation; never publishes) and a `ReleaseSource` seam with a
-`DirectorySource` end-to-end test (install, update, readiness on copy, activation, probation, forced crash, hang,
-rollback, quarantine) running in Windows CI. LC-17 (legacy data-root migration, legacy vault probes) is deleted only
+`DirectorySource` end-to-end test (install, update, readiness, activation, forced crash, rollback, quarantine)
+running in Windows CI. Readiness on the database copy is covered by the desktop's tests; the probation and hang
+scenarios join the harness with LC-09 in M8.8 (D23). LC-17 (legacy data-root migration, legacy vault probes) is deleted only
 after the maintainer confirms their machine is migrated.
 
 Account runtime: AC-01 `SecretToken` (M1); AC-05 bounded exit (M1); AC-02 `credential_vault::MAX_SECRET_BYTES = 2560`

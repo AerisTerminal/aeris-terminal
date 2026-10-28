@@ -425,6 +425,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aeris_release_packager"
+version = "1.2.0"
+dependencies = [
+ "aeris_platform_runtime",
+ "aeris_release_lifecycle",
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
 name = "aeris_rithmic_protocol_adapter"
 version = "1.2.0"
 dependencies = [
