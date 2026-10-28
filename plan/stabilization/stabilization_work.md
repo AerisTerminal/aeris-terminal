@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-54 of 90 items are fully done (2026-10-28).
+55 of 90 items are fully done (2026-10-28).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -41,7 +41,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 0 / 12 | 12 |
+| M8 lifecycle and trim | 1 / 12 | 12 |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -462,7 +462,7 @@ still wait on the GUI checks and the remaining work on their lines.
 
 ### M8 lifecycle and trim
 
-- [ ] M8.1 Release code moves into a `release_lifecycle` crate
+- [x] M8.1 Release code moves into a `release_lifecycle` crate
   - Landed: `crates/release_lifecycle` (`aeris_release_lifecycle`) holds `lifecycle.rs`,
     `release_delivery.rs`, `rollout.rs`, `release_identity.rs`, the `aeris_launcher` binary and
     its icon `build.rs`, moved unchanged apart from imports. `sign_release_manifest` and
@@ -478,7 +478,7 @@ still wait on the GUI checks and the remaining work on their lines.
     `tools/release_packager` and the crate itself may depend on it, only the packager and the
     crate may enable `producer`, the moved dependencies and files cannot return to
     `platform_runtime`, and the signers stay gated. Kept, not deleted (D2). Closes PL-01.
-  - Left: the CI workspace run on this commit.
+    CI passed the workspace gate on 27dd1f50, which includes this commit.
 - [ ] M8.2 Launcher hygiene and trust
   - Landed (LC-01, LC-16, LC-14): the launcher parses its command into `LauncherCommand` before
     any key loads; `--launcher-identity` and `--remove-all-local-data` never load the verifying
