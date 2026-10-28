@@ -1,6 +1,7 @@
 //! Native network-availability notification boundary.
 
 use crate::CapabilityAvailability;
+pub use aeris_platform_sys::network::NetworkEvent;
 use std::{
     error::Error,
     fmt,
@@ -11,16 +12,17 @@ use std::{
 };
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::{
-    atomic::AtomicU8,
-    mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+use aeris_platform_sys::network::{
+    InterfaceChange, InterfaceChangeRegistration, RegistrationError,
 };
-
-#[cfg(target_os = "macos")]
-use std::sync::Mutex;
-
-#[cfg(target_os = "windows")]
-use std::sync::mpsc::RecvTimeoutError;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::{
+    sync::{
+        atomic::AtomicU8,
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
+    },
+    time::Duration,
+};
 
 #[cfg(target_os = "linux")]
 use zbus::{
@@ -53,26 +55,24 @@ const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
 const NAME_OWNER_CHANGED_SIGNAL: &str = "NameOwnerChanged";
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+const INITIAL_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct NetworkEventPublisher {
     latest: Arc<AtomicU8>,
-    wake: SyncSender<()>,
-    #[cfg(target_os = "macos")]
     closed: Arc<AtomicBool>,
+    wake: SyncSender<()>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 impl NetworkEventPublisher {
-    fn publish(&self, event: NetworkEvent) {
-        self.latest
-            .store(encode_network_event(event), Ordering::Release);
-        match self.wake.try_send(()) {
-            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
+    fn deliver(&self, change: InterfaceChange) {
+        match change {
+            InterfaceChange::Availability(event) => self
+                .latest
+                .store(encode_network_event(event), Ordering::Release),
+            InterfaceChange::Stopped => self.closed.store(true, Ordering::Release),
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
         match self.wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
         }
@@ -83,41 +83,14 @@ impl NetworkEventPublisher {
 struct NetworkEventInbox {
     latest: Arc<AtomicU8>,
     cancelled: Arc<AtomicBool>,
-    wake: Receiver<()>,
-    #[cfg(target_os = "macos")]
     closed: Arc<AtomicBool>,
+    wake: Receiver<()>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 impl NetworkEventInbox {
-    #[cfg(target_os = "windows")]
     fn channel() -> (
-        Arc<NetworkEventPublisher>,
-        Self,
-        NativeNetworkMonitorCancellation,
-    ) {
-        let latest = Arc::new(AtomicU8::new(0));
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let (wake, receiver) = sync_channel(1);
-        (
-            Arc::new(NetworkEventPublisher {
-                latest: Arc::clone(&latest),
-                wake: wake.clone(),
-            }),
-            Self {
-                latest,
-                cancelled: Arc::clone(&cancelled),
-                wake: receiver,
-            },
-            NativeNetworkMonitorCancellation { cancelled, wake },
-        )
-    }
-
-    #[cfg(target_os = "macos")]
-    fn channel(
-        run_loop: Arc<Mutex<Option<usize>>>,
-    ) -> (
-        Arc<NetworkEventPublisher>,
+        NetworkEventPublisher,
         Self,
         NativeNetworkMonitorCancellation,
     ) {
@@ -126,22 +99,18 @@ impl NetworkEventInbox {
         let closed = Arc::new(AtomicBool::new(false));
         let (wake, receiver) = sync_channel(1);
         (
-            Arc::new(NetworkEventPublisher {
+            NetworkEventPublisher {
                 latest: Arc::clone(&latest),
-                wake: wake.clone(),
                 closed: Arc::clone(&closed),
-            }),
+                wake: wake.clone(),
+            },
             Self {
                 latest,
                 cancelled: Arc::clone(&cancelled),
-                wake: receiver,
                 closed,
+                wake: receiver,
             },
-            NativeNetworkMonitorCancellation {
-                cancelled,
-                wake,
-                run_loop,
-            },
+            NativeNetworkMonitorCancellation { cancelled, wake },
         )
     }
 
@@ -153,7 +122,6 @@ impl NetworkEventInbox {
             if let Some(event) = self.take_latest() {
                 return Ok(event);
             }
-            #[cfg(target_os = "macos")]
             if self.closed.load(Ordering::Acquire) {
                 return Err(NetworkNotificationError::StreamClosed);
             }
@@ -163,18 +131,18 @@ impl NetworkEventInbox {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    fn recv_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Result<NetworkEvent, NetworkNotificationError> {
+    fn recv_initial(&self, timeout: Duration) -> Result<NetworkEvent, NetworkNotificationError> {
         if let Some(event) = self.take_latest() {
             return Ok(event);
         }
         match self.wake.recv_timeout(timeout) {
-            Ok(()) => self
-                .take_latest()
-                .ok_or(NetworkNotificationError::InitialNotificationTimedOut),
+            Ok(()) => self.take_latest().ok_or_else(|| {
+                if self.closed.load(Ordering::Acquire) {
+                    NetworkNotificationError::StreamClosed
+                } else {
+                    NetworkNotificationError::InitialNotificationTimedOut
+                }
+            }),
             Err(RecvTimeoutError::Timeout) => {
                 Err(NetworkNotificationError::InitialNotificationTimedOut)
             }
@@ -184,303 +152,6 @@ impl NetworkEventInbox {
 
     fn take_latest(&self) -> Option<NetworkEvent> {
         decode_network_event(self.latest.swap(0, Ordering::AcqRel))
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-mod macos {
-    use super::{
-        NativeNetworkMonitorCancellation, NetworkEvent, NetworkEventInbox, NetworkEventPublisher,
-        NetworkNotificationError,
-    };
-    use std::{
-        ffi::c_void,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-            mpsc::{SyncSender, sync_channel},
-        },
-        thread::{self, JoinHandle},
-    };
-
-    const AF_INET: u8 = 2;
-
-    type ReachabilityRef = *const c_void;
-    type RunLoopRef = *mut c_void;
-    type RunLoopMode = *const c_void;
-
-    #[repr(C)]
-    struct SockAddrIn {
-        len: u8,
-        family: u8,
-        port: u16,
-        address: u32,
-        zero: [u8; 8],
-    }
-
-    #[repr(C)]
-    struct ReachabilityContext {
-        version: isize,
-        info: *mut c_void,
-        retain: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
-        release: Option<unsafe extern "C" fn(*const c_void)>,
-        copy_description: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
-    }
-
-    type ReachabilityCallback = unsafe extern "C" fn(ReachabilityRef, u32, *mut c_void);
-
-    #[link(name = "SystemConfiguration", kind = "framework")]
-    unsafe extern "C" {
-        fn SCNetworkReachabilityCreateWithAddress(
-            allocator: *const c_void,
-            address: *const c_void,
-        ) -> ReachabilityRef;
-        fn SCNetworkReachabilityGetFlags(target: ReachabilityRef, flags: *mut u32) -> u8;
-        fn SCNetworkReachabilitySetCallback(
-            target: ReachabilityRef,
-            callback: Option<ReachabilityCallback>,
-            context: *mut ReachabilityContext,
-        ) -> u8;
-        fn SCNetworkReachabilityScheduleWithRunLoop(
-            target: ReachabilityRef,
-            run_loop: RunLoopRef,
-            mode: RunLoopMode,
-        ) -> u8;
-        fn SCNetworkReachabilityUnscheduleFromRunLoop(
-            target: ReachabilityRef,
-            run_loop: RunLoopRef,
-            mode: RunLoopMode,
-        ) -> u8;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        static kCFRunLoopDefaultMode: RunLoopMode;
-        fn CFRelease(value: *const c_void);
-        fn CFRunLoopGetCurrent() -> RunLoopRef;
-        fn CFRunLoopRun();
-        fn CFRunLoopStop(run_loop: RunLoopRef);
-    }
-
-    pub(super) struct Registration {
-        cancellation: NativeNetworkMonitorCancellation,
-        thread: Option<JoinHandle<()>>,
-    }
-
-    impl Registration {
-        pub(super) fn connect() -> Result<
-            (
-                Self,
-                NetworkEventInbox,
-                NetworkEvent,
-                NativeNetworkMonitorCancellation,
-            ),
-            NetworkNotificationError,
-        > {
-            let run_loop = Arc::new(Mutex::new(None));
-            let (publisher, events, cancellation) =
-                NetworkEventInbox::channel(Arc::clone(&run_loop));
-            let cancelled = Arc::clone(&events.cancelled);
-            let (ready_tx, ready_rx) = sync_channel(1);
-            let thread = thread::Builder::new()
-                .name("aeris-native-network-monitor".to_string())
-                .spawn(move || {
-                    let result = run_monitor(&publisher, &run_loop, &cancelled, &ready_tx);
-                    if let Err(error) = result {
-                        let _ = ready_tx.try_send(Err(error));
-                    }
-                    publisher.close();
-                })
-                .map_err(|_| NetworkNotificationError::MacOsPlatform {
-                    operation: "spawn reachability monitor thread",
-                })?;
-
-            let current = match ready_rx.recv() {
-                Ok(Ok(current)) => current,
-                Ok(Err(error)) => {
-                    let _ = thread.join();
-                    return Err(error);
-                }
-                Err(_) => {
-                    let _ = thread.join();
-                    return Err(NetworkNotificationError::StreamClosed);
-                }
-            };
-            Ok((
-                Self {
-                    cancellation: cancellation.clone(),
-                    thread: Some(thread),
-                },
-                events,
-                current,
-                cancellation,
-            ))
-        }
-    }
-
-    impl Drop for Registration {
-        fn drop(&mut self) {
-            self.cancellation.clone().cancel();
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
-
-    fn run_monitor(
-        publisher: &NetworkEventPublisher,
-        run_loop_slot: &Mutex<Option<usize>>,
-        cancelled: &AtomicBool,
-        ready: &SyncSender<Result<NetworkEvent, NetworkNotificationError>>,
-    ) -> Result<(), NetworkNotificationError> {
-        let address = SockAddrIn {
-            len: u8::try_from(std::mem::size_of::<SockAddrIn>()).expect("sockaddr_in fits in u8"),
-            family: AF_INET,
-            port: 0,
-            address: 0,
-            zero: [0; 8],
-        };
-        // SAFETY: the sockaddr has Darwin's `sockaddr_in` layout and remains
-        // alive for the duration of the creation call.
-        let reachability = unsafe {
-            SCNetworkReachabilityCreateWithAddress(
-                std::ptr::null(),
-                std::ptr::from_ref(&address).cast(),
-            )
-        };
-        if reachability.is_null() {
-            return Err(NetworkNotificationError::MacOsPlatform {
-                operation: "SCNetworkReachabilityCreateWithAddress",
-            });
-        }
-        let mut guard = ReachabilityGuard::new(reachability);
-        let mut context = ReachabilityContext {
-            version: 0,
-            info: std::ptr::from_ref(publisher).cast_mut().cast(),
-            retain: None,
-            release: None,
-            copy_description: None,
-        };
-        // SAFETY: `publisher` outlives this run loop thread and callback
-        // scheduling; the callback only takes a shared reference to it.
-        if unsafe {
-            SCNetworkReachabilitySetCallback(
-                reachability,
-                Some(reachability_callback),
-                &raw mut context,
-            )
-        } == 0
-        {
-            return Err(NetworkNotificationError::MacOsPlatform {
-                operation: "SCNetworkReachabilitySetCallback",
-            });
-        }
-        // SAFETY: CoreFoundation returns the current thread's live run loop.
-        let run_loop = unsafe { CFRunLoopGetCurrent() };
-        if run_loop.is_null() {
-            return Err(NetworkNotificationError::MacOsPlatform {
-                operation: "CFRunLoopGetCurrent",
-            });
-        }
-        // SAFETY: reachability, run loop and the exported default mode are live
-        // CoreFoundation objects on this thread.
-        if unsafe {
-            SCNetworkReachabilityScheduleWithRunLoop(reachability, run_loop, kCFRunLoopDefaultMode)
-        } == 0
-        {
-            return Err(NetworkNotificationError::MacOsPlatform {
-                operation: "SCNetworkReachabilityScheduleWithRunLoop",
-            });
-        }
-        guard.1 = Some(run_loop);
-        *run_loop_slot
-            .lock()
-            .map_err(|_| NetworkNotificationError::MacOsPlatform {
-                operation: "store reachability run loop",
-            })? = Some(run_loop as usize);
-
-        let mut flags = 0_u32;
-        // SAFETY: `reachability` remains owned by `guard` and `flags` is a
-        // writable out-parameter for the synchronous state read.
-        if unsafe { SCNetworkReachabilityGetFlags(reachability, &raw mut flags) } == 0 {
-            clear_run_loop(run_loop_slot);
-            return Err(NetworkNotificationError::MacOsPlatform {
-                operation: "SCNetworkReachabilityGetFlags",
-            });
-        }
-        let current = NetworkEvent::from_macos_reachability_flags(flags);
-        ready
-            .send(Ok(current))
-            .map_err(|_| NetworkNotificationError::StreamClosed)?;
-        if cancelled.load(Ordering::Acquire) {
-            clear_run_loop(run_loop_slot);
-            return Ok(());
-        }
-
-        // SAFETY: the reachability source is scheduled on this thread's run
-        // loop. `cancel` stops this loop from another thread.
-        unsafe { CFRunLoopRun() };
-        clear_run_loop(run_loop_slot);
-        Ok(())
-    }
-
-    struct ReachabilityGuard(ReachabilityRef, Option<RunLoopRef>);
-
-    impl ReachabilityGuard {
-        fn new(reachability: ReachabilityRef) -> Self {
-            Self(reachability, None)
-        }
-    }
-
-    impl Drop for ReachabilityGuard {
-        fn drop(&mut self) {
-            if let Some(run_loop) = self.1 {
-                // SAFETY: this is the same reachability/run-loop pair that was
-                // successfully scheduled above; cleanup happens before release.
-                let _ = unsafe {
-                    SCNetworkReachabilityUnscheduleFromRunLoop(
-                        self.0,
-                        run_loop,
-                        kCFRunLoopDefaultMode,
-                    )
-                };
-            }
-            // SAFETY: this thread owns the create-rule reference exactly once.
-            unsafe { CFRelease(self.0) };
-        }
-    }
-
-    unsafe extern "C" fn reachability_callback(
-        _target: ReachabilityRef,
-        flags: u32,
-        info: *mut c_void,
-    ) {
-        if info.is_null() {
-            return;
-        }
-        // SAFETY: the registration context points at the publisher owned by the
-        // run-loop thread and is unscheduled before that publisher is dropped.
-        let publisher = unsafe { &*info.cast::<NetworkEventPublisher>() };
-        publisher.publish(NetworkEvent::from_macos_reachability_flags(flags));
-    }
-
-    fn clear_run_loop(run_loop: &Mutex<Option<usize>>) {
-        if let Ok(mut run_loop) = run_loop.lock() {
-            *run_loop = None;
-        }
-    }
-
-    pub(super) fn stop_run_loop(run_loop: &Mutex<Option<usize>>) {
-        if let Ok(run_loop) = run_loop.lock()
-            && let Some(run_loop) = *run_loop
-        {
-            let run_loop = run_loop as RunLoopRef;
-            // SAFETY: the slot is populated only with the live run loop owned by
-            // the registration thread. Holding the slot lock prevents that thread
-            // from clearing the pointer and exiting while this call uses it.
-            unsafe { CFRunLoopStop(run_loop) };
-        }
     }
 }
 
@@ -501,105 +172,17 @@ const fn decode_network_event(value: u8) -> Option<NetworkEvent> {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
-mod windows {
-    // The callback context is an Arc kept alive until Win32 confirms
-    // cancellation. Failed cancellation leaks that Arc deliberately so a late
-    // operating-system callback can never dereference freed memory.
-    use super::{NetworkEvent, NetworkEventInbox, NetworkEventPublisher, NetworkNotificationError};
-    use std::{ffi::c_void, sync::Arc, time::Duration};
-    use windows_sys::Win32::{
-        Foundation::{ERROR_SUCCESS, HANDLE},
-        NetworkManagement::IpHelper::{
-            CancelMibChangeNotify2, NotifyNetworkConnectivityHintChange,
-        },
-        Networking::WinSock::NL_NETWORK_CONNECTIVITY_HINT,
-    };
-
-    const INITIAL_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
-
-    pub(super) struct Registration {
-        handle: usize,
-        context: Option<Arc<NetworkEventPublisher>>,
-    }
-
-    impl Registration {
-        pub(super) fn connect() -> Result<
-            (
-                Self,
-                NetworkEventInbox,
-                NetworkEvent,
-                super::NativeNetworkMonitorCancellation,
-            ),
-            NetworkNotificationError,
-        > {
-            let (publisher, events, cancellation) = NetworkEventInbox::channel();
-            let context = publisher;
-            let mut handle: HANDLE = std::ptr::null_mut();
-            // SAFETY: the Arc allocation remains valid for the notification
-            // lifetime, and the callback matches Win32's documented ABI.
-            let result = unsafe {
-                NotifyNetworkConnectivityHintChange(
-                    Some(network_callback),
-                    Arc::as_ptr(&context).cast(),
-                    true,
-                    &raw mut handle,
-                )
-            };
-            if result != ERROR_SUCCESS {
-                return Err(NetworkNotificationError::WindowsPlatform {
-                    operation: "NotifyNetworkConnectivityHintChange",
-                    code: result,
-                });
-            }
-            let registration = Self {
-                handle: handle as usize,
-                context: Some(context),
-            };
-            let current = events.recv_timeout(INITIAL_NOTIFICATION_TIMEOUT)?;
-            Ok((registration, events, current, cancellation))
-        }
-    }
-
-    impl Drop for Registration {
-        fn drop(&mut self) {
-            // SAFETY: handle was returned by the matching notification call.
-            let result = unsafe { CancelMibChangeNotify2(self.handle as _) };
-            if result != ERROR_SUCCESS
-                && let Some(context) = self.context.take()
-            {
-                let _ = Arc::into_raw(context);
-            }
-        }
-    }
-
-    unsafe extern "system" fn network_callback(
-        context: *const c_void,
-        hint: NL_NETWORK_CONNECTIVITY_HINT,
-    ) {
-        // SAFETY: registration pins this sender until cancellation succeeds;
-        // on failure it is leaked. The callback only takes a shared reference.
-        let events = unsafe { &*context.cast::<NetworkEventPublisher>() };
-        events.publish(NetworkEvent::from_windows_connectivity_level(
-            hint.ConnectivityLevel,
-        ));
-    }
-}
-
 #[cfg(any(target_os = "linux", test))]
 const NETWORK_MANAGER_STATE_CONNECTED_GLOBAL: u32 = 70;
 
-#[cfg(any(target_os = "macos", test))]
-const MACOS_REACHABILITY_REACHABLE: u32 = 1 << 1;
-#[cfg(any(target_os = "macos", test))]
-const MACOS_REACHABILITY_CONNECTION_REQUIRED: u32 = 1 << 2;
-#[cfg(any(target_os = "macos", test))]
-const MACOS_REACHABILITY_CONNECTION_ON_TRAFFIC: u32 = 1 << 3;
-#[cfg(any(target_os = "macos", test))]
-const MACOS_REACHABILITY_INTERVENTION_REQUIRED: u32 = 1 << 4;
-#[cfg(any(target_os = "macos", test))]
-const MACOS_REACHABILITY_CONNECTION_ON_DEMAND: u32 = 1 << 5;
+#[cfg(any(target_os = "linux", test))]
+const fn network_event_from_network_manager_state(state: u32) -> NetworkEvent {
+    if state == NETWORK_MANAGER_STATE_CONNECTED_GLOBAL {
+        NetworkEvent::Available
+    } else {
+        NetworkEvent::Unavailable
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn network_manager_state_rule() -> Result<MatchRule<'static>, zbus::Error> {
@@ -626,13 +209,6 @@ fn network_manager_owner_rule() -> Result<MatchRule<'static>, zbus::Error> {
     Ok(rule)
 }
 
-/// Provider-relevant native network availability.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkEvent {
-    Unavailable,
-    Available,
-}
-
 struct NetworkTransitionFilter {
     current: NetworkEvent,
 }
@@ -653,49 +229,11 @@ impl NetworkTransitionFilter {
     }
 }
 
-impl NetworkEvent {
-    #[cfg(any(target_os = "linux", test))]
-    const fn from_network_manager_state(state: u32) -> Self {
-        if state == NETWORK_MANAGER_STATE_CONNECTED_GLOBAL {
-            Self::Available
-        } else {
-            Self::Unavailable
-        }
-    }
-
-    #[cfg(any(target_os = "windows", test))]
-    const fn from_windows_connectivity_level(level: i32) -> Self {
-        if level == 3 {
-            Self::Available
-        } else {
-            Self::Unavailable
-        }
-    }
-
-    #[cfg(any(target_os = "macos", test))]
-    const fn from_macos_reachability_flags(flags: u32) -> Self {
-        let reachable = flags & MACOS_REACHABILITY_REACHABLE != 0;
-        let connection_required = flags & MACOS_REACHABILITY_CONNECTION_REQUIRED != 0;
-        let can_connect_automatically = flags
-            & (MACOS_REACHABILITY_CONNECTION_ON_DEMAND | MACOS_REACHABILITY_CONNECTION_ON_TRAFFIC)
-            != 0;
-        let intervention_required = flags & MACOS_REACHABILITY_INTERVENTION_REQUIRED != 0;
-        if reachable
-            && (!connection_required || (can_connect_automatically && !intervention_required))
-        {
-            Self::Available
-        } else {
-            Self::Unavailable
-        }
-    }
-}
-
 /// Blocking native network-event listener.
 ///
 /// On Linux this subscribes to `NetworkManager`'s `StateChanged` signal on the
-/// system bus. On macOS it subscribes to `SCNetworkReachability` for the default
-/// route on a dedicated CoreFoundation run loop. On Windows it subscribes to
-/// native connectivity-hint changes. Callback backends atomically coalesce bursts
+/// system bus. On macOS and Windows it consumes the `platform_sys`
+/// network-availability callback. Callback backends atomically coalesce bursts
 /// to the latest availability.
 /// Callers must run [`Self::next_event`] outside async executors and UI threads
 /// because it blocks until availability changes.
@@ -710,14 +248,10 @@ pub struct NativeNetworkMonitor {
     state_rule: MatchRule<'static>,
     #[cfg(target_os = "linux")]
     owner_rule: MatchRule<'static>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     events: NetworkEventInbox,
-    #[cfg(target_os = "windows")]
-    _registration: windows::Registration,
-    #[cfg(target_os = "macos")]
-    events: NetworkEventInbox,
-    #[cfg(target_os = "macos")]
-    _registration: macos::Registration,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    _registration: InterfaceChangeRegistration,
 }
 
 /// Handle that unblocks a [`NativeNetworkMonitor`] waiting for its next event.
@@ -730,8 +264,6 @@ pub struct NativeNetworkMonitorCancellation {
     query_connection: Connection,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     wake: SyncSender<()>,
-    #[cfg(target_os = "macos")]
-    run_loop: Arc<Mutex<Option<usize>>>,
 }
 
 impl NativeNetworkMonitorCancellation {
@@ -747,8 +279,6 @@ impl NativeNetworkMonitorCancellation {
         match self.wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
         }
-        #[cfg(target_os = "macos")]
-        macos::stop_run_loop(&self.run_loop);
     }
 }
 
@@ -811,7 +341,7 @@ fn read_network_event(connection: &Connection) -> Result<NetworkEvent, NetworkNo
             continue;
         }
         return state
-            .map(NetworkEvent::from_network_manager_state)
+            .map(network_event_from_network_manager_state)
             .map_err(NetworkNotificationError::Platform);
     }
     Err(NetworkNotificationError::OwnerChangedRepeatedly)
@@ -871,20 +401,13 @@ impl NativeNetworkMonitor {
             })
         }
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            let (registration, events, current, cancellation) = windows::Registration::connect()?;
-            Ok(Self {
-                transitions: NetworkTransitionFilter::new(current),
-                cancellation,
-                events,
-                _registration: registration,
-            })
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let (registration, events, current, cancellation) = macos::Registration::connect()?;
+            let (publisher, events, cancellation) = NetworkEventInbox::channel();
+            let registration =
+                InterfaceChangeRegistration::register(move |change| publisher.deliver(change))
+                    .map_err(NetworkNotificationError::Registration)?;
+            let current = events.recv_initial(INITIAL_NOTIFICATION_TIMEOUT)?;
             Ok(Self {
                 transitions: NetworkTransitionFilter::new(current),
                 cancellation,
@@ -979,17 +502,10 @@ impl fmt::Debug for NativeNetworkMonitor {
 pub enum NetworkNotificationError {
     #[cfg(target_os = "linux")]
     Platform(zbus::Error),
-    #[cfg(target_os = "windows")]
-    WindowsPlatform {
-        operation: &'static str,
-        code: u32,
-    },
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    Registration(RegistrationError),
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     InitialNotificationTimedOut,
-    #[cfg(target_os = "macos")]
-    MacOsPlatform {
-        operation: &'static str,
-    },
     OwnerChangedRepeatedly,
     Cancelled,
     StreamClosed,
@@ -1003,20 +519,11 @@ impl fmt::Display for NetworkNotificationError {
             Self::Platform(error) => {
                 write!(formatter, "native network notification failed: {error}")
             }
-            #[cfg(target_os = "windows")]
-            Self::WindowsPlatform { operation, code } => write!(
-                formatter,
-                "native network notification operation {operation} failed with Windows error {code}"
-            ),
-            #[cfg(target_os = "windows")]
-            Self::InitialNotificationTimedOut => formatter.write_str(
-                "native network notification did not deliver its initial Windows state in time",
-            ),
-            #[cfg(target_os = "macos")]
-            Self::MacOsPlatform { operation } => write!(
-                formatter,
-                "native network notification operation {operation} failed on macOS"
-            ),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Self::Registration(error) => error.fmt(formatter),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Self::InitialNotificationTimedOut => formatter
+                .write_str("native network notification did not deliver its initial state in time"),
             Self::OwnerChangedRepeatedly => formatter
                 .write_str("native network notification owner changed repeatedly during sampling"),
             Self::Cancelled => formatter.write_str("native network notification wait cancelled"),
@@ -1033,6 +540,8 @@ impl Error for NetworkNotificationError {
         match self {
             #[cfg(target_os = "linux")]
             Self::Platform(error) => Some(error),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Self::Registration(error) => Some(error),
             _ => None,
         }
     }
@@ -1040,21 +549,24 @@ impl Error for NetworkNotificationError {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use super::NetworkEventInbox;
-    use super::{NativeNetworkMonitor, NetworkEvent, NetworkTransitionFilter};
+    use super::{
+        NativeNetworkMonitor, NetworkEvent, NetworkTransitionFilter,
+        network_event_from_network_manager_state,
+    };
     use crate::CapabilityAvailability;
 
     #[test]
     fn only_global_network_manager_state_is_provider_available() {
         for state in [0, 10, 20, 30, 40, 50, 60, 80, u32::MAX] {
             assert_eq!(
-                NetworkEvent::from_network_manager_state(state),
+                network_event_from_network_manager_state(state),
                 NetworkEvent::Unavailable
             );
         }
         assert_eq!(
-            NetworkEvent::from_network_manager_state(70),
+            network_event_from_network_manager_state(70),
             NetworkEvent::Available
         );
     }
@@ -1064,101 +576,61 @@ mod tests {
         let mut transitions = NetworkTransitionFilter::new(NetworkEvent::Unavailable);
         for state in [0, 40, 50, 60] {
             assert_eq!(
-                transitions.accept(NetworkEvent::from_network_manager_state(state)),
+                transitions.accept(network_event_from_network_manager_state(state)),
                 None
             );
         }
         assert_eq!(
-            transitions.accept(NetworkEvent::from_network_manager_state(70)),
+            transitions.accept(network_event_from_network_manager_state(70)),
             Some(NetworkEvent::Available)
         );
         assert_eq!(
-            transitions.accept(NetworkEvent::from_network_manager_state(70)),
+            transitions.accept(network_event_from_network_manager_state(70)),
             None
         );
         assert_eq!(
-            transitions.accept(NetworkEvent::from_network_manager_state(60)),
+            transitions.accept(network_event_from_network_manager_state(60)),
             Some(NetworkEvent::Unavailable)
         );
         assert_eq!(
-            transitions.accept(NetworkEvent::from_network_manager_state(20)),
+            transitions.accept(network_event_from_network_manager_state(20)),
             None
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn only_windows_internet_access_is_provider_available() {
-        for level in [0, 1, 2, 4, 5, i32::MAX] {
-            assert_eq!(
-                NetworkEvent::from_windows_connectivity_level(level),
-                NetworkEvent::Unavailable
-            );
-        }
-        assert_eq!(
-            NetworkEvent::from_windows_connectivity_level(3),
-            NetworkEvent::Available
-        );
-    }
+    fn mailbox_retains_the_latest_state_under_callback_bursts() {
+        use aeris_platform_sys::network::InterfaceChange;
 
-    #[test]
-    fn macos_reachability_requires_a_usable_route() {
-        use super::{
-            MACOS_REACHABILITY_CONNECTION_ON_DEMAND, MACOS_REACHABILITY_CONNECTION_ON_TRAFFIC,
-            MACOS_REACHABILITY_CONNECTION_REQUIRED, MACOS_REACHABILITY_INTERVENTION_REQUIRED,
-            MACOS_REACHABILITY_REACHABLE,
-        };
-
-        assert_eq!(
-            NetworkEvent::from_macos_reachability_flags(0),
-            NetworkEvent::Unavailable
-        );
-        assert_eq!(
-            NetworkEvent::from_macos_reachability_flags(MACOS_REACHABILITY_REACHABLE),
-            NetworkEvent::Available
-        );
-        assert_eq!(
-            NetworkEvent::from_macos_reachability_flags(
-                MACOS_REACHABILITY_REACHABLE | MACOS_REACHABILITY_CONNECTION_REQUIRED
-            ),
-            NetworkEvent::Unavailable
-        );
-        for automatic in [
-            MACOS_REACHABILITY_CONNECTION_ON_DEMAND,
-            MACOS_REACHABILITY_CONNECTION_ON_TRAFFIC,
-        ] {
-            assert_eq!(
-                NetworkEvent::from_macos_reachability_flags(
-                    MACOS_REACHABILITY_REACHABLE
-                        | MACOS_REACHABILITY_CONNECTION_REQUIRED
-                        | automatic
-                ),
-                NetworkEvent::Available
-            );
-            assert_eq!(
-                NetworkEvent::from_macos_reachability_flags(
-                    MACOS_REACHABILITY_REACHABLE
-                        | MACOS_REACHABILITY_CONNECTION_REQUIRED
-                        | automatic
-                        | MACOS_REACHABILITY_INTERVENTION_REQUIRED
-                ),
-                NetworkEvent::Unavailable
-            );
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_mailbox_retains_the_latest_state_under_callback_bursts() {
         let (publisher, events, _cancellation) = NetworkEventInbox::channel();
         for _ in 0..64 {
-            publisher.publish(NetworkEvent::Available);
-            publisher.publish(NetworkEvent::Unavailable);
+            publisher.deliver(InterfaceChange::Availability(NetworkEvent::Available));
+            publisher.deliver(InterfaceChange::Availability(NetworkEvent::Unavailable));
         }
-        publisher.publish(NetworkEvent::Available);
+        publisher.deliver(InterfaceChange::Availability(NetworkEvent::Available));
         assert_eq!(
             events.recv().expect("latest network state is retained"),
             NetworkEvent::Available
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_stopped_source_closes_the_stream_after_its_last_state() {
+        use aeris_platform_sys::network::InterfaceChange;
+
+        let (publisher, events, _cancellation) = NetworkEventInbox::channel();
+        publisher.deliver(InterfaceChange::Availability(NetworkEvent::Available));
+        publisher.deliver(InterfaceChange::Stopped);
+        assert_eq!(
+            events.recv().expect("the last state is delivered"),
+            NetworkEvent::Available
+        );
+        assert!(matches!(
+            events.recv(),
+            Err(super::NetworkNotificationError::StreamClosed)
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -1190,47 +662,22 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn windows_network_monitor_receives_bounded_initial_state() {
-        let monitor = NativeNetworkMonitor::connect()
-            .expect("Windows network callback provides its initial state");
+    fn network_monitor_receives_bounded_initial_state() {
+        let monitor =
+            NativeNetworkMonitor::connect().expect("native network callback provides its state");
         assert!(matches!(
             monitor.current(),
             NetworkEvent::Available | NetworkEvent::Unavailable
         ));
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn windows_network_monitor_cancellation_unblocks_a_waiter() {
-        let mut monitor = NativeNetworkMonitor::connect()
-            .expect("Windows network callback provides its initial state");
-        let cancellation = monitor.cancellation();
-        let waiter = std::thread::spawn(move || monitor.next_event());
-        cancellation.cancel();
-        assert!(matches!(
-            waiter.join().expect("join network monitor waiter"),
-            Err(super::NetworkNotificationError::Cancelled)
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_network_monitor_reads_initial_state() {
-        let monitor = NativeNetworkMonitor::connect()
-            .expect("macOS reachability monitor provides its initial state");
-        assert!(matches!(
-            monitor.current(),
-            NetworkEvent::Available | NetworkEvent::Unavailable
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_network_monitor_cancellation_unblocks_a_waiter() {
-        let mut monitor = NativeNetworkMonitor::connect()
-            .expect("macOS reachability monitor provides its initial state");
+    fn network_monitor_cancellation_unblocks_a_waiter() {
+        let mut monitor =
+            NativeNetworkMonitor::connect().expect("native network callback provides its state");
         let cancellation = monitor.cancellation();
         let waiter = std::thread::spawn(move || monitor.next_event());
         cancellation.cancel();

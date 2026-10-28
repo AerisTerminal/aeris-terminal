@@ -4,6 +4,8 @@
 //! need to use `unsafe` to access these capabilities.
 
 pub mod fs;
+pub mod network;
+pub mod power;
 pub mod process;
 #[cfg(target_os = "windows")]
 pub mod session;

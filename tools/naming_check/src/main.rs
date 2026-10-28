@@ -2351,20 +2351,10 @@ mod tests {
         }
     }
 
-    const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[(&str, &str)] = &[
-        (
-            "crates/platform_runtime/src/io_cancellation.rs",
-            "existing Windows CancelIoEx boundary awaits the M8.3 abort-latency decision",
-        ),
-        (
-            "crates/platform_runtime/src/network_notifications.rs",
-            "existing native interface-change callbacks await M8.3 extraction",
-        ),
-        (
-            "crates/platform_runtime/src/power_notifications.rs",
-            "existing native suspend/resume callbacks await M8.3 extraction",
-        ),
-    ];
+    const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[(&str, &str)] = &[(
+        "crates/platform_runtime/src/io_cancellation.rs",
+        "existing Windows CancelIoEx boundary awaits the M8.3 abort-latency decision",
+    )];
 
     fn contains_unsafe_code(source: &str) -> bool {
         source.contains("allow(unsafe_code)")

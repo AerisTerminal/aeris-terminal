@@ -550,7 +550,18 @@ still wait on the GUI checks and the remaining work on their lines.
     `platform_sys/src/windows/session.rs` (documented single-operation `SAFETY` blocks) and is
     re-exported by `platform_runtime`. A second guard in one process now reuses the registered
     window class instead of failing. Its interim unsafe allowlist entry is removed.
-  - Left: move the power, network and `CancelIoEx` FFI.
+  - Landed: the suspend/resume and network-availability FFI moved to
+    `platform_sys::power::SuspendResumeRegistration` and
+    `platform_sys::network::InterfaceChangeRegistration` (Windows power-manager and
+    connectivity-hint callbacks; macOS `IOKit` and `SCNetworkReachability` run-loop threads),
+    which also own `PowerEvent` and `NetworkEvent`. The coalescing event streams, cancellation and
+    the Linux logind/NetworkManager backends stay in `platform_runtime`, whose windows-sys
+    features shrink to `CancelIoEx`'s. The macOS reachability thread now runs its run loop in
+    one-second slices, so a stop requested just before the loop starts is no longer lost. Both
+    interim unsafe allowlist entries are removed. Checked: Windows tests and clippy; macOS
+    `platform_sys` clippy with `--target aarch64-apple-darwin`. macOS `platform_runtime`
+    cannot be cross-checked here (`ring` needs a C compiler) and nothing ran on macOS.
+  - Left: the `CancelIoEx` FFI.
   - Restore `forbid(unsafe_code)` in `platform_runtime`. Closes PL-02.
   - The logoff flush check is maintainer-only.
 - [ ] M8.4 Account runtime vault and lock fixes
