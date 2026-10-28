@@ -201,10 +201,14 @@ record it on this line.
   - Left: guarded GUI check that sign-in, sign-out and the Manage Profile refresh still update
     the sign-in window and the account menu.
 - [ ] M7.3 `AerisChartView` emits host events
-  - Left: make it an `EventEmitter<ChartHostEvent>` and delete the four `pending_*` request fields
-    and their drains.
-  - Split its host state and add a naming_check ban.
-  - GUI: the context menu, settings and study removal still work. Part of UI-07 and UI-14.
+  - Landed: `AerisChartView` is an `EventEmitter<ChartHostEvent>` (activate, context menu,
+    settings, study removal); the four `pending_*` fields, `ActivationRequest` and the
+    `take_*_request` drains are deleted, and the workspace surface subscribes per chart. Host
+    events, the Y-axis menu and the legend moved out of `view.rs` into `view/host_events.rs`,
+    `view/price_axis_menu.rs` and `view/legend.rs`. A gpui test shows one context-menu input
+    emits exactly one host event; naming_check rejects the pending names in chart_integration and
+    the `take_*` polls in the desktop. Part of UI-07 and UI-14.
+  - Left: guarded GUI check that the context menu, settings and study removal still work.
 - [ ] M7.4 `WorkspaceSurface` split into pane controllers
   - Left: `OrderFlowPresenter`, `StudiesController`, `AlertsController`, `PaneChromeState` and
     `ContextPanelController`, each with private fields.

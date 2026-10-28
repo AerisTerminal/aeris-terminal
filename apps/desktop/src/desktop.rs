@@ -116,23 +116,23 @@ use aeris_chart_integration::{
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartAxisAppearance, ChartBridgeMetrics, ChartColor, ChartContextKind,
     ChartContextRequest, ChartDepthLevel, ChartDrawingId, ChartDrawingKind, ChartDrawingStamp,
-    ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker,
-    ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator, ChartIndicatorState,
-    ChartInstrumentMetadata, ChartLegendOptions, ChartOrderId, ChartOrderKind, ChartOrderRole,
-    ChartOrderSide, ChartOrderStatus, ChartPaneContent, ChartPaneHeight, ChartPositionId,
-    ChartPositionSide, ChartSeriesColors, ChartSettingsRequest, ChartSplitDirection,
-    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
-    ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
-    ChartStudyThresholdRegion, ChartThemeColors, ChartThemeDefaults, ChartTradingAnnotation,
-    ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
-    ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
-    ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
-    ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
-    DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings, FootprintDisplayMode,
-    MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings, chart_color_hex,
-    classify_order_flow_sweeps,
+    ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEvent,
+    ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
+    ChartIndicatorState, ChartInstrumentMetadata, ChartLegendOptions, ChartOrderId, ChartOrderKind,
+    ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPaneContent, ChartPaneHeight,
+    ChartPositionId, ChartPositionSide, ChartSeriesColors, ChartSettingsRequest,
+    ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartThemeDefaults,
+    ChartTradingAnnotation, ChartTradingAnnotationPlacement, ChartTradingAnnotationTone,
+    ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
+    ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
+    ChartWorkingOrder, ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings,
+    CumulativeDeltaStyle, DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings,
+    FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction,
+    PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
+    chart_color_hex, classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -3228,17 +3228,9 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 cx.notify();
             }
             app.close_vanished_drawing_settings_dialog(cx);
-            let (activate, request, settings_request, study_remove_request, intents, sync_events) =
-                chart.update(cx, |chart, _| {
-                    (
-                        chart.take_activate_request(),
-                        chart.take_context_menu_request(),
-                        chart.take_settings_request(),
-                        chart.take_study_remove_request(),
-                        chart.take_trading_intents(),
-                        chart.take_sync_events(),
-                    )
-                });
+            let (intents, sync_events) = chart.update(cx, |chart, _| {
+                (chart.take_trading_intents(), chart.take_sync_events())
+            });
             let had_sync_events = !sync_events.is_empty();
             for event in sync_events {
                 if app.pending_chart_sync_events.len() == CHART_SYNC_EVENTS_PER_SURFACE {
@@ -3254,31 +3246,10 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 .into_iter()
                 .last();
             let had_alert_request = alert_request.is_some();
-            if activate {
-                app.pending_pane_activate = PaneActivationRequest::Pending;
-            }
-            let had_menu = request.is_some();
-            if let Some(request) = request {
-                app.pending_chart_context_menu = Some(request);
-            }
-            let had_settings_request = settings_request.is_some();
-            if let Some(request) = settings_request.and_then(legend_settings_request) {
-                app.pending_settings_request = Some(request);
-            }
-            let had_study_remove_request = study_remove_request.is_some();
-            if let Some(study_id) = study_remove_request.and_then(StudyInstanceId::try_from_u64) {
-                app.pending_study_remove_request = Some(study_id);
-            }
             if let Some(request) = alert_request {
                 app.open_price_alert_dialog(request, cx);
             }
-            if activate
-                || had_menu
-                || had_alert_request
-                || had_settings_request
-                || had_study_remove_request
-                || had_sync_events
-            {
+            if had_alert_request || had_sync_events {
                 cx.notify();
             }
             if chart.read(cx).has_market_data() {
@@ -3296,6 +3267,28 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             {
                 app.last_persisted_viewport = Some(viewport);
             }
+        })
+        .detach();
+        cx.subscribe(chart, |app, _, event: &ChartHostEvent, cx| {
+            match event {
+                ChartHostEvent::Activate => {
+                    app.pending_pane_activate = PaneActivationRequest::Pending;
+                }
+                ChartHostEvent::ContextMenu(request) => {
+                    app.pending_chart_context_menu = Some(request.clone());
+                }
+                ChartHostEvent::Settings(request) => {
+                    if let Some(request) = legend_settings_request(*request) {
+                        app.pending_settings_request = Some(request);
+                    }
+                }
+                ChartHostEvent::RemoveStudy(study_id) => {
+                    if let Some(study_id) = StudyInstanceId::try_from_u64(*study_id) {
+                        app.pending_study_remove_request = Some(study_id);
+                    }
+                }
+            }
+            cx.notify();
         })
         .detach();
     }

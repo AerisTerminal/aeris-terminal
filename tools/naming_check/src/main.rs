@@ -2800,6 +2800,51 @@ mod tests {
         }
     }
 
+    /// Chart host requests (activation, context menu, settings, study removal) leave
+    /// `AerisChartView` as `ChartHostEvent`s the host subscribes to; neither the chart nor the
+    /// desktop parks them in pending fields drained by a frame-time `take_*` poll.
+    #[test]
+    fn chart_host_requests_are_emitted_events_not_pending_polls() {
+        const CHART_PENDING_HOST_REQUESTS: &[&str] = &[
+            "pending_context_menu",
+            "pending_activate",
+            "pending_settings_request",
+            "pending_study_remove",
+            "ActivationRequest",
+        ];
+        const HOST_REQUEST_POLLS: &[&str] = &[
+            "take_context_menu_request",
+            "take_activate_request",
+            "take_settings_request",
+            "take_study_remove_request",
+        ];
+        let chart_sources = production_sources_under("crates/ui/chart_integration/src");
+        let desktop_sources = production_sources_under("apps/desktop/src");
+        let scans = chart_sources
+            .into_iter()
+            .map(|path| (path, true))
+            .chain(desktop_sources.into_iter().map(|path| (path, false)));
+        for (path, chart_owned) in scans {
+            let relative = relative_string(&path);
+            let contents = fs::read_to_string(&path).expect("chart host source");
+            let production = production_prefix(&contents);
+            let chart_names = if chart_owned {
+                CHART_PENDING_HOST_REQUESTS
+            } else {
+                &[]
+            };
+            for name in HOST_REQUEST_POLLS.iter().chain(chart_names) {
+                assert!(
+                    !contains_identifier(&production, name),
+                    "{relative} uses `{name}`; chart host requests are `ChartHostEvent`s \
+                     delivered through the chart's GPUI event subscription"
+                );
+            }
+        }
+        let host_events = manifest("crates/ui/chart_integration/src/view/host_events.rs");
+        assert!(host_events.contains("impl gpui::EventEmitter<ChartHostEvent> for AerisChartView"));
+    }
+
     #[test]
     fn trusted_native_study_packaging_keeps_core_owners_and_dynamic_loading_out_of_the_sdk() {
         assert_excludes(

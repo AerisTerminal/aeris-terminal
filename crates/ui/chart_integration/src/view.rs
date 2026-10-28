@@ -21,8 +21,8 @@ use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
     DrawingId, DrawingInterval, DrawingIntervalUnit, FinancialAppearance, FinancialLegendIdentity,
     FinancialLegendRequest, FinancialSeriesColors, HostLegendSeries, IndicatorChromeOptions,
-    IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleMode, PriceScaleTarget,
-    SeriesChromeFlag, TradingIntent, TradingSnapshot,
+    IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleTarget, TradingIntent,
+    TradingSnapshot,
 };
 pub use aeris_charts_engine::{
     BigTradesFilter, BigTradesIntensity, BigTradesSize, CumulativeDeltaStyle,
@@ -50,15 +50,13 @@ use aeris_design_system::{
 };
 use aeris_observability::diagnostic;
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyView, App, Bounds, Context, CursorStyle, Entity,
-    FocusHandle, KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task,
-    Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
+    AnyView, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
+    ScrollWheelEvent, SharedString, Task, Window, canvas, div, prelude::*, px,
 };
 use num_traits::ToPrimitive;
 use order_flow::{OrderFlowChartState, OrderFlowStudy};
 use std::fmt;
-use std::sync::Arc;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -221,10 +219,6 @@ fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySna
         .apply_options(&options)
         .expect("the platform time-scale defaults are valid");
 }
-
-const LEGEND_INSET: f32 = 8.0;
-const LEGEND_ROW_HEIGHT: f32 = 24.0;
-const LEGEND_MAX_WIDTH: f32 = 640.0;
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -939,92 +933,6 @@ impl ChartType {
     }
 }
 
-/// Distinguishes a pane-canvas right-click from a price-axis right-click.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartContextKind {
-    Pane,
-    PriceAxis { pane: usize, left: bool },
-}
-
-/// A chart-surface right-click waiting for the shell to present a menu.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChartContextRequest {
-    pub position: Point<Pixels>,
-    pub kind: ChartContextKind,
-    /// Aeris Charts-formatted price at the right-click, when the click was on the pane.
-    pub copy_price: Option<SharedString>,
-}
-
-/// Aeris Charts-owned price-axis chrome the Y-axis menu presents.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PriceAxisMenuState {
-    pub flags: u16,
-    pub mode: u8,
-    pub left: bool,
-    pub precision: Option<u8>,
-}
-
-impl PriceAxisMenuState {
-    pub const PRICE_LINE: u16 = 1;
-    pub const LAST_VALUE: u16 = 2;
-    pub const TITLE: u16 = 4;
-    pub const COUNTDOWN: u16 = 8;
-    pub const INDICATOR_NAMES: u16 = 16;
-    pub const INDICATOR_VALUES: u16 = 32;
-    pub const AUTO_SCALE: u16 = 64;
-    pub const INVERT_SCALE: u16 = 128;
-    pub const BID_ASK: u16 = 256;
-    pub const ALIGN_LABELS: u16 = 512;
-    pub const INDICATOR_PRICE_LINES: u16 = 1024;
-
-    #[must_use]
-    pub const fn enabled(self, flag: u16) -> bool {
-        self.flags & flag != 0
-    }
-}
-
-/// A user command from the Y-axis menu.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PriceAxisMenuAction {
-    TogglePriceLine,
-    ToggleLastValue,
-    ToggleTitle,
-    ToggleCountdown,
-    ToggleIndicatorNameLabels,
-    ToggleIndicatorValueLabels,
-    ToggleIndicatorPriceLines,
-    ToggleBidAsk,
-    ToggleAlignLabels,
-    ToggleAutoScale,
-    ToggleInvertScale,
-    SetMode(u8),
-    SetLeft(bool),
-    SetPrecision(Option<u8>),
-}
-
-const PRICE_AXIS_PRECISION_CHOICES: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 8];
-
-fn price_axis_target(left: bool) -> PriceScaleTarget {
-    if left {
-        PriceScaleTarget::Left
-    } else {
-        PriceScaleTarget::Right
-    }
-}
-
-fn price_format_min_move(precision: u8) -> f64 {
-    10_f64.powi(-i32::from(precision.min(18)))
-}
-
-const fn price_scale_mode_code(mode: PriceScaleMode) -> u8 {
-    match mode {
-        PriceScaleMode::Normal => 0,
-        PriceScaleMode::Logarithmic => 1,
-        PriceScaleMode::Percentage => 2,
-        PriceScaleMode::IndexedTo100 => 3,
-    }
-}
-
 /// Aggregate state used by drawing-toolbar lock controls.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DrawingsLockSummary {
@@ -1042,19 +950,6 @@ enum SeriesMutation {
     TailReplace,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum LegendItem {
-    Asset,
-    Volume,
-    VolumeProfile,
-    Indicator(u32),
-    Study { study_id: u64, series_id: u32 },
-    OrderFlow(OrderFlowStudy),
-    BigTrades,
-    OrderBookDepth,
-    DepthHeatmap,
-}
-
 /// The volume indicator on a chart: the outputs of the Aeris Charts binding drawing it and the
 /// settings it was built from. The columns output is also the binding identity.
 #[derive(Clone, Debug)]
@@ -1065,97 +960,10 @@ struct VolumeIndicator {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum LegendPresence {
-    #[default]
-    Absent,
-    Present,
-}
-
-impl LegendPresence {
-    const fn is_present(self) -> bool {
-        matches!(self, Self::Present)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum ActivationRequest {
-    #[default]
-    None,
-    Pending,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PointerInteractionState {
     #[default]
     Active,
     Suspended,
-}
-
-impl LegendItem {
-    fn key(self) -> u64 {
-        match self {
-            Self::Asset => 0,
-            Self::Volume => 1,
-            Self::Indicator(binding) => u64::from(binding) + 2,
-            Self::Study { series_id, .. } => (1_u64 << 63) | u64::from(series_id),
-            Self::OrderFlow(study) => (1_u64 << 62) | study as u64,
-            Self::VolumeProfile => 1_u64 << 61,
-            Self::BigTrades => 1_u64 << 60,
-            Self::OrderBookDepth => 1_u64 << 59,
-            Self::DepthHeatmap => 1_u64 << 58,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LegendRow {
-    item: LegendItem,
-    pane: usize,
-    title: String,
-    /// One entry per readout (`O 77,876.69`, `%K 36.95`, …) so a legend that outgrows its pane
-    /// wraps value by value instead of spilling over the price axis.
-    values: Vec<LegendValue>,
-    visible: bool,
-    settings_available: bool,
-}
-
-/// A readout without its own series color reads neutral. The symbol's OHLC never takes the bar
-/// direction: flipping the values between the up and down colors reads as the text jumping.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LegendValue {
-    text: String,
-    color: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct LegendPaneLayout {
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-}
-
-#[derive(Clone, Copy)]
-struct LegendPalette {
-    text: Rgba,
-    muted: Rgba,
-    hover: Rgba,
-    danger: Rgba,
-}
-
-const LEGEND_VIEW_ICON: &str = "aeris/icons/ui/view.svg";
-const LEGEND_VIEW_OFF_ICON: &str = "aeris/icons/ui/view-off.svg";
-const LEGEND_SETTINGS_ICON: &str = "aeris/icons/ui/settings.svg";
-const LEGEND_REMOVE_ICON: &str = "aeris/icons/ui/close.svg";
-const LEGEND_LOADING_ICON: &str = "aeris/icons/ui/loader.svg";
-/// One rotation of the legend's loading glyph.
-const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
-
-fn platform_tabular_numerals() -> gpui::FontFeatures {
-    gpui::FontFeatures(Arc::new(vec![(
-        platform_typography().tabular_numerals_feature().to_owned(),
-        1,
-    )]))
 }
 
 impl SeriesMutation {
@@ -1215,10 +1023,6 @@ pub struct AerisChartView {
     input_wake: Option<Task<()>>,
     focus_handle: Option<FocusHandle>,
     pointer_interaction: PointerInteractionState,
-    pending_context_menu: Option<ChartContextRequest>,
-    pending_activate: ActivationRequest,
-    pending_settings_request: Option<ChartSettingsRequest>,
-    pending_study_remove: Option<u64>,
     instrument_price_precision: u8,
     instrument_price_increment: Option<i64>,
     instrument_price_scale: u8,
@@ -1330,10 +1134,6 @@ impl AerisChartView {
             input_wake: None,
             focus_handle: None,
             pointer_interaction: PointerInteractionState::Active,
-            pending_context_menu: None,
-            pending_activate: ActivationRequest::None,
-            pending_settings_request: None,
-            pending_study_remove: None,
             instrument_price_precision: 2,
             instrument_price_increment: None,
             instrument_price_scale: 2,
@@ -1444,10 +1244,6 @@ impl AerisChartView {
             input_wake: None,
             focus_handle: None,
             pointer_interaction: PointerInteractionState::Active,
-            pending_context_menu: None,
-            pending_activate: ActivationRequest::None,
-            pending_settings_request: None,
-            pending_study_remove: None,
             instrument_price_precision: replay_display_precision(replay),
             instrument_price_increment: replay.instrument().price_increment,
             instrument_price_scale: replay.instrument().precision.price_scale(),
@@ -1546,238 +1342,10 @@ impl AerisChartView {
         self.fitted = true;
     }
 
-    /// Takes a pending chart right-click request in window coordinates.
-    pub fn take_context_menu_request(&mut self) -> Option<ChartContextRequest> {
-        self.pending_context_menu.take()
-    }
-
-    /// Takes a pending request to make this chart's workspace pane active.
-    pub fn take_activate_request(&mut self) -> bool {
-        let pending = self.pending_activate == ActivationRequest::Pending;
-        self.pending_activate = ActivationRequest::None;
-        pending
-    }
-
-    /// Takes the latest pending host request to open a legend item's settings.
-    pub fn take_settings_request(&mut self) -> Option<ChartSettingsRequest> {
-        self.pending_settings_request.take()
-    }
-
-    /// Takes a pending host request to remove one runtime-managed study.
-    pub fn take_study_remove_request(&mut self) -> Option<u64> {
-        self.pending_study_remove.take()
-    }
-
     /// Places host content under the symbol legend row of the main pane, or removes it.
     /// Presses on it stay with the host and never reach chart input.
     pub fn set_legend_accessory(&mut self, accessory: Option<AnyView>) {
         self.legend_accessory = accessory;
-    }
-
-    /// Reads Aeris Charts-owned Y-axis chrome for the hit-tested price scale.
-    #[must_use]
-    pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
-        let target = price_axis_target(left);
-        let primary = self.engine.primary_series_on_price_scale(pane, target)?;
-        let mut flags = 0;
-        if self.product_price_line_visible() {
-            flags |= PriceAxisMenuState::PRICE_LINE;
-        }
-        if primary.last_value_visible {
-            flags |= PriceAxisMenuState::LAST_VALUE;
-        }
-        if primary.title_visible {
-            flags |= PriceAxisMenuState::TITLE;
-        }
-        if primary.countdown_visible {
-            flags |= PriceAxisMenuState::COUNTDOWN;
-        }
-        let chrome = self.engine.indicator_chrome_options();
-        if chrome.name_labels_visible {
-            flags |= PriceAxisMenuState::INDICATOR_NAMES;
-        }
-        if chrome.value_labels_visible {
-            flags |= PriceAxisMenuState::INDICATOR_VALUES;
-        }
-        if chrome.price_lines_visible {
-            flags |= PriceAxisMenuState::INDICATOR_PRICE_LINES;
-        }
-        if self.engine.price_scale_auto_scale_for(pane, target)? {
-            flags |= PriceAxisMenuState::AUTO_SCALE;
-        }
-        if self.engine.price_scale_inverted_for(pane, target)? {
-            flags |= PriceAxisMenuState::INVERT_SCALE;
-        }
-        if primary.bid_ask_visible {
-            flags |= PriceAxisMenuState::BID_ASK;
-        }
-        if self.engine.price_scale_align_labels_for(pane, target)? {
-            flags |= PriceAxisMenuState::ALIGN_LABELS;
-        }
-        Some(PriceAxisMenuState {
-            flags,
-            mode: price_scale_mode_code(self.engine.price_scale_mode_for(pane, target)?),
-            left,
-            precision: self.price_precision_override,
-        })
-    }
-
-    /// Returns the explicit main price-axis precision selected by the host.
-    ///
-    /// `None` means the chart is intentionally following the instrument's automatic precision.
-    #[must_use]
-    pub const fn selected_price_precision(&self) -> Option<u8> {
-        self.price_precision_override
-    }
-
-    /// Applies one Y-axis menu command through Aeris Charts' scale and series APIs.
-    pub fn apply_price_axis_menu_action(
-        &mut self,
-        pane: usize,
-        left: bool,
-        action: PriceAxisMenuAction,
-    ) -> bool {
-        let target = price_axis_target(left);
-        let Some(primary_id) = self.primary_series_id_on_scale(pane, target) else {
-            return false;
-        };
-        let applied = match action {
-            PriceAxisMenuAction::TogglePriceLine => self
-                .engine
-                .toggle_series_chrome(0, SeriesChromeFlag::PriceLine),
-            PriceAxisMenuAction::ToggleLastValue => self
-                .engine
-                .toggle_series_chrome(primary_id, SeriesChromeFlag::LastValue),
-            PriceAxisMenuAction::ToggleTitle => self
-                .engine
-                .toggle_series_chrome(primary_id, SeriesChromeFlag::Title),
-            PriceAxisMenuAction::ToggleCountdown => self
-                .engine
-                .toggle_series_chrome(primary_id, SeriesChromeFlag::Countdown),
-            PriceAxisMenuAction::ToggleIndicatorNameLabels => self.toggle_indicator_name_labels(),
-            PriceAxisMenuAction::ToggleIndicatorValueLabels => self.toggle_indicator_value_labels(),
-            PriceAxisMenuAction::ToggleIndicatorPriceLines => self.toggle_indicator_price_lines(),
-            PriceAxisMenuAction::ToggleBidAsk => self
-                .engine
-                .toggle_series_chrome(primary_id, SeriesChromeFlag::BidAsk),
-            PriceAxisMenuAction::ToggleAlignLabels => {
-                self.engine.toggle_price_scale_align_labels(pane, target)
-            }
-            PriceAxisMenuAction::ToggleAutoScale => {
-                let enabled = self.engine.price_scale_auto_scale_for(pane, target) != Some(true);
-                self.engine
-                    .set_price_scale_auto_scale_for(pane, target, enabled);
-                true
-            }
-            PriceAxisMenuAction::ToggleInvertScale => {
-                let inverted = self.engine.price_scale_inverted_for(pane, target) != Some(true);
-                self.engine
-                    .set_price_scale_inverted_for(pane, target, inverted);
-                true
-            }
-            PriceAxisMenuAction::SetMode(mode) if mode <= 3 => {
-                let mode = match mode {
-                    1 => PriceScaleMode::Logarithmic,
-                    2 => PriceScaleMode::Percentage,
-                    3 => PriceScaleMode::IndexedTo100,
-                    _ => PriceScaleMode::Normal,
-                };
-                self.engine.set_price_scale_mode_for(pane, target, mode);
-                true
-            }
-            PriceAxisMenuAction::SetMode(_) => false,
-            PriceAxisMenuAction::SetLeft(next_left) => self.move_price_axis(pane, left, next_left),
-            PriceAxisMenuAction::SetPrecision(precision) => self.set_price_precision(precision),
-        };
-        if applied {
-            self.mark_user_state_changed();
-            self.invalidate_series_layout();
-        }
-        applied
-    }
-
-    /// Restores a previously captured stable price-axis state by replaying the
-    /// same public actions used by the menu, so Aeris Charts remains authoritative.
-    pub fn restore_price_axis_menu_state(&mut self, desired: PriceAxisMenuState) -> bool {
-        let mut current = self
-            .price_axis_menu_state(0, false)
-            .or_else(|| self.price_axis_menu_state(0, true));
-        let Some(mut current_state) = current else {
-            return false;
-        };
-        if current_state.left != desired.left {
-            let _ = self.apply_price_axis_menu_action(
-                0,
-                current_state.left,
-                PriceAxisMenuAction::SetLeft(desired.left),
-            );
-            current = self.price_axis_menu_state(0, desired.left);
-            let Some(next) = current else {
-                return false;
-            };
-            current_state = next;
-        }
-        let flags = [
-            (
-                PriceAxisMenuState::PRICE_LINE,
-                PriceAxisMenuAction::TogglePriceLine,
-            ),
-            (
-                PriceAxisMenuState::LAST_VALUE,
-                PriceAxisMenuAction::ToggleLastValue,
-            ),
-            (PriceAxisMenuState::TITLE, PriceAxisMenuAction::ToggleTitle),
-            (
-                PriceAxisMenuState::COUNTDOWN,
-                PriceAxisMenuAction::ToggleCountdown,
-            ),
-            (
-                PriceAxisMenuState::INDICATOR_NAMES,
-                PriceAxisMenuAction::ToggleIndicatorNameLabels,
-            ),
-            (
-                PriceAxisMenuState::INDICATOR_VALUES,
-                PriceAxisMenuAction::ToggleIndicatorValueLabels,
-            ),
-            (
-                PriceAxisMenuState::INDICATOR_PRICE_LINES,
-                PriceAxisMenuAction::ToggleIndicatorPriceLines,
-            ),
-            // AUTO_SCALE is deliberately not replayed: the manual price range it implies is
-            // not part of this state, so disabling it on a new chart leaves no range to draw.
-            (
-                PriceAxisMenuState::INVERT_SCALE,
-                PriceAxisMenuAction::ToggleInvertScale,
-            ),
-            (
-                PriceAxisMenuState::BID_ASK,
-                PriceAxisMenuAction::ToggleBidAsk,
-            ),
-            (
-                PriceAxisMenuState::ALIGN_LABELS,
-                PriceAxisMenuAction::ToggleAlignLabels,
-            ),
-        ];
-        for (flag, action) in flags {
-            if current_state.enabled(flag) != desired.enabled(flag) {
-                let _ = self.apply_price_axis_menu_action(0, desired.left, action);
-            }
-        }
-        if current_state.mode != desired.mode {
-            let _ = self.apply_price_axis_menu_action(
-                0,
-                desired.left,
-                PriceAxisMenuAction::SetMode(desired.mode),
-            );
-        }
-        if current_state.precision != desired.precision {
-            let _ = self.apply_price_axis_menu_action(
-                0,
-                desired.left,
-                PriceAxisMenuAction::SetPrecision(desired.precision),
-            );
-        }
-        true
     }
 
     /// Selects a Aeris Charts-owned theme without changing chart data or viewport.
@@ -1858,60 +1426,6 @@ impl AerisChartView {
             .set_visible_time_range(start_seconds, end_seconds);
         self.invalidate_series_layout();
         self.fitted = true;
-        true
-    }
-
-    /// Returns whether the current chart-object selection can be deleted by product chrome.
-    #[must_use]
-    pub fn has_deletable_selection(&self) -> bool {
-        self.engine.selected_drawing().is_some()
-            || self
-                .engine
-                .selected_series()
-                .is_some_and(|series| series != 0)
-    }
-
-    /// Removes the selected drawing or native Aeris Charts indicator.
-    ///
-    /// The price series is product-owned and cannot be deleted.
-    pub fn remove_selected_chart_object(&mut self) -> bool {
-        if self.remove_selected_drawing() {
-            self.cancel_drawing();
-            return true;
-        }
-        let Some(series) = self.engine.selected_series() else {
-            return false;
-        };
-        let removed = self.remove_series_selection(series);
-        if removed {
-            self.engine.set_selected_series(None);
-        }
-        removed
-    }
-
-    /// Removes one selected product series. Studies are runtime-owned and become a host request;
-    /// the price series, the footprint presentation and the volume weights are protected.
-    fn remove_series_selection(&mut self, series: u32) -> bool {
-        if series == 0 || series == self.volume_series || self.footprint_series_id() == Some(series)
-        {
-            return false;
-        }
-        if let Some(study_id) = self.engine.external_study_for_series(series) {
-            self.pending_study_remove = Some(study_id);
-            return true;
-        }
-        if let Some(study) = self.order_flow_study_for_series(series) {
-            return self.remove_order_flow_study(study);
-        }
-        if self.is_volume_output(series) {
-            self.remove_volume();
-        } else if !self.engine.remove_indicator_for_series(series)
-            && !self.engine.remove_series(series)
-        {
-            return false;
-        }
-        self.invalidate_series_layout();
-        self.mark_user_state_changed();
         true
     }
 
@@ -2889,26 +2403,6 @@ impl AerisChartView {
         );
     }
 
-    fn move_price_axis(&mut self, pane: usize, from_left: bool, to_left: bool) -> bool {
-        if from_left == to_left {
-            return true;
-        }
-        let from = price_axis_target(from_left);
-        let to = price_axis_target(to_left);
-        self.engine.rebind_price_scale_series(pane, from, to)
-    }
-
-    fn set_price_precision(&mut self, precision: Option<u8>) -> bool {
-        if let Some(digits) = precision
-            && !PRICE_AXIS_PRECISION_CHOICES.contains(&digits)
-        {
-            return false;
-        }
-        self.price_precision_override = precision;
-        self.apply_selected_price_format();
-        true
-    }
-
     fn prepare_frame(
         &mut self,
         (width, height, scale_factor): (f32, f32, f32),
@@ -3120,332 +2614,6 @@ impl Default for AerisChartView {
     }
 }
 
-fn legend_palette(theme: &AerisTheme) -> LegendPalette {
-    let colors = theme.colors;
-    LegendPalette {
-        text: gpui_theme_color(colors.text_default),
-        muted: gpui_theme_color(colors.text_secondary),
-        hover: gpui_theme_color(colors.hover_bg),
-        danger: gpui_theme_color(colors.danger),
-    }
-}
-
-fn chart_legend_layers(
-    chart: &Entity<AerisChartView>,
-    rows: &[LegendRow],
-    panes: &[LegendPaneLayout],
-    theme: &AerisTheme,
-    loading: bool,
-    accessory: Option<&AnyView>,
-) -> Vec<AnyElement> {
-    let palette = legend_palette(theme);
-    panes
-        .iter()
-        .copied()
-        .enumerate()
-        .filter_map(|(pane_index, pane)| {
-            let pane_rows = rows.iter().filter(|row| row.pane == pane_index);
-            let mut accessory = accessory.filter(|_| pane_index == 0).cloned();
-            let follows_asset = rows
-                .iter()
-                .any(|row| row.pane == pane_index && row.item == LegendItem::Asset);
-            // Cap the legend at the plot area so it wraps inside the pane instead of running
-            // under the price axis.
-            let available_width = (pane.width - LEGEND_INSET * 2.0).clamp(0.0, LEGEND_MAX_WIDTH);
-            let mut layer = div()
-                .id(("chart_legend_pane", pane_index))
-                .absolute()
-                .left(px(pane.left + LEGEND_INSET))
-                .top(px(pane.top + LEGEND_INSET))
-                .max_w(px(available_width))
-                .max_h(px((pane.height - LEGEND_INSET * 2.0).max(0.0)))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .items_start()
-                .cursor(CursorStyle::Arrow);
-            let mut row_count = 0;
-            if !follows_asset && let Some(accessory) = accessory.take() {
-                row_count += 1;
-                layer = layer.child(legend_accessory(chart, accessory));
-            }
-            for row in pane_rows {
-                row_count += 1;
-                layer = layer.child(chart_legend_row(chart, row, palette, loading));
-                if row.item == LegendItem::Asset
-                    && let Some(accessory) = accessory.take()
-                {
-                    layer = layer.child(legend_accessory(chart, accessory));
-                }
-            }
-            (row_count > 0).then(|| layer.into_any_element())
-        })
-        .collect()
-}
-
-/// Host content under the symbol row. Presses stop here so a click on a host control never
-/// starts a chart gesture or moves keyboard focus to the chart; like any press on the chart,
-/// it still asks the host to activate the chart's pane.
-fn legend_accessory(chart: &Entity<AerisChartView>, accessory: AnyView) -> AnyElement {
-    let activate = chart.clone();
-    div()
-        .id("chart_legend_accessory")
-        .flex_none()
-        .px_1()
-        .py_1()
-        .on_any_mouse_down(move |_, _, cx| {
-            activate.update(cx, |chart, chart_cx| {
-                chart.pending_activate = ActivationRequest::Pending;
-                chart_cx.notify();
-            });
-            cx.stop_propagation();
-        })
-        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(accessory)
-        .into_any_element()
-}
-
-fn chart_legend_row(
-    chart: &Entity<AerisChartView>,
-    row: &LegendRow,
-    palette: LegendPalette,
-    loading: bool,
-) -> AnyElement {
-    let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
-    let controls = legend_row_controls(chart, row, palette, &group);
-    let values = if row.visible {
-        row.values.clone()
-    } else {
-        Vec::new()
-    };
-    let values = values.into_iter().map(|value| {
-        let color = value
-            .color
-            .as_deref()
-            .and_then(Color::parse_css)
-            .map_or(palette.muted, |color| rgba(color.0));
-        // A wrapping text element shapes at whatever width the row's flex-wrap pass offers it,
-        // so a labelled value such as "C 6812.25" could break at its space and jump inside the
-        // fixed-height cell as its digits change. Each value moves to a new row line as a whole.
-        div()
-            .flex_none()
-            .h(px(LEGEND_ROW_HEIGHT))
-            .flex()
-            .items_center()
-            .whitespace_nowrap()
-            .font_features(platform_tabular_numerals())
-            .text_color(color)
-            .child(value.text)
-            .into_any_element()
-    });
-    div()
-        .id(("chart_legend_row", row.item.key()))
-        .group(group.clone())
-        .min_h(px(LEGEND_ROW_HEIGHT))
-        .max_w_full()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x_2()
-        .px_1()
-        .rounded(px(f32::from(
-            aeris_design_system::RadiusToken::Sm.logical_pixels(),
-        )))
-        .text_xs()
-        .text_color(if row.visible {
-            palette.text
-        } else {
-            palette.muted
-        })
-        .cursor(CursorStyle::Arrow)
-        .hover(|style| style.bg(palette.hover))
-        .children((loading && row.item == LegendItem::Asset).then(|| legend_loading_glyph(palette)))
-        .child(
-            div()
-                .flex_none()
-                .h(px(LEGEND_ROW_HEIGHT))
-                .flex()
-                .items_center()
-                .whitespace_nowrap()
-                // The asset title (symbol, venue and interval) leads the legend one step up the
-                // type scale, at the surface's regular weight like every other legend row.
-                .when(row.item == LegendItem::Asset, gpui::Styled::text_sm)
-                .child(row.title.clone()),
-        )
-        .children(values)
-        .child(controls)
-        .into_any_element()
-}
-
-fn legend_row_controls(
-    chart: &Entity<AerisChartView>,
-    row: &LegendRow,
-    palette: LegendPalette,
-    group: &SharedString,
-) -> impl IntoElement {
-    let visibility = legend_control(
-        chart,
-        row.item,
-        LegendControl::Visibility(row.visible),
-        palette,
-    )
-    .when(row.visible, |control| {
-        control
-            .invisible()
-            .group_hover(group.clone(), gpui::Styled::visible)
-    });
-    let mut controls = div()
-        .flex_none()
-        .h(px(LEGEND_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .gap_1()
-        .child(visibility);
-    if row.settings_available
-        && matches!(
-            row.item,
-            LegendItem::Study { .. }
-                | LegendItem::BigTrades
-                | LegendItem::Volume
-                | LegendItem::OrderFlow(_)
-                | LegendItem::OrderBookDepth
-        )
-    {
-        controls = controls.child(
-            legend_control(chart, row.item, LegendControl::Settings, palette)
-                .invisible()
-                .group_hover(group.clone(), gpui::Styled::visible),
-        );
-    }
-    if row.item != LegendItem::Asset {
-        controls = controls.child(
-            legend_control(chart, row.item, LegendControl::Remove, palette)
-                .invisible()
-                .group_hover(group.clone(), gpui::Styled::visible),
-        );
-    }
-    controls
-}
-
-/// The symbol row's own load indicator, sized to the legend text and placed ahead
-/// of the title: a load in flight belongs to the symbol the trader is reading, not
-/// to a second notice sitting over the plot.
-fn legend_loading_glyph(palette: LegendPalette) -> AnyElement {
-    div()
-        .id("chart_legend_loading")
-        .flex_none()
-        .h(px(LEGEND_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .role(Role::Status)
-        .aria_label("Loading")
-        .child(
-            svg()
-                .path(LEGEND_LOADING_ICON)
-                .size(px(11.0))
-                .flex_none()
-                .text_color(palette.muted)
-                .with_animation(
-                    "chart_legend_loading",
-                    Animation::new(LEGEND_LOADING_PERIOD).repeat(),
-                    |glyph, delta| {
-                        glyph.with_transformation(Transformation::rotate(percentage(delta)))
-                    },
-                ),
-        )
-        .into_any_element()
-}
-
-#[derive(Clone, Copy)]
-enum LegendControl {
-    Visibility(bool),
-    Settings,
-    Remove,
-}
-
-fn legend_control(
-    chart: &Entity<AerisChartView>,
-    item: LegendItem,
-    control: LegendControl,
-    palette: LegendPalette,
-) -> gpui::Stateful<gpui::Div> {
-    let action_chart = chart.clone();
-    let remove = matches!(control, LegendControl::Remove);
-    let (label, path, color) = match control {
-        LegendControl::Visibility(true) => ("Hide", LEGEND_VIEW_ICON, palette.text),
-        LegendControl::Visibility(false) => ("Show", LEGEND_VIEW_OFF_ICON, palette.muted),
-        LegendControl::Settings => ("Settings", LEGEND_SETTINGS_ICON, palette.text),
-        LegendControl::Remove => ("Remove", LEGEND_REMOVE_ICON, palette.danger),
-    };
-    div()
-        .id(legend_control_element_id(item, control))
-        .size(px(20.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.0))
-        .text_color(color)
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(label)
-        .hover(|style| style.bg(palette.hover))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, _, cx| {
-            action_chart.update(cx, |chart, chart_cx| {
-                if matches!(control, LegendControl::Settings) {
-                    let request = match item {
-                        LegendItem::Study { study_id, .. } => {
-                            Some(ChartSettingsRequest::Study(study_id))
-                        }
-                        LegendItem::BigTrades => Some(ChartSettingsRequest::BigTrades),
-                        LegendItem::Volume => Some(ChartSettingsRequest::Volume),
-                        LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta) => {
-                            Some(ChartSettingsRequest::CumulativeDelta)
-                        }
-                        LegendItem::OrderFlow(OrderFlowStudy::Delta) => {
-                            Some(ChartSettingsRequest::DeltaHistogram)
-                        }
-                        LegendItem::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
-                        _ => None,
-                    };
-                    if let Some(request) = request {
-                        chart.pending_settings_request = Some(request);
-                        chart_cx.notify();
-                    }
-                    return;
-                }
-                if remove && let LegendItem::Study { study_id, .. } = item {
-                    chart.pending_study_remove = Some(study_id);
-                    chart_cx.notify();
-                    return;
-                }
-                let changed = if remove {
-                    chart.remove_legend_indicator(item)
-                } else {
-                    let LegendControl::Visibility(visible) = control else {
-                        return;
-                    };
-                    chart.set_legend_item_visible(item, !visible)
-                };
-                if changed {
-                    chart_cx.notify();
-                }
-            });
-            cx.stop_propagation();
-        })
-        .child(svg().path(path).size(px(14.0)).text_color(color))
-}
-
-fn legend_control_element_id(item: LegendItem, control: LegendControl) -> (&'static str, u64) {
-    let namespace = match control {
-        LegendControl::Visibility(_) => "chart_legend_visibility_control",
-        LegendControl::Settings => "chart_legend_settings_control",
-        LegendControl::Remove => "chart_legend_remove_control",
-    };
-    (namespace, item.key())
-}
-
 impl Render for AerisChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_clock_tick(cx);
@@ -3541,8 +2709,16 @@ pub use drawings::{
 mod builtin_indicators;
 pub use builtin_indicators::BuiltinIndicator;
 mod export;
+mod host_events;
+use host_events::SelectionRemoval;
+pub use host_events::{ChartContextKind, ChartContextRequest, ChartHostEvent};
 mod indicators;
 mod input;
+mod legend;
+use legend::{
+    LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendItem, LegendPaneLayout,
+    LegendPresence, LegendRow, LegendValue, chart_legend_layers,
+};
 mod order_book_depth;
 use order_book_depth::OrderBookDepthState;
 mod depth_heatmap;
@@ -3552,7 +2728,10 @@ pub use order_flow::classify_order_flow_sweeps;
 mod palette;
 pub use palette::{ChartAxisAppearance, ChartThemeDefaults};
 mod pane_heights;
+mod price_axis_menu;
 use palette::{PresetPalette, chart_theme, effective_color, theme_defaults};
 pub use pane_heights::{ChartPaneContent, ChartPaneHeight};
+use price_axis_menu::price_format_min_move;
+pub use price_axis_menu::{PriceAxisMenuAction, PriceAxisMenuState};
 mod studies;
 pub use studies::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};

@@ -7085,7 +7085,7 @@ impl WorkspaceSurface {
     pub(super) fn remove_selected_chart_object(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                if chart.remove_selected_chart_object() {
+                if chart.remove_selected_chart_object(chart_cx) {
                     chart_cx.notify();
                 }
             });

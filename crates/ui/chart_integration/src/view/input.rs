@@ -2,9 +2,9 @@
 //! module binds the shared GPUI adapter and turns the engine's host requests into product state.
 
 use super::{
-    ActivationRequest, AerisChartView, ChartContextKind, ChartContextRequest, ChartSettingsRequest,
+    AerisChartView, ChartContextKind, ChartContextRequest, ChartHostEvent, ChartSettingsRequest,
     Context, KeyDownEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PointerInteractionState, ScrollWheelEvent, SharedString, Window, px,
+    PointerInteractionState, ScrollWheelEvent, SelectionRemoval, SharedString, Window, px,
 };
 use aeris_charts_engine::{ChartContextMenu, ChartInputEvent, ChartRegion, PriceScaleTarget};
 use aeris_charts_render_gpui::input::cursor_style;
@@ -40,15 +40,17 @@ impl AerisChartView {
         }
     }
 
-    /// Turns the engine's queued host requests into product requests the shell takes.
-    pub(super) fn process_input_events(&mut self) {
+    /// Applies the engine's queued input events and returns the host requests among them, in
+    /// order.
+    pub(super) fn process_input_events(&mut self) -> Vec<ChartHostEvent> {
+        let mut host_events = Vec::new();
         for event in self.engine.take_input_events() {
             match event {
                 ChartInputEvent::ContextMenu(menu) => {
-                    self.pending_context_menu = Some(self.context_menu_request(menu));
+                    host_events.push(ChartHostEvent::ContextMenu(self.context_menu_request(menu)));
                 }
                 ChartInputEvent::DrawingSettingsRequested(id) => {
-                    self.pending_settings_request = Some(ChartSettingsRequest::Drawing(id));
+                    host_events.push(ChartHostEvent::Settings(ChartSettingsRequest::Drawing(id)));
                 }
                 // Terminal has no pane click, crosshair, drawing-created, delta-tooltip range, or
                 // general-chart brush and legend subscribers, and the engine runs drawing text
@@ -62,14 +64,17 @@ impl AerisChartView {
                 | ChartInputEvent::GeneralBrushChanged
                 | ChartInputEvent::GeneralLegendChanged => {}
                 ChartInputEvent::RemoveSeries(series) => {
-                    if self.remove_series_selection(series) {
+                    let removal = self.remove_series_selection(series);
+                    if removal != SelectionRemoval::Protected {
                         self.engine.set_selected_series(None);
                     }
+                    host_events.extend(removal.host_event());
                 }
                 ChartInputEvent::IndicatorRemoved(binding) => self.indicator_removed(binding),
                 ChartInputEvent::PanesResized => self.remember_pane_heights(),
             }
         }
+        host_events
     }
 
     fn context_menu_request(&self, menu: ChartContextMenu) -> ChartContextRequest {
@@ -101,10 +106,12 @@ impl AerisChartView {
         }
     }
 
-    /// Common tail of every listener: process engine requests, schedule deferred engine work, and
-    /// repaint.
-    fn after_input(&mut self, cx: &mut Context<Self>) {
-        self.process_input_events();
+    /// Common tail of every listener: process engine requests, emit host requests, schedule
+    /// deferred engine work, and repaint.
+    pub(super) fn after_input(&mut self, cx: &mut Context<Self>) {
+        for event in self.process_input_events() {
+            cx.emit(event);
+        }
         self.schedule_input_wake(cx);
         cx.notify();
     }
@@ -142,7 +149,7 @@ impl AerisChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
-        self.pending_activate = ActivationRequest::Pending;
+        cx.emit(ChartHostEvent::Activate);
         self.input.mouse_down(&mut self.engine, event);
         self.after_input(cx);
     }
@@ -160,7 +167,7 @@ impl AerisChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
-        self.pending_activate = ActivationRequest::Pending;
+        cx.emit(ChartHostEvent::Activate);
         self.input.context_menu(&mut self.engine, event);
         self.after_input(cx);
     }

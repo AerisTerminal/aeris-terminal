@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use super::legend::{LegendControl, legend_control_element_id, legend_palette};
 use super::*;
 use aeris_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
 use aeris_charts_engine::{
@@ -7,6 +8,7 @@ use aeris_charts_engine::{
     InputModifiers, PointerInput, WheelSample,
 };
 use aeris_design_system::{ThemeMode, ThemePreset};
+use gpui::CursorStyle;
 use std::collections::HashSet;
 
 // Input helpers drive the Aeris Charts input controller exactly as the GPUI listeners do: the
@@ -137,6 +139,20 @@ fn study_series_ids(chart: &AerisChartView, study_id: u64) -> Vec<u32> {
         .into_iter()
         .filter_map(|output| (output.study_id == study_id).then_some(output.series_id))
         .collect()
+}
+
+/// The one context-menu request among a listener's host events.
+fn context_menu_request(events: Vec<ChartHostEvent>) -> Option<ChartContextRequest> {
+    let mut requests = events.into_iter().filter_map(|event| match event {
+        ChartHostEvent::ContextMenu(request) => Some(request),
+        _ => None,
+    });
+    let request = requests.next();
+    assert!(
+        requests.next().is_none(),
+        "one right-click asks for one menu"
+    );
+    request
 }
 
 fn interactive_chart() -> AerisChartView {
@@ -2708,9 +2724,7 @@ fn pane_copy_price_uses_aeris_chart_context() {
         .series_format_price(0, context.price)
         .expect("asset price format");
     chart.engine.input_context_menu(x, y);
-    chart.process_input_events();
-    let request = chart
-        .take_context_menu_request()
+    let request = context_menu_request(chart.process_input_events())
         .expect("a pane right-click requests the menu");
     assert_eq!(request.kind, ChartContextKind::Pane);
     assert_eq!(request.copy_price.as_deref(), Some(expected.as_str()));
@@ -2721,9 +2735,7 @@ fn price_axis_context_menu_does_not_copy_price() {
     let mut chart = interactive_chart();
     let axis_x = chart.engine.pane_w + 1.0;
     chart.engine.input_context_menu(axis_x, 200.0);
-    chart.process_input_events();
-    let request = chart
-        .take_context_menu_request()
+    let request = context_menu_request(chart.process_input_events())
         .expect("an axis right-click requests the menu");
     assert!(matches!(
         request.kind,
@@ -2739,10 +2751,8 @@ fn price_axis_context_menu_does_not_copy_price() {
 fn empty_chart_has_no_copy_price() {
     let mut chart = AerisChartView::empty();
     chart.engine.input_context_menu(100.0, 200.0);
-    chart.process_input_events();
     assert!(
-        chart
-            .take_context_menu_request()
+        context_menu_request(chart.process_input_events())
             .is_none_or(|request| request.copy_price.is_none())
     );
 }
@@ -3863,7 +3873,7 @@ fn native_indicator_hover_selection_and_delete_reach_aeris_charts() {
     assert_eq!(chart.engine.selected_series(), Some(indicator));
     assert!(chart.has_deletable_selection());
 
-    assert!(chart.remove_selected_chart_object());
+    assert_eq!(chart.remove_selection(), SelectionRemoval::Removed);
     assert!(chart.engine.indicator_info(indicator).is_none());
     assert!(
         chart
@@ -3882,7 +3892,7 @@ fn grouped_indicator_delete_removes_every_native_output() {
         .expect("MACD is created");
     chart.engine.set_selected_series(Some(outputs[1]));
 
-    assert!(chart.remove_selected_chart_object());
+    assert_eq!(chart.remove_selection(), SelectionRemoval::Removed);
     for output in outputs {
         assert!(
             chart
@@ -3942,18 +3952,18 @@ fn product_series_are_protected_and_volume_remains_reusable() {
     let mut chart = interactive_chart();
     chart.engine.set_selected_series(Some(0));
     assert!(!chart.has_deletable_selection());
-    assert!(!chart.remove_selected_chart_object());
+    assert_eq!(chart.remove_selection(), SelectionRemoval::Protected);
     assert!(series_entry(&chart, 0).visible);
 
     chart.engine.set_selected_series(Some(chart.volume_series));
-    assert!(!chart.remove_selected_chart_object());
+    assert_eq!(chart.remove_selection(), SelectionRemoval::Protected);
 
     let volume = chart
         .add_indicator(ChartIndicator::Volume)
         .expect("volume is shown");
     chart.engine.set_selected_series(Some(volume[1]));
     assert!(chart.has_deletable_selection());
-    assert!(chart.remove_selected_chart_object());
+    assert_eq!(chart.remove_selection(), SelectionRemoval::Removed);
     assert_eq!(chart.volume_settings(), None);
     assert!(
         volume
@@ -4299,28 +4309,6 @@ fn study_legend_control_ids_do_not_overflow_or_alias_control_kinds() {
 }
 
 #[test]
-fn settings_requests_are_bounded_to_one_latest_legend_item() {
-    let mut chart = AerisChartView::empty();
-    assert_eq!(chart.take_settings_request(), None);
-    chart.pending_settings_request = Some(ChartSettingsRequest::Study(7));
-    chart.pending_settings_request = Some(ChartSettingsRequest::Study(9));
-    assert_eq!(
-        chart.take_settings_request(),
-        Some(ChartSettingsRequest::Study(9))
-    );
-    assert_eq!(chart.take_settings_request(), None);
-}
-
-#[test]
-fn study_remove_request_targets_one_runtime_study() {
-    let mut chart = AerisChartView::empty();
-    assert_eq!(chart.take_study_remove_request(), None);
-    chart.pending_study_remove = Some(7);
-    assert_eq!(chart.take_study_remove_request(), Some(7));
-    assert_eq!(chart.take_study_remove_request(), None);
-}
-
-#[test]
 fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_line() {
     let mut chart = AerisChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000];
@@ -4347,8 +4335,7 @@ fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_lin
     let series_ids = study_series_ids(&chart, 11);
     chart.engine.set_selected_series(Some(series_ids[1]));
 
-    assert!(chart.remove_selected_chart_object());
-    assert_eq!(chart.take_study_remove_request(), Some(11));
+    assert_eq!(chart.remove_selection(), SelectionRemoval::Study(11));
     assert_eq!(chart.engine.selected_series(), None);
     assert!(
         series_ids
@@ -5114,15 +5101,6 @@ fn text_edit_accepts_committed_altgr_and_multicharacter_input() {
         chart.engine.drawing_text_edit().map(|(_, text, _)| text),
         Some("@👩‍💻")
     );
-}
-
-#[test]
-fn activate_request_is_latched_until_taken() {
-    let mut chart = interactive_chart();
-    assert!(!chart.take_activate_request());
-    chart.pending_activate = ActivationRequest::Pending;
-    assert!(chart.take_activate_request());
-    assert!(!chart.take_activate_request());
 }
 
 #[test]
@@ -6221,4 +6199,41 @@ fn axis_colors_survive_theme_switches_and_canvas_edits_until_reset() {
             .as_deref(),
         Some(defaults.text.as_str())
     );
+}
+
+/// Records every host event the chart emits, in order, while the subscription lives.
+fn record_host_events(
+    chart: &Entity<AerisChartView>,
+    cx: &mut gpui::TestAppContext,
+) -> (
+    std::rc::Rc<std::cell::RefCell<Vec<ChartHostEvent>>>,
+    gpui::Subscription,
+) {
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorder = std::rc::Rc::clone(&events);
+    let subscription = cx.update(|cx| {
+        cx.subscribe(chart, move |_, event: &ChartHostEvent, _| {
+            recorder.borrow_mut().push(event.clone());
+        })
+    });
+    (events, subscription)
+}
+
+#[gpui::test]
+fn context_menu_input_emits_exactly_one_host_event(cx: &mut gpui::TestAppContext) {
+    let chart = cx.new(|_| interactive_chart());
+    let (events, _subscription) = record_host_events(&chart, cx);
+    chart.update(cx, |chart, chart_cx| {
+        let (x, y) = visible_series_point(chart, 0);
+        chart.engine.input_context_menu(x, y);
+        chart.after_input(chart_cx);
+    });
+    cx.run_until_parked();
+
+    let events = events.borrow();
+    assert_eq!(events.len(), 1, "one right-click emits one host event");
+    assert!(matches!(
+        &events[0],
+        ChartHostEvent::ContextMenu(request) if request.kind == ChartContextKind::Pane
+    ));
 }
