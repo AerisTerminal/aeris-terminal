@@ -16,8 +16,8 @@ pub use lifecycle::{
     LifecycleHooks, RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION,
     ROLLBACK_COMPATIBILITY_FILENAME, ROLLBACK_COMPATIBILITY_SCHEMA_VERSION, ReleaseChannelPointer,
     ReleaseFile, ReleaseFileRole, ReleaseInstaller, ReleaseInstallerMetadata, ReleaseManifest,
-    ReleasePolicy, RollbackCompatibilityMetadata, RolloutMetadata, SignedReleaseManifest,
-    UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
+    ReleasePolicy, ReleaseUninstaller, RollbackCompatibilityMetadata, RolloutMetadata,
+    SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
     native_installation_inventory, verify_release_file, verify_release_manifest,
     verify_release_manifest_signature,
 };

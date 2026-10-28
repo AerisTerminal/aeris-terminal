@@ -19,9 +19,10 @@ use aeris_platform_runtime::{CredentialVault, NativeCredentialVault, replace_fil
 use aeris_release_lifecycle::{
     ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
     MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer,
-    ReleaseFile, ReleaseInstaller, ReleasePolicy, SignedBlockPlan, SignedReleaseManifest,
-    VaultEntry, current_release_identity, decode_and_verify_block_plan, native_install_root,
-    native_installation_inventory, rollout_eligible, verify_release_file, verify_release_manifest,
+    ReleaseFile, ReleaseInstaller, ReleasePolicy, ReleaseUninstaller, SignedBlockPlan,
+    SignedReleaseManifest, VaultEntry, current_release_identity, decode_and_verify_block_plan,
+    native_install_root, native_installation_inventory, rollout_eligible, verify_release_file,
+    verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -88,54 +89,172 @@ fn user_launch_error_message(error: &str) -> String {
     format!("Aeris Terminal could not start.\n\n{detail}")
 }
 
-fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
-    let executable = std::env::current_exe().map_err(redacted)?;
-    let command = arguments
-        .next()
-        .and_then(|argument| argument.into_string().ok());
-    let verifying_key = embedded_verifying_key()?;
-    if command.is_none() {
+const LAUNCHER_USAGE: &str = "usage: aeris_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--prepare-update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher|--launcher-identity>";
+
+/// One parsed launcher invocation. Parsing completes before any key is
+/// loaded, so identity and uninstall never depend on packaging embedding the
+/// release verifying key.
+#[derive(Debug, Eq, PartialEq)]
+enum LauncherCommand {
+    LauncherIdentity,
+    RemoveAllLocalData,
+    Verified(VerifiedCommand),
+}
+
+/// Commands that read, install or launch signed releases.
+#[derive(Debug, Eq, PartialEq)]
+enum VerifiedCommand {
+    Bootstrap,
+    PromoteStableLauncher,
+    LaunchDesktop,
+    Install {
+        manifest_path: PathBuf,
+        bundle_root: PathBuf,
+    },
+    Update,
+    PrepareUpdate,
+    UpdateAndRestart,
+    CheckUpdate,
+    Recover,
+}
+
+impl LauncherCommand {
+    fn parse(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<Self, String> {
+        let Some(command) = arguments.next() else {
+            return Ok(Self::Verified(VerifiedCommand::Bootstrap));
+        };
+        let command = match command.to_str() {
+            Some("--launcher-identity") => Self::LauncherIdentity,
+            Some("--remove-all-local-data") => Self::RemoveAllLocalData,
+            Some("--promote-stable-launcher") => {
+                Self::Verified(VerifiedCommand::PromoteStableLauncher)
+            }
+            Some("--launch-desktop") => Self::Verified(VerifiedCommand::LaunchDesktop),
+            Some("--install") => Self::Verified(VerifiedCommand::Install {
+                manifest_path: required_path(&mut arguments, "signed manifest")?,
+                bundle_root: required_path(&mut arguments, "release bundle")?,
+            }),
+            Some("--update") => Self::Verified(VerifiedCommand::Update),
+            Some("--prepare-update") => Self::Verified(VerifiedCommand::PrepareUpdate),
+            Some("--update-and-restart") => Self::Verified(VerifiedCommand::UpdateAndRestart),
+            Some("--check-update") => Self::Verified(VerifiedCommand::CheckUpdate),
+            Some("--recover") => Self::Verified(VerifiedCommand::Recover),
+            _ => return Err(LAUNCHER_USAGE.to_string()),
+        };
         require_no_more(arguments)?;
-        return bootstrap_update_and_launch(&executable, &verifying_key);
+        Ok(command)
     }
-    if command.as_deref() == Some("--promote-stable-launcher") {
-        require_no_more(arguments)?;
-        return promote_stable_launcher(&executable, &verifying_key);
+}
+
+fn run(arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
+    run_with_key_source(arguments, embedded_verifying_key)
+}
+
+fn run_with_key_source(
+    arguments: impl Iterator<Item = std::ffi::OsString>,
+    verifying_key: impl FnOnce() -> Result<VerifyingKey, String>,
+) -> Result<(), String> {
+    match LauncherCommand::parse(arguments)? {
+        LauncherCommand::LauncherIdentity => print_launcher_identity(),
+        LauncherCommand::RemoveAllLocalData => {
+            remove_all_local_data(&std::env::current_exe().map_err(redacted)?)
+        }
+        LauncherCommand::Verified(command) => {
+            let verifying_key = verifying_key()?;
+            run_verified(
+                command,
+                &std::env::current_exe().map_err(redacted)?,
+                verifying_key,
+            )
+        }
     }
-    if command.as_deref() == Some("--launcher-identity") {
-        require_no_more(arguments)?;
-        let identity = current_release_identity();
-        let encoded = serde_json::to_string(&LauncherIdentityReport {
-            schema_version: 1,
-            release_identity: identity.release_identity,
-            install_generation: identity.install_generation,
-        })
-        .map_err(|_| "launcher identity could not be encoded".to_string())?;
-        println!("{encoded}");
-        return Ok(());
-    }
-    let install_root = executable
+}
+
+fn print_launcher_identity() -> Result<(), String> {
+    let identity = current_release_identity();
+    let encoded = serde_json::to_string(&LauncherIdentityReport {
+        schema_version: 1,
+        release_identity: identity.release_identity,
+        install_generation: identity.install_generation,
+    })
+    .map_err(|_| "launcher identity could not be encoded".to_string())?;
+    println!("{encoded}");
+    Ok(())
+}
+
+fn remove_all_local_data(executable: &Path) -> Result<(), String> {
+    let install_root = launcher_install_root(executable)?;
+    // The launcher runs from inside the tree this command deletes, and
+    // Windows refuses to delete a running executable (proven by the failed
+    // campaign: the child could never remove its waiting parent). Rename
+    // this image to a sibling staging directory first (renames are
+    // permitted), then uninstall the original tree synchronously with an
+    // honest exit code.
+    let staged = relocate_running_binary(executable, &install_root).map_err(redacted)?;
+    let result = uninstall_from_root(&install_root);
+    remove_relocated_binary(&staged);
+    result
+}
+
+fn launcher_install_root(executable: &Path) -> Result<PathBuf, String> {
+    executable
         .parent()
         .map(Path::to_path_buf)
-        .ok_or_else(|| "stable launcher installation root is unavailable".to_string())?;
-    let installer = ReleaseInstaller::new(&install_root, verifying_key, ReleasePolicy::native(0))
-        .map_err(|error| error.to_string())?;
-    let hooks = NativeHooks {
-        install_root: install_root.clone(),
-    };
-    match command.as_deref() {
-        Some("--launch-desktop") => {
-            require_no_more(arguments)?;
-            installer.recover(&hooks).map_err(|error| error.to_string())?;
-            launch_active_desktop(&installer, &hooks, &install_root)
+        .ok_or_else(|| "stable launcher installation root is unavailable".to_string())
+}
+
+/// The installation that contains this launcher, opened for signed work.
+struct LocalInstall {
+    root: PathBuf,
+    installer: ReleaseInstaller,
+    hooks: NativeHooks,
+}
+
+impl LocalInstall {
+    fn open(executable: &Path, verifying_key: VerifyingKey) -> Result<Self, String> {
+        let root = launcher_install_root(executable)?;
+        let installer = ReleaseInstaller::new(&root, verifying_key, ReleasePolicy::native(0))
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            hooks: NativeHooks {
+                install_root: root.clone(),
+            },
+            root,
+            installer,
+        })
+    }
+
+    fn recover(&self) -> Result<(), String> {
+        self.installer
+            .recover(&self.hooks)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn run_verified(
+    command: VerifiedCommand,
+    executable: &Path,
+    verifying_key: VerifyingKey,
+) -> Result<(), String> {
+    match command {
+        VerifiedCommand::Bootstrap => bootstrap_update_and_launch(executable, &verifying_key),
+        VerifiedCommand::PromoteStableLauncher => {
+            promote_stable_launcher(executable, &verifying_key)
         }
-        Some("--install") => {
-            let manifest_path = required_path(&mut arguments, "signed manifest")?;
-            let bundle_root = required_path(&mut arguments, "release bundle")?;
-            require_no_more(arguments)?;
+        VerifiedCommand::LaunchDesktop => {
+            let local = LocalInstall::open(executable, verifying_key)?;
+            local.recover()?;
+            launch_active_desktop(&local.installer, &local.hooks, &local.root)
+        }
+        VerifiedCommand::Install {
+            manifest_path,
+            bundle_root,
+        } => {
+            let local = LocalInstall::open(executable, verifying_key)?;
             let signed: SignedReleaseManifest = read_bounded_json(&manifest_path)?;
-            installer.recover(&hooks).map_err(|error| error.to_string())?;
-            if installer
+            local.recover()?;
+            if local
+                .installer
                 .audit_active_release()
                 .map_err(|error| error.to_string())?
                 .is_some_and(|active| {
@@ -155,49 +274,30 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
                 .map_err(|error| error.to_string())?;
                 return Ok(());
             }
-            installer
-                .install(&signed, &bundle_root, &hooks)
+            local
+                .installer
+                .install(&signed, &bundle_root, &local.hooks)
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }
-        Some("--update") => {
-            require_no_more(arguments)?;
-            installer.recover(&hooks).map_err(|error| error.to_string())?;
-            install_remote_update(&installer, &verifying_key, &hooks, &install_root)
+        VerifiedCommand::Update => {
+            let local = LocalInstall::open(executable, verifying_key)?;
+            local.recover()?;
+            install_remote_update(&local.installer, &verifying_key, &local.hooks, &local.root)
         }
-        Some("--prepare-update") => {
-            require_no_more(arguments)?;
-            prepare_remote_update(&installer, &verifying_key, &install_root)
+        VerifiedCommand::PrepareUpdate => {
+            let local = LocalInstall::open(executable, verifying_key)?;
+            prepare_remote_update(&local.installer, &verifying_key, &local.root)
         }
-        Some("--update-and-restart") => {
-            require_no_more(arguments)?;
-            update_and_restart(&installer, &verifying_key, &hooks, &install_root)
+        VerifiedCommand::UpdateAndRestart => {
+            let local = LocalInstall::open(executable, verifying_key)?;
+            update_and_restart(&local.installer, &verifying_key, &local.hooks, &local.root)
         }
-        Some("--check-update") => {
-            require_no_more(arguments)?;
-            check_remote_update(&installer, &verifying_key, &install_root)
+        VerifiedCommand::CheckUpdate => {
+            let local = LocalInstall::open(executable, verifying_key)?;
+            check_remote_update(&local.installer, &verifying_key, &local.root)
         }
-        Some("--recover") => {
-            require_no_more(arguments)?;
-            installer.recover(&hooks).map_err(|error| error.to_string())
-        }
-        Some("--remove-all-local-data") => {
-            require_no_more(arguments)?;
-            // The launcher runs from inside the tree this command deletes,
-            // and Windows refuses to delete a running executable (proven by
-            // the failed campaign: the child could never remove its waiting
-            // parent). Rename this image to a sibling staging directory
-            // first — renames are permitted — then uninstall the original
-            // tree synchronously with an honest exit code. A detached OS
-            // command removes the staging copy afterwards on Windows; Unix
-            // unlinks it directly before exit.
-            let staged = relocate_running_binary(&executable, &install_root)
-                .map_err(redacted)?;
-            let result = uninstall_from_root(&install_root);
-            remove_relocated_binary(&staged);
-            result
-        }
-        _ => Err("usage: aeris_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--prepare-update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher|--launcher-identity>".to_string()),
+        VerifiedCommand::Recover => LocalInstall::open(executable, verifying_key)?.recover(),
     }
 }
 
@@ -1823,23 +1923,18 @@ fn remove_relocated_binary(staged: &Path) {
     }
 }
 
-/// Uninstalls the explicit root. Used by the relocated child; factored so
-/// tests can drive it with a test key without embedding one.
-fn uninstall_from_root_with_key(root: &Path, verifying_key: VerifyingKey) -> Result<(), String> {
-    let installer = ReleaseInstaller::new(root, verifying_key, ReleasePolicy::native(0))
-        .map_err(|error| error.to_string())?;
+/// Uninstalls the explicit root. Uninstall verifies no release signature, so
+/// it works in a build without an embedded verifying key.
+fn uninstall_from_root(root: &Path) -> Result<(), String> {
+    let uninstaller = ReleaseUninstaller::new(root).map_err(|error| error.to_string())?;
     let hooks = NativeHooks {
         install_root: root.to_path_buf(),
     };
     let inventory = native_installation_inventory(root).map_err(|error| error.to_string())?;
-    installer
+    uninstaller
         .uninstall(&inventory, &hooks)
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-fn uninstall_from_root(root: &Path) -> Result<(), String> {
-    uninstall_from_root_with_key(root, embedded_verifying_key()?)
 }
 
 fn embedded_verifying_key() -> Result<VerifyingKey, String> {
@@ -2214,8 +2309,14 @@ impl LifecycleHooks for NativeHooks {
     }
 
     fn stop_owned_processes(&self) -> Result<(), String> {
-        if let Some(active) = active_from_root(&self.install_root)? {
-            self.prepare_activation(Some(&active))?;
+        // Waits for every installed desktop, not only the audited active
+        // release, so uninstall needs no signature verification.
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while owned_process_is_running(&self.install_root) {
+            if Instant::now() >= deadline {
+                return Err("an Aeris Terminal process must close before uninstall".to_string());
+            }
+            thread::sleep(Duration::from_millis(20));
         }
         Ok(())
     }
@@ -2246,15 +2347,6 @@ impl LifecycleHooks for NativeHooks {
         }
         Ok(())
     }
-}
-
-fn active_from_root(root: &Path) -> Result<Option<ActiveRelease>, String> {
-    let installer =
-        ReleaseInstaller::new(root, embedded_verifying_key()?, ReleasePolicy::native(0))
-            .map_err(|error| error.to_string())?;
-    installer
-        .audit_active_release()
-        .map_err(|error| error.to_string())
 }
 
 fn process_is_running(executable: &Path) -> bool {
@@ -3029,7 +3121,115 @@ mod tests {
         );
     }
 
-    // Note: the relocated-child path (`uninstall_from_root_with_key` with
+    fn launcher_arguments(values: &[&str]) -> std::vec::IntoIter<std::ffi::OsString> {
+        values
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn identity_and_uninstall_parse_outside_signature_verification() {
+        assert_eq!(
+            LauncherCommand::parse(launcher_arguments(&["--launcher-identity"])),
+            Ok(LauncherCommand::LauncherIdentity)
+        );
+        assert_eq!(
+            LauncherCommand::parse(launcher_arguments(&["--remove-all-local-data"])),
+            Ok(LauncherCommand::RemoveAllLocalData)
+        );
+    }
+
+    #[test]
+    fn every_release_command_parses_as_verified() {
+        let cases = [
+            (Vec::new(), VerifiedCommand::Bootstrap),
+            (
+                vec!["--promote-stable-launcher"],
+                VerifiedCommand::PromoteStableLauncher,
+            ),
+            (vec!["--launch-desktop"], VerifiedCommand::LaunchDesktop),
+            (
+                vec!["--install", "manifest.json", "bundle"],
+                VerifiedCommand::Install {
+                    manifest_path: PathBuf::from("manifest.json"),
+                    bundle_root: PathBuf::from("bundle"),
+                },
+            ),
+            (vec!["--update"], VerifiedCommand::Update),
+            (vec!["--prepare-update"], VerifiedCommand::PrepareUpdate),
+            (
+                vec!["--update-and-restart"],
+                VerifiedCommand::UpdateAndRestart,
+            ),
+            (vec!["--check-update"], VerifiedCommand::CheckUpdate),
+            (vec!["--recover"], VerifiedCommand::Recover),
+        ];
+        for (arguments, expected) in cases {
+            assert_eq!(
+                LauncherCommand::parse(launcher_arguments(&arguments)),
+                Ok(LauncherCommand::Verified(expected)),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn launcher_identity_runs_without_a_verifying_key() {
+        run_with_key_source(
+            launcher_arguments(&["--launcher-identity"]),
+            || -> Result<VerifyingKey, String> { panic!("identity must not load the key") },
+        )
+        .expect("identity reports without a key");
+    }
+
+    #[test]
+    fn release_commands_stop_at_a_missing_key_before_any_work() {
+        for arguments in [
+            Vec::new(),
+            vec!["--promote-stable-launcher"],
+            vec!["--launch-desktop"],
+            vec!["--install", "missing-manifest.json", "missing-bundle"],
+            vec!["--update"],
+            vec!["--prepare-update"],
+            vec!["--update-and-restart"],
+            vec!["--check-update"],
+            vec!["--recover"],
+        ] {
+            assert_eq!(
+                run_with_key_source(launcher_arguments(&arguments), || Err(
+                    "no verifying key".to_string()
+                )),
+                Err("no verifying key".to_string()),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_commands_are_rejected_before_any_key_is_loaded() {
+        for arguments in [
+            vec!["--unknown"],
+            vec!["--launcher-identity", "extra"],
+            vec!["--remove-all-local-data", "extra"],
+            vec!["--install", "manifest.json"],
+            vec!["--recover", "extra"],
+        ] {
+            assert!(
+                run_with_key_source(
+                    launcher_arguments(&arguments),
+                    || -> Result<VerifyingKey, String> {
+                        panic!("malformed commands must not load the key")
+                    },
+                )
+                .is_err(),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    // Note: the relocated-child path (`uninstall_from_root` with
     // `NativeHooks`) is proven by the physical installed-lifecycle campaign,
     // not here: it deletes real vault keys and data roots by design, which a
     // unit test must never trigger on a stateful machine.

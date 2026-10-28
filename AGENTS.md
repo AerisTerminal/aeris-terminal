@@ -215,7 +215,10 @@ violations and missing verification explicitly, and never describe them as satis
   it. The manifest and block-plan signers compile only under `cfg(test)` or its `producer` feature,
   which only `tools/release_packager` and the crate's own dev-dependency (for the launcher tests)
   enable. `platform_runtime::data_root` owns the owned-root safety check and legacy data-root
-  migration that the lifecycle reuses.
+  migration that the lifecycle reuses. The launcher parses its command before loading the release
+  verifying key: `--launcher-identity` and `--remove-all-local-data` never load it, and
+  `ReleaseUninstaller` holds no key. The desktop spawns launcher promotion only on a plain start of
+  an installed release (install generation above 0) and reaps that child.
 - Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
   derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
   non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.

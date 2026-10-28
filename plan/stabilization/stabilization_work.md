@@ -480,11 +480,21 @@ still wait on the GUI checks and the remaining work on their lines.
     `platform_runtime`, and the signers stay gated. Kept, not deleted (D2). Closes PL-01.
   - Left: the CI workspace run on this commit.
 - [ ] M8.2 Launcher hygiene and trust
+  - Landed (LC-01, LC-16, LC-14): the launcher parses its command into `LauncherCommand` before
+    any key loads; `--launcher-identity` and `--remove-all-local-data` never load the verifying
+    key, and every release command loads it in `run_verified`. Uninstall moved to the key-free
+    `ReleaseUninstaller` (shared lifecycle paths, no `VerifyingKey`), and the launcher's
+    uninstall hook waits for every installed desktop instead of auditing the active release's
+    signature. The desktop spawns launcher promotion only for a plain start of an installed
+    release (`update::launcher_promotion_applies`, install generation above 0) and reaps the
+    child on the `aeris-launcher-promotion` thread, logging an unsuccessful exit. LC-14 was
+    already met: launch errors use `platform_runtime::message_box` (`MessageBoxW` in
+    `platform_sys`). Tests: per-command parsing, identity running with no key, every release
+    command stopping at a missing key, malformed commands rejected before the key, the
+    key-free uninstall round trip, and the promotion gate; naming_check pins the key-free
+    dispatch and uninstaller.
   - Left:
-    - LC-01: dispatch commands before loading the key.
-    - LC-16: promotion gating and child reaping.
     - LC-13: a retired-binary sweep.
-    - LC-14: `MessageBoxW` errors.
     - LC-15: `platform_sys` process wait instead of sysinfo scans.
     - LC-20: build-validated release config.
     - LC-07: `WinVerifyTrust` with a thumbprint.

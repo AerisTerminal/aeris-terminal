@@ -566,19 +566,11 @@ impl ReleaseInstaller {
         policy: ReleasePolicy,
     ) -> Result<Self, LifecycleError> {
         let install_root = install_root.into();
-        validate_owned_root(&install_root)?;
-        let parent = install_root
-            .parent()
-            .ok_or(LifecycleError::InvalidInventory)?;
-        let name = install_root
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| valid_identifier(value, 64))
-            .ok_or(LifecycleError::InvalidInventory)?;
+        let (lifecycle_root, lifecycle_lock_path) = lifecycle_paths(&install_root)?;
         Ok(Self {
-            lifecycle_root: parent.join(format!(".{name}-lifecycle")),
-            lifecycle_lock_path: parent.join(format!(".{name}-lifecycle.lock")),
             install_root,
+            lifecycle_root,
+            lifecycle_lock_path,
             verifying_key,
             policy,
         })
@@ -919,55 +911,6 @@ impl ReleaseInstaller {
             }
         }
         self.remove_update_journal()
-    }
-
-    /// Removes every inventoried local artifact and credential, then audits absence.
-    ///
-    /// # Errors
-    /// Leaves a resumable journal until all exact owned targets are absent.
-    pub fn uninstall<H: LifecycleHooks>(
-        &self,
-        inventory: &InstallationInventory,
-        hooks: &H,
-    ) -> Result<UninstallOutcome, LifecycleError> {
-        self.validate_inventory(inventory)?;
-        let lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
-        let uninstall_journal = self.lifecycle_root.join("uninstall.json");
-        if !uninstall_journal.exists() {
-            write_json_atomic(
-                &self.lifecycle_root,
-                "uninstall.json",
-                &UninstallJournal { started: true },
-            )?;
-        }
-        hooks
-            .disable_registrations(&inventory.registrations)
-            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
-        hooks
-            .stop_owned_processes()
-            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
-        for entry in &inventory.vault_entries {
-            hooks
-                .delete_vault_entry(entry)
-                .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
-        }
-        let roots = inventory_roots(inventory);
-        for root in &roots {
-            remove_owned_path(root).map_err(|_| LifecycleError::UninstallPendingCleanup)?;
-        }
-        hooks
-            .audit_external_absence(inventory)
-            .map_err(|_| LifecycleError::ExternalArtifactRemaining)?;
-        if roots.iter().any(|path| path.exists()) {
-            return Err(LifecycleError::UninstallPendingCleanup);
-        }
-        remove_lifecycle_root_after_uninstall(&self.lifecycle_root)
-            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
-        lock.release()?;
-        Ok(UninstallOutcome {
-            removed_roots: roots.len().saturating_add(1),
-            removed_vault_keys: inventory.vault_entries.len(),
-        })
     }
 
     fn stage(
@@ -1447,6 +1390,80 @@ impl ReleaseInstaller {
         }
         self.audit_active_release().map(|_| ())
     }
+}
+
+/// Uninstall owner for one installation root. Removing local data never
+/// verifies release signatures, so it needs no release verifying key and works
+/// even when the active release cannot be audited.
+pub struct ReleaseUninstaller {
+    install_root: PathBuf,
+    lifecycle_root: PathBuf,
+    lifecycle_lock_path: PathBuf,
+}
+
+impl ReleaseUninstaller {
+    /// Creates an uninstaller for one exact absolute installation root.
+    ///
+    /// # Errors
+    /// Rejects broad, relative, or symlinked ownership roots.
+    pub fn new(install_root: impl Into<PathBuf>) -> Result<Self, LifecycleError> {
+        let install_root = install_root.into();
+        let (lifecycle_root, lifecycle_lock_path) = lifecycle_paths(&install_root)?;
+        Ok(Self {
+            install_root,
+            lifecycle_root,
+            lifecycle_lock_path,
+        })
+    }
+
+    /// Removes every inventoried local artifact and credential, then audits absence.
+    ///
+    /// # Errors
+    /// Leaves a resumable journal until all exact owned targets are absent.
+    pub fn uninstall<H: LifecycleHooks>(
+        &self,
+        inventory: &InstallationInventory,
+        hooks: &H,
+    ) -> Result<UninstallOutcome, LifecycleError> {
+        self.validate_inventory(inventory)?;
+        let lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
+        let uninstall_journal = self.lifecycle_root.join("uninstall.json");
+        if !uninstall_journal.exists() {
+            write_json_atomic(
+                &self.lifecycle_root,
+                "uninstall.json",
+                &UninstallJournal { started: true },
+            )?;
+        }
+        hooks
+            .disable_registrations(&inventory.registrations)
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        hooks
+            .stop_owned_processes()
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        for entry in &inventory.vault_entries {
+            hooks
+                .delete_vault_entry(entry)
+                .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        }
+        let roots = inventory_roots(inventory);
+        for root in &roots {
+            remove_owned_path(root).map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        }
+        hooks
+            .audit_external_absence(inventory)
+            .map_err(|_| LifecycleError::ExternalArtifactRemaining)?;
+        if roots.iter().any(|path| path.exists()) {
+            return Err(LifecycleError::UninstallPendingCleanup);
+        }
+        remove_lifecycle_root_after_uninstall(&self.lifecycle_root)
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        lock.release()?;
+        Ok(UninstallOutcome {
+            removed_roots: roots.len().saturating_add(1),
+            removed_vault_keys: inventory.vault_entries.len(),
+        })
+    }
 
     fn validate_inventory(&self, inventory: &InstallationInventory) -> Result<(), LifecycleError> {
         if inventory.schema_version != INVENTORY_SCHEMA_VERSION
@@ -1467,6 +1484,24 @@ impl ReleaseInstaller {
         }
         Ok(())
     }
+}
+
+/// Returns the lifecycle journal directory and lock path beside one validated
+/// installation root.
+fn lifecycle_paths(install_root: &Path) -> Result<(PathBuf, PathBuf), LifecycleError> {
+    validate_owned_root(install_root)?;
+    let parent = install_root
+        .parent()
+        .ok_or(LifecycleError::InvalidInventory)?;
+    let name = install_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| valid_identifier(value, 64))
+        .ok_or(LifecycleError::InvalidInventory)?;
+    Ok((
+        parent.join(format!(".{name}-lifecycle")),
+        parent.join(format!(".{name}-lifecycle.lock")),
+    ))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3939,15 +3974,12 @@ mod tests {
     #[test]
     fn uninstall_is_idempotent_and_removes_exact_roots_and_vault_keys() {
         let root = temporary_root("uninstall");
-        let (_, key, _) = release(&root, 1);
         let install_root = root.join("install");
         let data_root = root.join("data");
         fs::create_dir_all(&install_root).expect("install root");
         fs::create_dir_all(&data_root).expect("data root");
         fs::write(data_root.join("workspace-state.pb"), b"workspace").expect("workspace state");
-        let installer =
-            ReleaseInstaller::new(&install_root, key.verifying_key(), ReleasePolicy::native(0))
-                .expect("installer");
+        let uninstaller = ReleaseUninstaller::new(&install_root).expect("uninstaller");
         let inventory = InstallationInventory {
             schema_version: INVENTORY_SCHEMA_VERSION,
             install_root,
@@ -3968,11 +4000,13 @@ mod tests {
             registrations: vec!["start-menu:Aeris".to_string()],
         };
         let hooks = Hooks::default();
-        let outcome = installer.uninstall(&inventory, &hooks).expect("uninstall");
+        let outcome = uninstaller
+            .uninstall(&inventory, &hooks)
+            .expect("uninstall");
         assert_eq!(outcome.removed_vault_keys, 2);
         assert!(!inventory.install_root.exists());
         assert!(!inventory.data_roots[0].exists());
-        installer
+        uninstaller
             .uninstall(&inventory, &hooks)
             .expect("repeated uninstall remains idempotent");
         let _ = remove_owned_path(&root);

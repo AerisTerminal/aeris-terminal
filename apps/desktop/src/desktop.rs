@@ -5495,13 +5495,17 @@ pub(super) fn run(
     let account_service = aeris_account_runtime::AccountService::new(
         aeris_account_runtime::AccountServiceConfig::production(),
     );
-    let launcher_promotion = command_arguments.is_empty().then(|| {
+    let launcher_promotion = update::launcher_promotion_applies(
+        &command_arguments,
+        aeris_release_lifecycle::current_release_identity().install_generation,
+    )
+    .then(|| {
         aeris_platform_runtime::active_data_root()
             .ok()
             .and_then(|root| {
                 root.run_installed_app_side_effect(
                     aeris_platform_runtime::InstalledAppSideEffect::LauncherPromotion,
-                    schedule_versioned_launcher_promotion,
+                    update::schedule_versioned_launcher_promotion,
                 )
             })
     });
@@ -5708,31 +5712,6 @@ fn fatal_startup(account_service: &aeris_account_runtime::AccountService, messag
         diagnostic!("Aeris startup error dialog could not open: {error}");
     }
     exit_after_account_refresh_quiesce(account_service, 1);
-}
-
-fn schedule_versioned_launcher_promotion() -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|_| "desktop executable path is unavailable".to_string())?;
-    let release_root = executable
-        .parent()
-        .ok_or_else(|| "desktop release directory is unavailable".to_string())?;
-    let launcher = release_root.join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
-    let metadata = match std::fs::symlink_metadata(&launcher) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err("versioned launcher metadata is unavailable".to_string()),
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("versioned launcher is invalid".to_string());
-    }
-    std::process::Command::new(launcher)
-        .arg("--promote-stable-launcher")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())
 }
 
 fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {

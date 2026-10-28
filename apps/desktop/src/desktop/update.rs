@@ -894,6 +894,57 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
     }
 }
 
+/// Only a plain start of an installed release (generation above 0) has a
+/// signed versioned launcher to promote; development and directly packaged
+/// builds have none.
+pub(super) fn launcher_promotion_applies(
+    command_arguments: &[std::ffi::OsString],
+    install_generation: u64,
+) -> bool {
+    command_arguments.is_empty() && install_generation > 0
+}
+
+pub(super) fn schedule_versioned_launcher_promotion() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "desktop executable path is unavailable".to_string())?;
+    let release_root = executable
+        .parent()
+        .ok_or_else(|| "desktop release directory is unavailable".to_string())?;
+    let launcher = release_root.join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
+    let metadata = match std::fs::symlink_metadata(&launcher) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("versioned launcher metadata is unavailable".to_string()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("versioned launcher is invalid".to_string());
+    }
+    let mut promotion = Command::new(launcher)
+        .arg("--promote-stable-launcher")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())?;
+    thread::Builder::new()
+        .name("aeris-launcher-promotion".to_string())
+        .spawn(move || match promotion.wait() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                aeris_observability::diagnostic!(
+                    "Aeris launcher promotion did not complete: {status}"
+                );
+            }
+            Err(error) => {
+                aeris_observability::diagnostic!(
+                    "Aeris launcher promotion could not be reaped: {error}"
+                );
+            }
+        })
+        .map(|_| ())
+        .map_err(|_| "versioned launcher promotion could not be observed".to_string())
+}
+
 fn system_version() -> String {
     sysinfo::System::long_os_version()
         .or_else(sysinfo::System::name)
@@ -919,10 +970,20 @@ mod tests {
         CHECK_RETRY_INITIAL, CHECK_RETRY_MAXIMUM, ChildCleanup, DesktopUpdater,
         LauncherUpdateCheck, PERIODIC_CHECK_INTERVAL, PreparedRestart, RestartSlot,
         UpdatePresentation, UpdateRequest, UpdateResult, UpdateState, claim_restart_slot,
-        launcher_files_match, launcher_is_trusted_with, release_restart_slot, send_restart_commit,
-        terminate_and_reap, validate_launcher_report, validate_restart_acknowledgement,
-        wait_for_restart_ready,
+        launcher_files_match, launcher_is_trusted_with, launcher_promotion_applies,
+        release_restart_slot, send_restart_commit, terminate_and_reap, validate_launcher_report,
+        validate_restart_acknowledgement, wait_for_restart_ready,
     };
+
+    #[test]
+    fn launcher_promotion_runs_only_for_a_plain_start_of_an_installed_release() {
+        assert!(launcher_promotion_applies(&[], 1));
+        assert!(!launcher_promotion_applies(&[], 0));
+        assert!(!launcher_promotion_applies(
+            &[std::ffi::OsString::from("--workspace-tabs")],
+            1
+        ));
+    }
 
     #[cfg(target_os = "windows")]
     fn acknowledgement_child(exit_after_ack: bool) -> Child {

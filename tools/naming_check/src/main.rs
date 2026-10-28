@@ -51,8 +51,8 @@ const DESKTOP_PROVIDER_FIXTURE_PATHS: &[&str] = &[
 const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
     (
         "apps/desktop/src/desktop/update.rs",
-        6,
-        "release install/readiness generations",
+        7,
+        "release install/readiness generations and installed-release launcher promotion",
     ),
     (
         "apps/desktop/src/desktop/symbol_browser.rs",
@@ -4691,7 +4691,38 @@ mod tests {
                 "release lifecycle lost {contract}"
             );
         }
+        let uninstaller_start = lifecycle
+            .find("pub struct ReleaseUninstaller")
+            .expect("release uninstaller");
+        let uninstaller_end = lifecycle[uninstaller_start..]
+            .find("\nfn lifecycle_paths(")
+            .map(|offset| uninstaller_start + offset)
+            .expect("release uninstaller boundary");
+        let uninstaller = &lifecycle[uninstaller_start..uninstaller_end];
+        assert!(
+            !uninstaller.contains("VerifyingKey") && !uninstaller.contains("verify_release"),
+            "uninstall must never need a release verifying key"
+        );
         let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
+        let keyless_start = launcher
+            .find("fn run_with_key_source(")
+            .expect("launcher dispatch");
+        let keyless_end = launcher[keyless_start..]
+            .find("LauncherCommand::Verified(command) =>")
+            .map(|offset| keyless_start + offset)
+            .expect("verified launcher dispatch");
+        let uninstall_start = launcher
+            .find("fn uninstall_from_root(")
+            .expect("launcher uninstall");
+        let uninstall_end = launcher[uninstall_start..]
+            .find("\n}\n")
+            .map(|offset| uninstall_start + offset)
+            .expect("launcher uninstall boundary");
+        assert!(
+            !launcher[keyless_start..keyless_end].contains("verifying_key()")
+                && !launcher[uninstall_start..uninstall_end].contains("verifying_key"),
+            "launcher identity and uninstall must dispatch before any verifying key loads"
+        );
         for contract in [
             "--check-update",
             "--prepare-update",
