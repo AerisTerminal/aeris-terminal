@@ -1,6 +1,5 @@
 use aeris_contracts::{
-    AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
+    InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
     WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
     WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
     WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
@@ -109,45 +108,6 @@ fn workspace_tab() -> WorkspaceTabState {
         }),
         saved_layout_id: 0,
     }
-}
-
-#[test]
-fn provider_state_is_a_strongly_typed_in_process_contract() {
-    let measured = ProviderState {
-        provider: "rithmic".into(),
-        state: ProviderConnectionState::Online,
-        generation: 3,
-        detail: None,
-        transport_rtt_nanos: Some(18_400_000),
-    };
-    assert_eq!(measured.state, ProviderConnectionState::Online);
-    assert_eq!(measured.transport_rtt_nanos, Some(18_400_000));
-}
-
-#[test]
-fn account_view_is_a_strongly_typed_in_process_contract() {
-    let view = AccountView {
-        state: AccountSessionState::Active,
-        account_id: "acct_01".into(),
-        plan_id: "unlimited".into(),
-        detail: "active".into(),
-        request_generation: 3,
-        display_name: "Ada Trader".into(),
-        email: "ada@example.com".into(),
-        photo_url: "https://auth.example.test/photo/ada.png".into(),
-    };
-    assert_eq!(view.state, AccountSessionState::Active);
-    assert_eq!(view.display_name, "Ada Trader");
-    assert_eq!(view.account_id, "acct_01");
-}
-#[test]
-fn account_session_states_have_stable_values() {
-    assert_eq!(AccountSessionState::SignedOut as i32, 0);
-    assert_eq!(AccountSessionState::Authorizing as i32, 1);
-    assert_eq!(AccountSessionState::Active as i32, 2);
-    assert_eq!(AccountSessionState::Offline as i32, 3);
-    assert_eq!(AccountSessionState::ReauthenticationRequired as i32, 4);
-    assert_eq!(AccountSessionState::TerminalError as i32, 5);
 }
 
 #[test]

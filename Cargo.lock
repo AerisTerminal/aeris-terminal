@@ -122,7 +122,6 @@ name = "aeris_account_runtime"
 version = "1.2.0"
 dependencies = [
  "aeris_account",
- "aeris_contracts",
  "aeris_observability",
  "aeris_platform_runtime",
  "base64 0.23.1",
@@ -390,7 +389,6 @@ dependencies = [
 name = "aeris_probes"
 version = "1.2.0"
 dependencies = [
- "aeris_contracts",
  "aeris_instruments",
  "aeris_market_data",
  "aeris_market_engine",

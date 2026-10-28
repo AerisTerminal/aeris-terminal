@@ -4,6 +4,7 @@
 //! history, and realtime fanout inside the desktop process. There is no secondary local process, serialized runtime transport, or restart-replay layer here.
 
 mod cadence;
+mod catalog;
 /// Consumer-event fence types exposed without a desktop dependency on the
 /// market engine implementation crate.
 pub mod fence {
@@ -14,14 +15,30 @@ mod hyperliquid_history;
 mod hyperliquid_market_screen;
 mod hyperliquid_realtime;
 pub mod market_service;
+mod provider_presentation;
 mod rithmic_history;
 mod rithmic_realtime;
 mod rithmic_venue;
+mod status;
 pub mod study;
 
 pub use cadence::{
     CadenceError, legacy_interval, legacy_series_period, persisted_interval, resolve_cadence,
     resolve_series_key,
+};
+pub use catalog::{
+    InstrumentSearchCategories, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderInstrumentKind, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+    ProviderMarketScreen, ProviderMarketStatistics, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument,
+};
+pub use provider_presentation::{
+    ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,
+    ProviderFeedLevel, ProviderPresentationDescriptor,
+};
+pub use status::{
+    EngineFaultCode, FailureStage, Fault, MarketSessionPhase, MarketSessionSource,
+    MarketSessionStatus, ProviderConnectionState, ProviderState, SeriesLoadState,
 };
 
 /// Maximum durable alerts owned by one market consumer.
@@ -262,7 +279,7 @@ pub struct MarketSeriesState {
     pub consumer_id: aeris_market_engine::ConsumerId,
     pub generation: aeris_market_engine::GenerationId,
     pub series: Option<aeris_market_data::BarSeriesKey>,
-    pub state: aeris_contracts::SeriesLoadState,
+    pub state: crate::SeriesLoadState,
     pub detail: Option<String>,
     /// Runtime-owned presentation phase; clients never derive this from provider text.
     pub presentation: Option<SeriesPresentationStatus>,
@@ -284,8 +301,8 @@ pub struct MarketDemandError {
     pub consumer_id: aeris_market_engine::ConsumerId,
     pub generation: aeris_market_engine::GenerationId,
     pub scope: MarketDemandErrorScope,
-    pub code: aeris_contracts::EngineFaultCode,
-    pub stage: aeris_contracts::FailureStage,
+    pub code: crate::EngineFaultCode,
+    pub stage: crate::FailureStage,
     pub detail: String,
     pub series: Option<aeris_market_data::BarSeriesKey>,
     pub cause: String,
@@ -350,7 +367,7 @@ pub enum MarketRuntimeEvent {
     CatalogReady {
         provider: String,
     },
-    ProviderState(aeris_contracts::ProviderState),
+    ProviderState(crate::ProviderState),
     SeriesSnapshot(aeris_market_engine::ConsumerPublication),
     SeriesUpdate(aeris_market_engine::ConsumerSeriesUpdate),
     SeriesState(MarketSeriesState),
@@ -361,18 +378,18 @@ pub enum MarketRuntimeEvent {
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),
     PriceAlertTriggered(MarketPriceAlertTrigger),
-    ProviderInstrumentSearchResult(aeris_contracts::ProviderInstrumentSearchResult),
+    ProviderInstrumentSearchResult(crate::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
     /// A search or selection the provider or runtime refused. `selection`
     /// says which command lane failed, because the rejection reason alone
     /// (for example an unavailable dispatch) does not identify it.
     ProviderCatalogRejected {
-        rejection: aeris_contracts::ProviderCatalogRejected,
+        rejection: crate::ProviderCatalogRejected,
         selection: bool,
     },
-    ProviderMarketScreen(aeris_contracts::ProviderMarketScreen),
-    ProviderMarketScreenRejected(aeris_contracts::ProviderCatalogRejected),
-    Fault(aeris_contracts::Fault),
+    ProviderMarketScreen(crate::ProviderMarketScreen),
+    ProviderMarketScreenRejected(crate::ProviderCatalogRejected),
+    Fault(crate::Fault),
 }
 
 impl MarketRuntimeEvent {

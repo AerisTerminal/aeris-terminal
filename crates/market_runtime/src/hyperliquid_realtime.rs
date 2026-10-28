@@ -23,11 +23,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderMarketScreen,
-    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
+use crate::{
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+    ProviderMarketScreen, ScreenProviderMarkets, SearchProviderInstruments,
+    SelectProviderInstrument,
 };
+use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_hyperliquid_market_adapter::{
     DeliveredTradeIds, HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig,
     HyperliquidLiveCandle, WsClientEvent, decode_book_snapshot, decode_live_candle,
@@ -1908,7 +1909,7 @@ mod tests {
             provider: "hyperliquid".into(),
             query: "BTC".into(),
             maximum_results: 16,
-            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            categories: crate::InstrumentSearchCategories::ALL,
             exchange: exchange.map(str::to_string),
         };
         let exchanges = |event| match event {

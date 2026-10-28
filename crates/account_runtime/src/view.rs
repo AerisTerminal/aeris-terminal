@@ -1,8 +1,8 @@
-//! Bounded in-process account commands, replies, and sanitized views.
+//! Sanitized account views the account runtime publishes to the desktop.
 //!
-//! The account runtime owns PKCE transactions, loopback callbacks, token
-//! exchange, and vault material. Desktop presentation receives only browser
-//! authorization metadata and sanitized account state.
+//! The runtime owns PKCE transactions, loopback callbacks, token exchange and
+//! vault material; presentation receives only browser authorization metadata
+//! and sanitized account state.
 
 /// Runtime-owned account session state shared by all desktop windows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -18,33 +18,6 @@ pub enum AccountSessionState {
     ReauthenticationRequired = 4,
     TerminalError = 5,
 }
-
-/// Starts one generation-fenced native login transaction.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BeginLogin {
-    pub client_id: u64,
-    pub request_generation: u64,
-}
-
-/// Cancels one pending login transaction.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CancelLogin {
-    pub request_generation: u64,
-}
-
-/// Requests the current sanitized account view.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GetAccountStatus {}
-
-/// Requests one runtime-owned background refresh of the current profile.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RefreshAccountProfile {
-    pub request_id: u64,
-}
-
-/// Signs out one runtime-owned account session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SignOut {}
 
 /// Runtime-issued browser authorization address for one login transaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -65,4 +38,19 @@ pub struct AccountView {
     pub display_name: String,
     pub email: String,
     pub photo_url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AccountSessionState;
+
+    #[test]
+    fn account_session_states_have_stable_values() {
+        assert_eq!(AccountSessionState::SignedOut as i32, 0);
+        assert_eq!(AccountSessionState::Authorizing as i32, 1);
+        assert_eq!(AccountSessionState::Active as i32, 2);
+        assert_eq!(AccountSessionState::Offline as i32, 3);
+        assert_eq!(AccountSessionState::ReauthenticationRequired as i32, 4);
+        assert_eq!(AccountSessionState::TerminalError as i32, 5);
+    }
 }

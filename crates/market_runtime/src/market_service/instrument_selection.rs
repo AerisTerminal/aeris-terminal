@@ -369,7 +369,7 @@ impl Coordinator<'_> {
             provider: provider.clone(),
             query,
             maximum_results: 32,
-            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            categories: crate::InstrumentSearchCategories::ALL,
             exchange: None,
         };
         let dispatched = self
@@ -960,10 +960,7 @@ impl Coordinator<'_> {
         self.session_mut(provider).catalog_degraded = None;
     }
 
-    pub(super) fn handle_catalog_search(
-        &mut self,
-        result: aeris_contracts::ProviderInstrumentSearchResult,
-    ) {
+    pub(super) fn handle_catalog_search(&mut self, result: crate::ProviderInstrumentSearchResult) {
         if result.consumer_id == 0 {
             return;
         }

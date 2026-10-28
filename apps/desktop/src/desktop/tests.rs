@@ -35,9 +35,11 @@ use super::{
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
 use aeris_chart_integration::{ChartSplitDirection, PriceAxisMenuState};
 use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentKind,
-    ProviderInstrumentSummary, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis,
+    InstallProviderInstrument, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis,
     WorkspaceState,
+};
+use aeris_market_runtime::{
+    ProviderCatalogRejectionReason, ProviderInstrumentKind, ProviderInstrumentSummary,
 };
 
 pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
@@ -4068,7 +4070,7 @@ fn catalog_rejection_lane_comes_from_the_runtime_not_the_reason() {
         (true, ProviderCatalogCommand::Selection),
     ] {
         let event = aeris_market_runtime::MarketRuntimeEvent::ProviderCatalogRejected {
-            rejection: aeris_contracts::ProviderCatalogRejected {
+            rejection: aeris_market_runtime::ProviderCatalogRejected {
                 consumer_id: 1,
                 provider: "rithmic".into(),
                 provider_generation: None,
@@ -4203,7 +4205,7 @@ fn connection_indicator_is_transport_only() {
 
 #[test]
 fn header_market_dot_shows_session_only_while_the_feed_is_live() {
-    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+    use aeris_market_runtime::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
     const MINUTE: i64 = 60_000_000_000;
     let theme = super::AerisTheme::dark();
     let colors = theme.colors;
@@ -6032,7 +6034,7 @@ fn provider_presentation_controls_chart_types_intervals_queues_and_trades() {
     let mut fixture = aeris_market_runtime::built_in_provider_presentations()[0];
     fixture.id = "fixture-third";
     fixture.chart_interval_labels = &["3D"];
-    fixture.feed_level = aeris_contracts::ProviderFeedLevel::PriceLevels;
+    fixture.feed_level = aeris_market_runtime::ProviderFeedLevel::PriceLevels;
     fixture.trades_available = false;
     assert_eq!(
         super::intervals_from_labels(fixture.chart_interval_labels),
@@ -6046,7 +6048,7 @@ fn provider_presentation_controls_chart_types_intervals_queues_and_trades() {
     );
 
     fixture.chart_interval_labels = &["1m", "1h"];
-    fixture.feed_level = aeris_contracts::ProviderFeedLevel::OrderLevels;
+    fixture.feed_level = aeris_market_runtime::ProviderFeedLevel::OrderLevels;
     fixture.trades_available = true;
     assert_eq!(
         super::intervals_from_labels(fixture.chart_interval_labels),

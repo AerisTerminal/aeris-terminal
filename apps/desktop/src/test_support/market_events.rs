@@ -2,7 +2,6 @@
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use aeris_contracts::{EngineFaultCode, FailureStage, SeriesLoadState};
 use aeris_market_data::{BarSeriesKey, MarketBar, OrderBookPublication};
 use aeris_market_runtime::{
     CanonicalMarketSeriesSnapshot, MarketConsumerEvent, MarketConsumerId, MarketDemandError,
@@ -11,6 +10,7 @@ use aeris_market_runtime::{
     MarketStudyRemoved, MarketTradeTapeUpdate, SeriesTailOperation,
     fence::{ConsumerTag, EpochSequence, Fenced},
 };
+use aeris_market_runtime::{EngineFaultCode, FailureStage, SeriesLoadState};
 
 /// One registered fixture consumer lifetime, with its own coordinator epoch.
 pub struct FixtureMarketEvents {

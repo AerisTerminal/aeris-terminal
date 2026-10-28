@@ -1574,7 +1574,7 @@ impl Coordinator<'_> {
                 query: route.provider_symbol.clone(),
                 maximum_results: u32::try_from(super::MAXIMUM_CATALOG_INSTRUMENTS)
                     .unwrap_or(u32::MAX),
-                categories: aeris_contracts::InstrumentSearchCategories::ALL,
+                categories: crate::InstrumentSearchCategories::ALL,
                 exchange: None,
             };
             if let Err(error) = self.providers.dispatch_catalog(
@@ -1593,7 +1593,7 @@ impl Coordinator<'_> {
 
     pub(super) fn finish_trading_route_search(
         &mut self,
-        result: &aeris_contracts::ProviderInstrumentSearchResult,
+        result: &crate::ProviderInstrumentSearchResult,
     ) {
         let route = self.trading_routes.values().find(|route| {
             result.provider_generation != 0
@@ -1721,14 +1721,10 @@ impl Coordinator<'_> {
             .calendar
             .status(key.instrument.as_str(), at.div_euclid(1_000_000));
         let source = match status.source {
-            aeris_contracts::MarketSessionSource::ProviderCalendar => {
-                CalendarSourceKind::ProviderCalendar
-            }
-            aeris_contracts::MarketSessionSource::ProviderHours => {
-                CalendarSourceKind::ContractHours
-            }
-            aeris_contracts::MarketSessionSource::Continuous => CalendarSourceKind::AlwaysOpen,
-            aeris_contracts::MarketSessionSource::Unavailable => CalendarSourceKind::Unknown,
+            crate::MarketSessionSource::ProviderCalendar => CalendarSourceKind::ProviderCalendar,
+            crate::MarketSessionSource::ProviderHours => CalendarSourceKind::ContractHours,
+            crate::MarketSessionSource::Continuous => CalendarSourceKind::AlwaysOpen,
+            crate::MarketSessionSource::Unavailable => CalendarSourceKind::Unknown,
         };
         let session = InstrumentSession {
             instrument_id: key.instrument.clone(),
@@ -2667,8 +2663,8 @@ impl Coordinator<'_> {
                 consumer_id: waiter.consumer_id,
                 generation: waiter.generation,
                 scope: crate::MarketDemandErrorScope::Series,
-                code: aeris_contracts::EngineFaultCode::Permanent,
-                stage: aeris_contracts::FailureStage::Handoff,
+                code: crate::EngineFaultCode::Permanent,
+                stage: crate::FailureStage::Handoff,
                 detail: detail.to_string(),
                 series: Some(series.clone()),
                 cause: "calendar unavailable for live series".into(),
@@ -2709,10 +2705,10 @@ mod tests {
         StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget,
         StudySettings,
     };
+    use crate::{ProviderInstrumentSearchResult, ProviderMarketScreen};
     use crate::{
         hyperliquid_realtime::HyperliquidRealtimeEvent, rithmic_realtime::RithmicRealtimeEvent,
     };
-    use aeris_contracts::{ProviderInstrumentSearchResult, ProviderMarketScreen};
     use aeris_market_data::{
         AggressorSide, BarPeriod, DepthLevel, DepthSnapshot, EventMetadata, MarketBar, MarketTrade,
         OrderBookState, QualifiedTimestamp, TopOfBookQuote,
@@ -3375,12 +3371,12 @@ mod tests {
         coordinator.handle_provider_catalog(
             &instrument.provider,
             super::super::ProviderCatalogEvent::SearchCompleted(
-                aeris_contracts::ProviderInstrumentSearchResult {
+                crate::ProviderInstrumentSearchResult {
                     consumer_id: 0,
                     provider: instrument.provider.clone(),
                     provider_generation: instrument.session_generation,
                     search_generation: search.search_generation,
-                    instruments: vec![aeris_contracts::ProviderInstrumentSummary {
+                    instruments: vec![crate::ProviderInstrumentSummary {
                         symbol: route.provider_symbol.clone(),
                         exchange: route.venue_id.clone(),
                         ..Default::default()
@@ -3655,15 +3651,13 @@ mod tests {
             .events
             .get_mut(&consumer_id)
             .expect("outbox")
-            .provider = Some(MarketRuntimeEvent::ProviderState(
-            aeris_contracts::ProviderState {
-                provider: "fixture".to_string(),
-                state: ProviderConnectionState::Online,
-                generation: 1,
-                detail: None,
-                transport_rtt_nanos: None,
-            },
-        ));
+            .provider = Some(MarketRuntimeEvent::ProviderState(crate::ProviderState {
+            provider: "fixture".to_string(),
+            state: ProviderConnectionState::Online,
+            generation: 1,
+            detail: None,
+            transport_rtt_nanos: None,
+        }));
         coordinator.signal_pending_consumers();
         assert!(coordinator.outbox.wait(owner, Duration::ZERO));
         let (reply, received) = std::sync::mpsc::sync_channel(1);
@@ -7414,7 +7408,7 @@ mod tests {
             let MarketRuntimeEvent::DemandError(error) = event else {
                 panic!("expected MarketDemandError");
             };
-            assert_eq!(error.code, aeris_contracts::EngineFaultCode::Permanent);
+            assert_eq!(error.code, crate::EngineFaultCode::Permanent);
             assert_eq!(error.series, Some(selected));
         }
     }
@@ -8973,7 +8967,7 @@ mod tests {
     }
 
     fn queued_state(_consumer_id: ConsumerId, value: u64) -> MarketRuntimeEvent {
-        MarketRuntimeEvent::ProviderState(aeris_contracts::ProviderState {
+        MarketRuntimeEvent::ProviderState(crate::ProviderState {
             provider: "fixture".to_string(),
             state: ProviderConnectionState::Online,
             generation: value,
@@ -9290,7 +9284,7 @@ mod tests {
                 selection: false,
             }) if rejection.command_generation == 8
                 && rejection.reason
-                    == aeris_contracts::ProviderCatalogRejectionReason::SearchTimedOut
+                    == crate::ProviderCatalogRejectionReason::SearchTimedOut
         ));
         assert_eq!(coordinator.command_fences.count_for(consumer), 0);
         assert!(!armed(&mut coordinator));
@@ -9499,14 +9493,14 @@ mod tests {
                     catalog: Some(&catalog),
                 },
             );
-            let search = aeris_contracts::SearchProviderInstruments {
+            let search = crate::SearchProviderInstruments {
                 consumer_id: owner.0.get(),
                 search_generation: 7,
                 startup_resolve: false,
                 provider: descriptor.id.into(),
                 query: "EURUSD".into(),
                 maximum_results: 16,
-                categories: aeris_contracts::InstrumentSearchCategories::ALL,
+                categories: crate::InstrumentSearchCategories::ALL,
                 exchange: None,
             };
             let (reply, accepted) = std::sync::mpsc::sync_channel(1);
@@ -9515,7 +9509,7 @@ mod tests {
             assert!(matches!(dispatched.try_recv().unwrap(),
                 super::super::ProviderCatalogCommand::Search(search)
                     if search.search_generation == 7));
-            coordinator.handle_catalog_search(aeris_contracts::ProviderInstrumentSearchResult {
+            coordinator.handle_catalog_search(crate::ProviderInstrumentSearchResult {
                 consumer_id: owner.0.get(),
                 provider: descriptor.id.into(),
                 provider_generation: 1,
@@ -9780,12 +9774,12 @@ mod tests {
 
         coordinator.handle_catalog_selection(consumer.0.get(), 17, instrument());
         coordinator.handle_catalog_rejection(
-            aeris_contracts::ProviderCatalogRejected {
+            crate::ProviderCatalogRejected {
                 consumer_id: consumer.0.get(),
                 provider: "rithmic".into(),
                 provider_generation: None,
                 command_generation: 3,
-                reason: aeris_contracts::ProviderCatalogRejectionReason::InstrumentUnavailable,
+                reason: crate::ProviderCatalogRejectionReason::InstrumentUnavailable,
             },
             true,
         );

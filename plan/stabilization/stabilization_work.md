@@ -695,10 +695,14 @@ still wait on the GUI checks and the remaining work on their lines.
     the new `test-support` features of `application` and `chart_integration`; only
     dev-dependencies and the desktop `diagnostics` feature enable them, which naming_check checks
     in every manifest (`embedded_demo_replay_is_test_support_only`).
-  - Left: delete `GetAccountStatus` and `RefreshAccountProfile`, and reduce `contracts` to the persisted
-    schema.
-  - Add naming_check direction rules from `cargo metadata`.
-  - Record `study_sdk -> market_runtime` as the accepted facade. Closes PL-13 and PL-14.
+  - Landed: G4. `contracts` keeps only the persisted workspace schema. The in-process catalog,
+    status and provider-presentation types moved to `market_runtime`, the account views to
+    `account_runtime`, and the unused `GetAccountStatus`, `RefreshAccountProfile`,
+    `BeginLogin`, `CancelLogin` and `SignOut` messages were deleted. naming_check allows only the
+    desktop and `market_runtime` to depend on `contracts` and rejects a non-prost type in it.
+  - Left:
+    - Add naming_check direction rules from the `Cargo.toml` files.
+    - Record `study_sdk -> market_runtime` as the accepted facade. Closes PL-13 and PL-14.
 - [ ] M8.10 Dependency hygiene
   - Left:
     - Fetch the avatar with ureq and remove `reqwest_client` (AC-07).

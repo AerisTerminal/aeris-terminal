@@ -20,14 +20,9 @@ use aeris_application::{
     MarketEventProvenance, Provenanced, ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot,
     ReplayTailOperation, ReplayTailUpdate,
 };
-use aeris_contracts::{
-    EngineFaultCode, FailureStage, InstallProviderInstrument, WorkspacePaneKind, WorkspaceState,
-};
+use aeris_contracts::{InstallProviderInstrument, WorkspacePaneKind, WorkspaceState};
 #[cfg(test)]
-use aeris_contracts::{
-    ProviderConnectionState, ProviderState, SeriesKey, SeriesLoadState, WorkspacePaneState,
-    WorkspaceTabState,
-};
+use aeris_contracts::{SeriesKey, WorkspacePaneState, WorkspaceTabState};
 #[cfg(test)]
 use aeris_desktop::test_support::{
     fixture_futures_contract, fixture_futures_contracts, fixture_public_crypto,
@@ -38,12 +33,15 @@ use aeris_instruments::{
 use aeris_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
 #[cfg(test)]
 use aeris_market_runtime::MarketSeriesState;
+use aeris_market_runtime::{EngineFaultCode, FailureStage};
 pub(super) use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError,
     MarketDemandErrorScope, MarketOrderBookSnapshot, MarketPriceAlert, MarketPriceAlertTrigger,
     MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesUpdate, MarketService, MarketStream,
     SeriesTailOperation, StreamRequirements,
 };
+#[cfg(test)]
+use aeris_market_runtime::{ProviderConnectionState, ProviderState, SeriesLoadState};
 use aeris_observability::FeedConnectionState;
 
 use aeris_desktop::market_worker::{
@@ -792,7 +790,7 @@ pub(crate) fn runtime_provider_display_name(provider: &str) -> &str {
 
 fn provider_presentation(
     provider: &str,
-) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
+) -> Option<&'static aeris_market_runtime::ProviderPresentationDescriptor> {
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider)
@@ -891,9 +889,6 @@ use publications::{cancel_pending_recovery, complete_pending_recovery, send_reco
 mod tests {
     use super::*;
     use aeris_chart_integration::AerisChartView;
-    use aeris_contracts::{
-        ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
-    };
     use aeris_design_system::AerisTheme;
     use aeris_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
     use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
@@ -901,6 +896,9 @@ mod tests {
         CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
         MarketProviderGeneration, MarketProviderInstrumentSelection, MarketTradeTapeOperation,
         MarketTradeTapeUpdate,
+    };
+    use aeris_market_runtime::{
+        ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
     use std::collections::BTreeMap;
 

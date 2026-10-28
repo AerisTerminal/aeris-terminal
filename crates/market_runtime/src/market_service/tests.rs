@@ -211,25 +211,25 @@ fn shipping_provider_capabilities_accept_the_declared_non_bar_study_streams() {
 
 #[test]
 fn fourth_descriptor_registers_without_coordinator_changes() {
-    const FOURTH_PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
-        aeris_contracts::ProviderPresentationDescriptor {
+    const FOURTH_PRESENTATION: crate::ProviderPresentationDescriptor =
+        crate::ProviderPresentationDescriptor {
             id: "fourth-test-provider",
             display_name: "Fourth provider",
             chart_interval_labels: &["1m"],
-            daily_bars: aeris_contracts::ProviderDailyBarCadence::FixedDay,
+            daily_bars: crate::ProviderDailyBarCadence::FixedDay,
             search_hint: "Search fourth provider",
             logo_key: "fourth-provider",
             broker_venue_id: None,
             attribution: None,
-            catalog_symbol: aeris_contracts::ProviderCatalogSymbol::ProviderSymbol,
+            catalog_symbol: crate::ProviderCatalogSymbol::ProviderSymbol,
             selection_entitlement_id: "fourth-provider",
             catalog_refresh_on_startup: false,
             ready_label_suffix: "",
-            feed_level: aeris_contracts::ProviderFeedLevel::Bars,
+            feed_level: crate::ProviderFeedLevel::Bars,
             search_categories_available: false,
             market_screen_available: false,
             trades_available: false,
-            connection_kind: aeris_contracts::ProviderConnectionKind::Public,
+            connection_kind: crate::ProviderConnectionKind::Public,
         };
     let fourth = ProviderDescriptor {
         id: "fourth-test-provider",
@@ -281,11 +281,11 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
 fn registered_providers_declare_their_feed_level() {
     assert_eq!(
         RITHMIC_PRESENTATION.feed_level,
-        aeris_contracts::ProviderFeedLevel::OrderLevels
+        crate::ProviderFeedLevel::OrderLevels
     );
     assert_eq!(
         HYPERLIQUID_PRESENTATION.feed_level,
-        aeris_contracts::ProviderFeedLevel::PriceLevels
+        crate::ProviderFeedLevel::PriceLevels
     );
 }
 

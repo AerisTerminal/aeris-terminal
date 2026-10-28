@@ -797,7 +797,7 @@ pub(super) struct BottomPanelView<'a> {
     /// The active chart formats trade times in its selected zone.
     pub(super) chart: Option<Entity<AerisChartView>>,
     /// Attribution belonging to the active pane's held provider session.
-    pub(super) attribution: Option<aeris_contracts::ProviderAttribution>,
+    pub(super) attribution: Option<aeris_market_runtime::ProviderAttribution>,
 }
 
 pub(super) fn bottom_panel(
@@ -875,7 +875,7 @@ fn trade_history_resize_handle() -> impl IntoElement {
 fn trade_history_header(
     terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
-    attribution: Option<aeris_contracts::ProviderAttribution>,
+    attribution: Option<aeris_market_runtime::ProviderAttribution>,
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;

@@ -6,8 +6,8 @@
 //! every lane's answer as one flat list in the fixed provider order.
 
 use super::ProviderId;
-use aeris_contracts::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use aeris_desktop::chart_chrome::{ExchangeCode, SymbolSearchScope};
+use aeris_market_runtime::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use std::num::NonZeroUsize;
 
 pub(crate) const MAXIMUM_SYMBOL_QUERY_BYTES: usize = 64;

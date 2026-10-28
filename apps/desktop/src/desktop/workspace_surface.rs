@@ -226,11 +226,11 @@ fn chart_bridge_label(chart: Option<&Entity<AerisChartView>>, cx: &App) -> Strin
 /// Only a provider calendar that positively reports the product's session as closed stops the
 /// bar countdown; an unknown or missing calendar (e.g. providers without one) keeps it running.
 fn chart_market_trading(
-    status: Option<&aeris_contracts::MarketSessionStatus>,
+    status: Option<&aeris_market_runtime::MarketSessionStatus>,
     product: Option<&InstallProviderInstrument>,
 ) -> bool {
     !status.is_some_and(|status| {
-        status.phase == aeris_contracts::MarketSessionPhase::Closed
+        status.phase == aeris_market_runtime::MarketSessionPhase::Closed
             && product.is_some_and(|product| product.instrument_id == status.instrument_id)
     })
 }
@@ -3898,7 +3898,7 @@ impl WorkspaceSurface {
     fn apply_fenced_market_session_status(
         &mut self,
         generation: u64,
-        status: aeris_contracts::MarketSessionStatus,
+        status: aeris_market_runtime::MarketSessionStatus,
         cx: &mut Context<Self>,
     ) {
         if self.chart_pane_controller.accept_publication(generation) {
@@ -3954,7 +3954,7 @@ impl WorkspaceSurface {
 
     fn apply_market_session_status(
         &mut self,
-        status: aeris_contracts::MarketSessionStatus,
+        status: aeris_market_runtime::MarketSessionStatus,
         cx: &mut Context<Self>,
     ) {
         // Catalog selection can announce the next instrument before its series
@@ -4659,7 +4659,7 @@ impl WorkspaceSurface {
         event: aeris_market_runtime::MarketConsumerEvent,
         cx: &mut Context<Self>,
     ) {
-        use aeris_contracts::SeriesLoadState;
+        use aeris_market_runtime::SeriesLoadState;
 
         let aeris_market_runtime::MarketRuntimeEvent::SeriesState(state) = event.value else {
             diagnostic!("Aeris pane received an unexpected runtime readiness event");
@@ -4752,7 +4752,7 @@ impl WorkspaceSurface {
             diagnostic!("Aeris chart older history is unavailable");
             return;
         }
-        let state = if error.code == aeris_contracts::EngineFaultCode::Retryable {
+        let state = if error.code == aeris_market_runtime::EngineFaultCode::Retryable {
             ChartState::Recovering
         } else {
             ChartState::Error
@@ -4853,15 +4853,17 @@ impl WorkspaceSurface {
             return;
         }
         let connection = match state.state {
-            aeris_contracts::ProviderConnectionState::Disconnected => {
+            aeris_market_runtime::ProviderConnectionState::Disconnected => {
                 FeedConnectionState::Disconnected
             }
-            aeris_contracts::ProviderConnectionState::Connecting => {
+            aeris_market_runtime::ProviderConnectionState::Connecting => {
                 FeedConnectionState::Discovering
             }
-            aeris_contracts::ProviderConnectionState::Online => FeedConnectionState::Streaming,
-            aeris_contracts::ProviderConnectionState::Recovering => FeedConnectionState::Recovering,
-            aeris_contracts::ProviderConnectionState::Failed => FeedConnectionState::Stopped,
+            aeris_market_runtime::ProviderConnectionState::Online => FeedConnectionState::Streaming,
+            aeris_market_runtime::ProviderConnectionState::Recovering => {
+                FeedConnectionState::Recovering
+            }
+            aeris_market_runtime::ProviderConnectionState::Failed => FeedConnectionState::Stopped,
         };
         self.apply_market_connection_message(generation, connection, state.transport_rtt_nanos, cx);
     }

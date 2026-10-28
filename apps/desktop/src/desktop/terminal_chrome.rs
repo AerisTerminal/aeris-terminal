@@ -2,7 +2,7 @@ use super::app_navigation::app_navigation_button;
 use super::platform_menu::account_avatar_button;
 use super::*;
 use crate::desktop::native_ui::tooltip::TooltipPlacement;
-use aeris_contracts::{MarketSessionPhase, MarketSessionStatus};
+use aeris_market_runtime::{MarketSessionPhase, MarketSessionStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WindowCommand {
@@ -527,7 +527,7 @@ pub(super) fn header_controls(
                 provider_menu_open: false,
                 flyout_provider: None,
                 learned_exchanges: Vec::new(),
-                search_categories: aeris_contracts::InstrumentSearchCategories::ALL,
+                search_categories: aeris_market_runtime::InstrumentSearchCategories::ALL,
             },
             &state.theme,
         ))
@@ -585,10 +585,10 @@ pub(super) fn header_controls(
 
 /// Attribution follows the provider's held session, including recovery.
 pub(super) fn attribution_for_session(
-    presentations: &[aeris_contracts::ProviderPresentationDescriptor],
+    presentations: &[aeris_market_runtime::ProviderPresentationDescriptor],
     provider: ProviderId,
     state: FeedConnectionState,
-) -> Option<aeris_contracts::ProviderAttribution> {
+) -> Option<aeris_market_runtime::ProviderAttribution> {
     if !matches!(
         state,
         FeedConnectionState::Authenticating
@@ -624,7 +624,7 @@ impl RenderOnce for AttributionMarkImage {
 
 /// The bottom panel carries only the market-data mark; other marks and notices stay in About.
 pub(super) fn provider_attribution(
-    attribution: aeris_contracts::ProviderAttribution,
+    attribution: aeris_market_runtime::ProviderAttribution,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     div()
@@ -1650,7 +1650,7 @@ mod tests {
                 attribution_for_session(presentations, ProviderId(attributed.id), state).is_none()
             );
         }
-        let fixture = aeris_contracts::ProviderPresentationDescriptor {
+        let fixture = aeris_market_runtime::ProviderPresentationDescriptor {
             id: "fixture",
             attribution: None,
             ..*attributed
@@ -1663,13 +1663,13 @@ mod tests {
             )
             .is_none()
         );
-        let fixture_attribution = aeris_contracts::ProviderAttribution {
+        let fixture_attribution = aeris_market_runtime::ProviderAttribution {
             market_data_mark_key: "fixture_mark",
             powered_by_mark_key: "fixture_powered",
             notices: &["Fixture copyright © {year}"],
             powered_by_notice: "Fixture notice",
         };
-        let fixture_attributed = aeris_contracts::ProviderPresentationDescriptor {
+        let fixture_attributed = aeris_market_runtime::ProviderPresentationDescriptor {
             attribution: Some(fixture_attribution),
             ..fixture
         };

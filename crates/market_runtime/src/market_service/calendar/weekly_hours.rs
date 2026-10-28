@@ -4,9 +4,8 @@
 //! calendar. The status is a pure function of that timetable and the current
 //! instant, so it needs no cache and no refresh; holidays are not represented.
 
-use aeris_contracts::{
-    MarketSessionPhase, MarketSessionSource, MarketSessionStatus, ProviderSessionHours,
-};
+use crate::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+use aeris_contracts::ProviderSessionHours;
 use aeris_instruments::calendar::weekly_hours::{self as projection, WeeklyPhase, WeeklySegment};
 
 struct ProviderSegment<'a>(&'a ProviderSessionHours);

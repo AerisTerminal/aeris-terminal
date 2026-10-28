@@ -204,6 +204,13 @@ violations and missing verification explicitly, and never describe them as satis
   belongs to `market_runtime`.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a
   second desktop-owned market-state model.
+- `aeris_contracts` holds only the persisted workspace schema: the prost messages in
+  `messages.rs`, including the `InstallProviderInstrument` and `SeriesKey` identities a saved
+  pane stores. In-process catalog, status and provider-presentation types belong to
+  `market_runtime` (`catalog.rs`, `status.rs`, `provider_presentation.rs`) and account views to
+  `account_runtime::view`. Only the desktop and `market_runtime` may depend on `contracts`;
+  `contracts_hold_only_the_persisted_workspace_schema` checks the files, the prost derives and
+  every manifest.
 - Do not restore `apps/engine`, `local_engine_client`, a secondary market process, local process transport, or market autostart.
 - UI-thread code performs no blocking network, disk, process, or shutdown work. Background workers do
   not mutate GPUI state directly.

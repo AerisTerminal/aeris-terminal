@@ -1796,7 +1796,7 @@ mod tests {
             .expect("queued");
         sender
             .send(MarketWorkerCommand::ProviderSelect(
-                aeris_contracts::SelectProviderInstrument {
+                aeris_market_runtime::SelectProviderInstrument {
                     symbol: "ETH".into(),
                     ..Default::default()
                 },

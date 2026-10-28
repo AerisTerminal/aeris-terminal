@@ -25,11 +25,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::{AccountSessionState, AccountView, LoginAuthorization};
 use aeris_account::{
     AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
     MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
 };
-use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 use aeris_platform_runtime::{CredentialVault, MAX_SECRET_BYTES, NativeCredentialVault};
 use zeroize::Zeroizing;
 

@@ -1,10 +1,10 @@
 //! Pane and screener projection of coordinator-fenced catalog callbacks.
 
-use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
-    ProviderMarketScreen,
-};
+use aeris_contracts::InstallProviderInstrument;
 use aeris_market_runtime::MarketRuntimeEvent;
+use aeris_market_runtime::{
+    ProviderCatalogRejected, ProviderInstrumentSearchResult, ProviderMarketScreen,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProviderCatalogCommand {
@@ -71,7 +71,7 @@ pub(super) fn project_provider_catalog_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_contracts::ProviderCatalogRejectionReason;
+    use aeris_market_runtime::ProviderCatalogRejectionReason;
 
     #[test]
     fn screen_callbacks_project_with_their_request_identity() {

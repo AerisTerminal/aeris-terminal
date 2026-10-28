@@ -21,7 +21,7 @@ fn live_snapshot_gaps_keep_the_metric_and_bound_the_evidence() {
 
 #[test]
 fn chart_countdown_stops_only_for_the_products_closed_session() {
-    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+    use aeris_market_runtime::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
     let product = InstallProviderInstrument {
         instrument_id: "rithmic:Future:GCZ6:COMEX".into(),
         ..InstallProviderInstrument::default()

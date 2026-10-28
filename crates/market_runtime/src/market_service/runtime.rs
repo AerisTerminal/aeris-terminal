@@ -16,12 +16,12 @@ use super::{
     try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
     validate_provider_screen, validate_provider_search, validate_provider_selection,
 };
+use crate::ProviderPresentationDescriptor;
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
 use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::rithmic_realtime::RithmicLoginRevision;
-use aeris_contracts::ProviderPresentationDescriptor;
 use aeris_trading::market::{MarketFeedError, QuoteInterest, QuoteInterestSink};
 
 struct RuntimeChannels {
@@ -826,7 +826,7 @@ impl MarketService {
         &self,
         instrument: &aeris_contracts::InstallProviderInstrument,
         now_unix_nanos: i64,
-    ) -> aeris_contracts::MarketSessionStatus {
+    ) -> crate::MarketSessionStatus {
         Self::calendar_for(instrument).status(
             &instrument.instrument_id,
             now_unix_nanos.div_euclid(1_000_000),
@@ -1651,7 +1651,7 @@ mod tests {
         event_tx
             .send(
                 crate::rithmic_realtime::RithmicCatalogEvent::SearchCompleted(
-                    aeris_contracts::ProviderInstrumentSearchResult::default(),
+                    crate::ProviderInstrumentSearchResult::default(),
                 ),
             )
             .expect("bounded catalog response");
@@ -1920,8 +1920,8 @@ mod tests {
 
     #[test]
     fn fourth_descriptor_starts_without_coordinator_registration_edits() {
-        const FOURTH_PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
-            aeris_contracts::ProviderPresentationDescriptor {
+        const FOURTH_PRESENTATION: crate::ProviderPresentationDescriptor =
+            crate::ProviderPresentationDescriptor {
                 id: "fourth-test-provider",
                 ..super::super::RITHMIC_PRESENTATION
             };

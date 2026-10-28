@@ -3,7 +3,7 @@
 //! bounded cadence only while the page is shown; leaving the page stops all screen traffic.
 
 use super::*;
-use aeris_contracts::{
+use aeris_market_runtime::{
     ProviderMarketStatistics, ProviderPresentationDescriptor, ScreenProviderMarkets,
 };
 use gpui::{ScrollStrategy, UniformListScrollHandle};
@@ -794,7 +794,7 @@ impl MarketScreener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_contracts::ProviderInstrumentSummary;
+    use aeris_market_runtime::ProviderInstrumentSummary;
 
     fn market(
         symbol: &str,

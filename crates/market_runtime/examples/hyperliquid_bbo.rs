@@ -1,9 +1,9 @@
 //! Public no-chart quote lease. Run with `-- BTC 30` for a 30-second sample.
 
-use aeris_contracts::{SearchProviderInstruments, SelectProviderInstrument};
 use aeris_instruments::InstrumentId;
 use aeris_market_engine::{InstrumentStreamKey, LeaseOwner};
 use aeris_market_runtime::{MarketRuntimeEvent, MarketService};
+use aeris_market_runtime::{SearchProviderInstruments, SelectProviderInstrument};
 use std::{
     thread,
     time::{Duration, Instant},
@@ -21,7 +21,7 @@ fn run(market: &MarketService, symbol: &str, seconds: u64) -> Result<(), String>
             provider: "hyperliquid".into(),
             query: symbol.into(),
             maximum_results: 10,
-            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            categories: aeris_market_runtime::InstrumentSearchCategories::ALL,
             exchange: None,
         },
     )?;

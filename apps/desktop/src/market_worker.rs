@@ -4,14 +4,14 @@
 
 use aeris_application::ReplayRecoveryCommand;
 use aeris_application::{ReplaySnapshot, ReplayStreamUpdate};
-use aeris_contracts::{
-    InstallProviderInstrument, ScreenProviderMarkets, SearchProviderInstruments,
-    SelectProviderInstrument,
-};
+use aeris_contracts::InstallProviderInstrument;
 use aeris_market_data::ChartInterval;
 use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert, MarketRuntimeEvent,
+};
+use aeris_market_runtime::{
+    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_observability::FeedConnectionState;
 use std::{
@@ -198,7 +198,7 @@ pub enum LocalSessionStatus {
         state: FeedConnectionState,
         transport_rtt_nanos: Option<u64>,
     },
-    MarketSession(aeris_contracts::MarketSessionStatus),
+    MarketSession(aeris_market_runtime::MarketSessionStatus),
 }
 
 /// Scope of a locally detected failure, rather than a coordinator event.
@@ -1298,10 +1298,7 @@ mod tests {
         market_projection_channel, ui_diagnostics_channel,
     };
     use crate::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
-    use aeris_contracts::{
-        InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-        SearchProviderInstruments, SelectProviderInstrument,
-    };
+    use aeris_contracts::InstallProviderInstrument;
     use aeris_market_data::{
         BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
     };
@@ -1310,6 +1307,10 @@ mod tests {
     use aeris_market_runtime::{
         MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeOperation,
         MarketTradeTapeUpdate, SeriesTailOperation,
+    };
+    use aeris_market_runtime::{
+        ProviderCatalogRejected, ProviderCatalogRejectionReason, SearchProviderInstruments,
+        SelectProviderInstrument,
     };
 
     use aeris_study_sdk::builtins;
@@ -1376,9 +1377,9 @@ mod tests {
                 selection_generation: Some(generation),
                 event: Fenced {
                     epoch,
-                    value: MarketRuntimeEvent::ProviderState(aeris_contracts::ProviderState {
+                    value: MarketRuntimeEvent::ProviderState(aeris_market_runtime::ProviderState {
                         provider: "fixture".into(),
-                        state: aeris_contracts::ProviderConnectionState::Online,
+                        state: aeris_market_runtime::ProviderConnectionState::Online,
                         generation: 4,
                         detail: None,
                         transport_rtt_nanos: Some(12_500_000),
@@ -1421,7 +1422,7 @@ mod tests {
 
     #[test]
     fn local_connection_and_calendar_status_share_fifo_and_selection_stamp() {
-        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+        use aeris_market_runtime::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
         let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         sender
             .send(PaneProjectionEvent::SessionStatus {
@@ -1595,7 +1596,7 @@ mod tests {
     }
 
     fn status_message(
-        state: aeris_contracts::SeriesLoadState,
+        state: aeris_market_runtime::SeriesLoadState,
         detail: &str,
     ) -> PaneProjectionEvent {
         PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
@@ -1894,7 +1895,7 @@ mod tests {
         assert!(
             sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Resolving,
+                    aeris_market_runtime::SeriesLoadState::Resolving,
                     "loading"
                 ))
                 .is_ok()
@@ -1902,7 +1903,7 @@ mod tests {
         assert!(
             sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Ready,
+                    aeris_market_runtime::SeriesLoadState::Ready,
                     "ready"
                 ))
                 .is_ok()
@@ -1919,9 +1920,9 @@ mod tests {
                 PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(second), ..
                 }, .. })
-            ] if first.state == aeris_contracts::SeriesLoadState::Resolving
+            ] if first.state == aeris_market_runtime::SeriesLoadState::Resolving
                 && first.detail.as_deref() == Some("loading")
-                && second.state == aeris_contracts::SeriesLoadState::Ready
+                && second.state == aeris_market_runtime::SeriesLoadState::Ready
                 && second.detail.as_deref() == Some("ready")
         ));
     }
@@ -2012,7 +2013,7 @@ mod tests {
         assert_eq!(sender.send(tape()), Err(super::MarketWorkerSendError::Full));
         sender
             .send(status_message(
-                aeris_contracts::SeriesLoadState::Ready,
+                aeris_market_runtime::SeriesLoadState::Ready,
                 "ready",
             ))
             .expect("fenced readiness uses the control reserve");
@@ -2324,7 +2325,7 @@ mod tests {
         }));
         assert_eq!(wake_count.load(Ordering::Acquire), 0);
 
-        let message = || status_message(aeris_contracts::SeriesLoadState::Ready, "ready");
+        let message = || status_message(aeris_market_runtime::SeriesLoadState::Ready, "ready");
         sender.send(message()).expect("first state sends");
         sender.send(message()).expect("second state sends");
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2584,7 +2585,7 @@ mod tests {
         let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         sender
             .send(status_message(
-                aeris_contracts::SeriesLoadState::Resolving,
+                aeris_market_runtime::SeriesLoadState::Resolving,
                 "loading",
             ))
             .expect("state sends before wake registration");
@@ -2624,7 +2625,7 @@ mod tests {
         assert!(
             sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Ready,
+                    aeris_market_runtime::SeriesLoadState::Ready,
                     "ready"
                 ))
                 .is_err()
@@ -2702,7 +2703,7 @@ mod tests {
         assert!(
             sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Failed,
+                    aeris_market_runtime::SeriesLoadState::Failed,
                     "terminal"
                 ))
                 .is_ok()
@@ -2723,7 +2724,7 @@ mod tests {
                     event: aeris_market_runtime::fence::Fenced {
                         value: MarketRuntimeEvent::SeriesState(
                             aeris_market_runtime::MarketSeriesState {
-                                state: aeris_contracts::SeriesLoadState::Failed,
+                                state: aeris_market_runtime::SeriesLoadState::Failed,
                                 ..
                             }
                         ),
@@ -2741,7 +2742,7 @@ mod tests {
         assert!(
             sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Ready,
+                    aeris_market_runtime::SeriesLoadState::Ready,
                     "ready"
                 ))
                 .is_ok()
@@ -2759,7 +2760,7 @@ mod tests {
             messages.as_slice(),
             [PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                 value: MarketRuntimeEvent::SeriesState(state), ..
-            }, .. })] if state.state == aeris_contracts::SeriesLoadState::Ready
+            }, .. })] if state.state == aeris_market_runtime::SeriesLoadState::Ready
                 && state.detail.as_deref() == Some("ready")
         ));
     }
@@ -2817,7 +2818,7 @@ mod tests {
         );
         sender
             .send(status_message(
-                aeris_contracts::SeriesLoadState::Resolving,
+                aeris_market_runtime::SeriesLoadState::Resolving,
                 "switching",
             ))
             .expect("state sends after the marker");
@@ -2841,7 +2842,7 @@ mod tests {
         assert!(
             error_sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Failed,
+                    aeris_market_runtime::SeriesLoadState::Failed,
                     "terminal"
                 ))
                 .is_ok()
@@ -2849,7 +2850,7 @@ mod tests {
         assert!(
             error_sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Ready,
+                    aeris_market_runtime::SeriesLoadState::Ready,
                     "obsolete"
                 ))
                 .is_ok()
@@ -2864,9 +2865,9 @@ mod tests {
                 PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(obsolete), ..
                 }, .. })
-            ] if terminal.state == aeris_contracts::SeriesLoadState::Failed
+            ] if terminal.state == aeris_market_runtime::SeriesLoadState::Failed
                 && terminal.detail.as_deref() == Some("terminal")
-                && obsolete.state == aeris_contracts::SeriesLoadState::Ready
+                && obsolete.state == aeris_market_runtime::SeriesLoadState::Ready
                 && obsolete.detail.as_deref() == Some("obsolete")
         ));
 
@@ -2885,7 +2886,7 @@ mod tests {
         assert!(
             recovery_sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Resolving,
+                    aeris_market_runtime::SeriesLoadState::Resolving,
                     "obsolete"
                 ))
                 .is_ok()
@@ -2982,7 +2983,7 @@ mod tests {
         assert!(
             stale_sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Partial,
+                    aeris_market_runtime::SeriesLoadState::Partial,
                     "network changed"
                 ))
                 .is_ok()
@@ -3053,7 +3054,7 @@ mod tests {
         assert!(
             sender
                 .send(status_message(
-                    aeris_contracts::SeriesLoadState::Failed,
+                    aeris_market_runtime::SeriesLoadState::Failed,
                     "terminal"
                 ))
                 .is_ok()
@@ -3075,7 +3076,7 @@ mod tests {
                 event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::SeriesState(
                         aeris_market_runtime::MarketSeriesState {
-                            state: aeris_contracts::SeriesLoadState::Failed,
+                            state: aeris_market_runtime::SeriesLoadState::Failed,
                             ..
                         }
                     ),
@@ -3349,7 +3350,7 @@ mod tests {
             provider: "rithmic".to_string(),
             query: "ES".to_string(),
             maximum_results: 16,
-            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            categories: aeris_market_runtime::InstrumentSearchCategories::ALL,
             exchange: None,
         };
         let selection = SelectProviderInstrument {

@@ -11,9 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_contracts::{
-    ProviderInstrumentKind, ProviderInstrumentSummary, ProviderMarketStatistics,
-};
+use crate::{ProviderInstrumentKind, ProviderInstrumentSummary, ProviderMarketStatistics};
 use aeris_hyperliquid_market_adapter::{
     FUNDING_INTERVAL_SECONDS, FUNDING_RATE_SCALE, HyperliquidCatalog, HyperliquidHttpConfig,
     HyperliquidInstrument, HyperliquidMarketKind, HyperliquidMarketStatistics,

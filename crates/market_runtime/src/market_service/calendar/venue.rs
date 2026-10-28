@@ -1,6 +1,6 @@
 //! One normalized venue classification for calendar and provider collection routing.
+use crate::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
 use aeris_contracts::InstallProviderInstrument;
-use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
 pub use aeris_instruments::calendar::Venue;
 use aeris_instruments::calendar::classify_venue;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc, Weekday};

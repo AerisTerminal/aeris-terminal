@@ -4126,22 +4126,28 @@ mod tests {
 
     #[test]
     fn market_contracts_exclude_trading_execution_commands() {
-        let protocol = manifest("crates/contracts/src/messages.rs");
-        for forbidden in [
-            "CancelOrder",
-            "ExecutionReport",
-            "FlattenPosition",
-            "OrderAction",
-            "OrderRequest",
-            "PlaceOrder",
-            "Position",
-            "ReplaceOrder",
-            "SubmitOrder",
+        for relative in [
+            "crates/contracts/src/messages.rs",
+            "crates/market_runtime/src/catalog.rs",
+            "crates/market_runtime/src/status.rs",
         ] {
-            assert!(
-                !protocol.contains(forbidden),
-                "market-data contracts must not add future execution message {forbidden}"
-            );
+            let protocol = manifest(relative);
+            for forbidden in [
+                "CancelOrder",
+                "ExecutionReport",
+                "FlattenPosition",
+                "OrderAction",
+                "OrderRequest",
+                "PlaceOrder",
+                "Position",
+                "ReplaceOrder",
+                "SubmitOrder",
+            ] {
+                assert!(
+                    !protocol.contains(forbidden),
+                    "{relative} must not add future execution message {forbidden}"
+                );
+            }
         }
     }
 
@@ -6276,10 +6282,6 @@ jobs:
         const ACCOUNT_ALLOWED_PREFIXES: &[&str] = &[
             "crates/domain/account/src/",
             "crates/account_runtime/src/",
-            "crates/contracts/src/account.rs",
-            "crates/contracts/src/lib.rs",
-            "crates/contracts/src/messages.rs",
-            "crates/contracts/tests/",
             "crates/platform_runtime/src/browser.rs",
             "apps/desktop/src/account/",
             "apps/desktop/src/desktop.rs",
@@ -6702,21 +6704,14 @@ jobs:
         }
     }
     #[test]
-    fn account_contracts_remain_plain_bounded_values() {
-        let account = manifest("crates/contracts/src/account.rs");
-        for contract in [
-            "pub struct BeginLogin",
-            "pub struct CancelLogin",
-            "pub struct GetAccountStatus",
+    fn account_views_remain_plain_bounded_values() {
+        let account = manifest("crates/account_runtime/src/view.rs");
+        for view in [
             "pub struct LoginAuthorization",
             "pub struct AccountView",
-            "pub struct SignOut",
             "pub enum AccountSessionState",
         ] {
-            assert!(
-                account.contains(contract),
-                "account DTO boundary lost {contract}"
-            );
+            assert!(account.contains(view), "account view boundary lost {view}");
         }
         assert!(!account.contains("prost::Message"));
         assert!(!account.contains("#[prost"));
@@ -6736,15 +6731,106 @@ jobs:
                 "sanitized account DTO exposes {secret}"
             );
         }
+        for runtime in [
+            "crates/market_runtime/src/catalog.rs",
+            "crates/market_runtime/src/provider_presentation.rs",
+            "crates/market_runtime/src/status.rs",
+        ] {
+            assert!(
+                !manifest(runtime).contains("prost::"),
+                "{runtime} must stay plain in-process types"
+            );
+        }
         let messages = manifest("crates/contracts/src/messages.rs");
-        let runtime_market = messages
-            .split("/// Requests one bounded exact provider-instrument search")
-            .nth(1)
-            .expect("runtime market contract section exists");
-        assert!(!runtime_market.contains("prost::Message"));
-        assert!(!runtime_market.contains("#[prost"));
         assert!(messages.contains("Tags 6, 7, and 9-13 are permanently retired"));
         assert!(!messages.contains("pub struct Envelope"));
+    }
+
+    /// The first `pub struct` or `pub enum` whose attributes derive no prost message,
+    /// enumeration or oneof, that is, a type the workspace file cannot store.
+    fn first_non_schema_type(source: &str) -> Option<String> {
+        let lines: Vec<&str> = source.lines().map(str::trim).collect();
+        lines.iter().enumerate().find_map(|(index, line)| {
+            let declares = line.starts_with("pub struct ") || line.starts_with("pub enum ");
+            let derives_schema = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|line| line.starts_with('#') || line.starts_with("//"))
+                .any(|line| {
+                    line.contains("prost::Message")
+                        || line.contains("prost::Enumeration")
+                        || line.contains("prost::Oneof")
+                });
+            (declares && !derives_schema).then(|| (*line).to_string())
+        })
+    }
+
+    fn contracts_dependent_is_allowed(relative: &str) -> bool {
+        [
+            // The desktop reads and writes the workspace file.
+            "apps/desktop/Cargo.toml",
+            // The runtime restores the instrument and series identities a saved pane stores.
+            "crates/market_runtime/Cargo.toml",
+        ]
+        .contains(&relative)
+    }
+
+    #[test]
+    fn schema_rule_accepts_and_rejects_fixtures() {
+        assert_eq!(
+            first_non_schema_type(
+                "/// Saved.\n#[derive(Clone, PartialEq, prost::Message)]\n#[allow(dead_code)]\npub struct Saved {}\n"
+            ),
+            None
+        );
+        assert_eq!(
+            first_non_schema_type("#[derive(Clone, Copy, prost::Enumeration)]\npub enum Axis {}\n"),
+            None
+        );
+        assert_eq!(
+            first_non_schema_type("#[derive(Clone, Debug)]\npub struct Search {}\n").as_deref(),
+            Some("pub struct Search {}")
+        );
+        assert!(contracts_dependent_is_allowed("apps/desktop/Cargo.toml"));
+        assert!(!contracts_dependent_is_allowed(
+            "crates/account_runtime/Cargo.toml"
+        ));
+    }
+
+    #[test]
+    fn contracts_hold_only_the_persisted_workspace_schema() {
+        let mut files = fs::read_dir(repository_root().join("crates/contracts/src"))
+            .expect("contracts sources")
+            .map(|entry| {
+                entry
+                    .expect("contracts entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(
+            files,
+            ["lib.rs", "messages.rs"],
+            "contracts holds only the persisted workspace schema"
+        );
+        assert_eq!(
+            first_non_schema_type(&manifest("crates/contracts/src/messages.rs")),
+            None,
+            "contracts declares an in-process type; it belongs to its owning crate"
+        );
+        for path in workspace_manifests() {
+            let relative = relative_string(&path);
+            let contents = super::read_source(&path).expect("manifest");
+            let depends = manifest_dependencies(&contents)
+                .iter()
+                .any(|(_, name, _)| name == "aeris_contracts");
+            assert!(
+                !depends || contracts_dependent_is_allowed(&relative),
+                "{relative} depends on the workspace schema without persisting it"
+            );
+        }
     }
 
     #[test]

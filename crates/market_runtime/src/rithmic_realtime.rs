@@ -14,11 +14,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aeris_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderContractMetadata, ProviderInstrumentKind, ProviderInstrumentSearchResult,
-    ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument,
+use crate::{
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentKind,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument,
 };
+use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_market_data::{
     DepthSnapshot, MarketEvent, MarketTrade, OrderLevelEvent, OrderLevelUpdate, TopOfBookQuote,
 };
@@ -2578,7 +2579,7 @@ mod tests {
         publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
         reject_pending_catalog, reject_undispatched, retire_pending_catalog_generation,
     };
-    use aeris_contracts::{
+    use crate::{
         InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentKind,
         ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
     };

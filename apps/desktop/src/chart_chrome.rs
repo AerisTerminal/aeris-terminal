@@ -1,7 +1,8 @@
 use aeris_chart_integration::{
     ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
 };
-use aeris_contracts::{InstrumentSearchCategories, WorkspaceChromePoint, WorkspaceChromeState};
+use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
+use aeris_market_runtime::InstrumentSearchCategories;
 use std::path::{Path, PathBuf};
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;

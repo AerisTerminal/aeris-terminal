@@ -5,10 +5,8 @@ pub(crate) mod weekly_hours;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use aeris_contracts::{
-    InstallProviderInstrument, MarketSessionPhase, MarketSessionSource, MarketSessionStatus,
-    ProviderSessionHours,
-};
+use crate::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+use aeris_contracts::{InstallProviderInstrument, ProviderSessionHours};
 use aeris_instruments::{CalendarSourceKind, SessionPhase, SessionWindow};
 use chrono::{DateTime, Datelike, Utc};
 

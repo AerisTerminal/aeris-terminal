@@ -1,12 +1,12 @@
 //! GPUI pane fixture exercising the real bounded market mailbox without a provider session.
 
 use super::*;
-use aeris_contracts::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use aeris_desktop::market_worker::{
     EngineWorkerStartup, LocalCommandOutcome, LocalSessionStatus, MarketProjectionSender,
     MarketWorkerCommand, market_projection_channel,
 };
 use aeris_desktop::test_support::{FixtureMarketEvents, FixtureMarketWorker, FixtureSeries};
+use aeris_market_runtime::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use gpui::{TestAppContext, VisualTestContext};
 use std::num::NonZeroUsize;
 use std::sync::{atomic::AtomicU64, mpsc};
@@ -108,7 +108,7 @@ impl PaneHarness {
     fn fixture_readiness(
         &self,
         generation: u64,
-        state: aeris_contracts::SeriesLoadState,
+        state: aeris_market_runtime::SeriesLoadState,
         detail: &str,
     ) -> PaneProjectionEvent {
         PaneProjectionEvent::RuntimeProjection(
@@ -292,7 +292,7 @@ impl PaneHarness {
                 aeris_desktop::market_worker::RuntimeProjection::event(
                     self.market_events.readiness(
                         1,
-                        aeris_contracts::SeriesLoadState::Live,
+                        aeris_market_runtime::SeriesLoadState::Live,
                         "disconnected fixture ready",
                     ),
                 ),
@@ -880,7 +880,7 @@ fn fresh_default_partial_terms_cover_chart_and_stay_ready_through_live_updates(
         .publications
         .send(harness.fixture_readiness(
             1,
-            aeris_contracts::SeriesLoadState::Live,
+            aeris_market_runtime::SeriesLoadState::Live,
             "current coverage is live",
         ))
         .expect("runtime ready");
@@ -1096,7 +1096,7 @@ fn pane_harness_one_user_selection_command_and_one_applied_reply(cx: &mut TestAp
 
 #[gpui::test]
 fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut TestAppContext) {
-    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+    use aeris_market_runtime::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
 
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
@@ -1291,7 +1291,7 @@ fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
 fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
     cx: &mut TestAppContext,
 ) {
-    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+    use aeris_market_runtime::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
 
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
@@ -1560,7 +1560,7 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
         .publications
         .send(harness.fixture_readiness(
             1,
-            aeris_contracts::SeriesLoadState::Failed,
+            aeris_market_runtime::SeriesLoadState::Failed,
             "retired provider failure",
         ))
         .expect("retired failure enters mailbox");
@@ -1573,7 +1573,7 @@ fn pane_harness_failed_committed_interval_restores_previous_chart_with_one_notic
         .publications
         .send(harness.fixture_readiness(
             sequence,
-            aeris_contracts::SeriesLoadState::Failed,
+            aeris_market_runtime::SeriesLoadState::Failed,
             "private provider failure",
         ))
         .expect("failure enters mailbox");
@@ -1644,7 +1644,7 @@ fn pane_harness_failed_committed_instrument_keeps_original_chart_and_deduplicate
             .publications
             .send(harness.fixture_readiness(
                 sequence,
-                aeris_contracts::SeriesLoadState::Failed,
+                aeris_market_runtime::SeriesLoadState::Failed,
                 "private provider failure",
             ))
             .expect("failure enters mailbox");
@@ -2003,7 +2003,7 @@ impl SeededSwitchFixture {
                 };
                 harness.fixture_readiness(
                     generation,
-                    aeris_contracts::SeriesLoadState::Live,
+                    aeris_market_runtime::SeriesLoadState::Live,
                     detail,
                 )
             }
@@ -2425,7 +2425,7 @@ fn pane_harness_fenced_runtime_bars_project_only_after_selection_commit(cx: &mut
 fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
     cx: &mut TestAppContext,
 ) {
-    use aeris_contracts::SeriesLoadState;
+    use aeris_market_runtime::SeriesLoadState;
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
@@ -2519,7 +2519,7 @@ fn pane_harness_fenced_runtime_readiness_projects_only_committed_selection(
 
 #[gpui::test]
 fn pane_harness_fenced_runtime_failure_restores_previous_binding(cx: &mut TestAppContext) {
-    use aeris_contracts::SeriesLoadState;
+    use aeris_market_runtime::SeriesLoadState;
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
     let events = FixtureMarketEvents::default();
@@ -2644,7 +2644,7 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     let pending_state = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(state(sequence, aeris_contracts::SeriesLoadState::Live))
+        .send(state(sequence, aeris_market_runtime::SeriesLoadState::Live))
         .expect("early state");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2666,7 +2666,7 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
     let committed_state = cx.read(|cx| harness.pane.read(cx).chart_state);
     harness
         .publications
-        .send(state(1, aeris_contracts::SeriesLoadState::Failed))
+        .send(state(1, aeris_market_runtime::SeriesLoadState::Failed))
         .expect("retired state");
     harness.pane.update(cx, |pane, cx| {
         assert_eq!(pane.poll_market_worker(cx), 1);
@@ -2695,7 +2695,7 @@ fn pane_harness_history_unavailable_holds_until_the_runtime_clears_it(cx: &mut T
             aeris_desktop::market_worker::RuntimeProjection::event(
                 harness.market_events.readiness_with_presentation(
                     1,
-                    aeris_contracts::SeriesLoadState::Live,
+                    aeris_market_runtime::SeriesLoadState::Live,
                     "History unavailable; showing live bars",
                     aeris_market_runtime::SeriesPresentationStatus::HistoryUnavailable,
                 ),
@@ -2724,7 +2724,7 @@ fn pane_harness_history_unavailable_holds_until_the_runtime_clears_it(cx: &mut T
         .publications
         .send(harness.fixture_readiness(
             1,
-            aeris_contracts::SeriesLoadState::Live,
+            aeris_market_runtime::SeriesLoadState::Live,
             "Market history/live handoff is current",
         ))
         .expect("recovered live status");
@@ -2828,7 +2828,7 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
         .publications
         .send(harness.fixture_readiness(
             1,
-            aeris_contracts::SeriesLoadState::Failed,
+            aeris_market_runtime::SeriesLoadState::Failed,
             "retired private series failure",
         ))
         .expect("old series error");
@@ -2841,8 +2841,8 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
         assert_eq!(pane.chart_state, ChartState::Loading);
     });
     for state in [
-        aeris_contracts::SeriesLoadState::Live,
-        aeris_contracts::SeriesLoadState::Empty,
+        aeris_market_runtime::SeriesLoadState::Live,
+        aeris_market_runtime::SeriesLoadState::Empty,
     ] {
         harness
             .publications
@@ -2919,7 +2919,7 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
         .publications
         .send(harness.fixture_readiness(
             1,
-            aeris_contracts::SeriesLoadState::Failed,
+            aeris_market_runtime::SeriesLoadState::Failed,
             "retired private error",
         ))
         .expect("old series error");
@@ -3420,7 +3420,7 @@ fn check_switch_cover_through_ready(
     let covering = harness.fixture_snapshot(&replacement, replacement_interval, sequence, 13);
     let ready = harness.fixture_readiness(
         sequence,
-        aeris_contracts::SeriesLoadState::Live,
+        aeris_market_runtime::SeriesLoadState::Live,
         "replacement series ready",
     );
     let events = if snapshot_first {
@@ -5298,7 +5298,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
             event: Fenced {
                 epoch,
                 value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
-                    aeris_contracts::ProviderState {
+                    aeris_market_runtime::ProviderState {
                         provider,
                         state,
                         generation: 1,
@@ -5317,7 +5317,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
         .send(connection(
             "wrong-provider".into(),
             1,
-            aeris_contracts::ProviderConnectionState::Failed,
+            aeris_market_runtime::ProviderConnectionState::Failed,
             epochs.next(),
         ))
         .expect("wrong provider");
@@ -5331,9 +5331,9 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
             aeris_desktop::market_worker::RuntimeProjection::event(Fenced {
                 epoch: epochs.next(),
                 value: aeris_market_runtime::MarketRuntimeEvent::ProviderState(
-                    aeris_contracts::ProviderState {
+                    aeris_market_runtime::ProviderState {
                         provider: provider.clone(),
-                        state: aeris_contracts::ProviderConnectionState::Failed,
+                        state: aeris_market_runtime::ProviderConnectionState::Failed,
                         generation: 1,
                         detail: None,
                         transport_rtt_nanos: None,
@@ -5351,7 +5351,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
         .send(connection(
             provider.clone(),
             0,
-            aeris_contracts::ProviderConnectionState::Failed,
+            aeris_market_runtime::ProviderConnectionState::Failed,
             epochs.next(),
         ))
         .expect("retired provider state");
@@ -5364,7 +5364,7 @@ fn pane_harness_fenced_provider_state_rejects_wrong_provider_and_retired_selecti
         .send(connection(
             provider,
             1,
-            aeris_contracts::ProviderConnectionState::Online,
+            aeris_market_runtime::ProviderConnectionState::Online,
             epochs.next(),
         ))
         .expect("current provider state");
@@ -5713,7 +5713,7 @@ fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
             .publications
             .send(harness.fixture_readiness(
                 1,
-                aeris_contracts::SeriesLoadState::Failed,
+                aeris_market_runtime::SeriesLoadState::Failed,
                 "private-credential-sentinel",
             ))
             .expect("bounded fixture mailbox accepts failure");

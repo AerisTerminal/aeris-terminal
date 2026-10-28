@@ -20,7 +20,7 @@ use std::{
 };
 
 use aeris_account_runtime::AccountService;
-use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+use aeris_account_runtime::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// A window's account-change callback. The session holds it weakly.
 pub type AccountChangeWake = Arc<dyn Fn() + Send + Sync>;
@@ -1201,7 +1201,7 @@ mod tests {
         resolve_authoritative_authentication, sanitized_plan_label, unavailable_menu_state,
     };
     use aeris_account_runtime::{AccountService, AccountServiceConfig};
-    use aeris_contracts::{AccountSessionState, AccountView};
+    use aeris_account_runtime::{AccountSessionState, AccountView};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},

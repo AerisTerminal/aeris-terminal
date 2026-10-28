@@ -2,10 +2,8 @@
 
 use std::fmt;
 
-use aeris_contracts::{
-    InstallProviderInstrument, ProviderDailyBarCadence, ProviderPresentationDescriptor,
-    SeriesCadence, SeriesKey,
-};
+use crate::{ProviderDailyBarCadence, ProviderPresentationDescriptor};
+use aeris_contracts::{InstallProviderInstrument, SeriesCadence, SeriesKey};
 use aeris_instruments::CalendarSourceKind;
 use aeris_market_data::{BarPeriod, BarSeriesKey, ChartInterval};
 
@@ -207,8 +205,9 @@ fn unsupported(
 #[cfg(test)]
 mod tests {
     use super::{legacy_interval, persisted_interval, resolve_cadence};
+    use crate::ProviderDailyBarCadence;
     use crate::built_in_provider_presentations;
-    use aeris_contracts::{ProviderDailyBarCadence, SeriesCadence, SeriesKey};
+    use aeris_contracts::{SeriesCadence, SeriesKey};
     use aeris_instruments::CalendarSourceKind;
     use aeris_market_data::{BarPeriod, ChartInterval};
 

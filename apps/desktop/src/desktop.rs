@@ -117,18 +117,17 @@ use aeris_chart_integration::{
 use aeris_context_runtime::{ContextSnapshot, ContextSource};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState,
-    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
-    WorkspaceChartPaneHeightState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
-    WorkspaceChartStudyState, WorkspaceChromeState, WorkspaceCumulativeDeltaState,
-    WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState, WorkspaceLayoutState,
-    WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    SeriesKey, WorkspaceBigTradesState, WorkspaceChartAppearanceState,
+    WorkspaceChartIndicatorState, WorkspaceChartLegendState, WorkspaceChartPaneHeightState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceChromeState, WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
+    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
+    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSavedLayoutState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
@@ -149,6 +148,10 @@ use aeris_market_runtime::study::{
 use aeris_market_runtime::{
     MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,
     StreamRequirements,
+};
+use aeris_market_runtime::{
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+    SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_observability::FeedConnectionState;
 use aeris_observability::diagnostic;
@@ -729,7 +732,7 @@ const fn stabilized_connection_state(
 
 fn provider_presentation(
     provider: ProviderId,
-) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
+) -> Option<&'static aeris_market_runtime::ProviderPresentationDescriptor> {
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider.id())
@@ -742,9 +745,9 @@ fn provider_order_queues_available(provider: ProviderId) -> bool {
 }
 
 fn presentation_order_queues_available(
-    descriptor: &aeris_contracts::ProviderPresentationDescriptor,
+    descriptor: &aeris_market_runtime::ProviderPresentationDescriptor,
 ) -> bool {
-    descriptor.feed_level == aeris_contracts::ProviderFeedLevel::OrderLevels
+    descriptor.feed_level == aeris_market_runtime::ProviderFeedLevel::OrderLevels
 }
 
 /// Whether the provider streams trade prints. Footprint charts, tape studies and
@@ -899,7 +902,7 @@ struct WorkspaceSurface {
     #[cfg(feature = "diagnostics")]
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
-    market_session_status: Option<aeris_contracts::MarketSessionStatus>,
+    market_session_status: Option<aeris_market_runtime::MarketSessionStatus>,
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPaneState,
     trading_pane_token: aeris_desktop::trading::TradingPaneToken,
@@ -1289,10 +1292,10 @@ impl ProviderId {
 fn provider_ready_message(provider: ProviderId, product: &InstallProviderInstrument) -> String {
     let descriptor = provider_presentation(provider);
     let symbol = match descriptor.map(|descriptor| descriptor.catalog_symbol) {
-        Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
+        Some(aeris_market_runtime::ProviderCatalogSymbol::DisplaySymbol) => {
             product.display_symbol.as_str()
         }
-        Some(aeris_contracts::ProviderCatalogSymbol::ProviderSymbol) | None => {
+        Some(aeris_market_runtime::ProviderCatalogSymbol::ProviderSymbol) | None => {
             product.provider_symbol.as_str()
         }
     };
@@ -2894,7 +2897,7 @@ struct HeaderState {
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
     /// Runtime session projection for the selected product, shown by the header market dot.
-    market_session: Option<aeris_contracts::MarketSessionStatus>,
+    market_session: Option<aeris_market_runtime::MarketSessionStatus>,
     instrument_scroll: ScrollHandle,
 }
 

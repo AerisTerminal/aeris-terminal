@@ -1,8 +1,8 @@
 //! Provider and instrument metadata published by the market runtime.
 
+use crate::{ProviderConnectionKind, ProviderPresentationDescriptor};
 use aeris_contracts::{
-    InstallProviderInstrument, ProviderConnectionKind, ProviderContractMetadata,
-    ProviderInstrumentClass, ProviderPresentationDescriptor,
+    InstallProviderInstrument, ProviderContractMetadata, ProviderInstrumentClass,
 };
 use aeris_instruments::{CalendarSourceKind, InstrumentClass, PriceGrid};
 use aeris_market_data::{BarPeriod, BarSeriesKey, ChartInterval};
@@ -165,7 +165,7 @@ impl InstrumentRequest {
                     .find(|provider| provider.id == instrument.provider)
                     .map(|provider| provider.catalog_symbol)
                 {
-                    Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
+                    Some(crate::ProviderCatalogSymbol::DisplaySymbol) => {
                         instrument.display_symbol.clone()
                     }
                     _ => instrument.provider_symbol.clone(),

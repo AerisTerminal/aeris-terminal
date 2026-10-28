@@ -24,7 +24,6 @@ aeris_market_engine = { path = "../../crates/market_engine" }
 aeris_market_data = { path = "../../crates/domain/market_data" }
 aeris_instruments = { path = "../../crates/domain/instruments" }
 aeris_platform_runtime = { path = "../../crates/platform_runtime" }
-aeris_contracts = { path = "../../crates/contracts" }
 aeris_trading = { path = "../../crates/domain/trading" }
 aeris_trading_runtime = { path = "../../crates/trading_runtime" }
 chrono.workspace = true

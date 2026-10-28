@@ -13,6 +13,12 @@ use std::{
 };
 
 use crate::{
+    EngineFaultCode, FailureStage, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderCatalogSymbol, ProviderConnectionState, ProviderInstrumentSearchResult,
+    ProviderMarketScreen, ProviderPresentationDescriptor, ProviderState, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
+};
+use crate::{
     MarketRuntimeEvent,
     study::{
         MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE, MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE,
@@ -20,13 +26,7 @@ use crate::{
         StudyRuntime, StudyRuntimeConfig,
     },
 };
-use aeris_contracts::{
-    EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderCatalogSymbol, ProviderConnectionState,
-    ProviderInstrumentSearchResult, ProviderMarketScreen, ProviderPresentationDescriptor,
-    ProviderState, ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
-    SeriesLoadState,
-};
+use aeris_contracts::InstallProviderInstrument;
 use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
 use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
@@ -966,11 +966,11 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
         "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h",
         "12h", "1D", "1W", "1M",
     ],
-    daily_bars: aeris_contracts::ProviderDailyBarCadence::TradingSession,
+    daily_bars: crate::ProviderDailyBarCadence::TradingSession,
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
     broker_venue_id: Some(aeris_trading::venue::BROKER_VENUE_ID),
-    attribution: Some(aeris_contracts::ProviderAttribution {
+    attribution: Some(crate::ProviderAttribution {
         market_data_mark_key: "market_data_by_rithmic",
         powered_by_mark_key: "powered_by_omne",
         notices: &[
@@ -985,11 +985,11 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     catalog_refresh_on_startup: false,
     ready_label_suffix: "",
     // Rithmic streams depth by order, not only aggregated price levels.
-    feed_level: aeris_contracts::ProviderFeedLevel::OrderLevels,
+    feed_level: crate::ProviderFeedLevel::OrderLevels,
     search_categories_available: false,
     market_screen_available: false,
     trades_available: true,
-    connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
+    connection_kind: crate::ProviderConnectionKind::Credentials,
 };
 
 const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
@@ -1042,7 +1042,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     chart_interval_labels: &[
         "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
     ],
-    daily_bars: aeris_contracts::ProviderDailyBarCadence::FixedDay,
+    daily_bars: crate::ProviderDailyBarCadence::FixedDay,
     search_hint: "Search Hyperliquid markets",
     logo_key: "hyperliquid",
     broker_venue_id: None,
@@ -1051,11 +1051,11 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     selection_entitlement_id: "hyperliquid-public",
     catalog_refresh_on_startup: true,
     ready_label_suffix: "",
-    feed_level: aeris_contracts::ProviderFeedLevel::PriceLevels,
+    feed_level: crate::ProviderFeedLevel::PriceLevels,
     search_categories_available: false,
     market_screen_available: true,
     trades_available: true,
-    connection_kind: aeris_contracts::ProviderConnectionKind::Public,
+    connection_kind: crate::ProviderConnectionKind::Public,
 };
 
 const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
@@ -1617,7 +1617,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
 }
 
 fn publishes_order_levels(descriptor: &ProviderDescriptor) -> bool {
-    descriptor.presentation.feed_level == aeris_contracts::ProviderFeedLevel::OrderLevels
+    descriptor.presentation.feed_level == crate::ProviderFeedLevel::OrderLevels
 }
 
 fn configured_engine_from_descriptors(

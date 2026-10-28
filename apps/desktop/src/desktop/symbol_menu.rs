@@ -106,7 +106,7 @@ pub(super) struct InstrumentSelectorState {
     /// The provider whose exchange and category flyout is shown beside the dropdown.
     pub(super) flyout_provider: Option<ProviderId>,
     pub(super) learned_exchanges: Vec<(ProviderId, Vec<ExchangeCode>)>,
-    pub(super) search_categories: aeris_contracts::InstrumentSearchCategories,
+    pub(super) search_categories: aeris_market_runtime::InstrumentSearchCategories,
 }
 
 pub(super) struct InstrumentSelectorAvailability {

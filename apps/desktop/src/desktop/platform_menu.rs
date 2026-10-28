@@ -167,7 +167,7 @@ pub(super) struct PlatformMenuContent<'a> {
     pub(super) window_frame: chart_chrome::WindowFrame,
     pub(super) drawing_toolbar_visible: bool,
     /// Notices appear under About only while their provider's session is held.
-    pub(super) attribution: Option<aeris_contracts::ProviderAttribution>,
+    pub(super) attribution: Option<aeris_market_runtime::ProviderAttribution>,
     pub(super) now_unix_seconds: i64,
 }
 
@@ -319,7 +319,7 @@ struct PlatformMenuLayout {
     actions: usize,
     error: bool,
     about_details: usize,
-    attribution: Option<aeris_contracts::ProviderAttribution>,
+    attribution: Option<aeris_market_runtime::ProviderAttribution>,
 }
 
 impl PlatformMenuLayout {
@@ -363,7 +363,7 @@ impl PlatformMenuLayout {
 
 fn about_section_height(
     details: usize,
-    attribution: Option<aeris_contracts::ProviderAttribution>,
+    attribution: Option<aeris_market_runtime::ProviderAttribution>,
 ) -> f32 {
     let notices = if attribution.is_some() {
         ABOUT_NOTICES_HEIGHT
@@ -943,7 +943,7 @@ fn about_details(
 
 fn about_section(
     details: Vec<(&'static str, String)>,
-    attribution: Option<aeris_contracts::ProviderAttribution>,
+    attribution: Option<aeris_market_runtime::ProviderAttribution>,
     now_unix_seconds: i64,
     update: &UpdateView,
     on_update: &UpdateActivate,
@@ -1011,7 +1011,7 @@ fn about_section(
 }
 
 fn provider_notice_texts(
-    attribution: aeris_contracts::ProviderAttribution,
+    attribution: aeris_market_runtime::ProviderAttribution,
     year: i64,
 ) -> Vec<String> {
     attribution
@@ -1022,7 +1022,7 @@ fn provider_notice_texts(
 }
 
 fn provider_notices(
-    attribution: aeris_contracts::ProviderAttribution,
+    attribution: aeris_market_runtime::ProviderAttribution,
     year: i64,
     theme: &AerisTheme,
 ) -> impl IntoElement {

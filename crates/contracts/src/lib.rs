@@ -1,26 +1,16 @@
-//! Shared in-process and persisted `Aeris` contracts.
+//! Persisted `Aeris` workspace schema.
 //!
-//! These prost DTOs carry bounded market/account metadata between ownership
-//! boundaries in the single desktop process and encode the local workspace file.
-//! No transport framing, peer protocol, socket, or process boundary lives here.
+//! These prost messages encode the local workspace file, including the
+//! provider instrument and series identities a saved pane restores. Only
+//! durable schema lives here; in-process market and account types belong to
+//! their owning runtimes.
 
-pub mod account;
 mod messages;
-pub mod provider;
 
-pub use account::{
-    AccountSessionState, AccountView, BeginLogin, CancelLogin, GetAccountStatus,
-    LoginAuthorization, RefreshAccountProfile, SignOut,
-};
 pub use messages::{
-    EngineFaultCode, FailureStage, Fault, InstallProviderInstrument, InstrumentSearchCategories,
-    MarketSessionPhase, MarketSessionSource, MarketSessionStatus, PriceAlertCondition,
-    PriceAlertFrequency, PriceAlertStatus, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderConnectionState, ProviderContractMetadata, ProviderInstrumentClass,
-    ProviderInstrumentKind, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    ProviderMarketScreen, ProviderMarketStatistics, ProviderSessionHours, ProviderState,
-    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesKey, SeriesLoadState, WorkspaceBigTradesState, WorkspaceChartAppearanceState,
+    InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
+    ProviderContractMetadata, ProviderInstrumentClass, ProviderSessionHours, SeriesCadence,
+    SeriesKey, WorkspaceBigTradesState, WorkspaceChartAppearanceState,
     WorkspaceChartIndicatorState, WorkspaceChartLegendState, WorkspaceChartPaneHeightState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceChromePoint, WorkspaceChromeState, WorkspaceCumulativeDeltaState,
@@ -31,8 +21,4 @@ pub use messages::{
     WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
     WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
-};
-pub use provider::{
-    ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,
-    ProviderFeedLevel, ProviderPresentationDescriptor,
 };

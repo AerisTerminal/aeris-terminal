@@ -2043,7 +2043,10 @@ impl TerminalApp {
     }
 
     /// Attribution follows any pane holding the provider's session, including recovery.
-    fn held_provider_attribution(&self, cx: &App) -> Option<aeris_contracts::ProviderAttribution> {
+    fn held_provider_attribution(
+        &self,
+        cx: &App,
+    ) -> Option<aeris_market_runtime::ProviderAttribution> {
         self.tabs
             .iter()
             .flat_map(|workspace| &workspace.panes)

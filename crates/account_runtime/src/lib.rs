@@ -5,7 +5,9 @@
 //! secondary-engine lifecycle.
 
 mod account_service;
+mod view;
 
 pub use account_service::{
     AccountRefreshQuiesce, AccountRestoreReadiness, AccountService, AccountServiceConfig,
 };
+pub use view::{AccountSessionState, AccountView, LoginAuthorization};

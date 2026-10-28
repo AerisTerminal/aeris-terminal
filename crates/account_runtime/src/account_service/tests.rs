@@ -7,8 +7,8 @@ use super::{
     SESSION_REFRESH_JITTER_SECONDS, SessionRefresh, UnavailableVault, claim_profile_refresh,
     oidc::{self, AccountProfile, OidcEndpoints, SecretToken, VerifiedTokens},
 };
+use crate::{AccountSessionState, AccountView};
 use aeris_account::AccountId;
-use aeris_contracts::{AccountSessionState, AccountView};
 use aeris_platform_runtime::CredentialVault;
 use std::{
     collections::HashMap,
