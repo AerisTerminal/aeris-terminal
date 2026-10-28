@@ -899,7 +899,8 @@ mod tests {
     use aeris_market_runtime::fence::{ConsumerTag, EpochSequence, Fenced};
     use aeris_market_runtime::{
         CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
-        MarketProviderGeneration, MarketProviderInstrumentSelection, MarketTradeTapeSnapshot,
+        MarketProviderGeneration, MarketProviderInstrumentSelection, MarketTradeTapeOperation,
+        MarketTradeTapeUpdate,
     };
     use std::collections::BTreeMap;
 
@@ -3495,7 +3496,7 @@ mod tests {
         let product = fixture_futures_contract("MNQ");
         let (sender, receiver) =
             market_projection_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        let snapshot = |generation, revision| MarketTradeTapeSnapshot {
+        let update = |generation, revision| MarketTradeTapeUpdate {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::new(generation).unwrap_or(NonZeroU64::MIN)),
             provider_id: product.provider.clone(),
@@ -3507,16 +3508,19 @@ mod tests {
             rewrite_generation: 0,
             price_scale: 2,
             quantity_scale: 0,
-            trades: Arc::from([]),
+            sweeps: Arc::from([]),
+            operation: MarketTradeTapeOperation::Reset {
+                trades: Arc::from([]),
+            },
         };
         let endpoint = series_endpoint(sender, 1, 2);
-        let deliver = |snapshot| {
+        let deliver = |update| {
             runtime::deliver_runtime_trade_tape(
                 &endpoint,
-                fenced_event(MarketRuntimeEvent::TradeTapeSnapshot(snapshot)),
+                fenced_event(MarketRuntimeEvent::TradeTapeUpdate(update)),
             )
         };
-        let mut future = snapshot(3, 10);
+        let mut future = update(3, 10);
         assert_eq!(
             deliver(future.clone()),
             Err("engine trade-tape generation advanced unexpectedly".into())
@@ -3526,15 +3530,15 @@ mod tests {
             deliver(future),
             Err("engine trade-tape consumer mismatched".into())
         );
-        assert_eq!(deliver(snapshot(1, 8)), Ok(()));
-        assert_eq!(deliver(snapshot(2, 9)), Ok(()));
+        assert_eq!(deliver(update(1, 8)), Ok(()));
+        assert_eq!(deliver(update(2, 9)), Ok(()));
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
             [PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection { event: Fenced {
-                value: MarketRuntimeEvent::TradeTapeSnapshot(snapshot),
+                value: MarketRuntimeEvent::TradeTapeUpdate(update),
                 ..
-            }, .. })] if snapshot.revision == 9
+            }, .. })] if update.revision == 9
         ));
     }
 

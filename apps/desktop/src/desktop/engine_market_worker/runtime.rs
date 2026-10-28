@@ -462,17 +462,12 @@ fn apply_received_event(
         return Ok(false);
     }
     let event = event.value;
-    // The runtime publishes the incremental tape beside the legacy full-tape
-    // snapshot; the desktop consumes Append/Reset in stabilization M7.11.
-    if matches!(event, MarketRuntimeEvent::TradeTapeUpdate(_)) {
-        return Ok(false);
-    }
     if is_series_status(&event)
         || is_bar_publication(&event)
         || matches!(event, MarketRuntimeEvent::OrderBookSnapshot(_))
         || matches!(
             event,
-            MarketRuntimeEvent::TradeTapeSnapshot(_)
+            MarketRuntimeEvent::TradeTapeUpdate(_)
                 | MarketRuntimeEvent::StudyOutputSnapshot(_)
                 | MarketRuntimeEvent::StudyOutputsInvalidated(_)
                 | MarketRuntimeEvent::StudyRemoved(_)
@@ -567,7 +562,7 @@ fn deliver_fenced_pane_event(
             deliver_runtime_series_publication(endpoint, event, received_unix_nanos)
         }
         MarketRuntimeEvent::OrderBookSnapshot(_) => deliver_runtime_order_book(endpoint, event),
-        MarketRuntimeEvent::TradeTapeSnapshot(_) => deliver_runtime_trade_tape(endpoint, event),
+        MarketRuntimeEvent::TradeTapeUpdate(_) => deliver_runtime_trade_tape(endpoint, event),
         MarketRuntimeEvent::StudyOutputSnapshot(_)
         | MarketRuntimeEvent::StudyOutputsInvalidated(_)
         | MarketRuntimeEvent::StudyRemoved(_) => deliver_runtime_study(endpoint, event),
@@ -707,16 +702,16 @@ pub(super) fn deliver_runtime_trade_tape(
     endpoint: &WorkerEndpoint,
     event: aeris_market_runtime::MarketConsumerEvent,
 ) -> Result<(), String> {
-    let MarketRuntimeEvent::TradeTapeSnapshot(snapshot) = &event.value else {
+    let MarketRuntimeEvent::TradeTapeUpdate(update) = &event.value else {
         return Err("unexpected runtime trade-tape event".into());
     };
-    if snapshot.consumer_id.0.get() != endpoint.consumer_id {
+    if update.consumer_id.0.get() != endpoint.consumer_id {
         return Err("engine trade-tape consumer mismatched".into());
     }
-    if snapshot.generation.0.get() < endpoint.active_generation {
+    if update.generation.0.get() < endpoint.active_generation {
         return Ok(());
     }
-    if snapshot.generation.0.get() > endpoint.active_generation {
+    if update.generation.0.get() > endpoint.active_generation {
         return Err("engine trade-tape generation advanced unexpectedly".into());
     }
     endpoint

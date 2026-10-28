@@ -726,16 +726,39 @@ pub struct OrderFlowTrade {
     pub session_id: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct OrderFlowSweep {
-    pub first_ingestion_ordinal: u64,
-    pub last_ingestion_ordinal: u64,
-    pub timestamp_micros: i64,
-    pub terminal_price: f64,
-    pub total_volume: f64,
-    pub price_levels: u32,
-    pub aggressor: aeris_charts_engine::AggressorSide,
+/// How one incremental tape publication applies to the chart's order-flow
+/// stream. The pane's order-flow presenter owns continuity: the runtime's
+/// `Reset` arrives as a covering window, an `Append` as only its new prints.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderFlowTapeChange {
+    /// Install the covering retained window, replacing the span it covers.
+    ReplaceWindow,
+    /// Extend the installed window with prints newer than every applied print.
+    Append,
 }
+
+/// Why one order-flow tape apply failed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OrderFlowApplyError {
+    /// An append arrived before this stream's covering window was installed
+    /// (or after its price increment changed); resend the covering window.
+    AwaitingCoveringWindow,
+    /// Identity, fixed-point or engine failure; the tape was not applied.
+    Failed(String),
+}
+
+impl std::fmt::Display for OrderFlowApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AwaitingCoveringWindow => {
+                formatter.write_str("order-flow append awaits its covering window")
+            }
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for OrderFlowApplyError {}
 
 /// Aeris Charts-owned typed financial appearance, re-exported under the Terminal API name.
 pub type ChartAppearanceSettings = FinancialAppearance;
@@ -2682,7 +2705,6 @@ use order_book_depth::OrderBookDepthState;
 mod depth_heatmap;
 use depth_heatmap::DepthHeatmapState;
 mod order_flow;
-pub use order_flow::classify_order_flow_sweeps;
 mod palette;
 pub use palette::{ChartAxisAppearance, ChartThemeDefaults};
 mod pane_heights;

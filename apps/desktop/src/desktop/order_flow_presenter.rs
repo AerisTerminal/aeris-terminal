@@ -1,15 +1,15 @@
-//! The pane's order-flow presentation: the accepted trade tape, the sweeps highlighted in it,
-//! the Time & Sales filter and rows, and the order-book detail the market worker serves.
+//! The pane's order-flow presentation: the accepted trade-tape ring, the
+//! runtime-classified sweeps highlighted in it, the Time & Sales filter and
+//! rows, and the order-book detail the market worker serves.
 
 use super::time_sales_panel::TimeSalesRowsCache;
-use super::{
-    ChartAggressorSide, OrderBookDetail, OrderFlowSweep, OrderFlowTrade, classify_order_flow_sweeps,
+use super::{ChartAggressorSide, OrderBookDetail, OrderFlowTapeChange, OrderFlowTrade};
+use aeris_market_runtime::{
+    MAXIMUM_RECENT_LADDER_TRADES, MarketTradeSweep, MarketTradeTapeOperation,
+    MarketTradeTapeUpdate, RetainedMarketTrade,
 };
-use aeris_market_runtime::{MarketTradeTapeSnapshot, RetainedMarketTrade};
+use std::collections::VecDeque;
 use std::sync::Arc;
-
-/// The trailing trades the sweep classifier reads; every chart projection includes them.
-const SWEEP_CLASSIFICATION_WINDOW: usize = 512;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum TimeSalesSideFilter {
@@ -54,27 +54,68 @@ impl Default for TimeSalesFilter {
     }
 }
 
-/// Which trades a chart update takes from the tape.
+/// What one applied tape update asks of the chart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ChartTradeProjection {
-    /// The footprint continues after the chart's last applied ordinal, when it has one.
-    Footprint { resume_ordinal: Option<u64> },
-    /// The chart draws no footprint; only the sweep window is projected.
-    SweepsOnly,
+pub(super) enum TapeApply {
+    /// Install the covering retained window.
+    Reset,
+    /// Append the ring's trades from this index on.
+    Append { start: usize },
+    /// An older publication of the current stream; nothing changed.
+    Stale,
+    /// The append did not continue the ring. The tape was left unchanged and
+    /// the stream restarts from the runtime's next covering `Reset`.
+    Broken,
 }
 
-/// What moving the order-book demand to a new detail asks of the pane.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OrderBookDemandChange {
-    /// The book was hidden, so its view restarts from loading.
-    Opening,
-    /// The book stays open at another detail.
-    Changing,
+/// The pane's accepted tape: one bounded trailing window of retained prints
+/// plus the sweeps the runtime classified over it. The runtime's incremental
+/// `TradeTapeUpdate` stream mutates it; the desktop never reclassifies.
+pub(super) struct OrderFlowTape {
+    /// The selection generation this tape's stream belongs to; a new
+    /// selection restarts the stream with a `Reset` regardless of the
+    /// provider session's own generation numbering.
+    pub(super) selection_generation: u64,
+    pub(super) provider_generation: u64,
+    pub(super) revision: u64,
+    pub(super) price_scale: u8,
+    pub(super) quantity_scale: u8,
+    /// Newest prints last, bounded at the runtime's retained-tape bound. The
+    /// runtime restarts the stream with a `Reset` when an eviction would open
+    /// a gap, so an accepted `Append` never overflows it.
+    pub(super) trades: VecDeque<RetainedMarketTrade>,
+    pub(super) sweeps: Arc<[MarketTradeSweep]>,
+}
+
+impl OrderFlowTape {
+    fn new(update: &MarketTradeTapeUpdate, trades: VecDeque<RetainedMarketTrade>) -> Self {
+        Self {
+            selection_generation: update.generation.0.get(),
+            provider_generation: update.provider_generation,
+            revision: update.revision,
+            price_scale: update.price_scale,
+            quantity_scale: update.quantity_scale,
+            trades,
+            sweeps: Arc::clone(&update.sweeps),
+        }
+    }
+
+    fn refresh(&mut self, update: &MarketTradeTapeUpdate) {
+        self.selection_generation = update.generation.0.get();
+        self.provider_generation = update.provider_generation;
+        self.revision = update.revision;
+        self.price_scale = update.price_scale;
+        self.quantity_scale = update.quantity_scale;
+        self.sweeps = Arc::clone(&update.sweeps);
+    }
+
+    pub(super) fn sweeps(&self) -> &[MarketTradeSweep] {
+        &self.sweeps
+    }
 }
 
 pub(super) struct OrderFlowPresenter {
-    tape: Option<MarketTradeTapeSnapshot>,
-    sweeps: Arc<[OrderFlowSweep]>,
+    tape: Option<OrderFlowTape>,
     time_sales_filter: TimeSalesFilter,
     time_sales_rows: TimeSalesRowsCache,
     /// The order-book detail the market worker last accepted for this pane.
@@ -85,7 +126,6 @@ impl Default for OrderFlowPresenter {
     fn default() -> Self {
         Self {
             tape: None,
-            sweeps: Arc::from([]),
             time_sales_filter: TimeSalesFilter::default(),
             time_sales_rows: TimeSalesRowsCache::default(),
             order_book_demand: OrderBookDetail::Hidden,
@@ -94,12 +134,14 @@ impl Default for OrderFlowPresenter {
 }
 
 impl OrderFlowPresenter {
-    pub(super) const fn tape(&self) -> Option<&MarketTradeTapeSnapshot> {
+    pub(super) const fn tape(&self) -> Option<&OrderFlowTape> {
         self.tape.as_ref()
     }
 
-    pub(super) fn sweeps(&self) -> &[OrderFlowSweep] {
-        &self.sweeps
+    /// The accepted tape's sweeps, classified by the runtime over the
+    /// tape's trailing window.
+    pub(super) fn sweeps(&self) -> &[MarketTradeSweep] {
+        self.tape.as_ref().map_or(&[], OrderFlowTape::sweeps)
     }
 
     pub(super) const fn time_sales_filter(&self) -> TimeSalesFilter {
@@ -110,61 +152,89 @@ impl OrderFlowPresenter {
         &self.time_sales_rows
     }
 
-    /// Whether `snapshot` may replace the accepted tape. A new selection generation always
-    /// does; within one, an older provider generation or an older revision of the same
-    /// provider generation never does.
-    pub(super) fn supersedes(&self, snapshot: &MarketTradeTapeSnapshot) -> bool {
+    /// Whether the update may replace the accepted tape. A newer selection
+    /// generation always supersedes: the selection fence, not the provider
+    /// session's own generation numbering, decides which stream is current.
+    /// Within one selection an older provider generation or an older revision
+    /// of the same provider generation never applies.
+    fn supersedes(&self, update: &MarketTradeTapeUpdate) -> bool {
+        let selection_generation = update.generation.0.get();
         self.tape.as_ref().is_none_or(|current| {
-            current.generation != snapshot.generation
-                || (snapshot.provider_generation >= current.provider_generation
-                    && (current.provider_generation != snapshot.provider_generation
-                        || snapshot.revision >= current.revision))
+            selection_generation > current.selection_generation
+                || (selection_generation == current.selection_generation
+                    && (update.provider_generation > current.provider_generation
+                        || (update.provider_generation == current.provider_generation
+                            && update.revision >= current.revision)))
         })
     }
 
-    /// Whether `snapshot` rewrote the prefix of the accepted tape, so the chart must drop the
-    /// order flow it projected from it.
-    pub(super) fn rewrites(&self, snapshot: &MarketTradeTapeSnapshot) -> bool {
-        self.tape
-            .as_ref()
-            .is_some_and(|prior| prior.rewrite_generation != snapshot.rewrite_generation)
+    /// Applies one fenced incremental tape publication to the ring.
+    pub(super) fn apply_tape_update(&mut self, update: &MarketTradeTapeUpdate) -> TapeApply {
+        if !self.supersedes(update) {
+            return TapeApply::Stale;
+        }
+        match &update.operation {
+            MarketTradeTapeOperation::Reset { trades } => {
+                let mut ring: VecDeque<RetainedMarketTrade> = trades.iter().cloned().collect();
+                while ring.len() > MAXIMUM_RECENT_LADDER_TRADES {
+                    ring.pop_front();
+                }
+                self.tape = Some(OrderFlowTape::new(update, ring));
+                TapeApply::Reset
+            }
+            MarketTradeTapeOperation::Append {
+                from_ordinal,
+                trades,
+            } => {
+                let Some(tape) = self.tape.as_mut() else {
+                    return TapeApply::Broken;
+                };
+                let continues = trades.is_empty()
+                    || (tape.trades.back().is_some_and(|last| {
+                        last.ingestion_ordinal.saturating_add(1) == *from_ordinal
+                    }) && trades
+                        .first()
+                        .is_some_and(|first| first.ingestion_ordinal == *from_ordinal));
+                if !continues {
+                    return TapeApply::Broken;
+                }
+                tape.trades.extend(trades.iter().cloned());
+                while tape.trades.len() > MAXIMUM_RECENT_LADDER_TRADES {
+                    tape.trades.pop_front();
+                }
+                let start = tape.trades.len() - trades.len();
+                tape.refresh(update);
+                TapeApply::Append { start }
+            }
+        }
     }
 
-    pub(super) fn adopt_tape(&mut self, snapshot: MarketTradeTapeSnapshot) {
-        self.tape = Some(snapshot);
+    /// The chart trades one applied update contributes: the covering window
+    /// for a reset, or only the new suffix for an append. A trade whose price
+    /// or size cannot be represented projects nothing.
+    pub(super) fn chart_trades(
+        &self,
+        apply: TapeApply,
+    ) -> Option<(Vec<OrderFlowTrade>, OrderFlowTapeChange)> {
+        let tape = self.tape.as_ref()?;
+        let (start, change) = match apply {
+            TapeApply::Reset => (0, OrderFlowTapeChange::ReplaceWindow),
+            TapeApply::Append { start } => (start, OrderFlowTapeChange::Append),
+            TapeApply::Stale | TapeApply::Broken => return None,
+        };
+        chart_order_flow_trades(
+            tape.trades.iter().skip(start),
+            tape.price_scale,
+            tape.quantity_scale,
+        )
+        .map(|trades| (trades, change))
     }
 
-    /// Forgets the tape, its sweeps and projected rows when the pane leaves its instrument.
-    /// The filter is the trader's choice and stays.
+    /// Forgets the tape and projected rows when the pane leaves its
+    /// instrument. The filter is the trader's choice and stays.
     pub(super) fn clear_instrument(&mut self) {
         self.tape = None;
-        self.sweeps = Arc::from([]);
         self.time_sales_rows = TimeSalesRowsCache::default();
-    }
-
-    /// The chart trades `snapshot` contributes under `projection`, classifying the sweeps of
-    /// their trailing window. A trade whose price or size cannot be represented projects
-    /// nothing and keeps the previous sweeps.
-    pub(super) fn project_chart_trades(
-        &mut self,
-        snapshot: &MarketTradeTapeSnapshot,
-        projection: ChartTradeProjection,
-    ) -> Option<Vec<OrderFlowTrade>> {
-        let start = match projection {
-            ChartTradeProjection::Footprint { resume_ordinal } => order_flow_projection_start(
-                &snapshot.trades,
-                resume_ordinal,
-                SWEEP_CLASSIFICATION_WINDOW,
-            ),
-            ChartTradeProjection::SweepsOnly => snapshot
-                .trades
-                .len()
-                .saturating_sub(SWEEP_CLASSIFICATION_WINDOW),
-        };
-        let trades = chart_order_flow_trades(snapshot, start)?;
-        let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
-        self.sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
-        Some(trades)
     }
 
     pub(super) const fn cycle_time_sales_side(&mut self) {
@@ -219,36 +289,27 @@ impl OrderFlowPresenter {
     }
 }
 
+/// What moving the order-book demand to a new detail asks of the pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OrderBookDemandChange {
+    /// The book was hidden, so its view restarts from loading.
+    Opening,
+    /// The book stays open at another detail.
+    Changing,
+}
+
 fn scaled_market_value(value: i64, scale: u8) -> Option<f64> {
     let divisor = 10_f64.powi(i32::from(scale));
     let converted = num_traits::ToPrimitive::to_f64(&value)? / divisor;
     converted.is_finite().then_some(converted)
 }
 
-/// The first retained trade a chart update still needs. Keeping one trade the chart
-/// already applied preserves the window's continuity evidence, and the trailing
-/// `tail_window` trades are always projected for the sweep classifier.
-fn order_flow_projection_start(
-    trades: &[RetainedMarketTrade],
-    resume_ordinal: Option<u64>,
-    tail_window: usize,
-) -> usize {
-    let Some(applied) = resume_ordinal else {
-        return 0;
-    };
-    let next = trades.partition_point(|trade| trade.ingestion_ordinal <= applied);
-    next.saturating_sub(1)
-        .min(trades.len().saturating_sub(tail_window))
-}
-
-fn chart_order_flow_trades(
-    snapshot: &MarketTradeTapeSnapshot,
-    start: usize,
+fn chart_order_flow_trades<'a>(
+    trades: impl Iterator<Item = &'a RetainedMarketTrade>,
+    price_scale: u8,
+    quantity_scale: u8,
 ) -> Option<Vec<OrderFlowTrade>> {
-    snapshot
-        .trades
-        .get(start..)?
-        .iter()
+    trades
         .map(|retained| {
             let trade = retained.trade.as_ref();
             let timestamp_nanos = trade
@@ -260,8 +321,8 @@ fn chart_order_flow_trades(
             Some(OrderFlowTrade {
                 ingestion_ordinal: retained.ingestion_ordinal,
                 timestamp_micros: timestamp_nanos.div_euclid(1_000),
-                price: scaled_market_value(trade.price, snapshot.price_scale)?,
-                volume: scaled_market_value(trade.quantity, snapshot.quantity_scale)?,
+                price: scaled_market_value(trade.price, price_scale)?,
+                volume: scaled_market_value(trade.quantity, quantity_scale)?,
                 aggressor: match trade.aggressor {
                     aeris_market_data::AggressorSide::Buy => ChartAggressorSide::Buy,
                     aeris_market_data::AggressorSide::Sell => ChartAggressorSide::Sell,
@@ -314,17 +375,14 @@ mod tests {
         }
     }
 
-    fn tape(
-        selection: u64,
+    fn tape_update(
         provider_generation: u64,
         revision: u64,
-        trades: Vec<RetainedMarketTrade>,
-    ) -> MarketTradeTapeSnapshot {
-        MarketTradeTapeSnapshot {
+        operation: MarketTradeTapeOperation,
+    ) -> MarketTradeTapeUpdate {
+        MarketTradeTapeUpdate {
             consumer_id: aeris_market_runtime::MarketConsumerId(NonZeroU64::MIN),
-            generation: aeris_market_runtime::MarketGenerationId(
-                NonZeroU64::new(selection).expect("selection generation is nonzero"),
-            ),
+            generation: aeris_market_runtime::MarketGenerationId(NonZeroU64::MIN),
             provider_id: "provider".into(),
             instrument_id: "instrument".into(),
             entitlement_id: "entitlement".into(),
@@ -334,132 +392,255 @@ mod tests {
             rewrite_generation: 0,
             price_scale: 0,
             quantity_scale: 0,
-            trades: trades.into(),
+            sweeps: Arc::from([]),
+            operation,
         }
     }
 
-    #[test]
-    fn tape_ordering_rejects_only_older_publications_of_one_selection() {
-        let mut presenter = OrderFlowPresenter::default();
-        assert!(presenter.supersedes(&tape(1, 2, 5, Vec::new())));
-        presenter.adopt_tape(tape(1, 2, 5, Vec::new()));
+    fn reset(
+        provider_generation: u64,
+        revision: u64,
+        trades: Vec<RetainedMarketTrade>,
+    ) -> MarketTradeTapeUpdate {
+        tape_update(
+            provider_generation,
+            revision,
+            MarketTradeTapeOperation::Reset {
+                trades: trades.into(),
+            },
+        )
+    }
 
-        assert!(
-            presenter.supersedes(&tape(1, 2, 5, Vec::new())),
-            "a repeat revision applies"
+    fn append(
+        provider_generation: u64,
+        revision: u64,
+        from_ordinal: u64,
+        trades: Vec<RetainedMarketTrade>,
+    ) -> MarketTradeTapeUpdate {
+        tape_update(
+            provider_generation,
+            revision,
+            MarketTradeTapeOperation::Append {
+                from_ordinal,
+                trades: trades.into(),
+            },
+        )
+    }
+
+    fn ring_ordinals(presenter: &OrderFlowPresenter) -> Vec<u64> {
+        presenter
+            .tape()
+            .expect("accepted tape")
+            .trades
+            .iter()
+            .map(|trade| trade.ingestion_ordinal)
+            .collect()
+    }
+
+    #[test]
+    fn a_reset_installs_the_covering_window_and_projects_it_wholesale() {
+        let mut presenter = OrderFlowPresenter::default();
+        let trades = (1..=3).map(retained_tape_trade).collect();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 1, trades)),
+            TapeApply::Reset
         );
-        assert!(presenter.supersedes(&tape(1, 2, 6, Vec::new())));
-        assert!(!presenter.supersedes(&tape(1, 2, 4, Vec::new())));
-        assert!(
-            presenter.supersedes(&tape(1, 3, 1, Vec::new())),
-            "a newer provider generation restarts revisions"
+        assert_eq!(ring_ordinals(&presenter), [1, 2, 3]);
+        let (trades, change) = presenter
+            .chart_trades(TapeApply::Reset)
+            .expect("representable trades");
+        assert_eq!(change, OrderFlowTapeChange::ReplaceWindow);
+        assert_eq!(trades.len(), 3);
+        assert_eq!(trades[0].ingestion_ordinal, 1);
+    }
+
+    #[test]
+    fn an_append_extends_the_ring_and_projects_only_its_suffix() {
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 1, (1..=3).map(retained_tape_trade).collect())),
+            TapeApply::Reset
         );
-        assert!(!presenter.supersedes(&tape(1, 1, 9, Vec::new())));
-        assert!(
-            presenter.supersedes(&tape(2, 1, 1, Vec::new())),
-            "a new selection replaces the tape outright"
+        let apply = presenter.apply_tape_update(&append(
+            1,
+            2,
+            4,
+            (4..=5).map(retained_tape_trade).collect(),
+        ));
+        assert_eq!(apply, TapeApply::Append { start: 3 });
+        assert_eq!(ring_ordinals(&presenter), [1, 2, 3, 4, 5]);
+        let (trades, change) = presenter.chart_trades(apply).expect("representable");
+        assert_eq!(change, OrderFlowTapeChange::Append);
+        assert_eq!(
+            trades
+                .iter()
+                .map(|trade| trade.ingestion_ordinal)
+                .collect::<Vec<_>>(),
+            [4, 5]
         );
     }
 
     #[test]
-    fn a_rewrite_is_reported_only_against_an_accepted_tape() {
+    fn an_append_must_continue_the_ring() {
         let mut presenter = OrderFlowPresenter::default();
-        let mut rewritten = tape(1, 1, 2, Vec::new());
-        rewritten.rewrite_generation = 1;
-        assert!(!presenter.rewrites(&rewritten));
-        presenter.adopt_tape(tape(1, 1, 1, Vec::new()));
-        assert!(!presenter.rewrites(&tape(1, 1, 2, Vec::new())));
-        assert!(presenter.rewrites(&rewritten));
+        assert_eq!(
+            presenter.apply_tape_update(&append(1, 1, 1, vec![retained_tape_trade(1)])),
+            TapeApply::Broken,
+            "the runtime's first publication is always a covering reset"
+        );
+        assert!(presenter.tape().is_none());
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 1, (1..=3).map(retained_tape_trade).collect())),
+            TapeApply::Reset
+        );
+        assert_eq!(
+            presenter.apply_tape_update(&append(1, 2, 5, vec![retained_tape_trade(5)])),
+            TapeApply::Broken,
+            "a gap opens only when the runtime missed a reset"
+        );
+        assert_eq!(
+            ring_ordinals(&presenter),
+            [1, 2, 3],
+            "a broken append leaves the accepted tape unchanged"
+        );
+        // The stream recovers from the next covering reset.
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 3, (3..=6).map(retained_tape_trade).collect())),
+            TapeApply::Reset
+        );
+        assert_eq!(ring_ordinals(&presenter), [3, 4, 5, 6]);
     }
 
     #[test]
-    fn leaving_the_instrument_forgets_the_tape_and_sweeps_but_keeps_the_filter() {
+    fn older_revisions_and_provider_generations_never_apply() {
         let mut presenter = OrderFlowPresenter::default();
-        let trades = (1..=3)
-            .map(|ordinal| {
-                retained_trade_at(
-                    ordinal,
-                    ordinal * 1_000,
-                    100 + i64::try_from(ordinal).expect("small"),
-                    50,
-                )
-            })
-            .collect();
-        let snapshot = tape(1, 1, 1, trades);
-        assert!(
-            presenter
-                .project_chart_trades(&snapshot, ChartTradeProjection::SweepsOnly)
-                .is_some()
+        assert_eq!(
+            presenter.apply_tape_update(&reset(2, 5, vec![retained_tape_trade(1)])),
+            TapeApply::Reset
         );
-        presenter.adopt_tape(snapshot);
+        assert_eq!(
+            presenter.apply_tape_update(&append(2, 4, 2, vec![retained_tape_trade(2)])),
+            TapeApply::Stale,
+            "an older revision of the same provider session"
+        );
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 9, vec![retained_tape_trade(1)])),
+            TapeApply::Stale,
+            "an older provider session"
+        );
+        assert_eq!(
+            presenter.apply_tape_update(&append(2, 5, 2, vec![retained_tape_trade(2)])),
+            TapeApply::Append { start: 1 },
+            "a repeat revision still applies"
+        );
+        assert_eq!(ring_ordinals(&presenter), [1, 2]);
+    }
+
+    #[test]
+    fn a_newer_selection_generation_supersedes_regardless_of_provider_numbering() {
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(9, 5, vec![retained_tape_trade(1)])),
+            TapeApply::Reset
+        );
+        // A new selection can sit on a provider session whose generation
+        // numbering starts lower; its covering reset still replaces the tape.
+        let mut reselection = reset(1, 1, vec![retained_tape_trade(7)]);
+        reselection.generation =
+            aeris_market_runtime::MarketGenerationId(NonZeroU64::new(2).expect("nonzero"));
+        assert_eq!(presenter.apply_tape_update(&reselection), TapeApply::Reset);
+        assert_eq!(ring_ordinals(&presenter), [7]);
+    }
+
+    #[test]
+    fn an_overflow_reset_replaces_the_ring_after_eviction() {
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 1, (1..=4).map(retained_tape_trade).collect())),
+            TapeApply::Reset
+        );
+        // The consumer's queue overflowed; the runtime covered it with one reset.
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 2, (3..=6).map(retained_tape_trade).collect())),
+            TapeApply::Reset
+        );
+        assert_eq!(ring_ordinals(&presenter), [3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn the_ring_stays_bounded_at_the_runtime_tape_bound() {
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(
+                1,
+                1,
+                (1..=u64::try_from(MAXIMUM_RECENT_LADDER_TRADES).expect("capacity"))
+                    .map(retained_tape_trade)
+                    .collect(),
+            )),
+            TapeApply::Reset
+        );
+        let appended = u64::try_from(MAXIMUM_RECENT_LADDER_TRADES).expect("capacity") + 1;
+        assert_eq!(
+            presenter.apply_tape_update(&append(
+                1,
+                2,
+                appended,
+                vec![retained_tape_trade(appended)],
+            )),
+            TapeApply::Append {
+                start: MAXIMUM_RECENT_LADDER_TRADES - 1
+            }
+        );
+        let ring = ring_ordinals(&presenter);
+        assert_eq!(ring.len(), MAXIMUM_RECENT_LADDER_TRADES);
+        assert_eq!(ring.first(), Some(&2));
+        assert_eq!(ring.last(), Some(&appended));
+    }
+
+    #[test]
+    fn sweeps_come_from_the_update_and_survive_appends() {
+        let sweep = MarketTradeSweep {
+            first_ingestion_ordinal: 2,
+            last_ingestion_ordinal: 3,
+            timestamp_micros: 3_000_000,
+            terminal_price: 100.0,
+            total_volume: 9.0,
+            price_levels: 2,
+            aggressor: aeris_market_data::AggressorSide::Buy,
+        };
+        let mut initial = reset(1, 1, (1..=3).map(retained_tape_trade).collect());
+        initial.sweeps = Arc::from([sweep]);
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(presenter.apply_tape_update(&initial), TapeApply::Reset);
+        assert_eq!(presenter.sweeps(), &[sweep]);
+
+        let mut next = append(1, 2, 4, vec![retained_tape_trade(4)]);
+        next.sweeps = Arc::from([sweep]);
+        assert_eq!(
+            presenter.apply_tape_update(&next),
+            TapeApply::Append { start: 3 }
+        );
+        assert_eq!(
+            presenter.sweeps(),
+            &[sweep],
+            "an append adopts the runtime's current classification"
+        );
+    }
+
+    #[test]
+    fn leaving_the_instrument_forgets_the_tape_but_keeps_the_filter() {
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 1, (1..=3).map(retained_tape_trade).collect())),
+            TapeApply::Reset
+        );
         presenter.cycle_time_sales_side();
 
         presenter.clear_instrument();
         assert!(presenter.tape().is_none());
         assert_eq!(presenter.sweeps(), &[]);
         assert_eq!(presenter.time_sales_filter().side, TimeSalesSideFilter::Buy);
-    }
-
-    #[test]
-    fn order_flow_projection_keeps_one_applied_trade_and_the_sweep_window() {
-        let trades = (10..=20).map(retained_tape_trade).collect::<Vec<_>>();
-        assert_eq!(order_flow_projection_start(&trades, None, 2), 0);
-        // Ordinal 15 is index 5; keep it as continuity evidence for ordinals 16..=20.
-        assert_eq!(order_flow_projection_start(&trades, Some(15), 2), 5);
-        // The sweep window reaches further back than the unapplied suffix.
-        assert_eq!(order_flow_projection_start(&trades, Some(20), 2), 9);
-        // An applied ordinal older than the window still sends the covering window.
-        assert_eq!(order_flow_projection_start(&trades, Some(3), 2), 0);
-        assert_eq!(order_flow_projection_start(&[], Some(3), 2), 0);
-    }
-
-    #[test]
-    fn chart_projection_classifies_sweeps_over_the_trailing_window_only() {
-        let count = SWEEP_CLASSIFICATION_WINDOW as u64 + 100;
-        let trades = (1..=count)
-            .map(|ordinal| {
-                retained_trade_at(
-                    ordinal,
-                    ordinal * 1_000,
-                    i64::try_from(ordinal).expect("small ordinal"),
-                    1,
-                )
-            })
-            .collect::<Vec<_>>();
-        let snapshot = tape(1, 1, 1, trades);
-        let mut presenter = OrderFlowPresenter::default();
-
-        let footprint = presenter
-            .project_chart_trades(
-                &snapshot,
-                ChartTradeProjection::Footprint {
-                    resume_ordinal: None,
-                },
-            )
-            .expect("representable trades");
-        assert_eq!(
-            footprint.len(),
-            snapshot.trades.len(),
-            "a fresh chart takes the whole tape"
-        );
-        let tail = &footprint[footprint.len() - SWEEP_CLASSIFICATION_WINDOW..];
-        assert_eq!(
-            presenter.sweeps(),
-            classify_order_flow_sweeps(tail).as_slice()
-        );
-
-        let sweeps_only = presenter
-            .project_chart_trades(&snapshot, ChartTradeProjection::SweepsOnly)
-            .expect("representable trades");
-        assert_eq!(sweeps_only.len(), SWEEP_CLASSIFICATION_WINDOW);
-        assert_eq!(
-            sweeps_only.first().map(|trade| trade.ingestion_ordinal),
-            Some(101)
-        );
-        assert_eq!(
-            presenter.sweeps(),
-            classify_order_flow_sweeps(&sweeps_only).as_slice()
-        );
     }
 
     #[test]

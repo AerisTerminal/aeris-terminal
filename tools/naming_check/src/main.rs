@@ -102,7 +102,12 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
     (
         "apps/desktop/src/desktop/order_flow_presenter.rs",
         4,
-        "accepted tape ordering and tape prefix rewrites",
+        "accepted tape stream ordering (selection, provider session, revision)",
+    ),
+    (
+        "apps/desktop/src/desktop/time_sales_panel.rs",
+        1,
+        "time-and-sales rows cache identity on the accepted tape revision",
     ),
     (
         "apps/desktop/src/desktop/workspace_persistence.rs",
@@ -2879,6 +2884,33 @@ mod tests {
                 assert!(
                     !contains_identifier(&production, name),
                     "{relative} uses `{name}`; hollow candles are the engine's `CandleBody` style"
+                );
+            }
+        }
+    }
+
+    /// Sweep classification and trade-tape continuity are runtime-owned:
+    /// `market_service/trade_sweeps.rs` classifies once per ingested trade and the
+    /// coordinator publishes the incremental `Reset`/`Append` tape stream. Chart
+    /// integration applies the covering window or appended suffix it is given and
+    /// never reclassifies the tape or diffs ordinals. The retired host classifier
+    /// and resume-cursor APIs must not return.
+    #[test]
+    fn chart_integration_has_no_order_flow_analytics() {
+        let chart_sources = production_sources_under("crates/ui/chart_integration/src");
+        let desktop_sources = production_sources_under("apps/desktop/src");
+        for path in chart_sources.into_iter().chain(desktop_sources) {
+            let relative = relative_string(&path);
+            let contents = fs::read_to_string(&path).expect("chart source");
+            let production = production_prefix(&contents);
+            for name in [
+                "classify_order_flow_sweeps",
+                "order_flow_resume_ordinal",
+                "invalidate_order_flow_prefix",
+            ] {
+                assert!(
+                    !contains_identifier(&production, name),
+                    "{relative} uses `{name}`; sweep classification and tape continuity live in market_runtime"
                 );
             }
         }

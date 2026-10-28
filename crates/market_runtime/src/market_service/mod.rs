@@ -131,7 +131,7 @@ const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
 const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
-const MAXIMUM_RECENT_LADDER_TRADES: usize = 65_536;
+pub const MAXIMUM_RECENT_LADDER_TRADES: usize = 65_536;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -740,10 +740,9 @@ struct ConsumerEvents {
     /// into one bounded event before reaching presentation.
     study_removed: Option<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
-    trade_tape: Option<crate::MarketTradeTapeSnapshot>,
-    /// Incremental tape stream beside the legacy full-tape slot. A `Reset`
-    /// always covers everything queued before it, so overflow replaces the
-    /// queue with one covering reset instead of dropping an append.
+    /// The consumer's incremental tape stream. A `Reset` always covers
+    /// everything queued before it, so overflow replaces the queue with one
+    /// covering reset instead of dropping an append.
     tape_updates: VecDeque<MarketRuntimeEvent>,
     /// Continuity cursor of the incremental tape stream queued for this
     /// consumer; a new selection, provider session or prefix rewrite starts a

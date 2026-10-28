@@ -1,7 +1,8 @@
 use super::{
     AerisChartView, BigTradesFilter, BigTradesSettings, CumulativeDeltaReset,
-    CumulativeDeltaSettings, FootprintDisplayMode, OrderFlowAggregation, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, chart_color_hex,
+    CumulativeDeltaSettings, FootprintDisplayMode, OrderFlowAggregation, OrderFlowApplyError,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
+    chart_color_hex,
 };
 use aeris_design_system::AerisTheme;
 use num_traits::ToPrimitive;
@@ -11,8 +12,6 @@ use aeris_charts_engine::{
     FootprintImbalanceOptions, FootprintTrade, FootprintVisualOptions, OrderFlowPresentation,
     OrderFlowPresentationOptions, TradeStudyOptions,
 };
-
-const SWEEP_AGGREGATION_WINDOW_MICROS: i64 = 100_000;
 
 /// Tape-derived study panes backed by the chart's shared order-flow stream.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -35,9 +34,11 @@ pub(super) struct OrderFlowChartState {
     provider_generation: u64,
     aggregation: OrderFlowAggregation,
     tick_size_bits: u64,
-    last_ingestion_ordinal: Option<u64>,
-    /// Newest print time applied, where a reconnected or gapped tape resumes.
-    last_timestamp_micros: Option<i64>,
+    /// Newest applied print ordinal. Observation only; the host's
+    /// Append/Replace decision never reads it.
+    applied_through: Option<u64>,
+    /// Set once a covering window is installed; an append requires it.
+    window_installed: bool,
     pub(super) presentation: OrderFlowPresentation,
 }
 
@@ -131,33 +132,26 @@ impl AerisChartView {
             .map(|state| state.presentation.ticks_per_row())
     }
 
-    /// Invalidates an incremental prefix after a canonical history/correction rewrite.
-    pub fn invalidate_order_flow_prefix(&mut self) {
-        if let Some(state) = &mut self.order_flow_state {
-            state.last_ingestion_ordinal = None;
-        }
-    }
-
     /// Returns the footprint to candle history when its trade tape is unavailable.
     pub fn clear_order_flow_trades(&mut self) {
         self.teardown_order_flow();
     }
 
-    /// Projects one runtime-authoritative bounded tape into the chart-owned
-    /// footprint cache. While the runtime's sliding window continues the applied
-    /// tape without a gap, only its new suffix is sent, so the chart keeps bars
-    /// whose trades the runtime has since evicted. After a gap or a reconnect the
-    /// window's prints newer than the chart's newest print are appended, keeping the
-    /// history. A rewrite of the same session's window (a correction, a cancellation,
-    /// a backfill or a restarted tape) replaces only the span the window covers, so bars
-    /// older than the window are kept.
+    /// Applies one incremental tape publication to the chart-owned footprint
+    /// cache. The pane's order-flow presenter owns tape continuity from the
+    /// runtime's `Reset`/`Append` stream: a [`OrderFlowTapeChange::ReplaceWindow`]
+    /// installs the covering retained window, replacing the span it covers while
+    /// bars older than the window are kept; an [`OrderFlowTapeChange::Append`]
+    /// extends the installed window with prints newer than every applied print.
     ///
     /// Once drawn, the presentation keeps following the tape while no order-flow view is
     /// shown, so switching back to a footprint finds its history.
     ///
     /// # Errors
-    /// Returns an error for invalid identity, aggregation, fixed-point projection,
-    /// or chart resource exhaustion.
+    /// Returns [`OrderFlowApplyError::AwaitingCoveringWindow`] when an append
+    /// arrives before this stream's covering window is installed, and
+    /// [`OrderFlowApplyError::Failed`] for invalid identity, aggregation,
+    /// fixed-point projection, or chart resource exhaustion.
     pub fn apply_order_flow_trades(
         &mut self,
         identity: &str,
@@ -165,12 +159,15 @@ impl AerisChartView {
         aggregation: OrderFlowAggregation,
         tick_size: f64,
         trades: &[OrderFlowTrade],
-    ) -> Result<(), String> {
+        change: OrderFlowTapeChange,
+    ) -> Result<(), OrderFlowApplyError> {
         if !self.order_flow_presentation_requested() && self.order_flow_state.is_none() {
             return Ok(());
         }
         if identity.is_empty() || !tick_size.is_finite() || tick_size <= 0.0 {
-            return Err("order-flow identity and tick size must be valid".to_string());
+            return Err(OrderFlowApplyError::Failed(
+                "order-flow identity and tick size must be valid".to_string(),
+            ));
         }
         // Refreshed provider metadata can correct the price increment of the
         // same instrument; footprint rows are keyed by it, so rebuild them.
@@ -181,86 +178,83 @@ impl AerisChartView {
         {
             self.teardown_order_flow();
         }
+        let mut reconfigured = false;
         if self.order_flow_state.is_none() {
-            self.configure_order_flow(identity, provider_generation, aggregation, tick_size)?;
+            self.configure_order_flow(identity, provider_generation, aggregation, tick_size)
+                .map_err(OrderFlowApplyError::Failed)?;
+            reconfigured = true;
         }
-        let state = self
-            .order_flow_state
-            .as_mut()
-            .ok_or_else(|| "order-flow chart state was not configured".to_string())?;
+        let state = self.order_flow_state.as_mut().ok_or_else(|| {
+            OrderFlowApplyError::Failed("order-flow chart state was not configured".to_string())
+        })?;
         if state.identity != identity
             || state.provider_generation > provider_generation
             || state.aggregation != aggregation
         {
-            return Err("order-flow tape identity changed without replacing the chart".to_string());
+            return Err(OrderFlowApplyError::Failed(
+                "order-flow tape identity changed without replacing the chart".to_string(),
+            ));
         }
-        // A reconnected provider session restarts its tape and ingestion ordinals.
-        let reconnected = state.provider_generation < provider_generation;
-        if reconnected {
-            state.provider_generation = provider_generation;
-            state.last_ingestion_ordinal = None;
+        match change {
+            OrderFlowTapeChange::ReplaceWindow => {
+                // A reconnected provider session restarts its tape and
+                // ingestion ordinals; its covering window replaces the span.
+                state.provider_generation = provider_generation;
+                state.window_installed = true;
+            }
+            OrderFlowTapeChange::Append => {
+                if reconfigured
+                    || !state.window_installed
+                    || state.provider_generation != provider_generation
+                {
+                    return Err(OrderFlowApplyError::AwaitingCoveringWindow);
+                }
+            }
         }
-
-        let first = trades.first().map(|trade| trade.ingestion_ordinal);
-        let last = trades.last().map(|trade| trade.ingestion_ordinal);
-        let prior_last = state.last_ingestion_ordinal;
-        let contiguous = prior_last.is_some_and(|applied| match (first, last) {
-            (Some(first), Some(last)) => first <= applied.saturating_add(1) && last >= applied,
-            _ => true,
-        });
-        // Within one provider session ordinals only grow, so every print after the applied one
-        // is new, even across a gap. A reconnect restarts them; its prints newer than the
-        // chart's newest continue the same bars. Without either, the window is installed whole.
-        let resume_after = if reconnected {
-            state.last_timestamp_micros
-        } else {
-            None
-        };
-        let append = prior_last.is_some() || resume_after.is_some();
-        let start = trades.partition_point(|trade| {
-            prior_last.is_some_and(|last| trade.ingestion_ordinal <= last)
-        });
-        let converted = trades[start..]
+        let converted = trades
             .iter()
-            .filter(|trade| resume_after.is_none_or(|after| trade.timestamp_micros > after))
             .map(order_flow_trade)
-            .collect::<Result<Vec<_>, _>>()?;
-        let newest = converted.iter().map(|trade| trade.timestamp_micros).max();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(OrderFlowApplyError::Failed)?;
         let presentation = state.presentation;
-        if append {
-            self.engine
+        match change {
+            OrderFlowTapeChange::ReplaceWindow => self
+                .engine
+                .replace_order_flow_window(presentation, converted),
+            OrderFlowTapeChange::Append => self
+                .engine
                 .update_order_flow_presentation(presentation, converted, true)
-                .map(|_| ())
-        } else {
-            self.engine
-                .replace_order_flow_window(presentation, converted)
+                .map(|_| ()),
         }
-        .map_err(|error| error.to_string())?;
-        if let Some(state) = &mut self.order_flow_state {
-            state.last_ingestion_ordinal = last.max(prior_last);
-            // A covering window replaces every print from its oldest one, so its newest print
-            // is the chart's newest; an empty window changed nothing.
-            state.last_timestamp_micros = if append {
-                newest.max(state.last_timestamp_micros)
-            } else {
-                newest.or(state.last_timestamp_micros)
+        .map_err(|error| OrderFlowApplyError::Failed(error.to_string()))?;
+        if let Some(state) = &mut self.order_flow_state
+            && let Some(newest) = trades.last().map(|trade| trade.ingestion_ordinal)
+        {
+            // A covering window replaces the stream, so its newest print is the
+            // chart's newest; an append only ever moves it forward.
+            state.applied_through = match change {
+                OrderFlowTapeChange::ReplaceWindow => Some(newest),
+                OrderFlowTapeChange::Append => Some(
+                    state
+                        .applied_through
+                        .map_or(newest, |applied| applied.max(newest)),
+                ),
             };
         }
-        // The engine re-lays out on its own series revision; forcing layout on every
-        // tick would also let the price axis shrink and jitter while the tape streams.
-        if contiguous {
-            self.invalidate_series_frame();
-        } else {
-            self.invalidate_series_layout();
+        // The engine re-lays out on its own series revision; a covering window
+        // lays out once, while a tip append only repaints the frame so the
+        // price axis does not shrink and jitter while the tape streams.
+        match change {
+            OrderFlowTapeChange::ReplaceWindow => self.invalidate_series_layout(),
+            OrderFlowTapeChange::Append => self.invalidate_series_frame(),
         }
         Ok(())
     }
 
-    /// The last ingestion ordinal the chart applied for exactly this tape, so a host can
-    /// project only the runtime window's new suffix. `None` means the next update must
-    /// carry the covering window (no tape, a different tape, or an invalidated prefix).
+    /// The newest tape ordinal this chart applied for exactly this stream.
+    /// Observation only: the host's Append/Replace decision never reads it.
     #[must_use]
-    pub fn order_flow_resume_ordinal(
+    pub fn order_flow_applied_through(
         &self,
         identity: &str,
         provider_generation: u64,
@@ -275,7 +269,7 @@ impl AerisChartView {
                     && state.aggregation == aggregation
                     && state.tick_size_bits == tick_size.to_bits()
             })
-            .and_then(|state| state.last_ingestion_ordinal)
+            .and_then(|state| state.applied_through)
     }
 
     fn configure_order_flow(
@@ -302,8 +296,8 @@ impl AerisChartView {
             provider_generation,
             aggregation,
             tick_size_bits: tick_size.to_bits(),
-            last_ingestion_ordinal: None,
-            last_timestamp_micros: None,
+            applied_through: None,
+            window_installed: false,
             presentation,
         });
         Ok(())
@@ -579,80 +573,6 @@ const fn cell_mode(mode: FootprintDisplayMode) -> FootprintCellMode {
         FootprintDisplayMode::HorizontalImbalance => FootprintCellMode::HorizontalImbalance,
         FootprintDisplayMode::BidAskHistogram => FootprintCellMode::BidAskHistogram,
     }
-}
-
-/// The 90th percentile of the positive print volumes, so a sweep is a run that together outsizes
-/// nine in ten recent prints. `f64::MAX` when there is no positive print.
-fn sweep_volume_threshold(trades: &[OrderFlowTrade]) -> f64 {
-    let mut volumes = trades
-        .iter()
-        .map(|trade| trade.volume)
-        .filter(|volume| volume.is_finite() && *volume > 0.0)
-        .collect::<Vec<_>>();
-    if volumes.is_empty() {
-        return f64::MAX;
-    }
-    let index = volumes.len().saturating_mul(9).saturating_sub(1) / 10;
-    volumes.select_nth_unstable_by(index, f64::total_cmp);
-    volumes[index]
-}
-
-/// Groups consecutive aggressor-side prints that cross at least two price
-/// levels inside the bounded sweep window and outsize the recent prints.
-/// Provider order is preserved; no opaque trade identifier is interpreted as
-/// sequence evidence.
-#[must_use]
-pub fn classify_order_flow_sweeps(trades: &[OrderFlowTrade]) -> Vec<OrderFlowSweep> {
-    let threshold = sweep_volume_threshold(trades);
-    let mut sweeps = Vec::new();
-    let mut start = 0;
-    while start < trades.len() {
-        let first = &trades[start];
-        if first.aggressor == aeris_charts_engine::AggressorSide::Unknown {
-            start += 1;
-            continue;
-        }
-        let mut end = start + 1;
-        let mut total_volume = first.volume;
-        let mut levels = 1_u32;
-        let mut previous_price = first.price;
-        while let Some(next) = trades.get(end) {
-            let previous = &trades[end - 1];
-            let within_window = next.timestamp_micros >= previous.timestamp_micros
-                && next
-                    .timestamp_micros
-                    .saturating_sub(previous.timestamp_micros)
-                    <= SWEEP_AGGREGATION_WINDOW_MICROS;
-            let price_continues = match first.aggressor {
-                aeris_charts_engine::AggressorSide::Buy => next.price >= previous_price,
-                aeris_charts_engine::AggressorSide::Sell => next.price <= previous_price,
-                aeris_charts_engine::AggressorSide::Unknown => false,
-            };
-            if next.aggressor != first.aggressor || !within_window || !price_continues {
-                break;
-            }
-            if next.price.to_bits() != previous_price.to_bits() {
-                levels = levels.saturating_add(1);
-            }
-            total_volume += next.volume;
-            previous_price = next.price;
-            end += 1;
-        }
-        if levels >= 2 && total_volume >= threshold {
-            let terminal = &trades[end - 1];
-            sweeps.push(OrderFlowSweep {
-                first_ingestion_ordinal: first.ingestion_ordinal,
-                last_ingestion_ordinal: terminal.ingestion_ordinal,
-                timestamp_micros: terminal.timestamp_micros,
-                terminal_price: terminal.price,
-                total_volume,
-                price_levels: levels,
-                aggressor: first.aggressor,
-            });
-        }
-        start = end.max(start + 1);
-    }
-    sweeps
 }
 
 fn order_flow_trade(trade: &OrderFlowTrade) -> Result<FootprintTrade, String> {

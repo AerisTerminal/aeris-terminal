@@ -775,7 +775,7 @@ mod timeframe_input {
         generation: u64,
         revision: u64,
         last_ordinal: u64,
-    ) -> aeris_market_runtime::MarketTradeTapeSnapshot {
+    ) -> aeris_market_runtime::MarketTradeTapeUpdate {
         let trades = (1..=last_ordinal)
             .map(|ordinal| {
                 let seconds = 1_700_000_000 + i64::try_from(ordinal).expect("small ordinal");
@@ -804,7 +804,7 @@ mod timeframe_input {
                 }
             })
             .collect::<Vec<_>>();
-        aeris_market_runtime::MarketTradeTapeSnapshot {
+        aeris_market_runtime::MarketTradeTapeUpdate {
             consumer_id: aeris_market_runtime::MarketConsumerId(std::num::NonZeroU64::MIN),
             generation: aeris_market_runtime::MarketGenerationId(
                 std::num::NonZeroU64::new(generation).expect("selection generation is nonzero"),
@@ -818,16 +818,17 @@ mod timeframe_input {
             rewrite_generation: 0,
             price_scale: 0,
             quantity_scale: 0,
-            trades: trades.into(),
+            sweeps: Arc::from([]),
+            operation: aeris_market_runtime::MarketTradeTapeOperation::Reset {
+                trades: trades.into(),
+            },
         }
     }
 
-    fn tape_message(
-        snapshot: aeris_market_runtime::MarketTradeTapeSnapshot,
-    ) -> PaneProjectionEvent {
+    fn tape_message(update: aeris_market_runtime::MarketTradeTapeUpdate) -> PaneProjectionEvent {
         PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
-                aeris_desktop::test_support::FixtureMarketEvents::default().trade_tape(snapshot),
+                aeris_desktop::test_support::FixtureMarketEvents::default().trade_tape(update),
             ),
         )
     }
@@ -874,7 +875,7 @@ mod timeframe_input {
         cx: &VisualTestContext,
     ) -> Option<u64> {
         cx.read(|cx| {
-            chart.read(cx).order_flow_resume_ordinal(
+            chart.read(cx).order_flow_applied_through(
                 instrument_id,
                 1,
                 aeris_chart_integration::OrderFlowAggregation::TimeMicros(minutes * 60_000_000),

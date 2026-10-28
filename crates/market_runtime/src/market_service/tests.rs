@@ -370,37 +370,6 @@ fn order_book_slot_keeps_only_the_latest_complete_publication() {
 }
 
 #[test]
-fn trade_tape_slot_keeps_only_the_latest_complete_publication() {
-    let consumer_id = ConsumerId(NonZeroU64::MIN);
-    let generation = GenerationId(NonZeroU64::MIN);
-    let snapshot = |revision| crate::MarketTradeTapeSnapshot {
-        consumer_id,
-        generation,
-        provider_id: "rithmic".to_string(),
-        instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
-        entitlement_id: "test".to_string(),
-        provider_generation: 7,
-        revision,
-        source_watermark: revision,
-        rewrite_generation: 0,
-        price_scale: 2,
-        quantity_scale: 0,
-        trades: Arc::from([]),
-    };
-    let mut events = ConsumerEvents {
-        trade_tape: Some(snapshot(1)),
-        ..ConsumerEvents::default()
-    };
-    events.trade_tape = Some(snapshot(2));
-
-    assert!(matches!(
-        events.pop(),
-        Some(MarketRuntimeEvent::TradeTapeSnapshot(snapshot)) if snapshot.revision == 2
-    ));
-    assert!(events.pop().is_none());
-}
-
-#[test]
 fn covering_snapshot_is_popped_before_live_state() {
     let consumer_id = ConsumerId(NonZeroU64::MIN);
     let generation = GenerationId(NonZeroU64::MIN);

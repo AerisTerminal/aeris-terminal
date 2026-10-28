@@ -9,7 +9,7 @@ use super::{
 use crate::{
     MarketConsumerEvent, MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot,
     MarketRuntimeEvent, MarketSeriesState, MarketStudyOutputsInvalidated, MarketStudyRemoved,
-    MarketTradeTapeOperation, MarketTradeTapeSnapshot, MarketTradeTapeUpdate,
+    MarketTradeTapeOperation, MarketTradeTapeUpdate,
 };
 use aeris_observability::diagnostic;
 use std::sync::Arc;
@@ -196,30 +196,8 @@ fn demands_order_levels(demand: &aeris_market_engine::ConsumerDemand) -> bool {
         .is_some_and(|streams| streams.contains(crate::MarketStream::OrderLevels))
 }
 
-fn trade_tape_snapshot(
-    consumer_id: ConsumerId,
-    generation: GenerationId,
-    order_book: &ProviderOrderBook,
-    trades: Arc<[crate::RetainedMarketTrade]>,
-) -> Option<MarketTradeTapeSnapshot> {
-    Some(MarketTradeTapeSnapshot {
-        consumer_id,
-        generation,
-        provider_id: order_book.instrument.provider.clone(),
-        instrument_id: order_book.instrument.instrument_id.clone(),
-        entitlement_id: order_book.instrument.entitlement_id.clone(),
-        provider_generation: order_book.trade_session_generation,
-        revision: order_book.trade_tape_revision,
-        source_watermark: order_book.last_trade_source_sequence,
-        rewrite_generation: order_book.trade_tape_rewrite_generation,
-        price_scale: u8::try_from(order_book.instrument.price_scale).ok()?,
-        quantity_scale: u8::try_from(order_book.instrument.quantity_scale).ok()?,
-        trades,
-    })
-}
-
-/// Queues one incremental tape update for a consumer beside the legacy
-/// full-tape image. The first publication of a selection, a provider-session
+/// Queues one incremental tape update for a consumer. The first publication of
+/// a selection, a provider-session
 /// restart, a retained-prefix rewrite and an eviction gap each start a new
 /// stream with a covering `Reset`; a continuing stream appends only the
 /// trades newer than the cursor. A full queue is replaced by one covering
@@ -345,7 +323,6 @@ impl ConsumerEvents {
             || self.demand_error.is_some()
             || !self.price_alerts.is_empty()
             || self.order_book.is_some()
-            || self.trade_tape.is_some()
             || !self.tape_updates.is_empty()
             || self.startup_catalog_selection.is_some()
             || self.startup_catalog_search.is_some()
@@ -369,11 +346,6 @@ impl ConsumerEvents {
                     .or_else(|| self.demand_error.take())
                     .or_else(|| self.price_alerts.pop_front())
                     .or_else(|| self.order_book.take())
-                    .or_else(|| {
-                        self.trade_tape
-                            .take()
-                            .map(MarketRuntimeEvent::TradeTapeSnapshot)
-                    })
                     .or_else(|| self.tape_updates.pop_front())
                     .or_else(|| self.startup_catalog_selection.take())
                     .or_else(|| self.startup_catalog_search.take())
@@ -959,13 +931,7 @@ impl Coordinator<'_> {
             .cloned()
             .collect::<Vec<_>>()
             .into();
-        let Some(snapshot) =
-            trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))
-        else {
-            return;
-        };
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            events.trade_tape = Some(snapshot);
             queue_trade_tape_update(events, consumer_id, generation, order_book, &trades);
         }
     }
@@ -1025,13 +991,7 @@ impl Coordinator<'_> {
         order_book.trade_tape_dirty = false;
         order_book.trade_tape_published_at = Some(self.clock.monotonic());
         for (consumer_id, generation) in consumers {
-            let Some(snapshot) =
-                trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))
-            else {
-                continue;
-            };
             if let Some(events) = self.events.get_mut(&consumer_id) {
-                events.trade_tape = Some(snapshot);
                 queue_trade_tape_update(events, consumer_id, generation, order_book, &trades);
             }
         }

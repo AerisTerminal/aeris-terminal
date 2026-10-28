@@ -203,12 +203,27 @@ fn footprint_rewrites_its_window_and_keeps_history_across_a_reconnect() {
         order_flow_trade(2, 2_000_000, 3.0),
     ];
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
+    // A correction rewrites the retained prefix; the runtime sends the covering
+    // window again and it replaces only the span it covers.
     trades[0].volume = 5.0;
-    chart.invalidate_order_flow_prefix();
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
     assert!((footprint_total_volume(&chart) - 8.0).abs() < f64::EPSILON);
     let stream = chart
@@ -218,15 +233,22 @@ fn footprint_rewrites_its_window_and_keeps_history_across_a_reconnect() {
         .presentation
         .trade_stream();
 
-    // The reconnected session restarts its ordinals; a print the chart already holds is not
-    // counted twice, and the session's new prints continue the same bars.
+    // The reconnected session restarts its tape with a covering window; a print
+    // the chart already holds is not counted twice, and the session's new
+    // prints continue the same bars.
     let reconnected = [
         order_flow_trade(1, 2_000_000, 3.0),
         order_flow_trade(2, 3_000_000, 4.0),
     ];
-    chart.invalidate_order_flow_prefix();
     chart
-        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &reconnected)
+        .apply_order_flow_trades(
+            "instrument:test",
+            8,
+            aggregation,
+            0.25,
+            &reconnected,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
     assert_eq!(
         chart
@@ -239,17 +261,32 @@ fn footprint_rewrites_its_window_and_keeps_history_across_a_reconnect() {
     );
     assert!((footprint_total_volume(&chart) - 12.0).abs() < f64::EPSILON);
     assert_eq!(
-        chart.order_flow_resume_ordinal("instrument:test", 8, aggregation, 0.25),
+        chart.order_flow_applied_through("instrument:test", 8, aggregation, 0.25),
         Some(2)
     );
     assert!(
-        chart
-            .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
-            .is_err(),
+        matches!(
+            chart.apply_order_flow_trades(
+                "instrument:test",
+                7,
+                aggregation,
+                0.25,
+                &trades,
+                OrderFlowTapeChange::ReplaceWindow,
+            ),
+            Err(OrderFlowApplyError::Failed(_))
+        ),
         "a retired provider session never mutates the chart"
     );
     chart
-        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &reconnected)
+        .apply_order_flow_trades(
+            "instrument:test",
+            8,
+            aggregation,
+            0.25,
+            &reconnected,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
     assert!((footprint_total_volume(&chart) - 12.0).abs() < f64::EPSILON);
 }
@@ -263,18 +300,32 @@ fn a_restarted_tape_in_the_same_session_keeps_older_footprint_bars() {
         .map(|ordinal| order_flow_trade(ordinal, i64::try_from(ordinal).unwrap() * 60_000_000, 2.0))
         .collect::<Vec<_>>();
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &history)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &history,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
 
-    // The runtime cleared its window without a new provider session: its ordinals restart and
-    // it holds only the prints since the reset, so the host invalidates the applied prefix.
+    // The runtime cleared its window without a new provider session: its
+    // ordinals restart and it holds only the prints since the reset, which the
+    // covering window replaces while the older bars stay.
     let restarted = [
         order_flow_trade(1, 181_000_000, 4.0),
         order_flow_trade(2, 241_000_000, 1.0),
     ];
-    chart.invalidate_order_flow_prefix();
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &restarted)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &restarted,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
     let footprint = chart.footprint_series_id().expect("footprint");
     let starts = chart
@@ -287,21 +338,19 @@ fn a_restarted_tape_in_the_same_session_keeps_older_footprint_bars() {
     assert_eq!(starts, [1, 2, 3, 4]);
     assert!((footprint_total_volume(&chart) - 11.0).abs() < f64::EPSILON);
     assert_eq!(
-        chart.order_flow_resume_ordinal("instrument:test", 7, aggregation, 0.25),
+        chart.order_flow_applied_through("instrument:test", 7, aggregation, 0.25),
         Some(2)
     );
 
-    // The restarted window keeps streaming as a suffix onto the same bars.
+    // The restarted window keeps streaming as an append onto the same bars.
     chart
         .apply_order_flow_trades(
             "instrument:test",
             7,
             aggregation,
             0.25,
-            &[
-                order_flow_trade(2, 241_000_000, 1.0),
-                order_flow_trade(3, 242_000_000, 3.0),
-            ],
+            &[order_flow_trade(3, 242_000_000, 3.0)],
+            OrderFlowTapeChange::Append,
         )
         .unwrap();
     assert!((footprint_total_volume(&chart) - 14.0).abs() < f64::EPSILON);
@@ -317,7 +366,14 @@ fn order_flow_settings_and_chart_type_changes_keep_footprint_history() {
         order_flow_trade(2, 61_000_000, 3.0),
     ];
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &first)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &first,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .unwrap();
     let stream = chart
         .order_flow_state
@@ -325,10 +381,17 @@ fn order_flow_settings_and_chart_type_changes_keep_footprint_history() {
         .unwrap()
         .presentation
         .trade_stream();
-    // The runtime window has since evicted both prints.
+    // The runtime window has since evicted both prints; only the new print streams.
     let window = [order_flow_trade(3, 121_000_000, 5.0)];
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &window)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &window,
+            OrderFlowTapeChange::Append,
+        )
         .unwrap();
     assert!((footprint_total_volume(&chart) - 10.0).abs() < f64::EPSILON);
 
@@ -349,12 +412,16 @@ fn order_flow_settings_and_chart_type_changes_keep_footprint_history() {
     // Candles with no tape study still follow the stream, so the footprint returns whole.
     chart.set_chart_type(ChartType::Candles);
     assert!(chart.footprint_series_id().is_none());
-    let window = [
-        order_flow_trade(3, 121_000_000, 5.0),
-        order_flow_trade(4, 122_000_000, 1.0),
-    ];
+    let window = [order_flow_trade(4, 122_000_000, 1.0)];
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &window)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &window,
+            OrderFlowTapeChange::Append,
+        )
         .unwrap();
     chart.set_chart_type(ChartType::Footprint);
     assert!(chart.has_footprint_bars());
@@ -384,6 +451,7 @@ fn cumulative_delta_style_converts_the_drawn_cvd_in_place() {
             aggregation,
             0.25,
             &[order_flow_trade(1, 60_000_000, 2.0)],
+            OrderFlowTapeChange::ReplaceWindow,
         )
         .unwrap();
     let cvd = |chart: &AerisChartView| {
@@ -425,6 +493,7 @@ fn order_flow_study_reset_and_colors_restyle_the_drawn_series_in_place() {
             OrderFlowAggregation::TimeMicros(60_000_000),
             0.25,
             &[order_flow_trade(1, 60_000_000, 2.0)],
+            OrderFlowTapeChange::ReplaceWindow,
         )
         .unwrap();
     let series = |chart: &AerisChartView, study| {
@@ -481,6 +550,7 @@ fn order_flow_indicator_legend_rows_offer_settings() {
             OrderFlowAggregation::TimeMicros(60_000_000),
             0.25,
             &[order_flow_trade(1, 60_000_000, 2.0)],
+            OrderFlowTapeChange::ReplaceWindow,
         )
         .unwrap();
     let rows = chart.legend_rows();
@@ -642,44 +712,69 @@ fn order_book_depth_follows_the_indicator_and_its_legend_row() {
 }
 
 #[test]
-fn order_flow_resume_ordinal_scopes_suffix_projection_and_appends_skip_forced_layout() {
+fn order_flow_applied_through_scopes_observation_and_appends_skip_forced_layout() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
-    let resume = |chart: &AerisChartView, generation, tick| {
-        chart.order_flow_resume_ordinal("instrument:test", generation, aggregation, tick)
+    let applied = |chart: &AerisChartView, generation, tick| {
+        chart.order_flow_applied_through("instrument:test", generation, aggregation, tick)
     };
-    assert_eq!(resume(&chart, 7, 0.25), None);
+    assert_eq!(applied(&chart, 7, 0.25), None);
     let tape = (1..=6)
         .map(|ordinal| order_flow_trade(ordinal, i64::try_from(ordinal).unwrap() * 1_000_000, 1.0))
         .collect::<Vec<_>>();
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &tape[..4])
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &tape[..4],
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("covering tape");
     assert!(chart.layout_dirty, "a covering install lays out");
-    assert_eq!(resume(&chart, 7, 0.25), Some(4));
-    assert_eq!(resume(&chart, 8, 0.25), None, "another provider generation");
-    assert_eq!(resume(&chart, 7, 0.5), None, "another price increment");
+    assert_eq!(applied(&chart, 7, 0.25), Some(4));
     assert_eq!(
-        chart.order_flow_resume_ordinal("instrument:other", 7, aggregation, 0.25),
+        applied(&chart, 8, 0.25),
+        None,
+        "another provider generation"
+    );
+    assert_eq!(applied(&chart, 7, 0.5), None, "another price increment");
+    assert_eq!(
+        chart.order_flow_applied_through("instrument:other", 7, aggregation, 0.25),
         None
     );
 
-    // A host sends one already-applied trade plus the new suffix.
+    // The host sends only the new suffix; the chart trusts it.
     chart.layout_dirty = false;
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &tape[3..])
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &tape[4..],
+            OrderFlowTapeChange::Append,
+        )
         .expect("suffix append");
     assert!(
         !chart.layout_dirty,
         "a tip append invalidates only the frame"
     );
-    assert_eq!(resume(&chart, 7, 0.25), Some(6));
+    assert_eq!(applied(&chart, 7, 0.25), Some(6));
 
     let mut full = AerisChartView::empty();
     full.set_chart_type(ChartType::Footprint);
-    full.apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &tape)
-        .expect("full tape");
+    full.apply_order_flow_trades(
+        "instrument:test",
+        7,
+        aggregation,
+        0.25,
+        &tape,
+        OrderFlowTapeChange::ReplaceWindow,
+    )
+    .expect("full tape");
     let bars = |chart: &AerisChartView| {
         chart
             .engine
@@ -687,13 +782,93 @@ fn order_flow_resume_ordinal_scopes_suffix_projection_and_appends_skip_forced_la
             .expect("bars")
     };
     assert_eq!(bars(&chart), bars(&full));
+}
 
-    chart.invalidate_order_flow_prefix();
+#[test]
+fn an_append_before_the_covering_window_is_rejected_for_a_resend() {
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let trades = [order_flow_trade(1, 1_000_000, 2.0)];
     assert_eq!(
-        resume(&chart, 7, 0.25),
-        None,
-        "a rewrite needs the covering window"
+        chart.apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::Append,
+        ),
+        Err(OrderFlowApplyError::AwaitingCoveringWindow),
+        "nothing is installed yet, so the host must resend the covering window"
     );
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
+        .expect("covering window installs");
+    assert_eq!(
+        chart.apply_order_flow_trades(
+            "instrument:test",
+            8,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::Append,
+        ),
+        Err(OrderFlowApplyError::AwaitingCoveringWindow),
+        "a reconnected session restarts from its covering window"
+    );
+}
+#[test]
+#[ignore = "measurement harness; run with --ignored --nocapture"]
+fn order_flow_tape_apply_100k_measurement() {
+    use std::time::Instant;
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let trades = (1..=100_000_u64)
+        .map(|ordinal| order_flow_trade(ordinal, i64::try_from(ordinal).unwrap() * 1_000, 2.0))
+        .collect::<Vec<_>>();
+
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let start = Instant::now();
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
+        .expect("covering apply");
+    println!("covering 100k-trade window apply: {:?}", start.elapsed());
+
+    // Steady state after M7.11: each revision appends only its new prints.
+    let start = Instant::now();
+    for revision in 0..10_u64 {
+        let ordinal = 100_001 + revision;
+        chart
+            .apply_order_flow_trades(
+                "instrument:test",
+                7,
+                aggregation,
+                0.25,
+                &[order_flow_trade(
+                    ordinal,
+                    i64::try_from(ordinal).unwrap() * 1_000,
+                    2.0,
+                )],
+                OrderFlowTapeChange::Append,
+            )
+            .expect("revision append");
+    }
+    println!("10 single-print revision appends: {:?}", start.elapsed());
 }
 
 fn enable_cvd_and_delta(
@@ -710,7 +885,14 @@ fn enable_cvd_and_delta(
             .expect("settings apply")
     );
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("selected studies are added");
     chart
         .footprint_series_id()
@@ -735,7 +917,14 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
     );
 
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("candlestick chart accepts order-flow studies");
     assert!(chart.footprint_series_id().is_none());
     assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
@@ -752,7 +941,14 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
     assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
     trades.push(order_flow_trade(3, 3_000_000, 5.0));
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades[2..],
+            OrderFlowTapeChange::Append,
+        )
         .expect("line chart advances order-flow studies");
 
     chart.set_chart_type(ChartType::Footprint);
@@ -762,7 +958,14 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
     );
     assert!(chart.has_footprint_bars());
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &[],
+            OrderFlowTapeChange::Append,
+        )
         .expect("footprint advances on the shared presentation");
     assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
     assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
@@ -770,7 +973,14 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
     chart.set_chart_type(ChartType::Bars);
     assert!(chart.order_flow_state.is_some());
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &[],
+            OrderFlowTapeChange::Append,
+        )
         .expect("bars keep only the study panes");
     assert!(chart.footprint_series_id().is_none());
     assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
@@ -783,13 +993,19 @@ fn footprint_keeps_bars_after_runtime_prefix_eviction_and_across_a_gap() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
-    let first = vec![
-        order_flow_trade(1, 1_000_000, 2.0),
-        order_flow_trade(2, 1_500_000, 3.0),
-    ];
-    chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &first)
-        .expect("initial covering tape");
+    let apply =
+        |chart: &mut AerisChartView, trades: &[OrderFlowTrade], change: OrderFlowTapeChange| {
+            chart.apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, trades, change)
+        };
+    apply(
+        &mut chart,
+        &[
+            order_flow_trade(1, 1_000_000, 2.0),
+            order_flow_trade(2, 1_500_000, 3.0),
+        ],
+        OrderFlowTapeChange::ReplaceWindow,
+    )
+    .expect("initial covering tape");
     let footprint_series = chart
         .engine
         .series
@@ -797,22 +1013,13 @@ fn footprint_keeps_bars_after_runtime_prefix_eviction_and_across_a_gap() {
         .find(|series| series.kind == aeris_charts_engine::SeriesKind::Footprint && !series.removed)
         .map(|series| series.id)
         .expect("footprint series");
-    let after_covering = chart
-        .engine
-        .footprint_work_stats(footprint_series)
-        .expect("stats");
-
-    let third = order_flow_trade(3, 2_000_000, 5.0);
-    let mut appended = first.clone();
-    appended.push(third.clone());
-    chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &appended)
-        .expect("tip suffix");
-    let after_tip = chart
-        .engine
-        .footprint_work_stats(footprint_series)
-        .expect("stats");
-    assert!(after_tip.incremental_ticks > after_covering.incremental_ticks);
+    let bars_len = |chart: &AerisChartView| {
+        chart
+            .engine
+            .footprint_bars(footprint_series)
+            .expect("footprint bars")
+            .len()
+    };
     let total_volume = |chart: &AerisChartView| {
         chart
             .engine
@@ -822,57 +1029,49 @@ fn footprint_keeps_bars_after_runtime_prefix_eviction_and_across_a_gap() {
             .map(|bar| bar.total_volume)
             .sum::<f64>()
     };
+    let after_covering = chart
+        .engine
+        .footprint_work_stats(footprint_series)
+        .expect("stats");
+    apply(
+        &mut chart,
+        std::slice::from_ref(&order_flow_trade(3, 2_000_000, 5.0)),
+        OrderFlowTapeChange::Append,
+    )
+    .expect("tip suffix");
+    let after_tip = chart
+        .engine
+        .footprint_work_stats(footprint_series)
+        .expect("stats");
+    assert!(after_tip.incremental_ticks > after_covering.incremental_ticks);
 
     // The runtime's sliding window evicts trade 1, then every trade, while the
     // chart keeps the bars it already built from them.
-    let fourth = order_flow_trade(4, 61_000_000, 7.0);
-    chart
-        .apply_order_flow_trades(
-            "instrument:test",
-            7,
-            aggregation,
-            0.25,
-            &[first[1].clone(), third, fourth],
-        )
-        .expect("suffix after prefix eviction");
-    chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &[])
-        .expect("empty window after full eviction");
+    apply(
+        &mut chart,
+        std::slice::from_ref(&order_flow_trade(4, 61_000_000, 7.0)),
+        OrderFlowTapeChange::Append,
+    )
+    .expect("suffix after prefix eviction");
+    apply(&mut chart, &[], OrderFlowTapeChange::Append).expect("empty window after full eviction");
     assert!((total_volume(&chart) - 17.0).abs() < f64::EPSILON);
-    assert_eq!(
-        chart
-            .engine
-            .footprint_bars(footprint_series)
-            .expect("footprint bars")
-            .len(),
-        2
-    );
+    assert_eq!(bars_len(&chart), 2);
 
     // A gap means unseen trades were evicted; the built bars stay and the window continues them.
-    chart
-        .apply_order_flow_trades(
-            "instrument:test",
-            7,
-            aggregation,
-            0.25,
-            &[
-                order_flow_trade(8, 61_000_000, 7.0),
-                order_flow_trade(9, 121_000_000, 11.0),
-            ],
-        )
-        .expect("window continues the bars after a gap");
+    apply(
+        &mut chart,
+        &[
+            order_flow_trade(8, 61_000_000, 7.0),
+            order_flow_trade(9, 121_000_000, 11.0),
+        ],
+        OrderFlowTapeChange::Append,
+    )
+    .expect("window continues the bars after a gap");
     assert!(
         (total_volume(&chart) - 35.0).abs() < f64::EPSILON,
         "a new print sharing the newest print's microsecond still counts"
     );
-    assert_eq!(
-        chart
-            .engine
-            .footprint_bars(footprint_series)
-            .expect("footprint bars")
-            .len(),
-        3
-    );
+    assert_eq!(bars_len(&chart), 3);
 }
 
 #[test]
@@ -887,10 +1086,37 @@ fn footprint_rebuilds_rows_when_refreshed_metadata_corrects_the_tick_size() {
     trades[1].price = 101.0;
     let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 1e-8, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            1e-8,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("fallback tick");
+    // The corrected increment rebuilds the rows; the host answers the
+    // append's `AwaitingCoveringWindow` by resending the covering window.
+    assert_eq!(
+        chart.apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            1.0,
+            &trades,
+            OrderFlowTapeChange::Append,
+        ),
+        Err(OrderFlowApplyError::AwaitingCoveringWindow)
+    );
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 1.0, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            1.0,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("corrected tick rebuilds instead of rejecting the tape");
     let footprints = chart
         .engine
@@ -910,30 +1136,6 @@ fn footprint_rebuilds_rows_when_refreshed_metadata_corrects_the_tick_size() {
     assert_eq!(bars[0].levels.len(), 2);
 }
 
-#[test]
-fn sweep_classifier_requires_same_side_time_proximity_and_multiple_levels() {
-    let mut trades = vec![
-        order_flow_trade(1, 1_000_000, 6.0),
-        order_flow_trade(3, 1_020_000, 7.0),
-        order_flow_trade(5, 1_040_000, 8.0),
-    ];
-    for (index, trade) in trades.iter_mut().enumerate() {
-        trade.ingestion_ordinal = u64::try_from(index + 1).expect("small index");
-        trade.aggressor = aeris_charts_engine::AggressorSide::Buy;
-        trade.price = 100.0 + index.to_f64().expect("small index") * 0.25;
-    }
-    let sweeps = classify_order_flow_sweeps(&trades);
-    assert_eq!(sweeps.len(), 1);
-    assert_eq!(sweeps[0].price_levels, 3);
-    assert!((sweeps[0].total_volume - 21.0).abs() < f64::EPSILON);
-
-    trades[1].aggressor = aeris_charts_engine::AggressorSide::Sell;
-    assert_eq!(
-        classify_order_flow_sweeps(&trades),
-        [] as [OrderFlowSweep; 0]
-    );
-}
-
 fn apply_two_print_tape(chart: &mut AerisChartView) {
     let trades = [
         order_flow_trade(1, 1_000_000, 2.0),
@@ -941,7 +1143,14 @@ fn apply_two_print_tape(chart: &mut AerisChartView) {
     ];
     let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("tape applies");
 }
 
@@ -1081,47 +1290,6 @@ fn big_trades_settings_restyle_the_drawn_indicator_in_place() {
 }
 
 #[test]
-fn sweeps_must_outsize_nine_in_ten_recent_prints() {
-    // Nine one-lot prints and a two-level buy run of 2 + 3 lots.
-    let mut trades = (1..=9)
-        .map(|ordinal| {
-            order_flow_trade(
-                ordinal,
-                i64::try_from(ordinal).expect("small") * 1_000_000,
-                1.0,
-            )
-        })
-        .collect::<Vec<_>>();
-    for (offset, volume) in [(0, 2.0), (1, 3.0)] {
-        let mut trade = order_flow_trade(
-            10 + offset,
-            20_000_000 + i64::try_from(offset).expect("small"),
-            volume,
-        );
-        trade.aggressor = aeris_charts_engine::AggressorSide::Buy;
-        trade.price = 200.0 + offset.to_f64().expect("small") * 0.25;
-        trades.push(trade);
-    }
-    let sweeps = classify_order_flow_sweeps(&trades);
-    assert_eq!(
-        sweeps.len(),
-        1,
-        "a run above the 90th percentile print is a sweep"
-    );
-    assert!((sweeps[0].total_volume - 5.0).abs() < f64::EPSILON);
-
-    // The same run among larger prints no longer stands out.
-    for trade in &mut trades[..9] {
-        trade.volume = 8.0;
-    }
-    assert_eq!(
-        classify_order_flow_sweeps(&trades),
-        [] as [OrderFlowSweep; 0]
-    );
-    assert_eq!(classify_order_flow_sweeps(&[]), [] as [OrderFlowSweep; 0]);
-}
-
-#[test]
 #[ignore = "manual release-mode order-flow burst frame measurement"]
 fn measured_order_flow_burst_frame_work_stays_inside_one_frame() {
     const BURST_FRAMES: u64 = 512;
@@ -1135,6 +1303,7 @@ fn measured_order_flow_burst_frame_work_stays_inside_one_frame() {
     let burst_started = std::time::Instant::now();
     let mut maximum_frame_nanos = 0_u128;
     for frame in 0..BURST_FRAMES {
+        let frame_start = trades.len();
         for offset in 0..TRADES_PER_FRAME {
             let ordinal = frame * TRADES_PER_FRAME + offset + 1;
             let mut trade = order_flow_trade(
@@ -1152,7 +1321,12 @@ fn measured_order_flow_burst_frame_work_stays_inside_one_frame() {
                 7,
                 OrderFlowAggregation::TimeMicros(60_000_000),
                 0.25,
-                &trades,
+                &trades[frame_start..],
+                if frame == 0 {
+                    OrderFlowTapeChange::ReplaceWindow
+                } else {
+                    OrderFlowTapeChange::Append
+                },
             )
             .expect("bounded tape applies");
         std::hint::black_box(chart.engine.build_frame());
@@ -5800,7 +5974,14 @@ fn apply_last_bar_tape(chart: &mut AerisChartView) -> (OrderFlowAggregation, Vec
     let aggregation =
         OrderFlowAggregation::TimeMicros(u64::try_from(spacing * 1_000_000).expect("spacing"));
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("tape applies");
     (aggregation, trades)
 }
@@ -5897,7 +6078,14 @@ fn footprint_legend_keeps_one_price_row_and_order_flow_rows_follow_settings() {
     assert!(chart.remove_legend_indicator(LegendItem::OrderFlow(OrderFlowStudy::Delta)));
     assert!(!chart.order_flow_settings().show_delta_histogram);
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("tape rebuilds after the settings change");
     let rows = chart.legend_rows();
     assert!(
@@ -5911,7 +6099,14 @@ fn footprint_legend_keeps_one_price_row_and_order_flow_rows_follow_settings() {
     assert!(chart.clear_indicators());
     assert!(!chart.order_flow_settings().show_cumulative_delta);
     chart
-        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &trades,
+            OrderFlowTapeChange::ReplaceWindow,
+        )
         .expect("tape rebuilds after clearing indicators");
     assert!(chart.footprint_series_id().is_some());
     assert!(!chart.has_indicators());

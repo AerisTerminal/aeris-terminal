@@ -1943,7 +1943,6 @@ impl Coordinator<'_> {
                 // through after the class change. Canonical depth remains
                 // runtime-owned and is republished on Foreground restore.
                 events.order_book = None;
-                events.trade_tape = None;
                 events.study_outputs.clear();
             }
             Ok(())
@@ -1994,7 +1993,8 @@ impl Coordinator<'_> {
             if !streams.contains(MarketStream::Trades)
                 && let Some(events) = self.events.get_mut(&consumer_id)
             {
-                events.trade_tape = None;
+                events.tape_updates.clear();
+                events.tape_cursor = None;
             }
             self.ensure_realtime(&series)?;
             if streams.contains(MarketStream::Depth) || streams.contains(MarketStream::OrderLevels)

@@ -336,7 +336,7 @@ fn is_market_publication(message: &PaneProjectionEvent) -> bool {
                 event: aeris_market_runtime::fence::Fenced {
                     value: MarketRuntimeEvent::OrderBookSnapshot(_)
                         | MarketRuntimeEvent::StudyOutputSnapshot(_)
-                        | MarketRuntimeEvent::TradeTapeSnapshot(_),
+                        | MarketRuntimeEvent::TradeTapeUpdate(_),
                     ..
                 },
                 ..
@@ -1308,8 +1308,8 @@ mod tests {
     use aeris_market_data::{OrderBookFrame, OrderBookPublication};
     use aeris_market_runtime::study::StudyInstanceId;
     use aeris_market_runtime::{
-        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeSnapshot,
-        SeriesTailOperation,
+        MarketConsumerId, MarketGenerationId, MarketRuntimeEvent, MarketTradeTapeOperation,
+        MarketTradeTapeUpdate, SeriesTailOperation,
     };
 
     use aeris_study_sdk::builtins;
@@ -1989,7 +1989,7 @@ mod tests {
         let (sender, receiver) = market_projection_channel(NonZeroUsize::MIN);
         let tape = || {
             PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection::event(
-                FixtureMarketEvents::default().trade_tape(MarketTradeTapeSnapshot {
+                FixtureMarketEvents::default().trade_tape(MarketTradeTapeUpdate {
                     consumer_id: MarketConsumerId(NonZeroU64::MIN),
                     generation: MarketGenerationId(NonZeroU64::MIN),
                     provider_id: "fixture".into(),
@@ -2001,7 +2001,10 @@ mod tests {
                     rewrite_generation: 0,
                     price_scale: 2,
                     quantity_scale: 3,
-                    trades: Arc::from([]),
+                    sweeps: Arc::from([]),
+                    operation: MarketTradeTapeOperation::Reset {
+                        trades: Arc::from([]),
+                    },
                 }),
             ))
         };
@@ -2026,7 +2029,7 @@ mod tests {
             [PaneProjectionEvent::RuntimeProjection(
                 crate::market_worker::RuntimeProjection {
                     event: aeris_market_runtime::fence::Fenced {
-                        value: MarketRuntimeEvent::TradeTapeSnapshot(_),
+                        value: MarketRuntimeEvent::TradeTapeUpdate(_),
                         ..
                     },
                     ..
@@ -3241,7 +3244,7 @@ mod tests {
     fn trade_tape_mailbox_preserves_emission_order_per_runtime_generation() {
         let (sender, receiver) =
             market_projection_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
-        let snapshot = |revision| MarketTradeTapeSnapshot {
+        let tape = |revision| MarketTradeTapeUpdate {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::MIN),
             provider_id: "rithmic".to_string(),
@@ -3253,17 +3256,21 @@ mod tests {
             rewrite_generation: 0,
             price_scale: 2,
             quantity_scale: 0,
-            trades: Arc::from([]),
+            sweeps: Arc::from([]),
+            operation: MarketTradeTapeOperation::Append {
+                from_ordinal: revision,
+                trades: Arc::from([]),
+            },
         };
         let events = FixtureMarketEvents::default();
         sender
             .send(PaneProjectionEvent::RuntimeProjection(
-                crate::market_worker::RuntimeProjection::event(events.trade_tape(snapshot(2))),
+                crate::market_worker::RuntimeProjection::event(events.trade_tape(tape(2))),
             ))
             .expect("first tape queues");
         sender
             .send(PaneProjectionEvent::RuntimeProjection(
-                crate::market_worker::RuntimeProjection::event(events.trade_tape(snapshot(3))),
+                crate::market_worker::RuntimeProjection::event(events.trade_tape(tape(3))),
             ))
             .expect("newer tape queues behind it");
 
@@ -3271,8 +3278,8 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: first, .. }), PaneProjectionEvent::RuntimeProjection(crate::market_worker::RuntimeProjection { event: second, .. })]
-                if matches!(&first.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 2)
-                    && matches!(&second.value, MarketRuntimeEvent::TradeTapeSnapshot(tape) if tape.revision == 3)
+                if matches!(&first.value, MarketRuntimeEvent::TradeTapeUpdate(tape) if tape.revision == 2)
+                    && matches!(&second.value, MarketRuntimeEvent::TradeTapeUpdate(tape) if tape.revision == 3)
                     && first.epoch == second.epoch
         ));
     }

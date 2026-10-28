@@ -5,14 +5,15 @@ use super::*;
 use gpui::Stateful;
 use std::cell::RefCell;
 
-/// The visible rows derived from one tape publication and filter, so
+/// The visible rows derived from one tape revision and filter, so
 /// renders between publications (chart, book, and pointer repaints) never rescan the
-/// retained tape. Holding the projected tape's `Arc` makes its identity check exact.
+/// retained tape. The tape's provider generation and revision are its exact identity.
 #[derive(Default)]
 pub(super) struct TimeSalesRowsCache(RefCell<Option<TimeSalesRows>>);
 
 struct TimeSalesRows {
-    trades: Arc<[aeris_market_runtime::RetainedMarketTrade]>,
+    provider_generation: u64,
+    revision: u64,
     quantity_scale: u8,
     filter: super::order_flow_presenter::TimeSalesFilter,
     range: Option<(i128, i128)>,
@@ -22,7 +23,7 @@ struct TimeSalesRows {
 impl TimeSalesRowsCache {
     fn rows(
         &self,
-        snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+        tape: &super::order_flow_presenter::OrderFlowTape,
         product: Option<&InstallProviderInstrument>,
         book: Option<&aeris_market_data::OrderBookFrame>,
         filter: super::order_flow_presenter::TimeSalesFilter,
@@ -39,18 +40,20 @@ impl TimeSalesRowsCache {
         );
         let mut cached = self.0.borrow_mut();
         let current = cached.as_ref().is_some_and(|rows| {
-            Arc::ptr_eq(&rows.trades, &snapshot.trades)
-                && rows.quantity_scale == snapshot.quantity_scale
+            rows.provider_generation == tape.provider_generation
+                && rows.revision == tape.revision
+                && rows.quantity_scale == tape.quantity_scale
                 && rows.filter == filter
                 && rows.range == range
         });
         if !current {
             *cached = Some(TimeSalesRows {
-                trades: Arc::clone(&snapshot.trades),
-                quantity_scale: snapshot.quantity_scale,
+                provider_generation: tape.provider_generation,
+                revision: tape.revision,
+                quantity_scale: tape.quantity_scale,
                 filter,
                 range,
-                indices: filtered_time_sales_rows(snapshot, filter, range),
+                indices: filtered_time_sales_rows(tape, filter, range),
             });
         }
         cached
@@ -61,9 +64,9 @@ impl TimeSalesRowsCache {
 
 pub(super) struct TimeSalesPanelState<'a> {
     pub(super) app: Entity<WorkspaceSurface>,
-    pub(super) tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
+    pub(super) tape: Option<&'a super::order_flow_presenter::OrderFlowTape>,
     pub(super) rows_cache: &'a TimeSalesRowsCache,
-    pub(super) sweeps: &'a [OrderFlowSweep],
+    pub(super) sweeps: &'a [aeris_market_runtime::MarketTradeSweep],
     pub(super) product: Option<&'a InstallProviderInstrument>,
     /// Current book, whose mid anchors the price-range filter.
     pub(super) book: Option<&'a aeris_market_data::OrderBookFrame>,
@@ -127,9 +130,9 @@ fn trade_tape_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> State
         scroll,
         trades_unavailable_from: _,
     } = state;
-    let rows = tape.map_or_else(Vec::new, |snapshot| {
-        let indices = rows_cache.rows(snapshot, product, book, filter);
-        time_sales_rows(snapshot, &indices, sweeps, theme)
+    let rows = tape.map_or_else(Vec::new, |tape| {
+        let indices = rows_cache.rows(tape, product, book, filter);
+        time_sales_rows(tape, &indices, sweeps, theme)
     });
     let symbol = div()
         .pr_1()
@@ -223,16 +226,16 @@ fn time_sales_filters(
 }
 
 fn time_sales_rows(
-    snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+    tape: &super::order_flow_presenter::OrderFlowTape,
     indices: &[usize],
-    sweeps: &[OrderFlowSweep],
+    sweeps: &[aeris_market_runtime::MarketTradeSweep],
     theme: &AerisTheme,
 ) -> Vec<Div> {
-    let price_scale = u32::from(snapshot.price_scale);
-    let quantity_scale = u32::from(snapshot.quantity_scale);
+    let price_scale = u32::from(tape.price_scale);
+    let quantity_scale = u32::from(tape.quantity_scale);
     indices
         .iter()
-        .filter_map(|&index| snapshot.trades.get(index))
+        .filter_map(|&index| tape.trades.get(index))
         .map(|retained| time_sales_row(retained, sweeps, price_scale, quantity_scale, theme))
         .collect()
 }
@@ -240,13 +243,13 @@ fn time_sales_rows(
 /// Indices into the tape of the newest matching trades, newest exchange time first.
 /// `range` is the doubled book mid and the price increment while the range filter applies.
 fn filtered_time_sales_rows(
-    snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+    tape: &super::order_flow_presenter::OrderFlowTape,
     filter: super::order_flow_presenter::TimeSalesFilter,
     range: Option<(i128, i128)>,
 ) -> Vec<usize> {
     const MAXIMUM_VISIBLE_TRADES: usize = 96;
-    let quantity_divisor = 10_f64.powi(i32::from(snapshot.quantity_scale));
-    let mut rows: Vec<_> = snapshot
+    let quantity_divisor = 10_f64.powi(i32::from(tape.quantity_scale));
+    let mut rows: Vec<_> = tape
         .trades
         .iter()
         .enumerate()
@@ -302,7 +305,7 @@ const TIME_SALES_SIZE_COLUMN_WIDTH: f32 = 84.0;
 
 fn time_sales_row(
     retained: &aeris_market_runtime::RetainedMarketTrade,
-    sweeps: &[OrderFlowSweep],
+    sweeps: &[aeris_market_runtime::MarketTradeSweep],
     price_scale: u32,
     quantity_scale: u32,
     theme: &AerisTheme,
@@ -367,7 +370,10 @@ fn time_sales_row(
         )
 }
 
-fn trade_ordinal_is_in_sweep(sweeps: &[OrderFlowSweep], ordinal: u64) -> bool {
+fn trade_ordinal_is_in_sweep(
+    sweeps: &[aeris_market_runtime::MarketTradeSweep],
+    ordinal: u64,
+) -> bool {
     let index = sweeps.partition_point(|sweep| sweep.first_ingestion_ordinal <= ordinal);
     index > 0 && ordinal <= sweeps[index - 1].last_ingestion_ordinal
 }
@@ -392,21 +398,17 @@ mod tests {
     use super::*;
 
     fn tape(
+        revision: u64,
         trades: Vec<aeris_market_runtime::RetainedMarketTrade>,
-    ) -> aeris_market_runtime::MarketTradeTapeSnapshot {
-        aeris_market_runtime::MarketTradeTapeSnapshot {
-            consumer_id: aeris_market_runtime::MarketConsumerId(std::num::NonZeroU64::MIN),
-            generation: aeris_market_runtime::MarketGenerationId(std::num::NonZeroU64::MIN),
-            provider_id: "provider".into(),
-            instrument_id: "instrument".into(),
-            entitlement_id: "entitlement".into(),
+    ) -> super::super::order_flow_presenter::OrderFlowTape {
+        super::super::order_flow_presenter::OrderFlowTape {
+            selection_generation: 1,
             provider_generation: 1,
-            revision: 1,
-            source_watermark: 0,
-            rewrite_generation: 0,
+            revision,
             price_scale: 0,
             quantity_scale: 0,
             trades: trades.into(),
+            sweeps: Arc::from([]),
         }
     }
 
@@ -443,18 +445,53 @@ mod tests {
     #[test]
     fn rows_follow_exchange_time_and_refresh_only_for_a_new_publication_or_filter() {
         // A late covering history trade (ordinal 3) is older than the live trades.
-        let snapshot = tape(vec![trade(1, 10, 1), trade(2, 20, 5), trade(3, 5, 5)]);
+        let current = tape(1, vec![trade(1, 10, 1), trade(2, 20, 5), trade(3, 5, 5)]);
         let cache = TimeSalesRowsCache::default();
         let filter = super::super::order_flow_presenter::TimeSalesFilter::default();
-        assert_eq!(cache.rows(&snapshot, None, None, filter), vec![1, 0, 2]);
+        assert_eq!(cache.rows(&current, None, None, filter), vec![1, 0, 2]);
 
         let large = super::super::order_flow_presenter::TimeSalesFilter {
             minimum_quantity: 2.0,
             ..filter
         };
-        assert_eq!(cache.rows(&snapshot, None, None, large), vec![1, 2]);
+        assert_eq!(cache.rows(&current, None, None, large), vec![1, 2]);
 
-        let next = tape(vec![trade(1, 10, 1), trade(2, 20, 5), trade(4, 30, 9)]);
+        let next = tape(2, vec![trade(1, 10, 1), trade(2, 20, 5), trade(4, 30, 9)]);
         assert_eq!(cache.rows(&next, None, None, large), vec![2, 1]);
+    }
+
+    #[test]
+    fn sweep_highlights_match_the_runtime_classification() {
+        // The panel never reclassifies: it highlights exactly the ordinal span
+        // the runtime's `MarketTradeSweep` carries.
+        let sweeps: Arc<[aeris_market_runtime::MarketTradeSweep]> =
+            Arc::from([aeris_market_runtime::MarketTradeSweep {
+                first_ingestion_ordinal: 2,
+                last_ingestion_ordinal: 4,
+                timestamp_micros: 20_000_000,
+                terminal_price: 100.0,
+                total_volume: 15.0,
+                price_levels: 2,
+                aggressor: aeris_market_data::AggressorSide::Buy,
+            }]);
+        let tape = super::super::order_flow_presenter::OrderFlowTape {
+            sweeps,
+            ..tape(
+                1,
+                vec![
+                    trade(1, 10, 1),
+                    trade(2, 20, 5),
+                    trade(3, 20, 5),
+                    trade(4, 20, 5),
+                ],
+            )
+        };
+        let highlighted: Vec<u64> = tape
+            .trades
+            .iter()
+            .filter(|retained| trade_ordinal_is_in_sweep(tape.sweeps(), retained.ingestion_ordinal))
+            .map(|retained| retained.ingestion_ordinal)
+            .collect();
+        assert_eq!(highlighted, [2, 3, 4]);
     }
 }

@@ -176,28 +176,6 @@ pub struct RetainedMarketTrade {
     pub trade: std::sync::Arc<aeris_market_data::MarketTrade>,
 }
 
-/// Latest bounded immutable trade-tape image for one consumer generation.
-///
-/// A newer revision completely supersedes an older queued image. The shared
-/// `Arc` keeps chart, tape panel, and study projections from copying the same
-/// retained trade collection inside the desktop process.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MarketTradeTapeSnapshot {
-    pub consumer_id: aeris_market_engine::ConsumerId,
-    pub generation: aeris_market_engine::GenerationId,
-    pub provider_id: String,
-    pub instrument_id: String,
-    pub entitlement_id: String,
-    pub provider_generation: u64,
-    pub revision: u64,
-    pub source_watermark: u64,
-    /// Changes when history or a correction rewrites the retained prefix.
-    pub rewrite_generation: u64,
-    pub price_scale: u8,
-    pub quantity_scale: u8,
-    pub trades: std::sync::Arc<[RetainedMarketTrade]>,
-}
-
 /// One runtime-classified sweep on the retained trade tape.
 ///
 /// Computed by `market_runtime` once per ingested trade over the trailing
@@ -234,13 +212,10 @@ pub enum MarketTradeTapeOperation {
     },
 }
 
-/// Incremental generation-fenced trade-tape publication for one consumer.
-///
-/// Carries the same continuity metadata as [`MarketTradeTapeSnapshot`] plus
-/// the sweeps classified over the trailing retained window at publication.
-/// The full-snapshot [`MarketRuntimeEvent::TradeTapeSnapshot`] stays
-/// authoritative until the desktop consumes these updates (stabilization
-/// M7.11).
+/// Incremental generation-fenced trade-tape publication for one consumer: the
+/// only trade-tape publication. Its `Reset` covers the whole retained window;
+/// an `Append` continues it exactly. Carries the sweeps classified over the
+/// trailing retained window at publication.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketTradeTapeUpdate {
     pub consumer_id: aeris_market_engine::ConsumerId,
@@ -381,7 +356,6 @@ pub enum MarketRuntimeEvent {
     SeriesState(MarketSeriesState),
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
-    TradeTapeSnapshot(MarketTradeTapeSnapshot),
     TradeTapeUpdate(MarketTradeTapeUpdate),
     StudyOutputSnapshot(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
@@ -409,7 +383,6 @@ impl MarketRuntimeEvent {
             Self::SeriesState(event) => Some(event.generation),
             Self::DemandError(event) => Some(event.generation),
             Self::OrderBookSnapshot(event) => Some(event.generation),
-            Self::TradeTapeSnapshot(event) => Some(event.generation),
             Self::TradeTapeUpdate(event) => Some(event.generation),
             Self::StudyOutputSnapshot(event) => event.generation,
             Self::StudyOutputsInvalidated(event) => event.generation,
@@ -447,6 +420,7 @@ pub use market_service::descriptors::{
     ResolvedSeries, SavedProviderLogin, SelectionError, SelectionOutcome, SelectionRequest,
 };
 pub use market_service::{
-    BrokerVenueLink, MarketService, MarketServiceStatus, QuoteSubscription, RithmicLoginSummary,
-    RithmicServer, built_in_provider_presentations, published_provider_descriptors,
+    BrokerVenueLink, MAXIMUM_RECENT_LADDER_TRADES, MarketService, MarketServiceStatus,
+    QuoteSubscription, RithmicLoginSummary, RithmicServer, built_in_provider_presentations,
+    published_provider_descriptors,
 };

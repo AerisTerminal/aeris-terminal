@@ -65,10 +65,10 @@ pub use view::{
     ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion,
     ChartThemeDefaults, ChartType, CumulativeDeltaReset, CumulativeDeltaSettings,
     CumulativeDeltaStyle, DeltaHistogramSettings, DepthHeatmapSettings, DrawingsLockSummary,
-    FootprintDisplayMode, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings, chart_color_hex,
-    classify_order_flow_sweeps, drawing_color_hex,
+    FootprintDisplayMode, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
+    PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings,
+    VolumePlacement, VolumeSettings, chart_color_hex, drawing_color_hex,
 };
 pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

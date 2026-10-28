@@ -395,13 +395,14 @@ the check.
 - Trade-tape sweep classification lives in `market_runtime`
   (`market_service/trade_sweeps.rs`): it runs once per ingested trade (and on every retention
   eviction or session reset) over the trailing 512 retained prints with the 90th-percentile
-  size threshold and 100 ms grouping, so consumers never reclassify the tape. Beside the legacy
-  full `TradeTapeSnapshot`, the coordinator publishes fenced `TradeTapeUpdate` events carrying
+  size threshold and 100 ms grouping, so consumers never reclassify the tape. The coordinator
+  publishes fenced `TradeTapeUpdate` events carrying
   `MarketTradeTapeOperation::Reset { trades }` / `Append { from_ordinal, trades }` and the
   current sweeps; a consumer's bounded 64-entry update queue overflows into one covering
   `Reset`, and a new selection generation, provider session, prefix rewrite or eviction gap
-  restarts the stream with a `Reset`. The desktop consumes the incremental stream only after
-  the M7.11 presenter ring lands.
+  restarts the stream with a `Reset`. The desktop's `OrderFlowPresenter` applies the stream
+  into a ring bounded at the runtime's `MAXIMUM_RECENT_LADDER_TRADES` and projects only the
+  covering window or the appended suffix into the chart.
 - Provider catalog controls and responses pass through one bounded `ProviderCatalogChannel`
   boundary; provider-specific command translation stays with each registered channel.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider
@@ -515,6 +516,12 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
   leaves its body unfilled while the frame and wick carry the direction color.
   `chart_integration_candle_bodies_are_engine_owned` rejects the retired host transform names
   `hollow_appearance` and `hollow_base` in chart integration and desktop production source.
+- Order-flow sweep classification and tape continuity are runtime-owned: chart integration's
+  `apply_order_flow_trades` takes the runtime's `Reset`/`Append` decision as a
+  `OrderFlowTapeChange` and never reclassifies the tape or diffs ordinals.
+  `chart_integration_has_no_order_flow_analytics` rejects the retired host names
+  `classify_order_flow_sweeps`, `order_flow_resume_ordinal` and `invalidate_order_flow_prefix`
+  in chart integration and desktop production source.
 - When a chart feature needs more from Terminal than data, product policy, or a platform-only effect, the
   missing operation belongs in Aeris Charts. Add it there first (a coordinated two-repository task), push
   it, then bump the pinned revision here; never compensate with Terminal-side wiring.

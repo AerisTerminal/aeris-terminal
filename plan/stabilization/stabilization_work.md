@@ -400,20 +400,44 @@ only on the guarded GUI checks on their lines.
     trailing window, 90th-percentile size, 100 ms grouping, moved tests included) and runs once
     per ingested trade plus on every retention eviction and session reset, so
     `ProviderOrderBook::trade_sweeps` always describes the retained window. The tape publishes
-    beside the legacy full snapshot as fenced `TradeTapeUpdate` events carrying
+    as fenced `TradeTapeUpdate` events carrying
     `MarketTradeTapeOperation::Reset { trades }` / `Append { from_ordinal, trades }`, the full
     continuity metadata of the snapshot and the current sweeps; a consumer's bounded (64) update
     queue overflows into one covering `Reset`, and a new selection generation, provider session,
     prefix rewrite or eviction gap restarts the stream with a `Reset`. Tests: Append/Reset
     sequencing across rewrite and selection-generation changes, overflow-replay reconstructs the
     exact tape, sweep classification over the retained trailing window.
-  - Left: none for M7.10; the desktop ignores `TradeTapeUpdate` until M7.11 wires the
-    `OrderFlowPresenter` ring and deletes the snapshot path and the host classifier.
+  - Left: none; M7.11 made `TradeTapeUpdate` the only tape publication and removed the legacy
+    full snapshot.
 - [ ] M7.11 Desktop consumes runtime sweeps and incremental tape
-  - Left: `OrderFlowPresenter` applies Append/Reset into a bounded ring.
-  - Delete the host sweep function and ordinal diffing, and add a naming_check ban.
-  - Measure a 100k-trade apply before and after.
-  - GUI: Hyperliquid sweep highlights. Closes UI-14 with M7.3 and M7.9.
+  - Landed: `OrderFlowPresenter` applies the runtime's fenced `TradeTapeUpdate` stream into a
+    ring bounded at the runtime's `MAXIMUM_RECENT_LADDER_TRADES` (65,536): a `Reset` installs
+    the covering window, an `Append` must continue the ring exactly at `from_ordinal` (a gap
+    leaves the tape untouched and the runtime's next covering `Reset` restores it), and a newer
+    selection generation supersedes regardless of provider-session numbering. The chart applies
+    the projected change as `OrderFlowTapeChange::ReplaceWindow` (covering window) or `Append`
+    (new suffix only) through chart_integration's `apply_order_flow_trades`; an append ahead of
+    the covering window is rejected for a resend (`OrderFlowApplyError::AwaitingCoveringWindow`).
+    The host sweep classifier and ordinal-diffing (`classify_order_flow_sweeps`,
+    `order_flow_resume_ordinal`, `invalidate_order_flow_prefix`) are deleted, the Time & Sales
+    panel highlights the runtime's `MarketTradeSweep` spans directly, and naming_check's new
+    `chart_integration_has_no_order_flow_analytics` rejects their return. The legacy
+    `TradeTapeSnapshot` is removed from `market_runtime` entirely (the desktop was its last
+    consumer). Tests: presenter Reset/Append/overflow-Reset/ring-bound/stale-fencing/
+    selection-generation supersede, engine-worker tape fencing, Time & Sales rows and
+    runtime-sweep highlights, chart_integration covering-window/append/tick-size-rebuild
+    behavior, interval-switch fencing against the superseded chart.
+  - Measurement (`order_flow_tape_apply_100k_measurement`, an ignored deterministic harness in
+    `chart_integration` run with `cargo test -p aeris_chart_integration --locked --lib
+    order_flow_tape_apply_100k_measurement -- --ignored --nocapture`, debug build, no GUI):
+    the covering 100k-trade window apply took 131.1 s on the old full-snapshot path and 143.0 s
+    on the new `ReplaceWindow` path (same order; the engine's window replacement dominates, and
+    a covering window arrives only on selection/session changes or overflow). Steady state is
+    the win: the old path re-projected the 513-trade window per revision (22.2 us for 10
+    no-op revisions only because the chart diffed and discarded already-applied trades), while
+    the new path applies 10 single-print `Append`s in 24.8 ms total (~2.5 ms per print, inside
+    one frame budget) with no re-projection and no ordinal diffing.
+  - Left: GUI Hyperliquid sweep-highlight check. Closes UI-14 with M7.3 and M7.9.
 - [ ] M7.12 Desktop tests against controller boundaries
   - Left: rewrite `desktop/tests.rs`, `workspace_surface_tests.rs` and the chart_integration view
     tests against controllers and `PaneHarness`.
@@ -608,7 +632,9 @@ Outside the work items; each needs a maintainer decision or access before it can
 - **Exchange holiday data:** exchange rules report Open on holidays, and the staleness rule still
   protects trading.
 - **Second launch:** it does not focus the existing window (that needs IPC).
-- **Aeris Charts order-flow append:** add it only if M7.11 measures it as the bottleneck.
+- **Aeris Charts order-flow append:** resolved by M7.11 without an engine change: the existing
+  append API applies one print in ~2.5 ms (debug), inside a frame budget; only covering-window
+  installs walk the full tape, and those are selection/session-level events.
 - **Workspace-level account selection:** the per-pane selection is kept.
 - **Broker relay edge cases:**
   - the reverse 30-second deadline has no deterministic test
