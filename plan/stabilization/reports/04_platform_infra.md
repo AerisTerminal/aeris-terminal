@@ -309,6 +309,11 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: No dependency audit step (`cargo machete`/`cargo udeps`, `cargo deny`).
 - Fix: Remove unused crates; move `rpassword` behind a `bin` feature; centralize pins; align `resvg` with GPUI; add `cargo deny check` (bans duplicates with an allowlist) to CI.
 - Verification: `cargo machete` clean; `cargo tree -d` duplicates reduced to the allowlist.
+- Status (2026-10-28, M8.10): fixed except the CI `cargo deny` step. Crates that a scan of each
+  manifest against its crate's sources found unused are removed (`cargo machete` was not run),
+  `rpassword` is behind the rithmic `provision` feature, the per-crate pins are centralized, and
+  `resvg` uses GPUI's 0.46. The remaining `sha2`, `sysinfo` and `tiny-skia` duplicates come
+  from GPUI, `ed25519-dalek` or Aeris Charts.
 
 ### PL-16 Legacy brand migrations and tokens
 

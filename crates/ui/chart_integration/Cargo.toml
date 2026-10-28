@@ -18,8 +18,8 @@ aeris_observability = { path = "../../observability" }
 aeris_terminal_ui = { path = "../terminal_ui", default-features = false }
 aeris_trading = { path = "../../domain/trading" }
 gpui.workspace = true
-num-traits = "=0.2.19"
-resvg = { version = "=0.48.1", default-features = false }
+num-traits.workspace = true
+resvg.workspace = true
 aeris_charts_engine.workspace = true
 aeris_charts_native.workspace = true
 aeris_charts_render.workspace = true
@@ -31,7 +31,7 @@ aeris_application = { path = "../../application", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
-arboard = { version = "=3.6.1", default-features = false, features = ["image-data"] }
+arboard.workspace = true
 
 [lints]
 workspace = true

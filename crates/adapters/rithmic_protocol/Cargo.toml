@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Builds the interactive `provision_rithmic_test` binary, which prompts for a password.
+provision = ["dep:rpassword"]
+
+[[bin]]
+name = "provision_rithmic_test"
+required-features = ["provision"]
+
 [dependencies]
 aeris_instruments = { path = "../../domain/instruments" }
 aeris_market_data = { path = "../../domain/market_data" }
@@ -15,11 +23,11 @@ aeris_provider_history = { path = "../../provider_history" }
 chrono.workspace = true
 prost.workspace = true
 rustls.workspace = true
-rpassword.workspace = true
+rpassword = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-socket2 = { version = "=0.6.5", default-features = false }
+socket2.workspace = true
 tungstenite.workspace = true
 webpki-roots.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }

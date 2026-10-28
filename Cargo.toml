@@ -38,6 +38,7 @@ rust-version = "1.99.0"
 version = "1.2.0"
 
 [workspace.dependencies]
+arboard = { version = "=3.6.1", default-features = false, features = ["image-data"] }
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 # Pinned to the version Aeris Charts already resolves, so the time zone database is built once.
@@ -49,11 +50,14 @@ getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false }
 keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 notify-rust = "=4.18.1"
+num-traits = "=0.2.19"
+# Pinned to the version GPUI resolves so the SVG rasterizer stack is built once.
+resvg = { version = "=0.46.0", default-features = false }
 # Pinned to the version rustls already resolves; account ID tokens are verified with its RSA API.
 ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.45"
-socket2 = "=0.6.5"
+socket2 = { version = "=0.6.5", default-features = false }
 serde_json = "=1.0.151"
 same-file = "=1.0.6"
 webpki-roots = "=1.0.9"
@@ -66,7 +70,6 @@ tungstenite = { version = "=0.30.0", default-features = false, features = [
     "handshake",
     "rustls-tls-webpki-roots",
 ] }
-unicode-segmentation = "=1.13.3"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls", "json"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = { version = "=1.9.0", default-features = false }

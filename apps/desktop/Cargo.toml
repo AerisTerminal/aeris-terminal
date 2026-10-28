@@ -7,7 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-diagnostics = ["aeris_application/test-support", "aeris_chart_integration/diagnostics"]
+diagnostics = [
+    "aeris_application/test-support",
+    "aeris_chart_integration/diagnostics",
+    "dep:sha2",
+]
 
 [dependencies]
 aeris_application = { path = "../../crates/application" }
@@ -28,7 +32,8 @@ aeris_release_lifecycle = { path = "../../crates/release_lifecycle" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+# Hashes readiness-conformance evidence, which only diagnostics builds and tests compile.
+sha2 = { workspace = true, optional = true }
 sysinfo.workspace = true
 aeris_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 chrono.workspace = true
@@ -36,9 +41,8 @@ gpui.workspace = true
 gpui-base.workspace = true
 gpui_platform.workspace = true
 image.workspace = true
-num-traits = "=0.2.19"
+num-traits.workspace = true
 prost.workspace = true
-unicode-segmentation.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
 
 [build-dependencies]
@@ -48,6 +52,7 @@ embed-resource.workspace = true
 aeris_application = { path = "../../crates/application", features = ["test-support"] }
 aeris_chart_integration = { path = "../../crates/ui/chart_integration", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+sha2.workspace = true
 aeris_market_runtime = { path = "../../crates/market_runtime", features = ["replay"] }
 aeris_trading_runtime = { path = "../../crates/trading_runtime", features = ["test-observability", "test-support"] }
 

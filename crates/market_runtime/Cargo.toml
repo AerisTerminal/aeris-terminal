@@ -22,13 +22,10 @@ aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 aeris_instruments = { path = "../domain/instruments" }
 aeris_trading = { path = "../domain/trading" }
 chrono.workspace = true
-num-traits = "=0.2.19"
+num-traits.workspace = true
 chrono-tz.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-aeris_study_sdk = { path = "../study_sdk" }

@@ -159,7 +159,7 @@ dependencies = [
  "arboard",
  "gpui",
  "num-traits",
- "resvg 0.48.1",
+ "resvg",
  "serde_json",
 ]
 
@@ -284,7 +284,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sysinfo 0.39.6",
- "unicode-segmentation",
  "zeroize",
 ]
 
@@ -334,7 +333,6 @@ dependencies = [
  "aeris_platform_runtime",
  "aeris_provider_history",
  "aeris_rithmic_protocol_adapter",
- "aeris_study_sdk",
  "aeris_trading",
  "chrono",
  "chrono-tz",
@@ -362,7 +360,6 @@ dependencies = [
  "aeris_observability",
  "aeris_platform_sys",
  "base64 0.23.1",
- "getrandom 0.4.3",
  "keyring",
  "notify-rust",
  "rustls",
@@ -374,7 +371,6 @@ dependencies = [
  "webpki-roots 1.0.9",
  "windows-registry",
  "zbus",
- "zeroize",
 ]
 
 [[package]]
@@ -2756,7 +2752,7 @@ dependencies = [
  "raw-window-handle",
  "refineable",
  "regex",
- "resvg 0.46.0",
+ "resvg",
  "scheduler",
  "schemars",
  "seahash",
@@ -2771,7 +2767,7 @@ dependencies = [
  "thiserror 2.0.21",
  "ttf-parser",
  "url",
- "usvg 0.46.0",
+ "usvg",
  "uuid",
  "waker-fn",
  "web-time",
@@ -3438,12 +3434,6 @@ name = "imagesize"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
-
-[[package]]
-name = "imagesize"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "imgref"
@@ -5605,23 +5595,8 @@ dependencies = [
  "rgb",
  "svgtypes",
  "tiny-skia 0.11.4",
- "usvg 0.46.0",
+ "usvg",
  "zune-jpeg",
-]
-
-[[package]]
-name = "resvg"
-version = "0.48.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67e3803f97b999e80cbf7c6ecdd07a8102204d92e1633cf48783720c521196bd"
-dependencies = [
- "bytemuck",
- "log",
- "pico-args",
- "rgb",
- "svgtypes",
- "tiny-skia 0.12.0",
- "usvg 0.48.1",
 ]
 
 [[package]]
@@ -7087,7 +7062,7 @@ dependencies = [
  "data-url",
  "flate2",
  "fontdb 0.23.0",
- "imagesize 0.14.0",
+ "imagesize",
  "kurbo",
  "log",
  "pico-args",
@@ -7102,25 +7077,6 @@ dependencies = [
  "unicode-script",
  "unicode-vo",
  "xmlwriter",
-]
-
-[[package]]
-name = "usvg"
-version = "0.48.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
-dependencies = [
- "data-url",
- "imagesize 0.15.0",
- "kurbo",
- "log",
- "pico-args",
- "roxmltree 0.21.1",
- "simplecss",
- "siphasher",
- "strict-num",
- "svgtypes",
- "tiny-skia-path 0.12.0",
 ]
 
 [[package]]

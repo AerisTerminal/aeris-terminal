@@ -718,11 +718,20 @@ still wait on the GUI checks and the remaining work on their lines.
     photo and renders it from bytes; `reqwest_client` is gone, and `cargo tree -i reqwest` and
     `cargo tree -i hyper` are empty (50 packages left the lock). `http_wiring_tests.rs` now
     decodes runtime photo bytes.
-  - Left:
-    - Remove unused crates and put `rpassword` behind a feature.
-    - Centralize pins and dedupe sysinfo.
-    - GUI smoke test, including a signed-in avatar check (not run).
-  - Also covers the remaining TR-12 items and PL-15.
+  - Landed: PL-15. Removed unused `unicode-segmentation` (desktop and workspace), `getrandom` and
+    `zeroize` (`platform_runtime`) and the `market_runtime` dev-dependency on `study_sdk`. The
+    desktop's `sha2` is optional behind `diagnostics` (readiness conformance only) plus a
+    dev-dependency. `rpassword` is optional behind the rithmic `provision` feature, which
+    `provision_rithmic_test` requires. `num-traits`, `resvg`, `arboard` and `socket2` are
+    pinned once in `[workspace.dependencies]`, and `resvg` moved to GPUI's `=0.46.0`, so the
+    resvg/usvg/imagesize copies left the build. The lock went from 885 to 832 packages.
+    Not deduplicable here: `sha2 0.10.9` is GPUI's Linux secret-service dependency while
+    `ed25519-dalek 3` needs `0.11`; `sysinfo 0.31.4` is a lock-only entry from GPUI's screen
+    capture crate that no target builds; `tiny-skia 0.12` comes from Aeris Charts.
+  - TR-12 order plant: not unused. `market_runtime::rithmic_venue` opens it for broker orders, so
+    it stays in the default build.
+  - Left: GUI smoke test (charts, drawing stamps and image export after the `resvg` move), including
+    a signed-in avatar check. Not run.
 - [ ] M8.11 Vendor and tooling trim
   - Left: trim the `gpui_base` LSP editor, then lint and pin it.
   - Delete the physical-pacing scripts.

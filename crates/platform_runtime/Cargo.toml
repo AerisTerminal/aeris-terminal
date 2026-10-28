@@ -10,7 +10,6 @@ publish.workspace = true
 aeris_observability = { path = "../observability" }
 aeris_platform_sys = { path = "../platform_sys" }
 base64.workspace = true
-getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustls.workspace = true
@@ -18,7 +17,6 @@ sha2.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
 webpki-roots.workspace = true
-zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
