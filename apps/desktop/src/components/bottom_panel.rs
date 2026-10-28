@@ -710,15 +710,18 @@ impl TerminalApp {
                         .collect()
                 })
                 .await;
-            let _ = terminal.update(cx, |terminal, terminal_cx| {
-                if terminal.bottom_panel.history.receive_page(
-                    request_token,
-                    result,
-                    &terminal.bottom_panel.filter,
-                ) {
-                    terminal_cx.notify();
-                }
-            });
+            // A retired terminal no longer needs its completed history page.
+            terminal
+                .update(cx, |terminal, terminal_cx| {
+                    if terminal.bottom_panel.history.receive_page(
+                        request_token,
+                        result,
+                        &terminal.bottom_panel.filter,
+                    ) {
+                        terminal_cx.notify();
+                    }
+                })
+                .unwrap_or(());
         })
         .detach();
     }

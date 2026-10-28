@@ -1205,7 +1205,9 @@ mod tests {
 
     impl Drop for LiveGateFixture {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
+            if let Err(error) = std::fs::remove_dir_all(&self.directory) {
+                eprintln!("Could not remove live gate test directory: {error}");
+            }
         }
     }
 

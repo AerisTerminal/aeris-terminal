@@ -1,4 +1,5 @@
 //! Desktop-local presentation support shared by the application and its tests.
+#![deny(clippy::let_underscore_must_use, clippy::let_underscore_future)]
 
 pub mod account;
 #[path = "chart_chrome.rs"]

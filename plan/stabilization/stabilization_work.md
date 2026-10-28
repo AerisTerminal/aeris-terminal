@@ -152,7 +152,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | UI-08 | Medium | Trading state duplicated per pane and polled from the render path | M6.10 | closed: one subscription-backed TradingStore, no render-path trading poll or per-pane owner-state copy; pane selection remains per pane |
 | UI-09 | Medium | Persistence lacks versioning, duplicates atomic-write logic, and silently resets on corruption | M7.7 (duplication/backup), M7.8 | open |
 | UI-10 | Medium | Control flow depends on matching display strings | M5.1 (runtime part), M6.8, M6.11 | open |
-| UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | exit park closed in 3c42981b; remainder open |
+| UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | closed by M6.12: desktop production discards handled explicitly and crate-root deny lints enforced |
 | UI-12 | Medium (bloat; not a runtime risk) | Dormant account and placeholder code compiled into production | M7.2 | closed 2026-10-25: the account code is live Cognito sign-in, not dormant |
 | UI-13 | Low | Hardcoded colours outside the design system | M7.1 | open |
 | UI-14 | Medium | Chart analytics and transforms in the integration glue | M7.3 (requests), M7.9 (hollow), M7.10 (sweeps), M7.11 (tape) | open |
@@ -2497,10 +2497,14 @@ active item (parts 1-8); M6.8-M6.12 are open.
     desktop does not handle `StaleRevision`, flatten still needs a current bid and ask from the
     pane, and `TradingSnapshot`, `place_order_from_market`/`place_bracket_from_market` and
     `MAXIMUM_SNAPSHOT_ITEMS` remain.
-- [ ] M6.12 discard-policy-enforcement - Zero unhandled discards in desktop production code
-  - Status (2026-10-23 audit): every remaining `let _ =` in `apps/desktop/src` is test code or a
-    test-fixture `Drop`, and `update.rs` has none. Remaining: the `let_underscore_must_use`
-    and `let_underscore_future` deny lints.
+- [x] M6.12 discard-policy-enforcement - Zero unhandled discards in desktop production code
+  - 2026-10-28 `refactor(desktop)`: VAL-DSK-039. Both crate roots deny
+    `let_underscore_must_use` and `let_underscore_future`; no desktop production `let _ =`
+    remains. D21: the three maintainer preview/cancel sites keep the original
+    retired-dialog and removed-study behavior, with cancel restore failures
+    recorded through observability. Retired history completions are explicit;
+    diagnostics-gated fixture cleanup reports failures. Existing dialog tests
+    cover previews and cancel restoration. UI-11 closed.
 
 ### M7 desktop structure
 
@@ -2551,6 +2555,11 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- Desktop library and binary deny `clippy::let_underscore_must_use` and
+  `clippy::let_underscore_future`; production desktop source has no `let _ =`.
+  Propagate or report failures, or handle a typed retired outcome explicitly;
+  test-only statements and modules are exempt from the production scan
+  (M6.12, D21, `refactor(desktop): enforce explicit discard handling`).
 - Production trading commands use one owner-priced public entry per placement and
   modification kind. Caller-priced submissions and direct market observations remain
   `#[cfg(test)]` crate-private characterization seams only; desktop and probes cannot
@@ -3246,6 +3255,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-28 M6.11 Part 3a refactor(trading): decouple account capacity from snapshot limit - retain the released 10,000-account ceiling in its own admission constant with a threshold regression; owner-priced command collapse and snapshot confinement remain pending.
 - 2026-10-28 M6.11 Part 3b refactor(trading): consolidate owner-priced command surface - delete public caller-priced twins, migrate desktop/probes, preserve quote-less/replay characterization under a test-only crate-private seam; retain OCO provenance and checked-modify owner-price regressions, 10,000-account threshold and existing migration tests. D20/D25/D26; snapshot confinement and GUI remain.
 - 2026-10-28 M6.11 Part 4 refactor(trading): confine snapshot projection and transport to test support, migrate the paper probe and chartless test to working sets and history, remove the snapshot limit constant, enforce the boundary in naming_check. Fresh-root public Hyperliquid probe: 22/22 passed, `source_clean=true` at code commit `f0107f2a`; GUI clauses remain not yet validated.
+- 2026-10-28 M6.12 refactor(desktop): enforce explicit discard handling - deny both Clippy discard lints in desktop crate roots, handle all production and diagnostics-gated discards, preserve D21 preview/cancel intent, and close UI-11; VAL-DSK-039 verified by production-cut grep, desktop fmt/clippy/tests and naming_check.
 
 ## 7. Known gaps / deferred
 

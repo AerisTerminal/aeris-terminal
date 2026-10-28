@@ -1240,7 +1240,7 @@ mod tests {
     fn wait_for(session: &DesktopAccount, what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let _ = session.poll();
+            let _changed = session.poll();
             if done() {
                 return;
             }

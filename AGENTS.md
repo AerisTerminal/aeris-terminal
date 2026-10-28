@@ -616,6 +616,10 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
 - Rust edition/toolchain is repository-pinned; dependencies stay pinned to intentional versions.
 - Avoid `unwrap`/`expect` outside tests and unavoidable startup invariants.
 - Propagate errors intentionally; do not silently discard failures.
+- Desktop library and binary deny `clippy::let_underscore_must_use` and
+  `clippy::let_underscore_future`. Desktop production code must not use `let _ =`;
+  propagate failures, log them through observability, or explicitly handle a typed
+  retired/absent outcome. Test-only discards do not count toward the production scan.
 - Keep file/directory names snake_case.
 - Fix Clippy findings rather than adding broad lint suppression.
 - Do not create planning documents, architecture diaries, nested agent files, or duplicate README files.

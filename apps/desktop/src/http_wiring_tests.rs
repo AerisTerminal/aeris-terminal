@@ -70,7 +70,9 @@ fn installed_http_client_loads_remote_avatar_resource() {
         install_platform_http_client(cx);
         let load = <ImageAssetLoader as Asset>::load(Resource::Uri(url.into()), cx);
         let loaded = reqwest_client::runtime().block_on(load).is_ok();
-        let _ = result_tx.send(loaded);
+        result_tx
+            .send(loaded)
+            .expect("avatar result receiver is live");
         cx.quit();
     });
 

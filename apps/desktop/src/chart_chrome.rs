@@ -954,8 +954,11 @@ mod tests {
     }
 
     fn remove_chart_chrome_test_files(path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("bak"));
+        for file in [path.to_path_buf(), path.with_extension("bak")] {
+            if let Err(error) = std::fs::remove_file(file) {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            }
+        }
     }
 
     #[test]

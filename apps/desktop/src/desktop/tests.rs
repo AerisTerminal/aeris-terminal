@@ -5779,7 +5779,9 @@ impl ChartOrderFixture {
         self.service
             .shutdown(std::time::Duration::from_secs(2))
             .expect("shutdown");
-        let _ = std::fs::remove_dir_all(self.directory);
+        if let Err(error) = std::fs::remove_dir_all(&self.directory) {
+            eprintln!("Could not remove chart order fixture directory: {error}");
+        }
     }
 }
 

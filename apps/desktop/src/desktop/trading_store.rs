@@ -344,7 +344,7 @@ impl TradingStore {
                     } else {
                         #[cfg(test)]
                         if let Some(tick) = &timeout_tick {
-                            let _ = tick.send(());
+                            let _receiver_retired = tick.send(()).is_err();
                         }
                     }
                 }
@@ -613,7 +613,7 @@ mod tests {
             .start_bridge(
                 service.subscribe().expect("subscribe"),
                 Arc::new(move || {
-                    let _ = wake.send(());
+                    let _receiver_retired = wake.send(()).is_err();
                 }),
                 Duration::from_millis(1),
                 Some(tick),
@@ -1653,7 +1653,7 @@ mod tests {
             .start(
                 subscription,
                 Arc::new(move || {
-                    let _ = woke.try_send(());
+                    let _wake_not_delivered = woke.try_send(()).is_err();
                 }),
             )
             .expect("named bridge");

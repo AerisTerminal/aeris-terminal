@@ -2,6 +2,7 @@
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
+#![deny(clippy::let_underscore_must_use, clippy::let_underscore_future)]
 
 //! Native executable entry point.
 

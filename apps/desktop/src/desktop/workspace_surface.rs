@@ -778,7 +778,7 @@ pub(super) fn preview_on_change(
     window.subscribe(input, cx, move |_, event: &InputEvent, _, cx| {
         if matches!(event, InputEvent::Change) {
             // A surface already gone has no dialog left to preview.
-            let _ = surface.update(cx, preview);
+            surface.update(cx, preview).unwrap_or(());
         }
     })
 }
@@ -7806,12 +7806,11 @@ impl WorkspaceSurface {
         };
         self.indicator_settings_dialog = None;
         // Big trades removed while the dialog was open has nothing left to restore.
-        let _ = self.apply_big_trades_settings(
-            original.filter,
-            original.size,
-            original.show_volume,
-            cx,
-        );
+        if let Err(error) =
+            self.apply_big_trades_settings(original.filter, original.size, original.show_volume, cx)
+        {
+            aeris_observability::diagnostic!("Big trades dialog restore skipped: {error}");
+        }
         cx.notify();
     }
 
@@ -7991,7 +7990,9 @@ impl WorkspaceSurface {
         };
         self.indicator_settings_dialog = None;
         // Volume removed while the dialog was open has nothing left to restore.
-        let _ = self.apply_volume_settings(original, cx);
+        if let Err(error) = self.apply_volume_settings(original, cx) {
+            aeris_observability::diagnostic!("Volume dialog restore skipped: {error}");
+        }
         cx.notify();
     }
 
