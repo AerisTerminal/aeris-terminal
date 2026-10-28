@@ -29,11 +29,12 @@ const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_mins(30);
 const CHECK_RETRY_INITIAL: Duration = Duration::from_mins(1);
 const CHECK_RETRY_MAXIMUM: Duration = Duration::from_mins(30);
 const MAXIMUM_CHECK_OUTPUT_BYTES: usize = 16 * 1024;
-const RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const RESTART_CHILD_STABILITY_WINDOW: Duration = Duration::from_millis(150);
 const MAXIMUM_RESTART_ACK_BYTES: usize = 128;
 const MAXIMUM_LAUNCHER_BYTES: u64 = 64 * 1024 * 1024;
-use aeris_release_lifecycle::{UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY};
+use aeris_release_lifecycle::{
+    UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY, UPDATE_RESTART_VERIFICATION_TIMEOUT,
+};
 
 static UPDATE_RESTART_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 const UPDATE_BACKEND_CONFIGURED: bool = false;
@@ -855,7 +856,7 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
         return Err("update restart acknowledgement could not be monitored".to_string());
     }
 
-    match ready_rx.recv_timeout(RESTART_HANDSHAKE_TIMEOUT) {
+    match ready_rx.recv_timeout(UPDATE_RESTART_VERIFICATION_TIMEOUT) {
         Ok(Ok(())) => {
             let deadline = Instant::now() + RESTART_CHILD_STABILITY_WINDOW;
             loop {
@@ -986,7 +987,7 @@ mod tests {
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
-        time::{Instant, SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
@@ -1008,20 +1009,22 @@ mod tests {
         ));
     }
 
+    /// A restart helper that spends `verification` before it acknowledges.
     #[cfg(target_os = "windows")]
-    fn acknowledgement_child(exit_after_ack: bool) -> Child {
+    fn acknowledgement_child(exit_after_ack: bool, verification: Duration) -> Child {
         let tail = if exit_after_ack {
             ""
         } else {
             "; Start-Sleep -Seconds 2"
         };
+        let verification = verification.as_millis();
         let mut child = Command::new("powershell.exe")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
                 &format!(
-                    "[Console]::Error.WriteLine('READY'); $null=[Console]::In.ReadLine(); [Console]::Out.Write(\"AERIS_UPDATE_RESTART_READY_V1`n\"){tail}"
+                    "[Console]::Error.WriteLine('READY'); $null=[Console]::In.ReadLine(); Start-Sleep -Milliseconds {verification}; [Console]::Out.Write(\"AERIS_UPDATE_RESTART_READY_V1`n\"){tail}"
                 ),
             ])
             .stdin(Stdio::piped())
@@ -1047,12 +1050,13 @@ mod tests {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn acknowledgement_child(exit_after_ack: bool) -> Child {
+    fn acknowledgement_child(exit_after_ack: bool, verification: Duration) -> Child {
         let tail = if exit_after_ack { "" } else { "; sleep 2" };
+        let verification = verification.as_secs_f64();
         Command::new("sh")
             .args([
                 "-c",
-                &format!("printf 'AERIS_UPDATE_RESTART_READY_V1\\n'{tail}"),
+                &format!("sleep {verification}; printf 'AERIS_UPDATE_RESTART_READY_V1\\n'{tail}"),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1330,7 +1334,7 @@ mod tests {
 
     #[test]
     fn restart_ack_is_rejected_when_helper_exits_immediately_after_it() {
-        let mut child = acknowledgement_child(true);
+        let mut child = acknowledgement_child(true, Duration::ZERO);
         // Process teardown can outlast the 150 ms stability window on a loaded
         // runner; the acknowledgement stays readable in the pipe after exit.
         child.wait().expect("ack fixture exits");
@@ -1342,9 +1346,20 @@ mod tests {
 
     #[test]
     fn restart_ack_requires_a_living_handoff_owner() {
-        let child = acknowledgement_child(false);
+        let child = acknowledgement_child(false, Duration::ZERO);
         let mut child = wait_for_restart_ready(child).expect("living helper is accepted");
         assert!(child.try_wait().expect("helper state reads").is_none());
+        assert_eq!(terminate_and_reap(&mut child), Ok(ChildCleanup::Terminated));
+    }
+
+    #[test]
+    fn restart_waits_for_a_launcher_verification_slower_than_the_channel_bound() {
+        // A channel fetch that runs to its 15 s bound followed by a slow-disk audit.
+        let verification = Duration::from_secs(25);
+        let started = Instant::now();
+        let child = acknowledgement_child(false, verification);
+        let mut child = wait_for_restart_ready(child).expect("slow verification is awaited");
+        assert!(started.elapsed() >= verification);
         assert_eq!(terminate_and_reap(&mut child), Ok(ChildCleanup::Terminated));
     }
 

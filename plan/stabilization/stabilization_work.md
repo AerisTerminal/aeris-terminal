@@ -680,8 +680,16 @@ still wait on the GUI checks and the remaining work on their lines.
     launch. Unit tests cover each journal state, a candidate changed after readiness and the
     batch bound; `lifecycle_e2e` adds a stray release directory and manifest, and the launch
     moves them aside and starts the active release.
-  - Left:
-    - LC-06: all verification before READY, with a slow-verifier timing test.
+  - Landed: LC-06. The `--update-and-restart` helper does all verification in one step before
+    READY: one active-release audit (it was two), the prepared release's signature, files and
+    eligibility, and the current channel offer. After READY it only waits for COMMIT and the
+    desktop's exit, which naming_check enforces. The desktop waits for READY up to the shared
+    `UPDATE_RESTART_VERIFICATION_TIMEOUT` (2 minutes) instead of 20 s and stays usable meanwhile;
+    READY to COMMIT stays inside the desktop's durability waits (20 s account quiesce, 2 s
+    workspace) and the launcher's 60 s commit wait (D26). A desktop test spawns a fake helper that
+    spends 25 s verifying before READY and the restart proceeds. The real verification time on an
+    installed app is not measured.
+  - Left: a green windows-latest CI run of `lifecycle_e2e` with these cases.
 - [ ] M8.9 Dependency direction and `contracts`
   - Left: move `EmbeddedReplaySource` to test support.
   - Delete `GetAccountStatus` and `RefreshAccountProfile`, and reduce `contracts` to the persisted
@@ -738,6 +746,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D23 | Lifecycle harness scope | (2026-10-28) M8.7's end-to-end harness covers install, update, readiness rejection, activation, crash rollback and quarantine. The probation, hang and schema-gated rollback scenarios need LC-09's startup-complete marker and LC-05's manifest `max_store_schema`, so they are added to the same harness with those fixes in M8.8. Readiness on the database copy stays covered by the desktop's tests. |
 | D24 | Probation acceptance | (2026-10-28) A release generation is accepted once a desktop it started records the startup-complete marker; later launches of that generation skip probation, so only a release that has never finished starting is rolled back for a crash or a hang. The marker is written when the first window opens (the sign-in window counts) so a user who has not signed in within 60 s does not trigger a rollback. |
 | D25 | Update recovery | (2026-10-28) An update runs readiness on a copy of the user's data before the active pointer moves and journals `ReadinessPassed` first, so recovery finishes the update (or discards a candidate whose files changed since) without running candidate code. The `Activated` and `HealthChecked` journal states are removed; no released version wrote them, because 1.0.0 installs through Inno Setup without the lifecycle. A candidate that fails readiness never ran on the user's data, so its rollback needs no state-compatibility check. The launch audit stays exact; every launcher command recovers first, and recovery moves entries no release record owns into `orphaned/<ms>/`, keeping the newest 8 batches. |
+| D26 | Restart verification bound | (2026-10-28) The restart helper's verification (a 15 s-bounded channel fetch plus hashing the prepared and active releases) runs before READY, and the desktop waits for READY up to a shared 2-minute bound rather than the former 20 s handshake, so a slow disk or channel no longer fails a restart. The READY-to-COMMIT window keeps its existing bounds, since the desktop's durability waits (up to 22 s) already fit the launcher's 60 s commit wait. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in

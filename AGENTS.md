@@ -237,7 +237,13 @@ violations and missing verification explicitly, and never describe them as satis
   detects processes through `platform_sys::process` (re-exported by `platform_runtime`), never
   sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the
   install root; later launcher starts and the uninstaller delete it by that exact name, never
-  through a generated batch file.
+  through a generated batch file. An update runs readiness on a copy of the user's data and
+  journals `ReadinessPassed` before the active pointer moves, so recovery never runs candidate
+  code; recovery also moves entries no release record owns into `orphaned/<ms>/` (newest 8
+  batches kept). The `--update-and-restart` helper audits the active release once and checks the
+  prepared release and the current channel offer before it prints READY; after READY it only
+  waits for COMMIT and the desktop's exit. The desktop waits for READY up to
+  `UPDATE_RESTART_VERIFICATION_TIMEOUT` (2 minutes), and `tools/naming_check` keeps that order.
 - `tools/release_packager` (`aeris_release_packager`) packages one signed release into an
   origin-shaped output tree (payload executables, rollback-compatibility data, signed manifest and,
   against a predecessor, a signed block plan), writes the channel pointer and prints the Inno Setup

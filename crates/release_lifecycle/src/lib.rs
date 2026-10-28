@@ -39,7 +39,10 @@ pub use origin_layout::{
     RELEASE_CHANNEL, RELEASE_MANIFEST_FILENAME, channel_pointer_path, installer_filename,
     release_directory_path,
 };
-pub use protocol::{LAUNCHER_PROTOCOL_VERSION, UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY};
+pub use protocol::{
+    LAUNCHER_PROTOCOL_VERSION, UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY,
+    UPDATE_RESTART_VERIFICATION_TIMEOUT,
+};
 pub use readiness::{
     PRODUCTION_VAULT_NAMESPACE, READINESS_REPORT_SCHEMA_VERSION, ReadinessRejection,
     ReadinessReport, ServiceReadiness, ServiceStarted, VALIDATION_VAULT_NAMESPACE,

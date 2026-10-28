@@ -798,12 +798,10 @@ fn update_and_restart(
     hooks: &NativeHooks,
     install_root: &Path,
 ) -> Result<(), String> {
-    let (desktop, prepared) = preflight_update_restart(installer, origin, install_root)?;
-    let current = checked_release_channel(installer, origin, install_root)?;
-    if !prepared_matches_current_offer(&prepared.signed_release, &current) {
-        return Err("prepared Aeris update is no longer current and eligible".to_string());
-    }
-    // READY reports only that the signed prepared release passed preflight.
+    // Every check runs before READY, inside the desktop's verification wait; after READY
+    // this helper only waits for COMMIT and the desktop's exit.
+    let (desktop, prepared) = verify_update_restart(installer, origin, install_root)?;
+    // READY reports only that the signed prepared release passed verification.
     // The desktop sends COMMIT after account/workspace durability succeeds;
     // without that second message this helper must never observe exit as
     // authorization to mutate the installed release.
@@ -865,7 +863,9 @@ fn prepared_matches_current_offer(
     current.offer_eligible && &current.channel.signed_release == prepared
 }
 
-fn preflight_update_restart(
+/// Audits the active release once, then checks the prepared release's signature, files and
+/// eligibility and that the channel still offers it.
+fn verify_update_restart(
     installer: &ReleaseInstaller,
     origin: &ReleaseOrigin,
     install_root: &Path,
@@ -895,6 +895,10 @@ fn preflight_update_restart(
         .map_err(|_| "active Aeris desktop is unavailable".to_string())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("active Aeris desktop is invalid".to_string());
+    }
+    let current = check_release_channel(Some(active), origin, install_root)?;
+    if !prepared_matches_current_offer(&signed_release, &current) {
+        return Err("prepared Aeris update is no longer current and eligible".to_string());
     }
     Ok((
         desktop,
@@ -1124,6 +1128,15 @@ fn checked_release_channel(
     let active = installer
         .audit_active_release()
         .map_err(|error| error.to_string())?;
+    check_release_channel(active, origin, install_root)
+}
+
+/// Fetches the channel and authenticates it against an already audited active release.
+fn check_release_channel(
+    active: Option<ActiveRelease>,
+    origin: &ReleaseOrigin,
+    install_root: &Path,
+) -> Result<CheckedReleaseChannel, String> {
     let base_url = origin.base_url.as_str();
     let manifest_url = format!(
         "{base_url}/{}",
