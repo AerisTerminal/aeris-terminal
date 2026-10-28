@@ -1,14 +1,15 @@
 use super::{
-    BTreeMap, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, ClientId, ConsumerEvents, ConsumerId,
-    Coordinator, DemandWaiter, EngineError, EngineFaultCode, FailureStage, GenerationId,
-    HISTORY_UNAVAILABLE_LIVE_DETAIL, HISTORY_UNAVAILABLE_WAITING_DETAIL, ProviderGeneration,
-    ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply, SeriesLoadState, SeriesTailOperation,
+    BTreeMap, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, CONSUMER_TAPE_UPDATE_CAPACITY,
+    ClientId, ConsumerEvents, ConsumerId, Coordinator, DemandWaiter, EngineError, EngineFaultCode,
+    FailureStage, GenerationId, HISTORY_UNAVAILABLE_LIVE_DETAIL,
+    HISTORY_UNAVAILABLE_WAITING_DETAIL, ProviderGeneration, ProviderOrderBook,
+    REALTIME_DRAIN_BUDGET, Reply, SeriesLoadState, SeriesTailOperation, TapeStreamCursor,
     authorize_consumer,
 };
 use crate::{
     MarketConsumerEvent, MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot,
     MarketRuntimeEvent, MarketSeriesState, MarketStudyOutputsInvalidated, MarketStudyRemoved,
-    MarketTradeTapeSnapshot,
+    MarketTradeTapeOperation, MarketTradeTapeSnapshot, MarketTradeTapeUpdate,
 };
 use aeris_observability::diagnostic;
 use std::sync::Arc;
@@ -217,6 +218,85 @@ fn trade_tape_snapshot(
     })
 }
 
+/// Queues one incremental tape update for a consumer beside the legacy
+/// full-tape image. The first publication of a selection, a provider-session
+/// restart, a retained-prefix rewrite and an eviction gap each start a new
+/// stream with a covering `Reset`; a continuing stream appends only the
+/// trades newer than the cursor. A full queue is replaced by one covering
+/// `Reset`, so a slow consumer never sees a hole in the ordinal sequence.
+pub(super) fn queue_trade_tape_update(
+    events: &mut ConsumerEvents,
+    consumer_id: ConsumerId,
+    generation: GenerationId,
+    order_book: &ProviderOrderBook,
+    trades: &Arc<[crate::RetainedMarketTrade]>,
+) {
+    let (Ok(price_scale), Ok(quantity_scale)) = (
+        u8::try_from(order_book.instrument.price_scale),
+        u8::try_from(order_book.instrument.quantity_scale),
+    ) else {
+        return;
+    };
+    let stream = TapeStreamCursor {
+        generation,
+        provider_generation: order_book.trade_session_generation,
+        rewrite_generation: order_book.trade_tape_rewrite_generation,
+        through_ordinal: 0,
+    };
+    let mut cursor = events.tape_cursor.filter(|cursor| {
+        cursor.generation == stream.generation
+            && cursor.provider_generation == stream.provider_generation
+            && cursor.rewrite_generation == stream.rewrite_generation
+    });
+    if events.tape_updates.len() >= CONSUMER_TAPE_UPDATE_CAPACITY {
+        events.tape_updates.clear();
+        cursor = None;
+    }
+    let suffix_start = cursor.map_or(0, |cursor| {
+        trades.partition_point(|trade| trade.ingestion_ordinal <= cursor.through_ordinal)
+    });
+    if cursor.is_some() && suffix_start == trades.len() {
+        return;
+    }
+    let operation = match cursor {
+        Some(cursor)
+            if trades
+                .get(suffix_start)
+                .is_some_and(|trade| trade.ingestion_ordinal == cursor.through_ordinal + 1) =>
+        {
+            MarketTradeTapeOperation::Append {
+                from_ordinal: trades[suffix_start].ingestion_ordinal,
+                trades: Arc::from(&trades[suffix_start..]),
+            }
+        }
+        _ => MarketTradeTapeOperation::Reset {
+            trades: Arc::clone(trades),
+        },
+    };
+    let through_ordinal = trades.last().map_or(0, |trade| trade.ingestion_ordinal);
+    events.tape_cursor = Some(TapeStreamCursor {
+        through_ordinal,
+        ..stream
+    });
+    events
+        .tape_updates
+        .push_back(MarketRuntimeEvent::TradeTapeUpdate(MarketTradeTapeUpdate {
+            consumer_id,
+            generation,
+            provider_id: order_book.instrument.provider.clone(),
+            instrument_id: order_book.instrument.instrument_id.clone(),
+            entitlement_id: order_book.instrument.entitlement_id.clone(),
+            provider_generation: order_book.trade_session_generation,
+            revision: order_book.trade_tape_revision,
+            source_watermark: order_book.last_trade_source_sequence,
+            rewrite_generation: order_book.trade_tape_rewrite_generation,
+            price_scale,
+            quantity_scale,
+            sweeps: Arc::clone(&order_book.trade_sweeps),
+            operation,
+        }));
+}
+
 pub(super) fn series_state(
     consumer_id: ConsumerId,
     generation: GenerationId,
@@ -266,6 +346,7 @@ impl ConsumerEvents {
             || !self.price_alerts.is_empty()
             || self.order_book.is_some()
             || self.trade_tape.is_some()
+            || !self.tape_updates.is_empty()
             || self.startup_catalog_selection.is_some()
             || self.startup_catalog_search.is_some()
             || self.catalog_selection.is_some()
@@ -293,6 +374,7 @@ impl ConsumerEvents {
                             .take()
                             .map(MarketRuntimeEvent::TradeTapeSnapshot)
                     })
+                    .or_else(|| self.tape_updates.pop_front())
                     .or_else(|| self.startup_catalog_selection.take())
                     .or_else(|| self.startup_catalog_search.take())
                     .or_else(|| self.catalog_selection.take())
@@ -877,12 +959,14 @@ impl Coordinator<'_> {
             .cloned()
             .collect::<Vec<_>>()
             .into();
-        let Some(snapshot) = trade_tape_snapshot(consumer_id, generation, order_book, trades)
+        let Some(snapshot) =
+            trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))
         else {
             return;
         };
         if let Some(events) = self.events.get_mut(&consumer_id) {
             events.trade_tape = Some(snapshot);
+            queue_trade_tape_update(events, consumer_id, generation, order_book, &trades);
         }
     }
 
@@ -948,6 +1032,7 @@ impl Coordinator<'_> {
             };
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 events.trade_tape = Some(snapshot);
+                queue_trade_tape_update(events, consumer_id, generation, order_book, &trades);
             }
         }
     }
@@ -1319,5 +1404,216 @@ mod tests {
             Some(8_376_500_000)
         );
         assert_eq!(reconnected.asks, [] as [aeris_market_data::DepthLevel; 0]);
+    }
+
+    fn tape_trade(
+        instrument: &aeris_contracts::InstallProviderInstrument,
+        session_generation: u64,
+        source_sequence: u64,
+        price: i64,
+        quantity: i64,
+    ) -> aeris_market_data::MarketTrade {
+        aeris_market_data::MarketTrade {
+            metadata: metadata(instrument, session_generation, source_sequence),
+            trade_id: format!("tape-{source_sequence}"),
+            price,
+            quantity,
+            aggressor: aeris_market_data::AggressorSide::Buy,
+        }
+    }
+
+    fn tape_trades(order_book: &ProviderOrderBook) -> Arc<[crate::RetainedMarketTrade]> {
+        order_book
+            .recent_trades
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn consumer_events() -> (ConsumerId, GenerationId, ConsumerEvents) {
+        (
+            ConsumerId(std::num::NonZeroU64::MIN),
+            GenerationId(std::num::NonZeroU64::MIN),
+            ConsumerEvents::default(),
+        )
+    }
+
+    fn queued_tape_update(events: &mut ConsumerEvents) -> crate::MarketTradeTapeUpdate {
+        let Some(MarketRuntimeEvent::TradeTapeUpdate(update)) = events.tape_updates.pop_front()
+        else {
+            panic!("queued incremental tape update expected");
+        };
+        update
+    }
+
+    #[test]
+    fn tape_updates_reset_then_append_within_one_stream() {
+        let instrument = hyperliquid_instrument(1);
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), false);
+        // One three-level buy run above the 90th percentile rides the reset.
+        for (sequence, price) in [(1, 100), (2, 101), (3, 102)] {
+            assert!(order_book.accept_recent_trade(&tape_trade(
+                &instrument,
+                1,
+                sequence,
+                price,
+                10
+            )));
+        }
+        let (consumer_id, generation, mut events) = consumer_events();
+        queue_trade_tape_update(
+            &mut events,
+            consumer_id,
+            generation,
+            &order_book,
+            &tape_trades(&order_book),
+        );
+
+        let reset = queued_tape_update(&mut events);
+        assert_eq!(reset.provider_generation, 1);
+        assert_eq!(reset.rewrite_generation, 0);
+        let MarketTradeTapeOperation::Reset { trades } = &reset.operation else {
+            panic!("a new tape stream starts with a covering reset");
+        };
+        assert_eq!(trades.len(), 3);
+        assert_eq!(reset.sweeps.len(), 1, "ingestion classified the buy run");
+        assert_eq!(reset.sweeps[0].first_ingestion_ordinal, 1);
+        assert_eq!(reset.sweeps[0].last_ingestion_ordinal, 3);
+        assert_eq!(reset.sweeps[0].price_levels, 3);
+
+        for (sequence, price) in [(4, 103), (5, 104)] {
+            assert!(order_book.accept_recent_trade(&tape_trade(
+                &instrument,
+                1,
+                sequence,
+                price,
+                10
+            )));
+        }
+        queue_trade_tape_update(
+            &mut events,
+            consumer_id,
+            generation,
+            &order_book,
+            &tape_trades(&order_book),
+        );
+        let append = queued_tape_update(&mut events);
+        let MarketTradeTapeOperation::Append {
+            from_ordinal,
+            trades,
+        } = &append.operation
+        else {
+            panic!("a continuing tape stream appends only the new suffix");
+        };
+        assert_eq!(*from_ordinal, 4);
+        assert_eq!(trades.len(), 2);
+        assert_eq!(append.revision, reset.revision + 2);
+        assert_eq!(append.sweeps.len(), 1);
+
+        // No new prints means no queued update.
+        queue_trade_tape_update(
+            &mut events,
+            consumer_id,
+            generation,
+            &order_book,
+            &tape_trades(&order_book),
+        );
+        assert!(events.tape_updates.is_empty());
+    }
+
+    #[test]
+    fn tape_updates_reset_on_rewrite_and_on_a_new_selection_generation() {
+        let instrument = hyperliquid_instrument(1);
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), false);
+        assert!(order_book.accept_recent_trade(&tape_trade(&instrument, 1, 1, 100, 1)));
+        let (consumer_id, generation, mut events) = consumer_events();
+        queue_trade_tape_update(
+            &mut events,
+            consumer_id,
+            generation,
+            &order_book,
+            &tape_trades(&order_book),
+        );
+        let _ = queued_tape_update(&mut events);
+
+        // A provider-session restart rewinds ordinals and rewrites the tape.
+        order_book.update_instrument(hyperliquid_instrument(2));
+        assert!(order_book.accept_recent_trade(&tape_trade(&instrument, 2, 1, 200, 1)));
+        queue_trade_tape_update(
+            &mut events,
+            consumer_id,
+            generation,
+            &order_book,
+            &tape_trades(&order_book),
+        );
+        let restarted = queued_tape_update(&mut events);
+        assert_eq!(restarted.provider_generation, 2);
+        assert!(restarted.rewrite_generation > 0);
+        assert!(matches!(
+            restarted.operation,
+            MarketTradeTapeOperation::Reset { .. }
+        ));
+
+        // A new selection generation restarts the stream even mid-session.
+        let new_generation = GenerationId(std::num::NonZeroU64::new(2).expect("nonzero"));
+        queue_trade_tape_update(
+            &mut events,
+            consumer_id,
+            new_generation,
+            &order_book,
+            &tape_trades(&order_book),
+        );
+        let reselected = queued_tape_update(&mut events);
+        assert_eq!(reselected.generation, new_generation);
+        assert!(matches!(
+            reselected.operation,
+            MarketTradeTapeOperation::Reset { .. }
+        ));
+        // Every incremental update carries its selection generation, so the
+        // coordinator's drain fence rejects it under any other demand.
+        assert_eq!(
+            MarketRuntimeEvent::TradeTapeUpdate(reselected).selection_generation(),
+            Some(new_generation)
+        );
+    }
+
+    #[test]
+    fn tape_update_overflow_recovers_with_one_covering_reset() {
+        let instrument = hyperliquid_instrument(1);
+        let mut order_book = ProviderOrderBook::new(instrument.clone(), false);
+        let (consumer_id, generation, mut events) = consumer_events();
+        let total = u64::try_from(super::CONSUMER_TAPE_UPDATE_CAPACITY).expect("small") + 10;
+        for sequence in 1..=total {
+            assert!(order_book.accept_recent_trade(&tape_trade(&instrument, 1, sequence, 100, 1)));
+            queue_trade_tape_update(
+                &mut events,
+                consumer_id,
+                generation,
+                &order_book,
+                &tape_trades(&order_book),
+            );
+            assert!(events.tape_updates.len() <= super::CONSUMER_TAPE_UPDATE_CAPACITY);
+        }
+
+        // Replaying the queued stream rebuilds the exact tape.
+        let mut applied: Vec<u64> = Vec::new();
+        while let Some(MarketRuntimeEvent::TradeTapeUpdate(update)) =
+            events.tape_updates.pop_front()
+        {
+            match update.operation {
+                MarketTradeTapeOperation::Reset { trades } => {
+                    applied = trades.iter().map(|trade| trade.ingestion_ordinal).collect();
+                }
+                MarketTradeTapeOperation::Append {
+                    from_ordinal,
+                    trades,
+                } => {
+                    assert_eq!(from_ordinal, applied.last().copied().unwrap_or(0) + 1);
+                    applied.extend(trades.iter().map(|trade| trade.ingestion_ordinal));
+                }
+            }
+        }
+        assert_eq!(applied, (1..=total).collect::<Vec<_>>());
     }
 }

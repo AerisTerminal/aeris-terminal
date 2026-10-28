@@ -396,9 +396,19 @@ only on the guarded GUI checks on their lines.
     and web demo keep the transparent-body color path; exposing `CandleBody` there is a possible
     follow-up, not required by Terminal.
 - [ ] M7.10 Sweep classification and incremental tape in `market_runtime`
-  - Left: move the sweep classification into the runtime, once per publication over the same
-    512-trade window.
-  - Publish the tape as fenced Append/Reset events.
+  - Landed: the classifier moved to `market_service/trade_sweeps.rs` unchanged (512-trade
+    trailing window, 90th-percentile size, 100 ms grouping, moved tests included) and runs once
+    per ingested trade plus on every retention eviction and session reset, so
+    `ProviderOrderBook::trade_sweeps` always describes the retained window. The tape publishes
+    beside the legacy full snapshot as fenced `TradeTapeUpdate` events carrying
+    `MarketTradeTapeOperation::Reset { trades }` / `Append { from_ordinal, trades }`, the full
+    continuity metadata of the snapshot and the current sweeps; a consumer's bounded (64) update
+    queue overflows into one covering `Reset`, and a new selection generation, provider session,
+    prefix rewrite or eviction gap restarts the stream with a `Reset`. Tests: Append/Reset
+    sequencing across rewrite and selection-generation changes, overflow-replay reconstructs the
+    exact tape, sweep classification over the retained trailing window.
+  - Left: none for M7.10; the desktop ignores `TradeTapeUpdate` until M7.11 wires the
+    `OrderFlowPresenter` ring and deletes the snapshot path and the host classifier.
 - [ ] M7.11 Desktop consumes runtime sweeps and incremental tape
   - Left: `OrderFlowPresenter` applies Append/Reset into a bounded ring.
   - Delete the host sweep function and ordinal diffing, and add a naming_check ban.

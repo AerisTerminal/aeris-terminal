@@ -89,6 +89,7 @@ impl ProviderOrderBook {
             ),
             top_of_book: None,
             recent_trades: VecDeque::new(),
+            trade_sweeps: std::sync::Arc::from([]),
             traded_volumes: BTreeMap::new(),
             trade_session_generation,
             last_trade_source_sequence: 0,
@@ -236,6 +237,7 @@ impl ProviderOrderBook {
 
     fn reset_recent_trades_for_session(&mut self, session_generation: u64) {
         self.recent_trades.clear();
+        self.trade_sweeps = std::sync::Arc::from([]);
         self.trade_tape_rewrite_generation = self.trade_tape_rewrite_generation.saturating_add(1);
         self.traded_volumes.clear();
         self.trade_session_generation = session_generation;
@@ -284,8 +286,27 @@ impl ProviderOrderBook {
         if changed {
             self.trade_tape_revision = self.trade_tape_revision.saturating_add(1);
             self.trade_tape_dirty = true;
+            self.refresh_trade_sweeps();
         }
         changed
+    }
+
+    /// Reclassifies sweeps over the trailing window after any retention or
+    /// ingestion change, once per change, so publications carry the sweeps of
+    /// exactly the retained tape.
+    fn refresh_trade_sweeps(&mut self) {
+        let (Ok(price_scale), Ok(quantity_scale)) = (
+            u8::try_from(self.instrument.price_scale),
+            u8::try_from(self.instrument.quantity_scale),
+        ) else {
+            self.trade_sweeps = std::sync::Arc::from([]);
+            return;
+        };
+        self.trade_sweeps = super::trade_sweeps::classify_recent_trade_sweeps(
+            &self.recent_trades,
+            price_scale,
+            quantity_scale,
+        );
     }
 
     pub(super) fn accept_recent_trade(&mut self, trade: &MarketTrade) -> bool {
@@ -347,6 +368,7 @@ impl ProviderOrderBook {
         if self.recent_trades.len() > MAXIMUM_RECENT_LADDER_TRADES {
             changed |= self.prune_recent_trades(observed_unix_nanos);
         }
+        self.refresh_trade_sweeps();
         changed
     }
 

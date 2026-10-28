@@ -82,6 +82,10 @@ const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 /// Bar updates a consumer may fall behind by before the oldest is dropped.
 const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
+/// Incremental tape updates a consumer may fall behind by before the whole
+/// queue is replaced with one covering `Reset`, since dropping the oldest
+/// append would open an undetectable hole in a strictly sequenced tape.
+const CONSUMER_TAPE_UPDATE_CAPACITY: usize = 64;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// After the bounded automatic retry budget is exhausted, keep the identical
@@ -737,6 +741,14 @@ struct ConsumerEvents {
     study_removed: Option<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
     trade_tape: Option<crate::MarketTradeTapeSnapshot>,
+    /// Incremental tape stream beside the legacy full-tape slot. A `Reset`
+    /// always covers everything queued before it, so overflow replaces the
+    /// queue with one covering reset instead of dropping an append.
+    tape_updates: VecDeque<MarketRuntimeEvent>,
+    /// Continuity cursor of the incremental tape stream queued for this
+    /// consumer; a new selection, provider session or prefix rewrite starts a
+    /// new stream with a `Reset`.
+    tape_cursor: Option<TapeStreamCursor>,
     price_alerts: VecDeque<MarketRuntimeEvent>,
     /// Latest interactive search answer per provider, so a picker searching
     /// several providers at once receives every provider's answer. Keys are
@@ -750,6 +762,16 @@ struct ConsumerEvents {
     catalog_screen: Option<MarketRuntimeEvent>,
 }
 
+/// Identity of one consumer's incremental tape stream plus the newest
+/// ingestion ordinal queued on it. Any field change restarts the stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TapeStreamCursor {
+    generation: GenerationId,
+    provider_generation: u64,
+    rewrite_generation: u64,
+    through_ordinal: u64,
+}
+
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     calendar: calendar::MarketCalendarService,
@@ -760,6 +782,9 @@ struct ProviderOrderBook {
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
     recent_trades: VecDeque<crate::RetainedMarketTrade>,
+    /// Sweeps classified once per ingested trade over the trailing window of
+    /// `recent_trades`; shared by every tape publication until reclassified.
+    trade_sweeps: Arc<[crate::MarketTradeSweep]>,
     traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
     trade_session_generation: u64,
     last_trade_source_sequence: u64,
@@ -791,6 +816,7 @@ enum OrderLevelSubscription {
 }
 
 mod lifecycle;
+mod trade_sweeps;
 use lifecycle::TradeModel;
 mod provider_event;
 pub(crate) mod provider_session;

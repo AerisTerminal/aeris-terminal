@@ -339,6 +339,7 @@ dependencies = [
  "aeris_trading",
  "chrono",
  "chrono-tz",
+ "num-traits",
  "serde_json",
  "zeroize",
 ]

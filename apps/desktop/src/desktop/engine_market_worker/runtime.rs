@@ -462,6 +462,11 @@ fn apply_received_event(
         return Ok(false);
     }
     let event = event.value;
+    // The runtime publishes the incremental tape beside the legacy full-tape
+    // snapshot; the desktop consumes Append/Reset in stabilization M7.11.
+    if matches!(event, MarketRuntimeEvent::TradeTapeUpdate(_)) {
+        return Ok(false);
+    }
     if is_series_status(&event)
         || is_bar_publication(&event)
         || matches!(event, MarketRuntimeEvent::OrderBookSnapshot(_))

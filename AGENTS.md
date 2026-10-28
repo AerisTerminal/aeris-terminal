@@ -392,6 +392,16 @@ the check.
   the provider's `maximum_order_level_instruments` and reports the rest as `BudgetExhausted` without
   evicting an admitted instrument. A gap or bound violation empties the bounded `MarketOrderLevelView`
   until a covering provider image arrives, and order levels are never persisted.
+- Trade-tape sweep classification lives in `market_runtime`
+  (`market_service/trade_sweeps.rs`): it runs once per ingested trade (and on every retention
+  eviction or session reset) over the trailing 512 retained prints with the 90th-percentile
+  size threshold and 100 ms grouping, so consumers never reclassify the tape. Beside the legacy
+  full `TradeTapeSnapshot`, the coordinator publishes fenced `TradeTapeUpdate` events carrying
+  `MarketTradeTapeOperation::Reset { trades }` / `Append { from_ordinal, trades }` and the
+  current sweeps; a consumer's bounded 64-entry update queue overflows into one covering
+  `Reset`, and a new selection generation, provider session, prefix rewrite or eviction gap
+  restarts the stream with a `Reset`. The desktop consumes the incremental stream only after
+  the M7.11 presenter ring lands.
 - Provider catalog controls and responses pass through one bounded `ProviderCatalogChannel`
   boundary; provider-specific command translation stays with each registered channel.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider

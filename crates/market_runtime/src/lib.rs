@@ -198,6 +198,68 @@ pub struct MarketTradeTapeSnapshot {
     pub trades: std::sync::Arc<[RetainedMarketTrade]>,
 }
 
+/// One runtime-classified sweep on the retained trade tape.
+///
+/// Computed by `market_runtime` once per ingested trade over the trailing
+/// 512-print window (90th-percentile size threshold, 100 ms grouping). The
+/// ordinal span addresses trades on the same tape; `terminal_price` and
+/// `total_volume` are the scaled presentation values the classification ran
+/// on, while the raw fixed-point prints stay authoritative in
+/// [`RetainedMarketTrade`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarketTradeSweep {
+    pub first_ingestion_ordinal: u64,
+    pub last_ingestion_ordinal: u64,
+    pub timestamp_micros: i64,
+    pub terminal_price: f64,
+    pub total_volume: f64,
+    pub price_levels: u32,
+    pub aggressor: aeris_market_data::AggressorSide,
+}
+
+/// How one incremental trade-tape publication changes the consumer's tape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MarketTradeTapeOperation {
+    /// A covering window: the consumer replaces its whole tape. Sent for the
+    /// first publication of a selection, a provider-session restart, a
+    /// retained-prefix rewrite, an eviction gap, or an outbox overflow.
+    Reset {
+        trades: std::sync::Arc<[RetainedMarketTrade]>,
+    },
+    /// Trades continuing the consumer's tape exactly at `from_ordinal`, which
+    /// is one past the newest ordinal the runtime queued for this tape stream.
+    Append {
+        from_ordinal: u64,
+        trades: std::sync::Arc<[RetainedMarketTrade]>,
+    },
+}
+
+/// Incremental generation-fenced trade-tape publication for one consumer.
+///
+/// Carries the same continuity metadata as [`MarketTradeTapeSnapshot`] plus
+/// the sweeps classified over the trailing retained window at publication.
+/// The full-snapshot [`MarketRuntimeEvent::TradeTapeSnapshot`] stays
+/// authoritative until the desktop consumes these updates (stabilization
+/// M7.11).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketTradeTapeUpdate {
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: aeris_market_engine::GenerationId,
+    pub provider_id: String,
+    pub instrument_id: String,
+    pub entitlement_id: String,
+    pub provider_generation: u64,
+    pub revision: u64,
+    pub source_watermark: u64,
+    /// Changes when history or a correction rewrites the retained prefix.
+    pub rewrite_generation: u64,
+    pub price_scale: u8,
+    pub quantity_scale: u8,
+    /// Sweeps over the trailing classification window of the current tape.
+    pub sweeps: std::sync::Arc<[MarketTradeSweep]>,
+    pub operation: MarketTradeTapeOperation,
+}
+
 /// Direct completed provider selection for one runtime consumer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketProviderInstrumentSelection {
@@ -320,6 +382,7 @@ pub enum MarketRuntimeEvent {
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
     TradeTapeSnapshot(MarketTradeTapeSnapshot),
+    TradeTapeUpdate(MarketTradeTapeUpdate),
     StudyOutputSnapshot(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),
@@ -347,6 +410,7 @@ impl MarketRuntimeEvent {
             Self::DemandError(event) => Some(event.generation),
             Self::OrderBookSnapshot(event) => Some(event.generation),
             Self::TradeTapeSnapshot(event) => Some(event.generation),
+            Self::TradeTapeUpdate(event) => Some(event.generation),
             Self::StudyOutputSnapshot(event) => event.generation,
             Self::StudyOutputsInvalidated(event) => event.generation,
             Self::StudyRemoved(event) => event.generation,
