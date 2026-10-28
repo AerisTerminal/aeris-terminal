@@ -6,6 +6,8 @@
 pub mod fs;
 pub mod process;
 #[cfg(target_os = "windows")]
+pub mod session;
+#[cfg(target_os = "windows")]
 pub mod trust;
 pub mod ui;
 

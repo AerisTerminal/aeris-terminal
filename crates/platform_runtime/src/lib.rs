@@ -15,12 +15,15 @@ mod live_market_gate;
 mod market_socket;
 mod network_notifications;
 mod power_notifications;
-mod session_shutdown;
 mod user_notifications;
 
 pub use aeris_platform_sys::fs;
 pub use aeris_platform_sys::fs::replace_file as replace_file_atomically;
 pub use aeris_platform_sys::process;
+#[cfg(target_os = "windows")]
+pub use aeris_platform_sys::session::{
+    NativeSessionShutdownGuard, NativeSessionShutdownPermit, SessionShutdownError,
+};
 #[cfg(target_os = "windows")]
 pub use aeris_platform_sys::trust;
 pub use aeris_platform_sys::ui::{confirm_message_box, message_box};
@@ -57,11 +60,6 @@ pub use network_notifications::{
 pub use power_notifications::{
     NativePowerMonitor, NativePowerMonitorCancellation, PowerEvent, PowerNotificationError,
 };
-pub use session_shutdown::{
-    NativeSessionShutdownCancellation, NativeSessionShutdownMonitor, SessionShutdownError,
-};
-#[cfg(target_os = "windows")]
-pub use session_shutdown::{NativeSessionShutdownGuard, NativeSessionShutdownPermit};
 pub use user_notifications::{
     APPLICATION_IDENTIFIER, APPLICATION_NAME, NativeUserNotification, NativeUserNotificationError,
     try_send_user_notification,

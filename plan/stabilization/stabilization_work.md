@@ -543,8 +543,14 @@ still wait on the GUI checks and the remaining work on their lines.
     `display-info`, `wayland-client` and `wayland-protocols` dependencies (also dropped from the
     workspace pins); no production or tool code used it. Its interim unsafe allowlist entry is
     removed. Closes PL-10 (display_timing).
-  - Left: move the power, network, session-shutdown and `CancelIoEx` FFI.
-  - Delete `NativeSessionShutdownMonitor`.
+  - Landed: `NativeSessionShutdownMonitor` (no callers) is deleted with its Unix signal and
+    logind workers and the `signal-hook` dependency. `NativeSessionShutdownGuard` is kept,
+    because no maintainer logoff flush test has proved GPUI's own end-session handling drains
+    account refresh rotation; it moved to `platform_sys::session` with its window procedure in
+    `platform_sys/src/windows/session.rs` (documented single-operation `SAFETY` blocks) and is
+    re-exported by `platform_runtime`. A second guard in one process now reuses the registered
+    window class instead of failing. Its interim unsafe allowlist entry is removed.
+  - Left: move the power, network and `CancelIoEx` FFI.
   - Restore `forbid(unsafe_code)` in `platform_runtime`. Closes PL-02.
   - The logoff flush check is maintainer-only.
 - [ ] M8.4 Account runtime vault and lock fixes

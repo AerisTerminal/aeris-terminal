@@ -2364,10 +2364,6 @@ mod tests {
             "crates/platform_runtime/src/power_notifications.rs",
             "existing native suspend/resume callbacks await M8.3 extraction",
         ),
-        (
-            "crates/platform_runtime/src/session_shutdown.rs",
-            "existing native shutdown callbacks await M8.3 manual logoff verification",
-        ),
     ];
 
     fn contains_unsafe_code(source: &str) -> bool {
@@ -4743,13 +4739,15 @@ mod tests {
             "every candidate-readiness exit after account creation must drain refresh-token rotation"
         );
 
-        let platform = manifest("crates/platform_runtime/src/session_shutdown.rs");
+        let session = manifest("crates/platform_sys/src/session.rs");
+        let window = manifest("crates/platform_sys/src/windows/session.rs");
         assert!(
-            platform.contains("pub struct NativeSessionShutdownGuard")
-                && platform.contains("pub struct NativeSessionShutdownPermit")
-                && platform.contains("WM_QUERYENDSESSION")
-                && platform.contains("query_end_session()")
-                && platform.contains("end_session(wparam != 0)"),
+            session.contains("pub struct NativeSessionShutdownGuard")
+                && session.contains("pub struct NativeSessionShutdownPermit")
+                && session.contains("fn query_end_session(&self) -> bool")
+                && window.contains("WM_QUERYENDSESSION")
+                && window.contains("GuardWindowState::query_end_session")
+                && window.contains("end_session(wparam != 0)"),
             "Windows session termination must be vetoable until account refresh durability settles"
         );
     }
