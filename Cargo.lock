@@ -430,6 +430,7 @@ version = "1.2.0"
 dependencies = [
  "aeris_platform_runtime",
  "aeris_release_lifecycle",
+ "aeris_trading_runtime",
  "base64 0.23.1",
  "ed25519-dalek",
  "serde",

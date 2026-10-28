@@ -90,6 +90,9 @@ pub struct ReleaseRequest<'a> {
     pub release_identity: &'a str,
     pub install_generation: u64,
     pub rollout: RolloutMetadata,
+    /// The newest trading store schema the payload's desktop opens; a launcher never rolls
+    /// back to this release once the live store is newer.
+    pub max_store_schema: u32,
     /// A release directory packaged earlier with the same key. Its files are the block plan's
     /// source, so launchers running that release download only the blocks that changed.
     pub previous: Option<&'a Path>,
@@ -134,6 +137,9 @@ pub fn package_release(
     }
     if request.install_generation == 0 {
         return Err("the install generation must be at least 1".to_string());
+    }
+    if request.max_store_schema == 0 {
+        return Err("the trading store schema must be at least 1".to_string());
     }
     let relative = release_directory_path(
         std::env::consts::OS,
@@ -193,8 +199,10 @@ fn package_into(
             executable: true,
         });
     }
-    let compatibility = serde_json::to_vec(&RollbackCompatibilityMetadata::current())
-        .map_err(|_| "the rollback-compatibility data could not be encoded".to_string())?;
+    let compatibility = serde_json::to_vec(&RollbackCompatibilityMetadata::for_store_schema(
+        request.max_store_schema,
+    ))
+    .map_err(|_| "the rollback-compatibility data could not be encoded".to_string())?;
     write_file_durably(
         &directory.join(ROLLBACK_COMPATIBILITY_FILENAME),
         &compatibility,

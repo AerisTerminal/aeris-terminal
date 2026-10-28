@@ -112,6 +112,8 @@ fn release(mut options: Options) -> Result<serde_json::Value, String> {
             release_identity: &release_identity,
             install_generation,
             rollout,
+            // The packager is built from the payload's commit, so this is the desktop's schema.
+            max_store_schema: aeris_trading_runtime::SCHEMA_VERSION,
             previous: previous.as_deref(),
         },
         &key,

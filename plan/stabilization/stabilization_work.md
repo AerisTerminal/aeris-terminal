@@ -652,10 +652,18 @@ still wait on the GUI checks and the remaining work on their lines.
     recovery. The installed programs are copies of the `aeris_lifecycle_fixture` binary; copying
     the test executable itself was quarantined by Windows Defender as `Bearfoos.A!ml`. Passed
     three local runs on Windows. Probation, hang and schema-gated rollback join it in M8.8 (D23).
-  - Left: the test passing on the windows-latest CI run.
+  - Left: the test passing on the windows-latest CI run. The run for 43262b0a stopped at the
+    format check; 48be77c1 fixes the format.
 - [ ] M8.8 Rollback safety
+  - Landed: LC-05. The packager writes `max_store_schema` (the payload's `SCHEMA_VERSION`) into
+    the rollback-compatibility data. Before a crash rollback the launcher reads the live trading
+    store's `user_version` from the SQLite header (`store_schema`); a write-ahead log holding
+    frames counts as the failed release's schema, and an unreadable store fails closed. A retained
+    release that cannot open the live store is refused with `RollbackStoreSchemaNewer` before
+    quarantine, so the failed release stays active. Unit tests cover the header read and the gate;
+    `lifecycle_e2e` opens the real store through the trading owner and adds a release that
+    migrates to schema 31, crashes and is not rolled back.
   - Left:
-    - LC-05: a schema-gated rollback.
     - LC-09: a startup-complete marker and probation.
     - LC-18: readiness journaled before Activated, plus `orphaned/`.
     - LC-06: all verification before READY.

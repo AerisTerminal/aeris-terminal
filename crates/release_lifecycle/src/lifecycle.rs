@@ -26,7 +26,7 @@ use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 
-use crate::LAUNCHER_PROTOCOL_VERSION;
+use crate::{LAUNCHER_PROTOCOL_VERSION, LiveStoreSchema};
 
 pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const RELEASE_CHANNEL_SCHEMA_VERSION: u32 = 1;
@@ -229,19 +229,25 @@ pub struct ActiveRelease {
 /// the same epoch. Any forward-only/destructive migration must increment the
 /// epoch, making automatic rollback fail closed before an older binary sees the
 /// new state.
+///
+/// `max_store_schema` is the newest trading store schema the release opens. A
+/// rollback is refused when the live store's schema is newer than the target's.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackCompatibilityMetadata {
     pub schema_version: u32,
     pub state_compatibility_epoch: u32,
+    pub max_store_schema: u32,
 }
 
 impl RollbackCompatibilityMetadata {
+    /// The current epoch for a release whose trading store schema is `max_store_schema`.
     #[must_use]
-    pub const fn current() -> Self {
+    pub const fn for_store_schema(max_store_schema: u32) -> Self {
         Self {
             schema_version: ROLLBACK_COMPATIBILITY_SCHEMA_VERSION,
             state_compatibility_epoch: CURRENT_STATE_COMPATIBILITY_EPOCH,
+            max_store_schema,
         }
     }
 }
@@ -332,6 +338,7 @@ pub enum LifecycleError {
     ShutdownFailed,
     HealthCheckFailed,
     RollbackFailed,
+    RollbackStoreSchemaNewer,
     UpdatePendingCleanup,
     UninstallPendingCleanup,
     ExternalArtifactRemaining,
@@ -352,6 +359,9 @@ impl fmt::Display for LifecycleError {
             Self::ShutdownFailed => "owned processes did not stop cleanly",
             Self::HealthCheckFailed => "candidate release failed its readiness check",
             Self::RollbackFailed => "candidate rollback requires remediation",
+            Self::RollbackStoreSchemaNewer => {
+                "the retained release cannot open the trading data a newer release migrated"
+            }
             Self::UpdatePendingCleanup => "update is pending superseded-file cleanup",
             Self::UninstallPendingCleanup => "uninstall is pending local-artifact cleanup",
             Self::ExternalArtifactRemaining => "an external Aeris artifact remains",
@@ -695,16 +705,19 @@ impl ReleaseInstaller {
     /// The rollback target cannot be supplied by channel data or the caller: it
     /// is resolved only from the bounded local known-good record written by a
     /// previously successful update. Both its signed manifest and exact file
-    /// inventory are reverified before any active pointer changes. The failed
-    /// newer release is removed after the older release becomes active.
+    /// inventory are reverified before any active pointer changes, and the target
+    /// must open `live_store`. The failed newer release is removed after the older
+    /// release becomes active.
     ///
     /// # Errors
-    /// Returns an error if no verified retained release exists, another
-    /// lifecycle transaction is pending, the active process cannot stop, or
-    /// the journaled pointer/cleanup transaction cannot complete safely.
+    /// Returns an error if no verified retained release exists, it cannot open the
+    /// live trading store, another lifecycle transaction is pending, the active
+    /// process cannot stop, or the journaled pointer/cleanup transaction cannot
+    /// complete safely.
     pub fn rollback_to_retained_known_good<H: LifecycleHooks>(
         &self,
         hooks: &H,
+        live_store: LiveStoreSchema,
     ) -> Result<ActiveRelease, LifecycleError> {
         let _lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
         if self.lifecycle_root.join("uninstall.json").exists() {
@@ -714,13 +727,7 @@ impl ReleaseInstaller {
         {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
-        let failed = self
-            .audit_active_release()?
-            .ok_or(LifecycleError::RollbackFailed)?;
-        let target = self
-            .retained_known_good_release()?
-            .ok_or(LifecycleError::RollbackFailed)?;
-        self.verify_retained_rollback_compatibility(&failed, &target)?;
+        let (failed, target) = self.retained_rollback(live_store)?;
         let journal = RetainedRollbackJournal {
             state: RetainedRollbackState::Preparing,
             failed,
@@ -729,6 +736,41 @@ impl ReleaseInstaller {
         self.write_retained_rollback_journal(&journal)?;
         self.resume_retained_rollback(journal, hooks)?;
         Ok(target)
+    }
+
+    /// Returns the retained release a rollback from the active release would
+    /// select, after the checks [`Self::rollback_to_retained_known_good`] runs
+    /// before it changes anything. A caller uses it to decide on a rollback
+    /// before recording that decision.
+    ///
+    /// # Errors
+    /// Returns the error the rollback itself would return for its target.
+    pub fn verify_retained_rollback(
+        &self,
+        live_store: LiveStoreSchema,
+    ) -> Result<ActiveRelease, LifecycleError> {
+        self.retained_rollback(live_store).map(|(_, target)| target)
+    }
+
+    fn retained_rollback(
+        &self,
+        live_store: LiveStoreSchema,
+    ) -> Result<(ActiveRelease, ActiveRelease), LifecycleError> {
+        let failed = self
+            .audit_active_release()?
+            .ok_or(LifecycleError::RollbackFailed)?;
+        let target = self
+            .retained_known_good_release()?
+            .ok_or(LifecycleError::RollbackFailed)?;
+        let (failed_compatibility, target_compatibility) =
+            self.verify_retained_rollback_compatibility(&failed, &target)?;
+        if !live_store.allows_rollback(
+            failed_compatibility.max_store_schema,
+            target_compatibility.max_store_schema,
+        ) {
+            return Err(LifecycleError::RollbackStoreSchemaNewer);
+        }
+        Ok((failed, target))
     }
 
     /// Returns the authenticated signed manifest for the currently owned active
@@ -1072,6 +1114,7 @@ impl ReleaseInstaller {
             serde_json::from_slice(&bytes).map_err(|_| LifecycleError::RollbackFailed)?;
         if compatibility.schema_version != ROLLBACK_COMPATIBILITY_SCHEMA_VERSION
             || compatibility.state_compatibility_epoch == 0
+            || compatibility.max_store_schema == 0
         {
             return Err(LifecycleError::RollbackFailed);
         }
@@ -1082,13 +1125,14 @@ impl ReleaseInstaller {
         &self,
         failed: &ActiveRelease,
         target: &ActiveRelease,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<(RollbackCompatibilityMetadata, RollbackCompatibilityMetadata), LifecycleError>
+    {
         let failed = self.rollback_compatibility_metadata(failed)?;
         let target = self.rollback_compatibility_metadata(target)?;
         if failed.state_compatibility_epoch != target.state_compatibility_epoch {
             return Err(LifecycleError::RollbackFailed);
         }
-        Ok(())
+        Ok((failed, target))
     }
 
     fn remove_release_record_temporaries(
@@ -1299,6 +1343,8 @@ impl ReleaseInstaller {
         let mut rollback_policy = self.policy.clone();
         rollback_policy.minimum_install_generation = 0;
         self.audit_release(&journal.target, &rollback_policy)?;
+        // The store schema gate ran before the journal was written, and no
+        // release runs while the journal is pending, so it is not re-read here.
         if journal.state != RetainedRollbackState::Cleanup {
             self.audit_release(&journal.failed, &rollback_policy)?;
             self.verify_retained_rollback_compatibility(&journal.failed, &journal.target)?;
@@ -2469,8 +2515,25 @@ mod tests {
             root,
             generation,
             Some(
-                serde_json::to_vec(&RollbackCompatibilityMetadata::current())
+                serde_json::to_vec(&RollbackCompatibilityMetadata::for_store_schema(30))
                     .expect("rollback compatibility encodes"),
+            ),
+        )
+    }
+
+    fn release_with_store_schema(
+        root: &Path,
+        generation: u64,
+        max_store_schema: u32,
+    ) -> (SignedReleaseManifest, SigningKey, PathBuf) {
+        release_with_rollback_bytes(
+            root,
+            generation,
+            Some(
+                serde_json::to_vec(&RollbackCompatibilityMetadata::for_store_schema(
+                    max_store_schema,
+                ))
+                .expect("rollback compatibility encodes"),
             ),
         )
     }
@@ -2487,6 +2550,7 @@ mod tests {
                 serde_json::to_vec(&RollbackCompatibilityMetadata {
                     schema_version: ROLLBACK_COMPATIBILITY_SCHEMA_VERSION,
                     state_compatibility_epoch: epoch,
+                    max_store_schema: 30,
                 })
                 .expect("rollback compatibility encodes"),
             ),
@@ -3400,7 +3464,7 @@ mod tests {
             .expect("second install");
 
         let restored = installer
-            .rollback_to_retained_known_good(&Hooks::default())
+            .rollback_to_retained_known_good(&Hooks::default(), LiveStoreSchema::Absent)
             .expect("rollback to retained release");
         assert_eq!(restored.install_generation, 1);
         assert_eq!(
@@ -3426,6 +3490,56 @@ mod tests {
     }
 
     #[test]
+    fn retained_rollback_requires_a_target_that_opens_the_live_store_schema() {
+        let root = temporary_root("rollback-store-schema");
+        let (first, key, first_bundle) = release_with_store_schema(&root, 1, 30);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release_with_store_schema(&root, 2, 31);
+        let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+        let active = installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install")
+            .active;
+
+        for refused in [
+            LiveStoreSchema::Checkpointed(31),
+            LiveStoreSchema::Uncheckpointed(30),
+        ] {
+            assert_eq!(
+                installer.verify_retained_rollback(refused),
+                Err(LifecycleError::RollbackStoreSchemaNewer)
+            );
+            assert_eq!(
+                installer.rollback_to_retained_known_good(&Hooks::default(), refused),
+                Err(LifecycleError::RollbackStoreSchemaNewer)
+            );
+            assert_eq!(
+                installer.active_release().expect("active read"),
+                Some(active.clone())
+            );
+            assert!(!installer.retained_rollback_journal_exists());
+        }
+        let live = LiveStoreSchema::Checkpointed(30);
+        let target = installer
+            .verify_retained_rollback(live)
+            .expect("the retained release opens schema 30");
+        assert_eq!(target.install_generation, 1);
+        assert_eq!(
+            installer.rollback_to_retained_known_good(&Hooks::default(), live),
+            Ok(target)
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
     fn retained_rollback_rejects_mismatched_signed_state_compatibility_epochs() {
         let root = temporary_root("rollback-compatibility-epoch");
         let (first, key, first_bundle) = release_with_compatibility_epoch(&root, 1, 1);
@@ -3446,7 +3560,7 @@ mod tests {
             .active;
 
         assert_eq!(
-            installer.rollback_to_retained_known_good(&Hooks::default()),
+            installer.rollback_to_retained_known_good(&Hooks::default(), LiveStoreSchema::Absent),
             Err(LifecycleError::RollbackFailed)
         );
         assert_eq!(
@@ -3478,7 +3592,7 @@ mod tests {
             .active;
 
         assert_eq!(
-            installer.rollback_to_retained_known_good(&Hooks::default()),
+            installer.rollback_to_retained_known_good(&Hooks::default(), LiveStoreSchema::Absent),
             Err(LifecycleError::RollbackFailed)
         );
         assert_eq!(
@@ -3511,7 +3625,7 @@ mod tests {
             .active;
 
         assert_eq!(
-            installer.rollback_to_retained_known_good(&Hooks::default()),
+            installer.rollback_to_retained_known_good(&Hooks::default(), LiveStoreSchema::Absent),
             Err(LifecycleError::RollbackFailed)
         );
         assert_eq!(

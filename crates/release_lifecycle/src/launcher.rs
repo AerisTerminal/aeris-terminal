@@ -20,9 +20,10 @@ use crate::{
     ReleaseManifest, ReleasePolicy, ReleaseUninstaller, SignedBlockPlan, SignedReleaseManifest,
     UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY, VaultEntry, channel_pointer_path,
     current_release_identity, decode_and_verify_block_plan, installer_filename,
-    native_install_root, native_installation_inventory, release_config, release_directory_path,
+    native_install_root, native_installation_inventory, read_live_store_schema, release_config,
+    release_directory_path,
     release_source::{HttpsReleaseSource, ReleaseSource, ReleaseSourceError},
-    rollout_eligible, verify_release_file, verify_release_manifest,
+    rollout_eligible, trading_database_path, verify_release_file, verify_release_manifest,
 };
 use aeris_platform_runtime::{
     CredentialVault, NativeCredentialVault,
@@ -2116,6 +2117,22 @@ fn rollback_and_launch_retained(
     failed: &ActiveRelease,
     startup_error: &str,
 ) -> Result<(), String> {
+    // A retained release that cannot open the trading data the failed release
+    // migrated would fail on every start, so the failed release stays active.
+    let live_store = aeris_platform_runtime::native_data_root()
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            read_live_store_schema(&trading_database_path(&root)).map_err(|error| error.to_string())
+        })
+        .and_then(|live_store| {
+            installer
+                .verify_retained_rollback(live_store)
+                .map(|_| live_store)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| {
+            format!("{startup_error}; the retained known-good release cannot be restored: {error}")
+        })?;
     // The rollback removes the failed generation. Persist its quarantine
     // identity first so a crash or immediate restart cannot reinstall the same
     // bad channel offer in a loop.
@@ -2123,7 +2140,7 @@ fn rollback_and_launch_retained(
         format!("{startup_error}; failed release could not be quarantined: {error}")
     })?;
     let retained = installer
-        .rollback_to_retained_known_good(hooks)
+        .rollback_to_retained_known_good(hooks, live_store)
         .map_err(|error| {
             format!("{startup_error}; retained known-good rollback failed: {error}")
         })?;

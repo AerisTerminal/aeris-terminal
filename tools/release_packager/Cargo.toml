@@ -24,6 +24,7 @@ doc = false
 [dependencies]
 aeris_platform_runtime = { path = "../../crates/platform_runtime" }
 aeris_release_lifecycle = { path = "../../crates/release_lifecycle", features = ["producer"] }
+aeris_trading_runtime = { path = "../../crates/trading_runtime" }
 base64.workspace = true
 ed25519-dalek.workspace = true
 serde.workspace = true

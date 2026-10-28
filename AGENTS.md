@@ -236,9 +236,14 @@ violations and missing verification explicitly, and never describe them as satis
   against a predecessor, a signed block plan), writes the channel pointer and prints the Inno Setup
   defines. It reads the Ed25519 signing key only from a key file through `read_signing_key`
   (zeroized), never the environment, standard input or the command line, has no network dependency
-  and publishes nothing; `tools/naming_check` enforces this. Its `lifecycle_e2e` test runs
+  and publishes nothing; `tools/naming_check` enforces this. The rollback-compatibility data
+  records the payload's `max_store_schema` (`aeris_trading_runtime::SCHEMA_VERSION`). Before a
+  crash rollback the launcher reads the live trading store's `user_version` from its SQLite header
+  (a write-ahead log holding frames counts as the failed release's schema) and leaves the failed
+  release active instead of restoring one that cannot open that store. Its `lifecycle_e2e` test runs
   `run_launcher` against a local `DirectorySource` through install, update, readiness rejection,
-  block-plan delivery, activation, crash rollback and quarantine. The installed desktop and launcher
+  block-plan delivery, activation, crash rollback, quarantine and a rollback refused past a
+  migrated store. The installed desktop and launcher
   there are copies of the `aeris_lifecycle_fixture` binary; never copy a test executable into a
   release, because antivirus heuristics quarantine a program that copies and runs its own image.
 - The release packaging variables (`AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,

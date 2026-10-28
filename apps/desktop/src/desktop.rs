@@ -4031,14 +4031,13 @@ fn readiness_data_root_fields() -> Result<(bool, String, &'static str), String> 
 }
 
 fn trading_database_path() -> Result<std::path::PathBuf, aeris_trading_runtime::StoreError> {
-    Ok(aeris_platform_runtime::native_data_root()
-        .map_err(|error| {
-            aeris_trading_runtime::StoreError::Other(format!(
-                "trading data root is unavailable: {error}"
-            ))
-        })?
-        .join("trading")
-        .join("trading.sqlite3"))
+    let root = aeris_platform_runtime::native_data_root().map_err(|error| {
+        aeris_trading_runtime::StoreError::Other(format!(
+            "trading data root is unavailable: {error}"
+        ))
+    })?;
+    // The launcher reads the store schema at this same path before a rollback.
+    Ok(aeris_release_lifecycle::trading_database_path(&root))
 }
 
 fn start_trading_service(

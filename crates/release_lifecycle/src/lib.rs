@@ -1,7 +1,8 @@
 //! Signed release lifecycle: install, update, rollback and uninstall mechanics,
 //! release delivery plans, rollout policy, the compiled release identity, the candidate
 //! readiness report, the release origin's layout and the `ReleaseSource` it is read through,
-//! and the stable launcher that the `aeris_launcher` binary runs.
+//! the trading store schema a rollback must respect, and the stable launcher that the
+//! `aeris_launcher` binary runs.
 
 mod launcher;
 mod lifecycle;
@@ -13,6 +14,7 @@ mod release_delivery;
 mod release_identity;
 mod release_source;
 mod rollout;
+mod store_schema;
 
 pub use launcher::{
     ReleaseOrigin, run_launcher, run_native_launcher, valid_release_identity,
@@ -52,3 +54,4 @@ pub use release_delivery::{
 pub use release_identity::{ReleaseIdentity, current_release_identity};
 pub use release_source::{ArtifactBody, ReleaseSource, ReleaseSourceError};
 pub use rollout::rollout_eligible;
+pub use store_schema::{LiveStoreSchema, read_live_store_schema, trading_database_path};
