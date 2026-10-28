@@ -262,6 +262,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: The benchmark flag was removed without removing its tooling.
 - Fix: Delete the pacing scripts, their verifier tests, and `display_timing`; delete other unreferenced scripts or wire them into CI.
 - Verification: `rg -- "--windowed-benchmark" tools apps` empty; every remaining `tools/*.ps1` is referenced by CI or documentation.
+- Status (2026-10-28, M8.11): fixed. The pacing, endurance, transition-capture and evidence-verifier scripts and the other unreferenced wrappers are deleted; naming_check requires CI, the Readme or AGENTS.md to name every remaining `tools/` script. `display_timing` was removed earlier.
 
 ### PL-11 `plan/` directory contradicts the AGENTS documentation rule
 

@@ -733,8 +733,13 @@ still wait on the GUI checks and the remaining work on their lines.
   - Left: GUI smoke test (charts, drawing stamps and image export after the `resvg` move), including
     a signed-in avatar check. Not run.
 - [ ] M8.11 Vendor and tooling trim
+  - Landed: tools trim. The physical-pacing, desktop-endurance, transition-capture and evidence
+    verifier scripts and every other unreferenced `tools/*.ps1`/`*.sh` wrapper are deleted (21
+    files); `tools/` keeps `setup_linux_desktop.sh` and `windows/aeris_setup.iss`. naming_check
+    `every_tool_script_is_referenced_by_ci_or_the_docs` requires a workflow, the Readme or AGENTS.md
+    to name each remaining script. `display_timing` and `NativeSessionShutdownMonitor` were
+    already gone; `replace_file_atomically` stays (the launcher uses it).
   - Left: trim the `gpui_base` LSP editor, then lint and pin it.
-  - Delete the physical-pacing scripts.
   - Move `live_market_gate` out of the production `platform_runtime` library.
   - Prune `.gitignore`.
   - GUI text-input check. Closes PL-10, PL-12 and PL-19.

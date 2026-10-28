@@ -803,6 +803,9 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
   propagate failures, log them through observability, or explicitly handle a typed
   retired/absent outcome. Test-only discards do not count toward the production scan.
 - Keep file/directory names snake_case.
+- Every file under `tools/` outside its Cargo packages is named by a workflow, the `Readme` or this
+  file; `every_tool_script_is_referenced_by_ci_or_the_docs` in `tools/naming_check` enforces it.
+  Delete a script that loses its last reference instead of keeping it.
 - Desktop modules live where their `mod` declaration resolves: the library's modules directly
   under `apps/desktop/src/`, the binary's `desktop` children under `apps/desktop/src/desktop/`.
   `desktop_modules_follow_the_directory_tree` rejects a `#[path]` attribute anywhere in

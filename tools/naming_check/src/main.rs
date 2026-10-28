@@ -3765,7 +3765,6 @@ mod tests {
     /// test's job to assert; this one only keeps the boundaries from vanishing.
     fn durable_migration_test_boundaries_remain_present() {
         for relative in [
-            "tools/run_rithmic_protocol_conformance.sh",
             "crates/market_runtime/src/market_service/history/tracker.rs",
             "crates/provider_history/tests/handoff_conformance.rs",
             "crates/contracts/tests/contracts.rs",
@@ -3781,6 +3780,67 @@ mod tests {
                 "durable test boundary {relative} is missing"
             );
         }
+    }
+
+    /// The scripts in `scripts` whose repository path `references` never names.
+    fn unreferenced_tool_scripts<'a>(scripts: &'a [String], references: &str) -> Vec<&'a str> {
+        scripts
+            .iter()
+            .map(String::as_str)
+            .filter(|script| !references.contains(script))
+            .collect()
+    }
+
+    /// Repository paths of the files under `directory`, skipping Cargo packages.
+    fn collect_tool_scripts(directory: &Path, scripts: &mut Vec<String>) {
+        for entry in fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        {
+            let path = entry.expect("tools entry is readable").path();
+            if path.is_dir() {
+                if !path.join("Cargo.toml").is_file() {
+                    collect_tool_scripts(&path, scripts);
+                }
+            } else {
+                let relative = path
+                    .strip_prefix(repository_root())
+                    .expect("tool script is inside the repository");
+                scripts.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    #[test]
+    fn every_tool_script_is_referenced_by_ci_or_the_docs() {
+        let mut scripts = Vec::new();
+        collect_tool_scripts(&repository_root().join("tools"), &mut scripts);
+        assert!(!scripts.is_empty(), "tools/ keeps its setup scripts");
+        let mut references = manifest("Readme");
+        references.push_str(&manifest("AGENTS.md"));
+        for entry in fs::read_dir(repository_root().join(".github/workflows"))
+            .expect("workflow directory is readable")
+        {
+            let path = entry.expect("workflow entry is readable").path();
+            references.push_str(&super::read_source(&path).expect("workflow is readable"));
+        }
+        assert_eq!(
+            unreferenced_tool_scripts(&scripts, &references),
+            Vec::<&str>::new(),
+            "every tools/ script outside a Cargo package must be named by a workflow, the Readme or AGENTS.md"
+        );
+    }
+
+    #[test]
+    fn unreferenced_tool_scripts_are_reported_by_path() {
+        let scripts = ["tools/setup.sh".to_owned(), "tools/stale.ps1".to_owned()];
+        assert_eq!(
+            unreferenced_tool_scripts(&scripts, "run: tools/setup.sh --system"),
+            vec!["tools/stale.ps1"]
+        );
+        assert_eq!(
+            unreferenced_tool_scripts(&scripts, "tools/setup.sh, then tools/stale.ps1"),
+            Vec::<&str>::new()
+        );
     }
     #[test]
     fn repository_markdown_inventory_is_exact() {
@@ -5907,17 +5967,6 @@ jobs:
                 && !workflow.contains("git config --global"),
             "CI must fetch public Aeris Charts without credential rewriting"
         );
-        // Stale pacing/evidence verifiers stay out of CI entirely. The
-        // performance lane exists only under the dispatch-only job above.
-        for retired_step in [
-            "test_evidence_verifiers.ps1",
-            "test_desktop_endurance_workflow.ps1",
-        ] {
-            assert!(
-                !workflow.contains(retired_step),
-                "the push/pull_request gate must not run the retired step {retired_step}"
-            );
-        }
         for production_release_contract in
             std::iter::once("release-pair").chain(RELEASE_CONFIG_VARIABLES)
         {
