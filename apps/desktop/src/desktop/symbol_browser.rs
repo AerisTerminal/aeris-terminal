@@ -961,5 +961,4 @@ fn contract_month(expiration: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[path = "symbol_browser_tests.rs"]
 mod tests;

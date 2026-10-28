@@ -186,7 +186,7 @@ violations and missing verification explicitly, and never describe them as satis
   production `if`/`match` conditions comparing known notice literals and
   message constants with `starts_with`, `contains` or `==`. Use typed outcomes
   rather than branching on display text.
-- `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`; the module is
+- `FixtureMarketWorker` lives only under `apps/desktop/src/test_support/`; the module is
   compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
   construct fixture market publications. The diagnostic conformance command is gated likewise.
 - The desktop stores `ChartInterval` and must not construct `SeriesCadence`; interval-to-cadence mapping
@@ -401,7 +401,7 @@ the check.
   native-vault entry. Submitted field values never derive `Debug`. Live/test provider sessions must
   respect provider concurrency limits.
 - Desktop connection rows come from `published_provider_descriptors()` exactly once per registered
-  provider. `components/provider_login.rs` renders the published vault-login field schema and
+  provider. `desktop/provider_login.rs` renders the published vault-login field schema and
   calls only provider-id-keyed market-runtime login methods; the desktop never imports a
   provider-specific login summary/server or writes a credential outside the runtime's vault seam.
   `tools/naming_check` keeps this component in the native-vault and rendering-boundary checks;
@@ -489,7 +489,7 @@ persistence paths exist: the desktop entrypoint shows the sign-in window, and
 `start_signed_in_runtime` (market runtime and provider sessions, context sources, the
 market-demanding workspace, the trading market feed and the broker venue relay) runs only when the
 `services::SignedInStart` gate releases it, exactly once per process; a validation root runs it
-directly. After a later sign-out the workspace window renders `components/sign_in_gate.rs` (no
+directly. After a later sign-out the workspace window renders `desktop/sign_in_gate.rs` (no
 workspace handlers or trading hotkeys attach behind it), but provider sessions and the venue stay up
 until exit because `MarketService::shutdown` is final and cannot restart in-process; the next sign-in
 starts nothing new. `tools/naming_check` keeps these owners out of the entrypoint. Tests must not call `start_restore` or touch
@@ -641,6 +641,10 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
   propagate failures, log them through observability, or explicitly handle a typed
   retired/absent outcome. Test-only discards do not count toward the production scan.
 - Keep file/directory names snake_case.
+- Desktop modules live where their `mod` declaration resolves: the library's modules directly
+  under `apps/desktop/src/`, the binary's `desktop` children under `apps/desktop/src/desktop/`.
+  `desktop_modules_follow_the_directory_tree` rejects a `#[path]` attribute anywhere in
+  `apps/desktop/src`.
 - Fix Clippy findings rather than adding broad lint suppression.
 - Do not create planning documents, architecture diaries, nested agent files, or duplicate README files.
   Durable architecture rules belong in code/tests/`tools/naming_check`; implementation notes belong near

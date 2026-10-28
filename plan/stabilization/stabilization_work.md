@@ -255,8 +255,11 @@ only on the guarded GUI checks on their lines.
     gains the bottom panel and layouts page, `ProviderLoginFlow` the data connections and
     `TabStrip` the linked-chart sync revisions. The former bool clusters are enums,
     `struct_excessive_bools` is removed, and `TerminalApp` drops from 52 to 15 fields.
-  - Left: turn `#[path]` modules into directories, keeping the `LayoutLibrary` rules.
-  - GUI check of tabs, search and menus. Part of UI-07.
+    The `#[path]` modules are a real module tree: every `desktop` child, including the former
+    `components/`, `native_ui/`, `engine_market_worker/` and root-level files, lives under
+    `apps/desktop/src/desktop/`, the library's fixtures under `apps/desktop/src/test_support/`,
+    and `desktop_modules_follow_the_directory_tree` rejects a new `#[path]`.
+  - Left: GUI check of tabs, search and menus. Part of UI-07.
 - [ ] M7.6 Dirty-source `FrameScheduler`
   - Left: `DirtySet` and `FrameScheduler`, with layout persistence by revision.
   - Delete the 100 ms timer and put diagnostics behind the feature flag.

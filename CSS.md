@@ -27,7 +27,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
 - Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars and the large
-  workspace panels) use `popover_surface` from `native_ui/theme.rs`, the Theme System
+  workspace panels) use `popover_surface` from `desktop/native_ui/theme.rs`, the Theme System
   `.ui-popover`: an opaque `surface-popover` fill, a 1px `border-popover-highlight` inner edge
   and a 1px `border-popover` outer edge (the CSS `inset 0 0 0 1px` / `0 0 0 1px` pair). The
   popover tokens are Aeris-only; presets resolve them to `surface-secondary`, transparent and
@@ -82,7 +82,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 
 ## Components
 
-Controls come from `apps/desktop/src/native_ui`, never hand-built divs. Ask for a component and
+Controls come from `apps/desktop/src/desktop/native_ui`, never hand-built divs. Ask for a component and
 variant **by name**; the component owns every color, border, radius, hover, press, disabled and
 focus state. Callers add only layout (flex, gaps, margins, an explicit width).
 

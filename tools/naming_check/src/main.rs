@@ -31,31 +31,31 @@ const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md", "themes.md"]
 /// The sole provider identity exception maps published logo keys to bundled artwork.
 /// Every other desktop production source must remain provider-neutral.
 const DESKTOP_PROVIDER_ALLOWLIST: &[(&str, &str)] = &[(
-    "apps/desktop/src/assets.rs",
+    "apps/desktop/src/desktop/assets.rs",
     "registered provider logo assets",
 )];
 
 // Only these declared modules can be omitted from the production identity scan.
 // The declaration gates are checked below, so moving one into production fails.
 const DESKTOP_PROVIDER_FIXTURE_PATHS: &[&str] = &[
-    "apps/desktop/src/desktop/test_support/mod.rs",
-    "apps/desktop/src/desktop/test_support/fixture_market.rs",
-    "apps/desktop/src/desktop/test_support/market_events.rs",
-    "apps/desktop/src/desktop/test_support/provider_instruments.rs",
-    "apps/desktop/src/desktop/test_support/pane_harness.rs",
-    "apps/desktop/src/readiness_conformance.rs",
+    "apps/desktop/src/test_support/mod.rs",
+    "apps/desktop/src/test_support/fixture_market.rs",
+    "apps/desktop/src/test_support/market_events.rs",
+    "apps/desktop/src/test_support/provider_instruments.rs",
+    "apps/desktop/src/desktop/pane_harness.rs",
+    "apps/desktop/src/desktop/readiness_conformance.rs",
 ];
 
 /// Existing non-pane comparisons have a file-local purpose and a fixed count.
 /// A new comparison, or a vanished exception, requires an explicit review.
 const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
     (
-        "apps/desktop/src/update.rs",
+        "apps/desktop/src/desktop/update.rs",
         6,
         "release install/readiness generations",
     ),
     (
-        "apps/desktop/src/symbol_browser.rs",
+        "apps/desktop/src/desktop/symbol_browser.rs",
         3,
         "app-scoped catalog selection fence",
     ),
@@ -65,22 +65,22 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "verified terms and bounded diagnostics",
     ),
     (
-        "apps/desktop/src/engine_market_worker.rs",
+        "apps/desktop/src/desktop/engine_market_worker.rs",
         1,
         "initial worker selection",
     ),
     (
-        "apps/desktop/src/engine_market_worker/selection_commands.rs",
+        "apps/desktop/src/desktop/engine_market_worker/selection_commands.rs",
         4,
         "worker command and startup admission",
     ),
     (
-        "apps/desktop/src/engine_market_worker/runtime.rs",
+        "apps/desktop/src/desktop/engine_market_worker/runtime.rs",
         2,
         "worker coalescing and initial admission",
     ),
     (
-        "apps/desktop/src/engine_market_worker/replay_conversion.rs",
+        "apps/desktop/src/desktop/engine_market_worker/replay_conversion.rs",
         3,
         "book session projection before pane delivery",
     ),
@@ -120,7 +120,7 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "controller publication/initial/display checks",
     ),
     (
-        "apps/desktop/src/components/fullscreen_hint.rs",
+        "apps/desktop/src/desktop/fullscreen_hint.rs",
         2,
         "animation timer tokens",
     ),
@@ -214,6 +214,7 @@ fn collect_desktop_fence_sources(
             }
         } else if path.extension().is_some_and(|extension| extension == "rs")
             && path.file_name() != Some(OsStr::new("readiness_conformance.rs"))
+            && path.file_name() != Some(OsStr::new("pane_harness.rs"))
         {
             let count = desktop_fence_comparison_count(&read_source(&path)?);
             if count > 0 {
@@ -249,14 +250,16 @@ fn desktop_provider_identity_at_path(
     if !DESKTOP_PROVIDER_FIXTURE_PATHS.contains(&path) {
         return desktop_provider_identity(source);
     }
-    let root_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"desktop/test_support/mod.rs\"]\npub mod test_support;";
-    let diagnostic_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"readiness_conformance.rs\"]\nmod readiness_conformance;";
-    let pane_gate =
-        "#[cfg(test)]\n#[path = \"desktop/test_support/pane_harness.rs\"]\nmod pane_harness;";
+    let root_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\npub mod test_support;";
+    let diagnostic_gate =
+        "#[cfg(any(test, feature = \"diagnostics\"))]\nmod readiness_conformance;";
+    let pane_gate = "#[cfg(test)]\nmod pane_harness;";
     let gated = match path {
-        "apps/desktop/src/readiness_conformance.rs" => gate_source.contains(diagnostic_gate),
-        "apps/desktop/src/desktop/test_support/pane_harness.rs" => gate_source.contains(pane_gate),
-        "apps/desktop/src/desktop/test_support/mod.rs" => gate_source.contains(root_gate),
+        "apps/desktop/src/desktop/readiness_conformance.rs" => {
+            gate_source.contains(diagnostic_gate)
+        }
+        "apps/desktop/src/desktop/pane_harness.rs" => gate_source.contains(pane_gate),
+        "apps/desktop/src/test_support/mod.rs" => gate_source.contains(root_gate),
         _ => {
             let name = path
                 .rsplit('/')
@@ -531,7 +534,7 @@ const COLOR_TOKEN_SOURCE_ROOTS: &[&str] = &[
 /// A new literal, or a vanished one, requires an explicit review.
 const COLOR_LITERAL_ALLOWLIST: &[(&str, usize, &str)] = &[
     (
-        "apps/desktop/src/native_ui/color_picker.rs",
+        "apps/desktop/src/desktop/native_ui/color_picker.rs",
         9,
         "the picker's hue spectrum and transparent gradient stops, which span every color",
     ),
@@ -918,22 +921,22 @@ fn collect_desktop_provider_sources(
                 .to_string_lossy()
                 .replace('\\', "/");
             let source = read_source(&path)?;
-            let (gate_source, child_source, root_source) =
-                if DESKTOP_PROVIDER_FIXTURE_PATHS.contains(&relative.as_str()) {
-                    let library = read_source(root.join("apps/desktop/src/lib.rs"))?;
-                    let declaration = if relative == "apps/desktop/src/readiness_conformance.rs"
-                        || relative == "apps/desktop/src/desktop/test_support/pane_harness.rs"
-                    {
-                        read_source(root.join("apps/desktop/src/desktop.rs"))?
-                    } else {
-                        library.clone()
-                    };
-                    let children =
-                        read_source(root.join("apps/desktop/src/desktop/test_support/mod.rs"))?;
-                    (declaration, children, library)
+            let (gate_source, child_source, root_source) = if DESKTOP_PROVIDER_FIXTURE_PATHS
+                .contains(&relative.as_str())
+            {
+                let library = read_source(root.join("apps/desktop/src/lib.rs"))?;
+                let declaration = if relative == "apps/desktop/src/desktop/readiness_conformance.rs"
+                    || relative == "apps/desktop/src/desktop/pane_harness.rs"
+                {
+                    read_source(root.join("apps/desktop/src/desktop.rs"))?
                 } else {
-                    (String::new(), String::new(), String::new())
+                    library.clone()
                 };
+                let children = read_source(root.join("apps/desktop/src/test_support/mod.rs"))?;
+                (declaration, children, library)
+            } else {
+                (String::new(), String::new(), String::new())
+            };
             if desktop_provider_identity_at_path(
                 &relative,
                 &source,
@@ -1014,11 +1017,13 @@ fn has_runtime_descriptor_test(source: &str) -> bool {
 }
 
 // The fixture is available to the diagnostic executable and tests, never to the default
-// desktop. The only diagnostic caller is the explicitly gated conformance command.
+// desktop. The only diagnostic caller is the explicitly gated conformance command; the
+// only other desktop user is the test-only pane harness.
 fn violates_fixture_market_boundary(path: &str, source: &str) -> bool {
     path.starts_with("apps/desktop/src/")
-        && !path.starts_with("apps/desktop/src/desktop/test_support/")
-        && path != "apps/desktop/src/readiness_conformance.rs"
+        && !path.starts_with("apps/desktop/src/test_support/")
+        && path != "apps/desktop/src/desktop/readiness_conformance.rs"
+        && path != "apps/desktop/src/desktop/pane_harness.rs"
         && production_source_prefix(source).contains("FixtureMarketWorker")
 }
 
@@ -1894,9 +1899,16 @@ mod tests {
 
     #[test]
     fn color_literal_rule_rejects_new_and_stale_exceptions() {
-        let allowed = [("apps/desktop/src/native_ui/color_picker.rs", 9, "spectrum")];
+        let allowed = [(
+            "apps/desktop/src/desktop/native_ui/color_picker.rs",
+            9,
+            "spectrum",
+        )];
         let mut observed = std::collections::BTreeMap::new();
-        observed.insert("apps/desktop/src/native_ui/color_picker.rs".to_string(), 9);
+        observed.insert(
+            "apps/desktop/src/desktop/native_ui/color_picker.rs".to_string(),
+            9,
+        );
         assert_eq!(
             super::counted_allowlist_violations(&allowed, &observed),
             Vec::<PathBuf>::new()
@@ -1909,7 +1921,9 @@ mod tests {
         observed.clear();
         assert_eq!(
             super::counted_allowlist_violations(&allowed, &observed),
-            [PathBuf::from("apps/desktop/src/native_ui/color_picker.rs")]
+            [PathBuf::from(
+                "apps/desktop/src/desktop/native_ui/color_picker.rs"
+            )]
         );
     }
 
@@ -1927,8 +1941,8 @@ mod tests {
             .collect();
         for expected in [
             "apps/desktop/src/desktop/tests.rs",
-            "apps/desktop/src/desktop/workspace_surface_tests.rs",
-            "apps/desktop/src/desktop/test_support/pane_harness.rs",
+            "apps/desktop/src/desktop/workspace_surface/tests.rs",
+            "apps/desktop/src/desktop/pane_harness.rs",
             "crates/ui/chart_integration/src/view/tests.rs",
         ] {
             assert!(test_only.contains(expected), "{expected} is not test-only");
@@ -1991,18 +2005,18 @@ mod tests {
     #[test]
     fn desktop_market_fences_reject_stale_exceptions() {
         let allowed = [(
-            "apps/desktop/src/update.rs",
+            "apps/desktop/src/desktop/update.rs",
             1,
             "release install generation",
         )];
         let observed = std::collections::BTreeMap::new();
         assert_eq!(
             super::counted_allowlist_violations(&allowed, &observed),
-            [PathBuf::from("apps/desktop/src/update.rs")],
+            [PathBuf::from("apps/desktop/src/desktop/update.rs")],
             "removed comparisons make their exception stale"
         );
         let observed = std::collections::BTreeMap::from([
-            ("apps/desktop/src/update.rs".to_string(), 1),
+            ("apps/desktop/src/desktop/update.rs".to_string(), 1),
             ("apps/desktop/src/new_market_fence.rs".to_string(), 1),
         ]);
         assert_eq!(
@@ -2012,7 +2026,10 @@ mod tests {
         assert_eq!(
             super::counted_allowlist_violations(
                 &allowed,
-                &std::collections::BTreeMap::from([("apps/desktop/src/update.rs".to_string(), 1)]),
+                &std::collections::BTreeMap::from([(
+                    "apps/desktop/src/desktop/update.rs".to_string(),
+                    1
+                )]),
             ),
             Vec::<PathBuf>::new()
         );
@@ -2057,10 +2074,9 @@ mod tests {
 
     #[test]
     fn desktop_provider_neutrality_excludes_only_gated_fixture_paths() {
-        let gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n\
-                    #[path = \"desktop/test_support/mod.rs\"]\npub mod test_support;";
+        let gate = "#[cfg(any(test, feature = \"diagnostics\"))]\npub mod test_support;";
         let source = "const ID: &str = \"rithmic-test:\";";
-        let fixture = "apps/desktop/src/desktop/test_support/provider_instruments.rs";
+        let fixture = "apps/desktop/src/test_support/provider_instruments.rs";
         assert!(!super::desktop_provider_identity_at_path(
             fixture,
             source,
@@ -2089,9 +2105,9 @@ mod tests {
             "mod provider_instruments;",
             gate
         ));
-        let readiness = "apps/desktop/src/readiness_conformance.rs";
-        let diagnostic_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n\
-                               #[path = \"readiness_conformance.rs\"]\nmod readiness_conformance;";
+        let readiness = "apps/desktop/src/desktop/readiness_conformance.rs";
+        let diagnostic_gate =
+            "#[cfg(any(test, feature = \"diagnostics\"))]\nmod readiness_conformance;";
         assert!(!super::desktop_provider_identity_at_path(
             readiness,
             source,
@@ -2106,9 +2122,8 @@ mod tests {
             "",
             ""
         ));
-        let pane = "apps/desktop/src/desktop/test_support/pane_harness.rs";
-        let test_gate =
-            "#[cfg(test)]\n#[path = \"desktop/test_support/pane_harness.rs\"]\nmod pane_harness;";
+        let pane = "apps/desktop/src/desktop/pane_harness.rs";
+        let test_gate = "#[cfg(test)]\nmod pane_harness;";
         assert!(!super::desktop_provider_identity_at_path(
             pane, source, test_gate, "", ""
         ));
@@ -2125,31 +2140,31 @@ mod tests {
     #[test]
     fn desktop_fixture_gates_accept_crlf_source() {
         let fixture = "const ID: &str = \"rithmic-test:\";";
-        let root_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"desktop/test_support/mod.rs\"]\npub mod test_support;";
-        let diagnostic_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"readiness_conformance.rs\"]\nmod readiness_conformance;";
-        let pane_gate =
-            "#[cfg(test)]\n#[path = \"desktop/test_support/pane_harness.rs\"]\nmod pane_harness;";
+        let root_gate = "#[cfg(any(test, feature = \"diagnostics\"))]\npub mod test_support;";
+        let diagnostic_gate =
+            "#[cfg(any(test, feature = \"diagnostics\"))]\nmod readiness_conformance;";
+        let pane_gate = "#[cfg(test)]\nmod pane_harness;";
         for (path, gate, child, root) in [
             (
-                "apps/desktop/src/desktop/test_support/mod.rs",
+                "apps/desktop/src/test_support/mod.rs",
                 root_gate,
                 "",
                 root_gate,
             ),
             (
-                "apps/desktop/src/desktop/test_support/fixture_market.rs",
+                "apps/desktop/src/test_support/fixture_market.rs",
                 root_gate,
                 "mod fixture_market;",
                 root_gate,
             ),
             (
-                "apps/desktop/src/readiness_conformance.rs",
+                "apps/desktop/src/desktop/readiness_conformance.rs",
                 diagnostic_gate,
                 "",
                 "",
             ),
             (
-                "apps/desktop/src/desktop/test_support/pane_harness.rs",
+                "apps/desktop/src/desktop/pane_harness.rs",
                 pane_gate,
                 "",
                 "",
@@ -2186,8 +2201,8 @@ mod tests {
             std::iter::empty(),
         ));
         assert!(provider_allowlist_matches(
-            ["apps/desktop/src/assets.rs"],
-            ["apps/desktop/src/assets.rs"],
+            ["apps/desktop/src/desktop/assets.rs"],
+            ["apps/desktop/src/desktop/assets.rs"],
         ));
     }
 
@@ -2867,7 +2882,7 @@ mod tests {
                 "libloading",
             ],
         );
-        let packages = manifest("apps/desktop/src/study_packages.rs");
+        let packages = manifest("apps/desktop/src/desktop/study_packages.rs");
         assert!(packages.contains("TRUSTED_NATIVE_STUDY_PACKAGES"));
         for forbidden in ["LoadLibrary", "dlopen", "read_dir", "libloading"] {
             assert!(
@@ -2964,8 +2979,8 @@ mod tests {
 
     #[test]
     fn fixture_market_boundary_accepts_only_gated_test_and_diagnostic_sources() {
-        let fixture = "apps/desktop/src/desktop/test_support/fixture_market.rs";
-        let diagnostic = "apps/desktop/src/readiness_conformance.rs";
+        let fixture = "apps/desktop/src/test_support/fixture_market.rs";
+        let diagnostic = "apps/desktop/src/desktop/readiness_conformance.rs";
         let production = "apps/desktop/src/market_worker.rs";
         assert!(!super::violates_fixture_market_boundary(
             fixture,
@@ -2981,11 +2996,18 @@ mod tests {
         ));
         let library = manifest("apps/desktop/src/lib.rs");
         let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(library.contains(
-            "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"desktop/test_support/mod.rs\"]"
-        ));
-        assert!(desktop.contains(
-            "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"readiness_conformance.rs\"]"
+        assert!(
+            library.contains("#[cfg(any(test, feature = \"diagnostics\"))]\npub mod test_support;")
+        );
+        assert!(
+            desktop.contains(
+                "#[cfg(any(test, feature = \"diagnostics\"))]\nmod readiness_conformance;"
+            )
+        );
+        assert!(desktop.contains("#[cfg(test)]\nmod pane_harness;"));
+        assert!(!super::violates_fixture_market_boundary(
+            "apps/desktop/src/desktop/pane_harness.rs",
+            "market: FixtureMarketWorker,"
         ));
     }
 
@@ -3006,6 +3028,23 @@ mod tests {
             assert!(
                 !super::violates_fixture_market_boundary(&relative, &source),
                 "{relative} exposes the fixture outside desktop test support"
+            );
+        }
+    }
+
+    /// Desktop modules live where their `mod` declaration resolves, so a module's file
+    /// shows its real parent and the reach of its `pub(super)` items.
+    #[test]
+    fn desktop_modules_follow_the_directory_tree() {
+        for path in production_sources_under("apps/desktop/src") {
+            let relative = relative_string(&path);
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+            assert!(
+                !source
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("#[path")),
+                "{relative} mounts a module with #[path]; move the file to where its declaration resolves"
             );
         }
     }
@@ -3112,9 +3151,9 @@ mod tests {
             "crates/market_runtime/src/market_service/tests.rs",
             "crates/market_runtime/src/study/tests.rs",
             "crates/account_runtime/src/account_service/tests.rs",
-            "apps/desktop/src/desktop/workspace_surface_tests.rs",
-            "apps/desktop/src/http_wiring_tests.rs",
-            "apps/desktop/src/readiness_conformance.rs",
+            "apps/desktop/src/desktop/workspace_surface/tests.rs",
+            "apps/desktop/src/desktop/http_wiring_tests.rs",
+            "apps/desktop/src/desktop/readiness_conformance.rs",
         ] {
             assert!(
                 repository_root().join(relative).is_file(),
@@ -3186,17 +3225,17 @@ mod tests {
     #[test]
     fn desktop_rendering_remains_component_owned() {
         for relative in [
-            "apps/desktop/src/components/chart_context_menus.rs",
-            "apps/desktop/src/components/chart_surface.rs",
-            "apps/desktop/src/components/chart_toolbar_menus.rs",
-            "apps/desktop/src/components/chrome_menu.rs",
-            "apps/desktop/src/components/drawing_toolbar.rs",
-            "apps/desktop/src/components/indicator_menu.rs",
-            "apps/desktop/src/components/provider_login.rs",
-            "apps/desktop/src/components/symbol_menu.rs",
-            "apps/desktop/src/components/terminal_chrome.rs",
-            "apps/desktop/src/components/terminal_view.rs",
-            "apps/desktop/src/components/workspace_layout.rs",
+            "apps/desktop/src/desktop/chart_context_menus.rs",
+            "apps/desktop/src/desktop/chart_surface.rs",
+            "apps/desktop/src/desktop/chart_toolbar_menus.rs",
+            "apps/desktop/src/desktop/chrome_menu.rs",
+            "apps/desktop/src/desktop/drawing_toolbar.rs",
+            "apps/desktop/src/desktop/indicator_menu.rs",
+            "apps/desktop/src/desktop/provider_login.rs",
+            "apps/desktop/src/desktop/symbol_menu.rs",
+            "apps/desktop/src/desktop/terminal_chrome.rs",
+            "apps/desktop/src/desktop/terminal_view.rs",
+            "apps/desktop/src/desktop/workspace_layout.rs",
         ] {
             assert!(
                 repository_root().join(relative).is_file(),
@@ -3224,7 +3263,7 @@ mod tests {
         }
     }
 
-    /// Buttons, menus, dialogs, tabs and switches are `native_ui` components. Desktop components
+    /// Buttons, menus, dialogs, tabs and switches are `native_ui` components. Desktop modules
     /// compose them; they never hand-build a click target, menu panel, scrim or tab, and the
     /// retired per-file helpers stay gone. The few remaining exceptions are listed with why.
     #[test]
@@ -3288,11 +3327,20 @@ mod tests {
             (concat!("surface_", "overlay"), &[]),
         ];
 
-        for path in production_sources_under("apps/desktop/src/components") {
-            let contents = fs::read_to_string(&path)
+        // Every production module under `desktop/` except `native_ui`, which owns these primitives.
+        let sources = production_sources_under("apps/desktop/src");
+        let test_only =
+            super::test_only_module_files(&sources).expect("desktop sources are readable");
+        for path in sources.iter().filter(|path| {
+            let relative = relative_string(path);
+            relative.starts_with("apps/desktop/src/desktop/")
+                && !relative.starts_with("apps/desktop/src/desktop/native_ui/")
+                && !test_only.contains(*path)
+        }) {
+            let contents = fs::read_to_string(path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
             let production = production_prefix(&contents);
-            let relative = relative_string(&path);
+            let relative = relative_string(path);
             let file = relative.rsplit('/').next().unwrap_or_default();
             for retired in RETIRED_HELPERS {
                 assert!(
@@ -3734,7 +3782,8 @@ mod tests {
     }
     #[test]
     fn runtime_owns_startup_catalog_resolution_and_selection() {
-        let source = manifest("apps/desktop/src/engine_market_worker/selection_commands.rs");
+        let source =
+            manifest("apps/desktop/src/desktop/engine_market_worker/selection_commands.rs");
         for forbidden in [
             "StartupResolution::Searching",
             "handle_startup_catalog_event",
@@ -4227,7 +4276,7 @@ mod tests {
             restart < close && close < quit,
             "update restart must commit only after durability, then claim shared close before lifecycle quit"
         );
-        let update = manifest("apps/desktop/src/update.rs");
+        let update = manifest("apps/desktop/src/desktop/update.rs");
         let cleanup_start = update
             .find("impl Drop for PreparedRestart")
             .expect("prepared restart cleanup owner");
@@ -4317,7 +4366,7 @@ mod tests {
                 && prepare.contains("drop(account_refresh)"),
             "update restart must quiesce account refresh and release its claim on cancellation"
         );
-        let update = manifest("apps/desktop/src/update.rs");
+        let update = manifest("apps/desktop/src/desktop/update.rs");
         let commit_start = update
             .find("pub fn commit_restart")
             .expect("update restart commit owner");
@@ -4520,10 +4569,10 @@ mod tests {
             2,
             "signed-in startup has one definition and one validation-root call"
         );
-        let gate = manifest("apps/desktop/src/components/sign_in_gate.rs");
+        let gate = manifest("apps/desktop/src/desktop/sign_in_gate.rs");
         assert!(gate.contains("state.startup.release(self.account.authenticated())"));
         assert!(gate.contains("start_signed_in_runtime(startup)"));
-        let updater = manifest("apps/desktop/src/update.rs");
+        let updater = manifest("apps/desktop/src/desktop/update.rs");
         assert!(updater.contains("const UPDATE_BACKEND_CONFIGURED: bool = false"));
         // Sign-in is required except on a validation data root, which never
         // reaches the identity provider or a saved session.
@@ -4537,7 +4586,7 @@ mod tests {
             "only a sign-in-required process installs the account session"
         );
         assert!(
-            manifest("apps/desktop/src/components/terminal_view.rs")
+            manifest("apps/desktop/src/desktop/terminal_view.rs")
                 .contains("sign_in_gate::sign_in_page("),
             "an installed but unauthenticated account session must cover the workspace"
         );
@@ -4559,7 +4608,7 @@ mod tests {
             "apps/desktop/src/desktop/workspace_tabs.rs",
             "apps/desktop/src/desktop/workspace_surface.rs",
             "apps/desktop/src/desktop/layout_tabs.rs",
-            "apps/desktop/src/components/sign_in_gate.rs",
+            "apps/desktop/src/desktop/sign_in_gate.rs",
         ] {
             let source = manifest(relative);
             for retired in [
@@ -5429,7 +5478,7 @@ jobs:
         }
         for path in readers
             .into_iter()
-            .chain(["apps/desktop/src/components/provider_login.rs"])
+            .chain(["apps/desktop/src/desktop/provider_login.rs"])
             .chain([".github/workflows/live_market_gates.yml"])
         {
             let content = manifest(path);
@@ -5449,7 +5498,7 @@ jobs:
         }
         // The desktop hands a login to the market runtime and never opens the
         // vault or the adapter itself.
-        let desktop = manifest("apps/desktop/src/components/provider_login.rs");
+        let desktop = manifest("apps/desktop/src/desktop/provider_login.rs");
         for forbidden in ["NativeCredentialVault", "aeris_rithmic_protocol_adapter"] {
             assert!(
                 !desktop.contains(forbidden),

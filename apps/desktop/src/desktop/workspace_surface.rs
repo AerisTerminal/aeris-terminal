@@ -7826,5 +7826,4 @@ impl WorkspaceSurface {
 }
 
 #[cfg(test)]
-#[path = "workspace_surface_tests.rs"]
 mod tests;

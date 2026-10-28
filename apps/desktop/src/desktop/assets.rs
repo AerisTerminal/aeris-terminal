@@ -215,7 +215,7 @@ macro_rules! drawing_icons {
 
         fn drawing_asset(path: &str) -> Option<&'static [u8]> {
             Some(match path.strip_prefix(DRAWING_ASSET_PREFIX)? {
-                $($file => include_bytes!(concat!("../assets/icons/drawing/", $file)),)+
+                $($file => include_bytes!(concat!("../../assets/icons/drawing/", $file)),)+
                 _ => return None,
             })
         }
@@ -555,80 +555,84 @@ impl AssetSource for AerisAssets {
 
 fn ui_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(UI_ASSET_PREFIX)? {
-        "add.svg" => include_bytes!("../assets/icons/ui/add.svg"),
-        "arrow-left.svg" => include_bytes!("../assets/icons/ui/arrow-left.svg"),
+        "add.svg" => include_bytes!("../../assets/icons/ui/add.svg"),
+        "arrow-left.svg" => include_bytes!("../../assets/icons/ui/arrow-left.svg"),
         "arrow-right-double.svg" => {
-            include_bytes!("../assets/icons/ui/arrow-right-double.svg")
+            include_bytes!("../../assets/icons/ui/arrow-right-double.svg")
         }
-        "arrow-right.svg" => include_bytes!("../assets/icons/ui/arrow-right.svg"),
-        "camera.svg" => include_bytes!("../assets/icons/ui/camera.svg"),
-        "close.svg" => include_bytes!("../assets/icons/ui/close.svg"),
-        "close-bold.svg" => include_bytes!("../assets/icons/ui/close-bold.svg"),
-        "chart.svg" => include_bytes!("../assets/icons/ui/chart.svg"),
-        "check.svg" => include_bytes!("../assets/icons/ui/check.svg"),
-        "chevron-down.svg" => include_bytes!("../assets/icons/ui/chevron-down.svg"),
-        "copy.svg" => include_bytes!("../assets/icons/ui/copy.svg"),
-        "download.svg" => include_bytes!("../assets/icons/ui/download.svg"),
-        "copy-success.svg" => include_bytes!("../assets/icons/ui/copy-success.svg"),
-        "data-panel.svg" => include_bytes!("../assets/icons/ui/data-panel.svg"),
-        "order-book.svg" => include_bytes!("../assets/icons/ui/order-book.svg"),
-        "order-entry.svg" => include_bytes!("../assets/icons/ui/order-entry.svg"),
-        "time-sales.svg" => include_bytes!("../assets/icons/ui/time-sales.svg"),
-        "watchlist.svg" => include_bytes!("../assets/icons/ui/watchlist.svg"),
-        "flag.svg" => include_bytes!("../assets/icons/ui/flag.svg"),
-        "flag-filled.svg" => include_bytes!("../assets/icons/ui/flag-filled.svg"),
-        "trash.svg" => include_bytes!("../assets/icons/ui/trash.svg"),
-        "eraser.svg" => include_bytes!("../assets/icons/ui/eraser.svg"),
-        "failure.svg" => include_bytes!("../assets/icons/ui/failure.svg"),
-        "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
-        "minus.svg" => include_bytes!("../assets/icons/ui/minus.svg"),
-        "moon.svg" => include_bytes!("../assets/icons/ui/moon.svg"),
-        "redo.svg" => include_bytes!("../assets/icons/ui/redo.svg"),
-        "refresh.svg" => include_bytes!("../assets/icons/ui/refresh.svg"),
-        "refresh-2.svg" => include_bytes!("../assets/icons/ui/refresh-2.svg"),
-        "search.svg" => include_bytes!("../assets/icons/ui/search.svg"),
-        "settings.svg" => include_bytes!("../assets/icons/ui/settings.svg"),
-        "sidebar-left.svg" => include_bytes!("../assets/icons/ui/sidebar-left.svg"),
-        "split-side-by-side.svg" => include_bytes!("../assets/icons/ui/split-side-by-side.svg"),
-        "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),
-        "sun.svg" => include_bytes!("../assets/icons/ui/sun.svg"),
-        "undo.svg" => include_bytes!("../assets/icons/ui/undo.svg"),
-        "view.svg" => include_bytes!("../assets/icons/ui/view.svg"),
-        "view-off.svg" => include_bytes!("../assets/icons/ui/view-off.svg"),
-        "window-close.svg" => include_bytes!("../assets/icons/ui/window-close.svg"),
-        "window-maximize.svg" => include_bytes!("../assets/icons/ui/window-maximize.svg"),
-        "window-minimize.svg" => include_bytes!("../assets/icons/ui/window-minimize.svg"),
-        "window-restore.svg" => include_bytes!("../assets/icons/ui/window-restore.svg"),
-        "loader.svg" => include_bytes!("../assets/icons/ui/loader.svg"),
-        "info.svg" => include_bytes!("../assets/icons/ui/info.svg"),
-        "keyboard.svg" => include_bytes!("../assets/icons/ui/keyboard.svg"),
-        "signout.svg" => include_bytes!("../assets/icons/ui/signout.svg"),
-        "user.svg" => include_bytes!("../assets/icons/ui/user.svg"),
-        "star.svg" => include_bytes!("../assets/icons/ui/star.svg"),
-        "star-filled.svg" => include_bytes!("../assets/icons/ui/star-filled.svg"),
-        "tick.svg" => include_bytes!("../assets/icons/ui/tick.svg"),
-        "unlock.svg" => include_bytes!("../assets/icons/ui/unlock.svg"),
-        "more.svg" => include_bytes!("../assets/icons/ui/more.svg"),
-        "template.svg" => include_bytes!("../assets/icons/ui/template.svg"),
+        "arrow-right.svg" => include_bytes!("../../assets/icons/ui/arrow-right.svg"),
+        "camera.svg" => include_bytes!("../../assets/icons/ui/camera.svg"),
+        "close.svg" => include_bytes!("../../assets/icons/ui/close.svg"),
+        "close-bold.svg" => include_bytes!("../../assets/icons/ui/close-bold.svg"),
+        "chart.svg" => include_bytes!("../../assets/icons/ui/chart.svg"),
+        "check.svg" => include_bytes!("../../assets/icons/ui/check.svg"),
+        "chevron-down.svg" => include_bytes!("../../assets/icons/ui/chevron-down.svg"),
+        "copy.svg" => include_bytes!("../../assets/icons/ui/copy.svg"),
+        "download.svg" => include_bytes!("../../assets/icons/ui/download.svg"),
+        "copy-success.svg" => include_bytes!("../../assets/icons/ui/copy-success.svg"),
+        "data-panel.svg" => include_bytes!("../../assets/icons/ui/data-panel.svg"),
+        "order-book.svg" => include_bytes!("../../assets/icons/ui/order-book.svg"),
+        "order-entry.svg" => include_bytes!("../../assets/icons/ui/order-entry.svg"),
+        "time-sales.svg" => include_bytes!("../../assets/icons/ui/time-sales.svg"),
+        "watchlist.svg" => include_bytes!("../../assets/icons/ui/watchlist.svg"),
+        "flag.svg" => include_bytes!("../../assets/icons/ui/flag.svg"),
+        "flag-filled.svg" => include_bytes!("../../assets/icons/ui/flag-filled.svg"),
+        "trash.svg" => include_bytes!("../../assets/icons/ui/trash.svg"),
+        "eraser.svg" => include_bytes!("../../assets/icons/ui/eraser.svg"),
+        "failure.svg" => include_bytes!("../../assets/icons/ui/failure.svg"),
+        "lock.svg" => include_bytes!("../../assets/icons/ui/lock.svg"),
+        "minus.svg" => include_bytes!("../../assets/icons/ui/minus.svg"),
+        "moon.svg" => include_bytes!("../../assets/icons/ui/moon.svg"),
+        "redo.svg" => include_bytes!("../../assets/icons/ui/redo.svg"),
+        "refresh.svg" => include_bytes!("../../assets/icons/ui/refresh.svg"),
+        "refresh-2.svg" => include_bytes!("../../assets/icons/ui/refresh-2.svg"),
+        "search.svg" => include_bytes!("../../assets/icons/ui/search.svg"),
+        "settings.svg" => include_bytes!("../../assets/icons/ui/settings.svg"),
+        "sidebar-left.svg" => include_bytes!("../../assets/icons/ui/sidebar-left.svg"),
+        "split-side-by-side.svg" => include_bytes!("../../assets/icons/ui/split-side-by-side.svg"),
+        "split-stacked.svg" => include_bytes!("../../assets/icons/ui/split-stacked.svg"),
+        "sun.svg" => include_bytes!("../../assets/icons/ui/sun.svg"),
+        "undo.svg" => include_bytes!("../../assets/icons/ui/undo.svg"),
+        "view.svg" => include_bytes!("../../assets/icons/ui/view.svg"),
+        "view-off.svg" => include_bytes!("../../assets/icons/ui/view-off.svg"),
+        "window-close.svg" => include_bytes!("../../assets/icons/ui/window-close.svg"),
+        "window-maximize.svg" => include_bytes!("../../assets/icons/ui/window-maximize.svg"),
+        "window-minimize.svg" => include_bytes!("../../assets/icons/ui/window-minimize.svg"),
+        "window-restore.svg" => include_bytes!("../../assets/icons/ui/window-restore.svg"),
+        "loader.svg" => include_bytes!("../../assets/icons/ui/loader.svg"),
+        "info.svg" => include_bytes!("../../assets/icons/ui/info.svg"),
+        "keyboard.svg" => include_bytes!("../../assets/icons/ui/keyboard.svg"),
+        "signout.svg" => include_bytes!("../../assets/icons/ui/signout.svg"),
+        "user.svg" => include_bytes!("../../assets/icons/ui/user.svg"),
+        "star.svg" => include_bytes!("../../assets/icons/ui/star.svg"),
+        "star-filled.svg" => include_bytes!("../../assets/icons/ui/star-filled.svg"),
+        "tick.svg" => include_bytes!("../../assets/icons/ui/tick.svg"),
+        "unlock.svg" => include_bytes!("../../assets/icons/ui/unlock.svg"),
+        "more.svg" => include_bytes!("../../assets/icons/ui/more.svg"),
+        "template.svg" => include_bytes!("../../assets/icons/ui/template.svg"),
         _ => return None,
     })
 }
 
 fn series_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(SERIES_ASSET_PREFIX)? {
-        "candlestick-chart.svg" => include_bytes!("../assets/icons/series/candlestick-chart.svg"),
+        "candlestick-chart.svg" => {
+            include_bytes!("../../assets/icons/series/candlestick-chart.svg")
+        }
         "hollow-candles-chart.svg" => {
-            include_bytes!("../assets/icons/series/hollow-candles-chart.svg")
+            include_bytes!("../../assets/icons/series/hollow-candles-chart.svg")
         }
-        "ohlc-bar-chart.svg" => include_bytes!("../assets/icons/series/ohlc-bar-chart.svg"),
-        "line-chart-type.svg" => include_bytes!("../assets/icons/series/line-chart-type.svg"),
+        "ohlc-bar-chart.svg" => include_bytes!("../../assets/icons/series/ohlc-bar-chart.svg"),
+        "line-chart-type.svg" => include_bytes!("../../assets/icons/series/line-chart-type.svg"),
         "line-with-markers-chart.svg" => {
-            include_bytes!("../assets/icons/series/line-with-markers-chart.svg")
+            include_bytes!("../../assets/icons/series/line-with-markers-chart.svg")
         }
-        "area-chart-type.svg" => include_bytes!("../assets/icons/series/area-chart-type.svg"),
-        "heikin-ashi-chart.svg" => include_bytes!("../assets/icons/series/heikin-ashi-chart.svg"),
+        "area-chart-type.svg" => include_bytes!("../../assets/icons/series/area-chart-type.svg"),
+        "heikin-ashi-chart.svg" => {
+            include_bytes!("../../assets/icons/series/heikin-ashi-chart.svg")
+        }
         "brushable-area-chart.svg" => {
-            include_bytes!("../assets/icons/series/brushable-area-chart.svg")
+            include_bytes!("../../assets/icons/series/brushable-area-chart.svg")
         }
         _ => return None,
     })
@@ -636,19 +640,19 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
 
 fn brand_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(BRAND_ASSET_PREFIX)? {
-        "logo.svg" => include_bytes!("../assets/aeris_assets/logo.svg"),
-        "logomark-dark.svg" => include_bytes!("../assets/aeris_assets/logomark-dark.svg"),
-        "logomark-white.svg" => include_bytes!("../assets/aeris_assets/logomark-white.svg"),
+        "logo.svg" => include_bytes!("../../assets/aeris_assets/logo.svg"),
+        "logomark-dark.svg" => include_bytes!("../../assets/aeris_assets/logomark-dark.svg"),
+        "logomark-white.svg" => include_bytes!("../../assets/aeris_assets/logomark-white.svg"),
         _ => return None,
     })
 }
 
 fn exchange_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(EXCHANGE_ASSET_PREFIX)? {
-        "binance.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/binance.svg"),
-        "rithmic.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/rithmic.svg"),
+        "binance.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/binance.svg"),
+        "rithmic.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/rithmic.svg"),
         "hyperliquid.svg" => {
-            include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.svg")
+            include_bytes!("../../assets/exchange_assets/exchange_logo/hyperliquid.svg")
         }
         _ => return None,
     })
@@ -658,35 +662,39 @@ fn provider_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(PROVIDER_ASSET_PREFIX)? {
         "market_data_by_rithmic_light_1x.png" => {
             include_bytes!(
-                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_1x.png"
+                "../../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_1x.png"
             )
         }
         "market_data_by_rithmic_light_2x.png" => {
             include_bytes!(
-                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_2x.png"
+                "../../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_2x.png"
             )
         }
         "market_data_by_rithmic_dark_1x.png" => {
             include_bytes!(
-                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_dark_1x.png"
+                "../../assets/exchange_assets/provider_logo/market_data_by_rithmic_dark_1x.png"
             )
         }
         "market_data_by_rithmic_dark_2x.png" => {
             include_bytes!(
-                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_dark_2x.png"
+                "../../assets/exchange_assets/provider_logo/market_data_by_rithmic_dark_2x.png"
             )
         }
         "powered_by_omne_light_1x.png" => {
-            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_light_1x.png")
+            include_bytes!(
+                "../../assets/exchange_assets/provider_logo/powered_by_omne_light_1x.png"
+            )
         }
         "powered_by_omne_light_2x.png" => {
-            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_light_2x.png")
+            include_bytes!(
+                "../../assets/exchange_assets/provider_logo/powered_by_omne_light_2x.png"
+            )
         }
         "powered_by_omne_dark_1x.png" => {
-            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_dark_1x.png")
+            include_bytes!("../../assets/exchange_assets/provider_logo/powered_by_omne_dark_1x.png")
         }
         "powered_by_omne_dark_2x.png" => {
-            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_dark_2x.png")
+            include_bytes!("../../assets/exchange_assets/provider_logo/powered_by_omne_dark_2x.png")
         }
         _ => return None,
     })

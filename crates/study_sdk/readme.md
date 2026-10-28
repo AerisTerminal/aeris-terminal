@@ -11,7 +11,7 @@ Native studies are **statically linked trusted code**. Aeris does not scan a plu
 load arbitrary DLLs/shared libraries, or define a public native ABI. A production build approves a
 study by pinning/reviewing its crate and dependency closure, linking it into the application, and
 adding its `TrustedStudyPackage` descriptor to the bounded product allowlist in
-`apps/desktop/src/study_packages.rs`. The signed application build is the trust boundary.
+`apps/desktop/src/desktop/study_packages.rs`. The signed application build is the trust boundary.
 
 This is not a sandbox. Approved native Rust executes in-process and can use whatever operating
 system capabilities its reviewed dependency graph exposes. The Study SDK deliberately does not

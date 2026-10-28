@@ -1,158 +1,90 @@
 //! Desktop composition and shared presentation types. Behavior lives in owned child modules.
 
-#[path = "components/accounts_panel.rs"]
 mod accounts_panel;
-#[path = "desktop/alerts_controller.rs"]
 mod alerts_controller;
 use alerts_controller::{PriceAlertAnnouncement, PriceAlertDialogState, PriceAlertDropdown};
-#[path = "desktop/app_chrome.rs"]
 mod app_chrome;
-#[path = "components/app_navigation.rs"]
 mod app_navigation;
 use app_chrome::AppChrome;
-#[path = "desktop/app_notices.rs"]
 mod app_notices;
 use app_notices::AppNotices;
-#[path = "desktop/app_services.rs"]
 mod app_services;
 use app_services::AppServices;
-#[path = "assets.rs"]
 mod assets;
-#[path = "components/big_trades_dialog.rs"]
 mod big_trades_dialog;
-#[path = "components/bottom_panel.rs"]
 mod bottom_panel;
-#[path = "components/chart_context_menus.rs"]
 mod chart_context_menus;
-#[path = "desktop/chart_menus.rs"]
 mod chart_menus;
 use chart_menus::{ChartMenus, ChartSettingsPanel, ChartSettingsTemplateOverlay};
-#[path = "desktop/chart_pane_controller.rs"]
 mod chart_pane_controller;
-#[path = "desktop/context_panel_controller.rs"]
 mod context_panel_controller;
 use context_panel_controller::{ContextCredentialDialogState, ContextPanelTab};
-#[path = "components/chart_surface.rs"]
 mod chart_surface;
-#[path = "components/chart_toolbar_menus.rs"]
 mod chart_toolbar_menus;
-#[path = "components/chrome_menu.rs"]
 mod chrome_menu;
-#[path = "components/command_palette.rs"]
 mod command_palette;
-#[path = "components/context_panel.rs"]
 mod context_panel;
-#[path = "components/drawing_context_toolbar.rs"]
 mod drawing_context_toolbar;
-#[path = "components/drawing_settings_dialog.rs"]
 mod drawing_settings_dialog;
-#[path = "components/drawing_toolbar.rs"]
 mod drawing_toolbar;
-#[path = "engine_market_worker.rs"]
 mod engine_market_worker;
-#[path = "frame_poll_gate.rs"]
 mod frame_poll_gate;
-#[path = "desktop/frame_wakes.rs"]
 mod frame_wakes;
 use frame_wakes::FrameWakes;
-#[path = "components/frameless_title_bar.rs"]
 mod frameless_title_bar;
-#[path = "components/fullscreen_hint.rs"]
 mod fullscreen_hint;
-#[path = "components/indicator_menu.rs"]
 mod indicator_menu;
-#[path = "components/keyboard_shortcuts.rs"]
 mod keyboard_shortcuts;
-#[path = "components/layouts_view.rs"]
 mod layouts_view;
-#[path = "desktop/local_state.rs"]
 mod local_state;
-#[path = "desktop/studies_controller.rs"]
 mod studies_controller;
 #[cfg(test)]
 pub(super) fn default_workspace_for_test() -> WorkspaceState {
     local_state::default_workspace()
 }
-#[path = "desktop/market_screener.rs"]
 mod market_screener;
-#[path = "components/market_screener_view.rs"]
 mod market_screener_view;
-#[path = "desktop/market_watch.rs"]
 mod market_watch;
 use market_watch::MarketWatch;
-#[path = "native_ui/mod.rs"]
 mod native_ui;
-#[path = "desktop/notification_center.rs"]
 mod notification_center;
-#[path = "components/order_book_panel.rs"]
 mod order_book_panel;
-#[path = "components/order_entry_panel.rs"]
 mod order_entry_panel;
-#[path = "components/order_flow_dialog.rs"]
 mod order_flow_dialog;
-#[path = "desktop/order_flow_presenter.rs"]
 mod order_flow_presenter;
-#[path = "components/order_quantity.rs"]
 mod order_quantity;
-#[path = "components/order_ticket.rs"]
 mod order_ticket;
-#[path = "desktop/overlay_stack.rs"]
 mod overlay_stack;
 use overlay_stack::{OverlayKind, OverlayStack};
-#[path = "desktop/pane_chrome_state.rs"]
 mod pane_chrome_state;
-#[path = "desktop/pane_persistence.rs"]
 mod pane_persistence;
 use pane_chrome_state::{ChromeOverlay, ChromeOverlayPhase, ChromeTrigger};
-#[path = "components/platform_menu.rs"]
 mod platform_menu;
-#[path = "components/price_alert_dialog.rs"]
 mod price_alert_dialog;
-#[path = "components/provider_login.rs"]
 mod provider_login;
 #[cfg(any(test, feature = "diagnostics"))]
-#[path = "readiness_conformance.rs"]
 mod readiness_conformance;
-#[path = "desktop/saved_workspace.rs"]
 mod saved_workspace;
 use saved_workspace::{SavedWorkspace, UnsavedEdit, WorkspaceSave, WorkspaceSnapshot};
-#[path = "components/side_panel_dock.rs"]
 mod side_panel_dock;
-#[path = "components/sign_in_gate.rs"]
 mod sign_in_gate;
-#[path = "study_packages.rs"]
 mod study_packages;
-#[path = "components/study_settings_dialog.rs"]
 mod study_settings_dialog;
-#[path = "symbol_browser.rs"]
 mod symbol_browser;
-#[path = "desktop/symbol_entry.rs"]
 mod symbol_entry;
-#[path = "components/symbol_menu.rs"]
 mod symbol_menu;
-#[path = "desktop/tab_strip.rs"]
 mod tab_strip;
 use tab_strip::{TabClose, TabDragMove, TabStrip, WorkspaceDragState};
-#[path = "components/terminal_chrome.rs"]
 mod terminal_chrome;
-#[path = "components/terminal_view.rs"]
 mod terminal_view;
-#[path = "components/time_sales_panel.rs"]
 mod time_sales_panel;
-#[path = "components/toaster.rs"]
 mod toaster;
-#[path = "components/trading_hotkeys.rs"]
 mod trading_hotkeys;
-#[path = "update.rs"]
 mod update;
-#[path = "components/volume_dialog.rs"]
 mod volume_dialog;
-#[path = "desktop/window_state.rs"]
 mod window_state;
 use window_state::{ActivityChange, WindowState};
-#[path = "components/watchlist_panel.rs"]
 mod watchlist_panel;
-#[path = "components/workspace_layout.rs"]
 mod workspace_layout;
 
 use aeris_application::ReplayStreamUpdate;
@@ -5999,9 +5931,7 @@ fn bind_desktop_keys(cx: &mut App) -> Result<(), String> {
 mod tests;
 
 #[cfg(test)]
-#[path = "desktop/test_support/pane_harness.rs"]
 mod pane_harness;
 
 #[cfg(test)]
-#[path = "http_wiring_tests.rs"]
 mod http_wiring_tests;

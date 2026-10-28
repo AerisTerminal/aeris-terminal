@@ -832,7 +832,6 @@ pub(crate) fn runtime_presentation(provider: &str) -> (String, String) {
     )
 }
 
-#[path = "engine_market_worker/replay_conversion.rs"]
 mod replay_conversion;
 #[cfg(test)]
 use replay_conversion::replay_bar_definition;
@@ -877,17 +876,14 @@ fn random_order_book_identity() -> Result<u64, String> {
         .get())
 }
 
-#[path = "engine_market_worker/runtime.rs"]
 mod runtime;
 use runtime::{retire_endpoint, run_workers};
 
-#[path = "engine_market_worker/selection_commands.rs"]
 mod selection_commands;
 #[cfg(test)]
 use selection_commands::retain_order_book_detail;
 use selection_commands::{initialize_endpoint, initialize_market_screen_endpoint, process_command};
 
-#[path = "engine_market_worker/publications.rs"]
 mod publications;
 use publications::{cancel_pending_recovery, complete_pending_recovery, send_recovery};
 
