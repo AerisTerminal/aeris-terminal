@@ -20,7 +20,6 @@ serde_json.workspace = true
 semver.workspace = true
 same-file.workspace = true
 sha2.workspace = true
-sysinfo.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]

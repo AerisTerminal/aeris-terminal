@@ -2646,6 +2646,13 @@ mod tests {
                 );
             }
         }
+        let release = manifest("crates/release_lifecycle/Cargo.toml");
+        assert!(
+            !release
+                .lines()
+                .any(|line| line.trim().starts_with("sysinfo")),
+            "the launcher waits on processes through platform_sys::process, not sysinfo scans"
+        );
         let platform = manifest("crates/platform_runtime/Cargo.toml");
         for moved in [
             "ed25519-dalek",
@@ -5715,7 +5722,8 @@ jobs:
         // tree can be removed synchronously with an honest exit code.
         for marker in [
             "relocate_running_binary",
-            "remove_relocated_binary",
+            "sweep_retired_binaries",
+            "aeris_launcher.retired-",
             "uninstall-stage",
         ] {
             assert!(
@@ -5723,6 +5731,23 @@ jobs:
                 "launcher uninstall lost its out-of-tree relocation {marker}"
             );
         }
+        // The retired launcher is swept by name, never by a generated batch
+        // file whose interpolated paths break on shell metacharacters.
+        for retired in [
+            ".join(\"finish-uninstall.bat\")",
+            "Command::new(\"cmd\")",
+            "ping -n",
+        ] {
+            assert!(
+                !launcher.contains(retired),
+                "launcher uninstall must not return to a batch-file deleter ({retired})"
+            );
+        }
+        let setup = manifest("tools/windows/aeris_setup.iss");
+        assert!(
+            setup.contains("\\.Aeris-uninstall-stage\\aeris_launcher.retired-*"),
+            "the uninstaller must delete the retired launcher after it exits"
+        );
     }
 
     #[test]

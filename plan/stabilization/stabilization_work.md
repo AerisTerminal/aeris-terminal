@@ -493,11 +493,28 @@ still wait on the GUI checks and the remaining work on their lines.
     command stopping at a missing key, malformed commands rejected before the key, the
     key-free uninstall round trip, and the promotion gate; naming_check pins the key-free
     dispatch and uninstaller.
+  - Landed (LC-13, LC-15): `platform_sys::process` (re-exported by `platform_runtime`) opens the
+    processes whose image matches once (Toolhelp snapshot plus `OpenProcess` with
+    `SYNCHRONIZE`), waits on their handles with `WaitForSingleObject` and re-enumerates once to
+    confirm none started meanwhile; a matching process that grants query but not wait access
+    fails closed. macOS uses `proc_listallpids`/`proc_pidpath` and Linux `/proc`, both polling
+    the pid's image at 50 ms. The launcher's 20 ms sysinfo scans are gone (stable-launcher
+    promotion, restart, update and uninstall waits, and the absence audit), and sysinfo left
+    `release_lifecycle`; `cargo tree -i sysinfo@0.39.6` now shows only the desktop (its OS
+    version string and readiness conformance), and GPUI's target-specific 0.31 stays. Uninstall
+    renames the running launcher to `aeris_launcher.retired-<pid>` in the sibling
+    `.<name>-uninstall-stage` directory; the `.bat` deleter is deleted. Every launcher start
+    and each relocation sweep that directory (exact retired names and the 1.x leftovers
+    `aeris_uninstall.exe`, `finish-uninstall.bat`, `deleter.log`; unknown files are kept, at
+    most 64 entries), and `aeris_setup.iss` deletes the retired launcher after its uninstall
+    step. Tests: spawned-child enumeration and exit wait, current-process and unmatched-image
+    exclusion, relocation naming, the sweep keeping unknown files; macOS `platform_sys` clippy
+    passes for `aarch64-apple-darwin`. naming_check rejects a returning batch deleter and a
+    sysinfo dependency in `release_lifecycle`.
   - Left:
-    - LC-13: a retired-binary sweep.
-    - LC-15: `platform_sys` process wait instead of sysinfo scans.
     - LC-20: build-validated release config.
     - LC-07: `WinVerifyTrust` with a thumbprint.
+    - Check: a development desktop start spawns no launcher child (process list); not run here.
 - [ ] M8.3 Remaining FFI moves to `platform_sys`
   - Left: move the power, network, session-shutdown and `CancelIoEx` FFI.
   - Delete `display_timing.rs` and `NativeSessionShutdownMonitor`.

@@ -15,7 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aeris_platform_runtime::{CredentialVault, NativeCredentialVault, replace_file_atomically};
+use aeris_platform_runtime::{
+    CredentialVault, NativeCredentialVault,
+    process::{any_process_running, wait_for_processes_to_exit},
+    replace_file_atomically,
+};
 use aeris_release_lifecycle::{
     ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
     MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer,
@@ -27,7 +31,6 @@ use aeris_release_lifecycle::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest as _, Sha256};
-use sysinfo::{ProcessesToUpdate, System};
 
 // Candidate readiness is a bounded in-process runtime probe. Keep activation
 // finite while allowing one complete cold-start attempt on slower machines.
@@ -53,8 +56,9 @@ const EARLY_DESKTOP_STARTUP_WINDOW: Duration = Duration::from_secs(5);
 const EARLY_DESKTOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn main() {
-    let _log_guard = native_install_root()
-        .map_err(|error| error.to_string())
+    let install_root = native_install_root().map_err(|error| error.to_string());
+    let _log_guard = install_root
+        .clone()
         .and_then(|root| {
             aeris_observability::install_log_sink(root.join("logs").join("launcher.log"))
                 .map_err(|error| error.to_string())
@@ -63,6 +67,12 @@ fn main() {
             aeris_observability::diagnostic!("Aeris launcher diagnostics could not start: {error}");
         })
         .ok();
+    if let Ok(root) = &install_root
+        && let Err(error) =
+            uninstall_stage_directory(root).and_then(|stage| sweep_retired_binaries(&stage))
+    {
+        aeris_observability::diagnostic!("Aeris retired launcher sweep deferred: {error}");
+    }
     let no_arguments = std::env::args_os().len() == 1;
     if let Err(error) = run(std::env::args_os().skip(1)) {
         aeris_observability::diagnostic!("Aeris lifecycle: {error}");
@@ -448,12 +458,8 @@ fn promote_stable_launcher(executable: &Path, verifying_key: &VerifyingKey) -> R
         return Ok(());
     }
 
-    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-    while process_is_running(&stable_launcher) {
-        if Instant::now() >= deadline {
-            return Err("stable launcher did not exit before promotion".to_string());
-        }
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_executable_exit(&stable_launcher, SHUTDOWN_TIMEOUT)? {
+        return Err("stable launcher did not exit before promotion".to_string());
     }
     persist_stable_launcher(&executable, &stable_launcher)
 }
@@ -962,14 +968,11 @@ fn read_update_restart_commit(input: impl std::io::BufRead) -> Result<(), String
 }
 
 fn wait_for_desktop_stop(desktop: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + RESTART_WAIT_TIMEOUT;
-    while process_is_running(desktop) {
-        if Instant::now() >= deadline {
-            return Err("active Aeris desktop did not close for restart".to_string());
-        }
-        thread::sleep(Duration::from_millis(20));
+    if wait_for_executable_exit(desktop, RESTART_WAIT_TIMEOUT)? {
+        Ok(())
+    } else {
+        Err("active Aeris desktop did not close for restart".to_string())
     }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -1857,72 +1860,96 @@ fn write_bounded_download(
     Ok(())
 }
 
-/// Renames the running launcher to a sibling staging directory outside
-/// `install_root`. Same-volume renames are permitted on Windows even for a
-/// running image, while deleting or overwriting it is denied — so the
-/// uninstall can then remove the original tree synchronously with an
-/// honest exit code. Fails closed before touching anything.
+/// Exact file names an earlier uninstall can leave in the staging directory:
+/// the retired launcher (with its process id) and the batch-file deleter and
+/// copy that released 1.x launchers used.
+const RETIRED_LAUNCHER_PREFIX: &str = "aeris_launcher.retired-";
+const LEGACY_UNINSTALL_STAGE_FILES: [&str; 3] =
+    ["aeris_uninstall.exe", "finish-uninstall.bat", "deleter.log"];
+/// Bound on one sweep; a staging directory never legitimately holds more.
+const MAXIMUM_UNINSTALL_STAGE_ENTRIES: usize = 64;
+
+/// Sibling directory, outside `install_root`, that holds a launcher retired
+/// by uninstall until it can be deleted.
+fn uninstall_stage_directory(install_root: &Path) -> Result<PathBuf, std::io::Error> {
+    let name = install_root
+        .file_name()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    Ok(install_root
+        .parent()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?
+        .join(format!(".{}-uninstall-stage", name.to_string_lossy())))
+}
+
+/// Renames the running launcher to `aeris_launcher.retired-<pid>` in the
+/// sibling staging directory outside `install_root`. Same-volume renames are
+/// permitted on Windows even for a running image, while deleting or
+/// overwriting it is denied, so the uninstall can then remove the original
+/// tree synchronously with an honest exit code. Fails closed before touching
+/// anything.
 fn relocate_running_binary(
     executable: &Path,
     install_root: &Path,
 ) -> Result<PathBuf, std::io::Error> {
-    let name = install_root
-        .file_name()
-        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    let dir = install_root
-        .parent()
-        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?
-        .join(format!(".{}-uninstall-stage", name.to_string_lossy()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir)?;
-    let staged = dir.join(format!("aeris_uninstall{}", std::env::consts::EXE_SUFFIX));
+    let directory = uninstall_stage_directory(install_root)?;
+    if let Err(error) = sweep_retired_binaries(&directory) {
+        aeris_observability::diagnostic!("Aeris uninstall staging sweep deferred: {error}");
+    }
+    fs::create_dir_all(&directory)?;
+    let staged = directory.join(format!(
+        "{RETIRED_LAUNCHER_PREFIX}{}{}",
+        std::process::id(),
+        std::env::consts::EXE_SUFFIX
+    ));
     fs::rename(executable, &staged)?;
     Ok(staged)
 }
 
-/// Removes the relocated staging copy after the owned tree is gone. Unix
-/// unlinks the running image directly; Windows schedules an OS-owned
-/// delayed delete because the image stays mapped until process exit.
+/// Unix unlinks the running image directly. On Windows the image stays
+/// mapped until this process exits; the uninstaller removes the staging
+/// directory after it waits for this process, and the next launcher start
+/// sweeps anything left.
+#[cfg(unix)]
 fn remove_relocated_binary(staged: &Path) {
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(staged);
-        if let Some(dir) = staged.parent() {
-            let _ = fs::remove_dir(dir);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // The command must live in a batch file, not argv: Rust quotes an
-        // argv element containing spaces, and cmd then strips the outer
-        // pair while leaving Rust-style \" escapes behind, silently
-        // breaking every quoted path (proven by two failed campaigns whose
-        // inline commands never deleted anything). A batch file has no
-        // quoting layer: `cmd /c "<bat>"` is the one standard case that
-        // parses. The log lives inside staging so success leaves no trace
-        // while failure keeps its own evidence.
-        let Some(dir) = staged.parent() else { return };
-        let log = dir.join("deleter.log");
-        let bat = dir.join("finish-uninstall.bat");
-        let body = format!(
-            "@echo off\r\necho deleter-start>>\"{2}\"\r\nping -n 4 127.0.0.1 >nul\r\nfor /l %%i in (1,1,20) do (\r\ndel /q \"{0}\" 2>nul\r\nif not exist \"{0}\" (\r\nrmdir /s /q \"{1}\" 2>nul\r\nexit 0\r\n)\r\nping -n 2 127.0.0.1 >nul\r\n)\r\necho deleter-gave-up>>\"{2}\"\r\n",
-            staged.display(),
-            dir.display(),
-            log.display()
-        );
-        if aeris_platform_runtime::fs::write_file_durably(&bat, body.as_bytes()).is_err() {
-            return;
-        }
-        let _ = Command::new("cmd")
-            .arg("/c")
-            .arg(&bat)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+    let _ = fs::remove_file(staged);
+    if let Some(directory) = staged.parent() {
+        let _ = fs::remove_dir(directory);
     }
 }
 
+#[cfg(not(unix))]
+fn remove_relocated_binary(_staged: &Path) {}
+
+/// Removes retired launchers and legacy uninstall leftovers from the staging
+/// directory, then the directory once it is empty. A retired launcher that is
+/// still running cannot be deleted yet and stays for a later sweep; files
+/// with other names are never touched.
+fn sweep_retired_binaries(directory: &Path) -> Result<(), std::io::Error> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut remaining = false;
+    for entry in entries.take(MAXIMUM_UNINSTALL_STAGE_ENTRIES) {
+        let entry = entry?;
+        let name = entry.file_name();
+        let retired = name.to_str().is_some_and(|name| {
+            name.starts_with(RETIRED_LAUNCHER_PREFIX)
+                || LEGACY_UNINSTALL_STAGE_FILES.contains(&name)
+        });
+        if !retired || !entry.file_type()?.is_file() || fs::remove_file(entry.path()).is_err() {
+            remaining = true;
+        }
+    }
+    if !remaining
+        && let Err(error) = fs::remove_dir(directory)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error);
+    }
+    Ok(())
+}
 /// Uninstalls the explicit root. Uninstall verifies no release signature, so
 /// it works in a build without an embedded verifying key.
 fn uninstall_from_root(root: &Path) -> Result<(), String> {
@@ -2237,15 +2264,10 @@ impl NativeHooks {
 
 impl LifecycleHooks for NativeHooks {
     fn prepare_activation(&self, previous: Option<&ActiveRelease>) -> Result<(), String> {
-        if let Some(previous) = previous {
-            let desktop = self.desktop(previous);
-            let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-            while process_is_running(&desktop) {
-                if Instant::now() >= deadline {
-                    return Err("active Aeris desktop must close before update".to_string());
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
+        if let Some(previous) = previous
+            && !wait_for_executable_exit(&self.desktop(previous), SHUTDOWN_TIMEOUT)?
+        {
+            return Err("active Aeris desktop must close before update".to_string());
         }
         Ok(())
     }
@@ -2311,14 +2333,14 @@ impl LifecycleHooks for NativeHooks {
     fn stop_owned_processes(&self) -> Result<(), String> {
         // Waits for every installed desktop, not only the audited active
         // release, so uninstall needs no signature verification.
-        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-        while owned_process_is_running(&self.install_root) {
-            if Instant::now() >= deadline {
-                return Err("an Aeris Terminal process must close before uninstall".to_string());
-            }
-            thread::sleep(Duration::from_millis(20));
+        let versions = self.install_root.join("versions");
+        if wait_for_processes_to_exit(|image| is_owned_desktop(&versions, image), SHUTDOWN_TIMEOUT)
+            .map_err(redacted)?
+        {
+            Ok(())
+        } else {
+            Err("an Aeris Terminal process must close before uninstall".to_string())
         }
-        Ok(())
     }
 
     fn delete_vault_entry(&self, entry: &VaultEntry) -> Result<(), String> {
@@ -2328,7 +2350,7 @@ impl LifecycleHooks for NativeHooks {
     }
 
     fn audit_external_absence(&self, inventory: &InstallationInventory) -> Result<(), String> {
-        if owned_process_is_running(&self.install_root) {
+        if owned_process_is_running(&self.install_root)? {
             return Err("an Aeris Terminal process remains active".to_string());
         }
         if inventory
@@ -2349,26 +2371,23 @@ impl LifecycleHooks for NativeHooks {
     }
 }
 
-fn process_is_running(executable: &Path) -> bool {
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
-    system
-        .processes()
-        .values()
-        .any(|process| process.exe() == Some(executable))
+/// Waits on the processes running `executable`. Returns `false` on timeout.
+fn wait_for_executable_exit(executable: &Path, timeout: Duration) -> Result<bool, String> {
+    wait_for_processes_to_exit(|image| image == executable, timeout).map_err(redacted)
 }
 
-fn owned_process_is_running(install_root: &Path) -> bool {
+fn is_owned_desktop(versions: &Path, image: &Path) -> bool {
+    image.starts_with(versions)
+        && image.file_name()
+            == Some(std::ffi::OsStr::new(&format!(
+                "aeris_desktop{}",
+                std::env::consts::EXE_SUFFIX
+            )))
+}
+
+fn owned_process_is_running(install_root: &Path) -> Result<bool, String> {
     let versions = install_root.join("versions");
-    let desktop = format!("aeris_desktop{}", std::env::consts::EXE_SUFFIX);
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
-    system.processes().values().any(|process| {
-        process.exe().is_some_and(|executable| {
-            executable.starts_with(&versions)
-                && executable.file_name() == Some(std::ffi::OsStr::new(&desktop))
-        })
-    })
+    any_process_running(|image| is_owned_desktop(&versions, image)).map_err(redacted)
 }
 
 fn redacted<E>(_error: E) -> String {
@@ -2948,12 +2967,52 @@ mod tests {
             fs::read(&staged).expect("staged bytes"),
             fs::read(&executable).expect("original bytes")
         );
-        fs::remove_file(&staged).expect("remove staging copy");
+        assert_eq!(
+            staged.file_name().and_then(|name| name.to_str()),
+            Some(
+                format!(
+                    "{RETIRED_LAUNCHER_PREFIX}{}{}",
+                    std::process::id(),
+                    std::env::consts::EXE_SUFFIX
+                )
+                .as_str()
+            )
+        );
+        sweep_retired_binaries(staged.parent().expect("staging directory"))
+            .expect("sweep the retired copy");
+        assert!(!staged.exists());
+        assert!(!staged.parent().expect("staging directory").exists());
         fs::remove_dir_all(&base).expect("remove temporary base");
-        // Note: `remove_relocated_binary` is proven by the physical
-        // installed-lifecycle campaign: its Windows path schedules an
-        // OS-owned delayed delete that a unit test cannot await
-        // deterministically.
+    }
+
+    #[test]
+    fn retired_launcher_sweep_removes_only_exact_retired_names() {
+        let base = temporary_base("retired-sweep");
+        let root = base.join("Aeris");
+        let stage = uninstall_stage_directory(&root).expect("stage directory");
+        assert_eq!(stage, base.join(".Aeris-uninstall-stage"));
+        sweep_retired_binaries(&stage).expect("a missing stage is already clean");
+        fs::create_dir_all(&stage).expect("stage");
+        for name in [
+            "aeris_launcher.retired-41.exe",
+            "aeris_launcher.retired-42",
+            "aeris_uninstall.exe",
+            "finish-uninstall.bat",
+            "deleter.log",
+        ] {
+            fs::write(stage.join(name), b"retired").expect("retired file");
+        }
+        fs::write(stage.join("keep.txt"), b"keep").expect("unknown file");
+        sweep_retired_binaries(&stage).expect("sweep");
+        let left: Vec<_> = fs::read_dir(&stage)
+            .expect("stage remains")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("keep.txt")]);
+        fs::remove_file(stage.join("keep.txt")).expect("remove unknown file");
+        sweep_retired_binaries(&stage).expect("sweep empty stage");
+        assert!(!stage.exists());
+        fs::remove_dir_all(&base).expect("remove temporary base");
     }
 
     #[test]

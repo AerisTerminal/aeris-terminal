@@ -218,7 +218,11 @@ violations and missing verification explicitly, and never describe them as satis
   migration that the lifecycle reuses. The launcher parses its command before loading the release
   verifying key: `--launcher-identity` and `--remove-all-local-data` never load it, and
   `ReleaseUninstaller` holds no key. The desktop spawns launcher promotion only on a plain start of
-  an installed release (install generation above 0) and reaps that child.
+  an installed release (install generation above 0) and reaps that child. The launcher waits on and
+  detects processes through `platform_sys::process` (re-exported by `platform_runtime`), never
+  sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the
+  install root; later launcher starts and the uninstaller delete it by that exact name, never
+  through a generated batch file.
 - Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
   derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
   non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.

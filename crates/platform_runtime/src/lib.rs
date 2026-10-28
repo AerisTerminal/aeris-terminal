@@ -21,6 +21,7 @@ mod user_notifications;
 
 pub use aeris_platform_sys::fs;
 pub use aeris_platform_sys::fs::replace_file as replace_file_atomically;
+pub use aeris_platform_sys::process;
 pub use aeris_platform_sys::ui::{confirm_message_box, message_box};
 pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;

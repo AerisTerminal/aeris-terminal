@@ -59,6 +59,12 @@ Type: filesandordirs; Name: "{localappdata}\Programs\.Axiusflow-lifecycle"
 Type: files; Name: "{localappdata}\Programs\.Axiusflow-lifecycle.lock"
 Type: filesandordirs; Name: "{autoprograms}\Axiusflow"
 
+[UninstallDelete]
+; --remove-all-local-data retires the running launcher outside {app}; it can be deleted once that
+; launcher has exited. Any other file in the staging directory is left in place.
+Type: files; Name: "{localappdata}\Programs\.Aeris-uninstall-stage\aeris_launcher.retired-*"
+Type: dirifempty; Name: "{localappdata}\Programs\.Aeris-uninstall-stage"
+
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Aeris Engine"; Flags: deletevalue
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Axiusflow Engine"; Flags: deletevalue
