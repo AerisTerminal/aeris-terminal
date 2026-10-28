@@ -337,7 +337,13 @@ fn run_verified(
         }
         VerifiedCommand::UpdateAndRestart => {
             let local = LocalInstall::open(executable, verifying_key)?;
-            update_and_restart(&local.installer, origin, &local.hooks, &local.root)
+            update_and_restart(
+                &local.installer,
+                origin,
+                &local.hooks,
+                &local.root,
+                &DesktopRestartHandshake,
+            )
         }
         VerifiedCommand::CheckUpdate => {
             let local = LocalInstall::open(executable, verifying_key)?;
@@ -797,6 +803,7 @@ fn update_and_restart(
     origin: &ReleaseOrigin,
     hooks: &NativeHooks,
     install_root: &Path,
+    handshake: &impl RestartHandshake,
 ) -> Result<(), String> {
     // Every check runs before READY, inside the desktop's verification wait; after READY
     // this helper only waits for COMMIT and the desktop's exit.
@@ -805,9 +812,9 @@ fn update_and_restart(
     // The desktop sends COMMIT after account/workspace durability succeeds;
     // without that second message this helper must never observe exit as
     // authorization to mutate the installed release.
-    announce_update_restart_ready()?;
-    wait_for_update_restart_commit()?;
-    wait_for_desktop_stop(&desktop)?;
+    handshake.announce_ready()?;
+    handshake.wait_for_commit()?;
+    handshake.wait_for_desktop_stop(&desktop)?;
 
     let update_result = (|| {
         // Recovery may stop processes and switch the active release, so it must
@@ -977,6 +984,33 @@ fn verify_prepared_channel_with_policy(
         return Err("prepared Aeris update is not eligible for this installation".to_string());
     }
     Ok(())
+}
+
+/// The desktop's side of the update-restart handoff, in the order the launcher drives it.
+trait RestartHandshake {
+    /// Tells the desktop that the prepared release passed verification.
+    fn announce_ready(&self) -> Result<(), String>;
+    /// Waits, bounded, for the desktop's exact COMMIT.
+    fn wait_for_commit(&self) -> Result<(), String>;
+    /// Waits, bounded, for the active desktop to exit.
+    fn wait_for_desktop_stop(&self, desktop: &Path) -> Result<(), String>;
+}
+
+/// The handshake with the desktop that spawned this launcher over its standard streams.
+struct DesktopRestartHandshake;
+
+impl RestartHandshake for DesktopRestartHandshake {
+    fn announce_ready(&self) -> Result<(), String> {
+        announce_update_restart_ready()
+    }
+
+    fn wait_for_commit(&self) -> Result<(), String> {
+        wait_for_update_restart_commit()
+    }
+
+    fn wait_for_desktop_stop(&self, desktop: &Path) -> Result<(), String> {
+        wait_for_desktop_stop(desktop)
+    }
 }
 
 fn announce_update_restart_ready() -> Result<(), String> {
@@ -2441,8 +2475,8 @@ fn redacted<E>(_error: E) -> String {
 mod tests {
     use super::*;
     use crate::{
-        BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor, BlockPlan,
-        LAUNCHER_PROTOCOL_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
+        ArtifactBody, BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor,
+        BlockPlan, LAUNCHER_PROTOCOL_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
         ReleaseInstallerMetadata, RolloutMetadata, StartupComplete, record_startup_complete,
         sign_block_plan, sign_release_manifest,
     };
@@ -2990,6 +3024,332 @@ mod tests {
         ] {
             assert!(read_update_restart_commit(std::io::Cursor::new(invalid)).is_err());
         }
+    }
+
+    struct AcceptingHooks;
+
+    impl LifecycleHooks for AcceptingHooks {
+        fn prepare_activation(&self, _previous: Option<&ActiveRelease>) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn health_check(&self, _candidate: &ActiveRelease) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn disable_registrations(&self, _registrations: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn stop_owned_processes(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete_vault_entry(&self, _entry: &VaultEntry) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn audit_external_absence(&self, _inventory: &InstallationInventory) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    type RestartSteps = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+    fn record_step(steps: &RestartSteps, step: &'static str) {
+        steps.lock().expect("restart step log").push(step);
+    }
+
+    /// Serves one release channel pointer and records each read as a `channel` step.
+    struct OfferedChannelSource {
+        channel: Vec<u8>,
+        steps: RestartSteps,
+    }
+
+    impl ReleaseSource for OfferedChannelSource {
+        fn read_channel(&self, _url: &str, _maximum: u64) -> Result<Vec<u8>, ReleaseSourceError> {
+            record_step(&self.steps, "channel");
+            Ok(self.channel.clone())
+        }
+
+        fn read_object(&self, _url: &str, _maximum: u64) -> Result<Vec<u8>, ReleaseSourceError> {
+            Err(ReleaseSourceError::Status(404))
+        }
+
+        fn read_range(
+            &self,
+            _url: &str,
+            _offset: u64,
+            _length: u32,
+            _total: u64,
+        ) -> Result<Vec<u8>, ReleaseSourceError> {
+            Err(ReleaseSourceError::Status(404))
+        }
+
+        fn open_artifact(
+            &self,
+            _url: &str,
+            _offset: u64,
+            _size: u64,
+        ) -> Result<ArtifactBody, ReleaseSourceError> {
+            Err(ReleaseSourceError::Status(404))
+        }
+    }
+
+    /// Records the handshake steps and fails the one named by `fail_at`.
+    struct RecordingHandshake {
+        steps: RestartSteps,
+        fail_at: Option<&'static str>,
+        stopped_desktop: std::sync::Mutex<Option<PathBuf>>,
+    }
+
+    impl RecordingHandshake {
+        fn new(steps: &RestartSteps, fail_at: Option<&'static str>) -> Self {
+            Self {
+                steps: steps.clone(),
+                fail_at,
+                stopped_desktop: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn step(&self, step: &'static str) -> Result<(), String> {
+            record_step(&self.steps, step);
+            if self.fail_at == Some(step) {
+                Err(format!("fixture {step} failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl RestartHandshake for RecordingHandshake {
+        fn announce_ready(&self) -> Result<(), String> {
+            self.step("ready")
+        }
+
+        fn wait_for_commit(&self) -> Result<(), String> {
+            self.step("commit")
+        }
+
+        fn wait_for_desktop_stop(&self, desktop: &Path) -> Result<(), String> {
+            *self.stopped_desktop.lock().expect("stopped desktop") = Some(desktop.to_path_buf());
+            self.step("stop")
+        }
+    }
+
+    /// An installation with a verified generation 7 release and a verified prepared
+    /// generation 8 update, as `--prepare-update` leaves it.
+    struct RestartFixture {
+        base: PathBuf,
+        install_root: PathBuf,
+        installer: ReleaseInstaller,
+        verifying_key: VerifyingKey,
+        active: ActiveRelease,
+        prepared: ReleaseChannelPointer,
+        prepared_bundle: PathBuf,
+    }
+
+    impl RestartFixture {
+        fn new(name: &str) -> Self {
+            let base = temporary_base(name);
+            // Installer roots reject symlinked ancestors, and macOS places the
+            // temporary directory under the `/var` symlink.
+            #[cfg(unix)]
+            let base = fs::canonicalize(&base).expect("canonical fixture base");
+            let install_root = base.join("install");
+            let (signing_key, active_channel) = prepared_channel_fixture(7, b"active desktop");
+            let active_bundle = base.join("active-bundle");
+            fs::create_dir_all(&active_bundle).expect("active bundle directory");
+            fs::write(
+                active_bundle.join(&active_channel.signed_release.manifest().files[0].path),
+                b"active desktop",
+            )
+            .expect("active artifact writes");
+            let installer = ReleaseInstaller::new(
+                &install_root,
+                signing_key.verifying_key(),
+                ReleasePolicy::native(0),
+            )
+            .expect("installer");
+            let active = installer
+                .install(
+                    &active_channel.signed_release,
+                    &active_bundle,
+                    &AcceptingHooks,
+                )
+                .expect("active release installs")
+                .active;
+
+            let (_, prepared) = prepared_channel_fixture(8, b"prepared desktop");
+            let downloads = install_root.join(".release-downloads");
+            let prepared_bundle = downloads.join(format!(
+                "{:020}-{}",
+                prepared.install_generation, prepared.release_identity
+            ));
+            fs::create_dir_all(&prepared_bundle).expect("prepared bundle directory");
+            fs::write(
+                prepared_bundle.join(&prepared.signed_release.manifest().files[0].path),
+                b"prepared desktop",
+            )
+            .expect("prepared artifact writes");
+            write_prepared_update(&downloads, &prepared).expect("prepared metadata commits");
+            Self {
+                base,
+                install_root,
+                installer,
+                verifying_key: signing_key.verifying_key(),
+                active,
+                prepared,
+                prepared_bundle,
+            }
+        }
+
+        fn origin(&self, offered: &ReleaseChannelPointer, steps: &RestartSteps) -> ReleaseOrigin {
+            ReleaseOrigin {
+                verifying_key: self.verifying_key,
+                base_url: "https://auth.aeris.test/releases".to_string(),
+                bootstrap_minimum_generation: 0,
+                source: Box::new(OfferedChannelSource {
+                    channel: serde_json::to_vec(offered).expect("offered channel encodes"),
+                    steps: steps.clone(),
+                }),
+            }
+        }
+
+        fn restart(
+            &self,
+            origin: &ReleaseOrigin,
+            handshake: &RecordingHandshake,
+        ) -> Result<(), String> {
+            update_and_restart(
+                &self.installer,
+                origin,
+                &NativeHooks {
+                    install_root: self.install_root.clone(),
+                },
+                &self.install_root,
+                handshake,
+            )
+        }
+
+        fn active_desktop(&self) -> PathBuf {
+            self.installer
+                .release_directory(&self.active)
+                .expect("active release directory")
+                .join(format!("aeris_desktop{}", std::env::consts::EXE_SUFFIX))
+        }
+
+        fn assert_nothing_installed(&self) {
+            assert_eq!(
+                self.installer
+                    .active_release()
+                    .expect("active pointer reads"),
+                Some(self.active.clone()),
+                "the active release stays selected"
+            );
+            let versions = fs::read_dir(self.install_root.join("versions"))
+                .expect("versions directory")
+                .count();
+            assert_eq!(versions, 1, "no candidate version directory is staged");
+            assert!(
+                self.prepared_bundle.is_dir(),
+                "the prepared bundle is kept for a later attempt"
+            );
+        }
+
+        fn remove(self) {
+            fs::remove_dir_all(&self.base).expect("restart fixture removes");
+        }
+    }
+
+    #[test]
+    fn restart_verification_failure_announces_nothing_and_installs_nothing() {
+        let fixture = RestartFixture::new("restart-tampered-active");
+        let steps = RestartSteps::default();
+        let origin = fixture.origin(&fixture.prepared, &steps);
+        fs::write(fixture.active_desktop(), b"tampered desktop").expect("active desktop mutates");
+        let handshake = RecordingHandshake::new(&steps, None);
+        assert!(fixture.restart(&origin, &handshake).is_err());
+        assert!(
+            steps.lock().expect("steps").is_empty(),
+            "an unverified active release fails before the channel check and before READY"
+        );
+        fixture.assert_nothing_installed();
+        fixture.remove();
+
+        let fixture = RestartFixture::new("restart-missing-prepared");
+        let steps = RestartSteps::default();
+        let origin = fixture.origin(&fixture.prepared, &steps);
+        fs::remove_file(
+            fixture
+                .install_root
+                .join(".release-downloads")
+                .join(PREPARED_UPDATE_FILE),
+        )
+        .expect("prepared metadata removes");
+        let handshake = RecordingHandshake::new(&steps, None);
+        assert!(fixture.restart(&origin, &handshake).is_err());
+        assert!(
+            steps.lock().expect("steps").is_empty(),
+            "no prepared update fails before READY"
+        );
+        fixture.assert_nothing_installed();
+        fixture.remove();
+
+        let fixture = RestartFixture::new("restart-superseded-offer");
+        let steps = RestartSteps::default();
+        let (_, superseding) = prepared_channel_fixture(9, b"newer desktop");
+        let origin = fixture.origin(&superseding, &steps);
+        let handshake = RecordingHandshake::new(&steps, None);
+        assert!(fixture.restart(&origin, &handshake).is_err());
+        assert_eq!(
+            *steps.lock().expect("steps"),
+            ["channel"],
+            "the current channel is checked, and a superseded offer is refused, before READY"
+        );
+        fixture.assert_nothing_installed();
+        fixture.remove();
+    }
+
+    #[test]
+    fn restart_without_a_valid_commit_installs_nothing() {
+        let fixture = RestartFixture::new("restart-no-commit");
+        let steps = RestartSteps::default();
+        let origin = fixture.origin(&fixture.prepared, &steps);
+        let handshake = RecordingHandshake::new(&steps, Some("commit"));
+        assert!(fixture.restart(&origin, &handshake).is_err());
+        assert_eq!(
+            *steps.lock().expect("steps"),
+            ["channel", "ready", "commit"],
+            "a missing COMMIT ends the handoff before the desktop wait"
+        );
+        assert_eq!(*handshake.stopped_desktop.lock().expect("stopped"), None);
+        fixture.assert_nothing_installed();
+        fixture.remove();
+    }
+
+    #[test]
+    fn restart_verifies_everything_before_ready_then_only_waits() {
+        let fixture = RestartFixture::new("restart-order");
+        let steps = RestartSteps::default();
+        let origin = fixture.origin(&fixture.prepared, &steps);
+        // Failing the last handshake step stops the run before it installs and
+        // launches, so the test observes the complete pre-install sequence.
+        let handshake = RecordingHandshake::new(&steps, Some("stop"));
+        assert!(fixture.restart(&origin, &handshake).is_err());
+        assert_eq!(
+            *steps.lock().expect("steps"),
+            ["channel", "ready", "commit", "stop"],
+            "every verification, including the one channel read, precedes READY; after \
+             READY only COMMIT and the desktop's exit are awaited"
+        );
+        assert_eq!(
+            *handshake.stopped_desktop.lock().expect("stopped"),
+            Some(fixture.active_desktop()),
+            "the launcher waits for the audited active desktop"
+        );
+        fixture.assert_nothing_installed();
+        fixture.remove();
     }
 
     #[cfg(target_os = "windows")]

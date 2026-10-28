@@ -3152,15 +3152,6 @@ mod tests {
                 );
             }
         }
-        assert!(
-            manifest("crates/release_lifecycle/src/lifecycle.rs")
-                .contains("aeris_platform_runtime::trust::verify_publisher(path, signer)"),
-            "release Authenticode audits must call platform_sys::trust::verify_publisher"
-        );
-        assert!(
-            manifest("crates/platform_sys/src/windows/trust.rs").contains("WinVerifyTrust("),
-            "platform_sys::trust must verify through WinVerifyTrust"
-        );
     }
 
     /// Packaging variables of one release configuration; every one must stay
@@ -4428,6 +4419,8 @@ mod tests {
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
             "crates/release_lifecycle/src/lifecycle.rs::LifecycleHooks".to_string(),
+            // The launcher's READY/COMMIT/exit handoff with the desktop, faked in its tests.
+            "crates/release_lifecycle/src/launcher.rs::RestartHandshake".to_string(),
             // The launcher's release origin: HTTPS in production, a local directory in the
             // end-to-end lifecycle test.
             "crates/release_lifecycle/src/release_source.rs::ReleaseSource".to_string(),
@@ -5294,73 +5287,6 @@ mod tests {
                 && window.contains("GuardWindowState::query_end_session")
                 && window.contains("end_session(wparam != 0)"),
             "Windows session termination must be vetoable until account refresh durability settles"
-        );
-    }
-
-    #[test]
-    fn update_restart_verifies_everything_before_ready() {
-        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
-        let restart_start = launcher
-            .find("fn update_and_restart(")
-            .expect("update restart function");
-        let restart_end = launcher[restart_start..]
-            .find("\nstruct PreparedUpdate")
-            .map(|offset| restart_start + offset)
-            .expect("prepared update boundary");
-        let restart = &launcher[restart_start..restart_end];
-        let verification = restart
-            .find("verify_update_restart(installer, origin, install_root)?;")
-            .expect("prepared restart verification");
-        let restart_ack = restart
-            .find("announce_update_restart_ready()?;")
-            .expect("prepared restart acknowledgement");
-        assert!(
-            restart.contains("prepared.signed_release")
-                && !restart.contains("install_remote_update")
-                && !restart.contains("spawn_active_launcher_promotion")
-                && !restart.contains("checked_release_channel")
-                && verification < restart_ack,
-            "restart handoff must activate only an already prepared local release"
-        );
-        // LC-06: verification finishes before READY; READY to the desktop's exit is
-        // only the commit wait.
-        let after_ready = restart[restart_ack..]
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .take(3)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            after_ready,
-            [
-                "announce_update_restart_ready()?;",
-                "wait_for_update_restart_commit()?;",
-                "wait_for_desktop_stop(&desktop)?;",
-            ],
-            "the restart helper must not verify between READY and the desktop's exit"
-        );
-        let verify_start = launcher
-            .find("fn verify_update_restart(")
-            .expect("restart verification function");
-        let verify_end = launcher[verify_start..]
-            .find("\nfn verify_prepared_bundle(")
-            .map(|offset| verify_start + offset)
-            .expect("restart verification boundary");
-        let verify = &launcher[verify_start..verify_end];
-        assert!(
-            verify.matches("audit_active_release()").count() == 1
-                && verify.contains("verify_prepared_channel(")
-                && verify.contains("verify_prepared_bundle(")
-                && verify.contains("check_release_channel(Some(active), origin, install_root)")
-                && verify.contains("prepared_matches_current_offer("),
-            "restart verification must audit the active release once and check the prepared \
-             release and the current channel offer"
-        );
-        let update = manifest("apps/desktop/src/desktop/update.rs");
-        assert!(
-            production_prefix(&update)
-                .contains("ready_rx.recv_timeout(UPDATE_RESTART_VERIFICATION_TIMEOUT)"),
-            "the desktop waits for READY for the launcher's verification bound"
         );
     }
 

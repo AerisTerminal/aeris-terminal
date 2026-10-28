@@ -758,6 +758,11 @@ still wait on the GUI checks and the remaining work on their lines.
   - Left: GUI text-input check (symbol search, order ticket) on Windows and macOS.
     Not run. Closes PL-10, PL-12 and PL-19.
 - [ ] M8.12 Structural naming_check and final docs
+  - Landed: the update-restart handshake is a `RestartHandshake` seam, and launcher tests prove a
+    failed verification sends no READY, a missing COMMIT installs nothing, and every check runs
+    before READY. The text pin `update_restart_verifies_everything_before_ready` and the
+    Authenticode call-site pin are deleted; `installed_exe_inventory_requires_the_embedded_publisher_signature`
+    already rejects an unsigned executable through `verify_publisher`.
   - Left: structural checks with a recursive markdown inventory, with text pins replaced by
     behavior tests.
   - Finalize `Readme` and `AGENTS.md`, and close out this tracker. Closes PL-08.
@@ -795,6 +800,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D25 | Update recovery | (2026-10-28) An update runs readiness on a copy of the user's data before the active pointer moves and journals `ReadinessPassed` first, so recovery finishes the update (or discards a candidate whose files changed since) without running candidate code. The `Activated` and `HealthChecked` journal states are removed; no released version wrote them, because 1.0.0 installs through Inno Setup without the lifecycle. A candidate that fails readiness never ran on the user's data, so its rollback needs no state-compatibility check. The launch audit stays exact; every launcher command recovers first, and recovery moves entries no release record owns into `orphaned/<ms>/`, keeping the newest 8 batches. |
 | D26 | Restart verification bound | (2026-10-28) The restart helper's verification (a 15 s-bounded channel fetch plus hashing the prepared and active releases) runs before READY, and the desktop waits for READY up to a shared 2-minute bound rather than the former 20 s handshake, so a slow disk or channel no longer fails a restart. The READY-to-COMMIT window keeps its existing bounds, since the desktop's durability waits (up to 22 s) already fit the launcher's 60 s commit wait. |
 | D27 | Study SDK facade | (2026-10-28) PL-13 is resolved as accepted, as `architecture.md` section 2.2 rule 8 records: `study_sdk` is the published-API facade above the in-process study runtime and is used only by the desktop's built-in study packages, so it keeps its `market_runtime` dependency and with it the adapters (`cargo tree -p aeris_study_sdk` still lists them). It is not an inversion while `market_runtime` only dev-depends on it, which naming_check enforces. Moving the study types into a contract crate waits until third-party study authors exist. |
+| D28 | M8.12 naming_check scope | (2026-10-28) Text pins go: the 26 that only match source text are deleted, the 8 that guard behavior already covered by a test are deleted, and the other 7 behavior pins are replaced by behavior tests before they are deleted. Every structural rule (crate graph, file layout, workflow shape, allowlists) stays. `Readme` is renamed `README.md`. `plan/longterm_plan/` is the second sanctioned planning directory beside `plan/stabilization/`. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in
@@ -815,7 +821,7 @@ they are prefixed M- here because those numbers collide with the table above.
 | M-D6 | M7.10 | Sweeps are classified once per publication in `market_runtime` over the last 512 trades. |
 | M-D8 | M7.1 website | Mirror only shared platform tokens; commit in the website only when its worktree is clean, run its lint, typecheck and build, and do not push without the maintainer. |
 | M-D9 | macOS | `platform_sys` can be checked for `aarch64-apple-darwin`; other macOS-only checks are maintainer or hosted-CI only. |
-| M-D10 | Repo hygiene | `plan/longterm_plan/*.md` is allowlisted, not deleted; the README keeps the name `Readme`; `gpui_base` stays outside the workspace (superseded in M8.11: it is a linted member); the Linux `sha2` duplicate is accepted; `resvg` is aligned only if chart export still works. |
+| M-D10 | Repo hygiene | `plan/longterm_plan/*.md` is allowlisted, not deleted; the README keeps the name `Readme` (superseded by D28); `gpui_base` stays outside the workspace (superseded in M8.11: it is a linted member); the Linux `sha2` duplicate is accepted; `resvg` is aligned only if chart export still works. |
 | M-D11 | AC-02 | The Windows credential blob cap is 2,560 bytes, sized against realistic Cognito tokens; tests never touch the native vault. |
 | M-D15 | M6.10 baselines | The `trading_projection_baseline_*` assertions and expected outputs stay identical. |
 | M-D16 | CI | CI gates are never weakened (no serial, quiet, skip or retry workarounds). |
