@@ -41,7 +41,6 @@ base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 # Pinned to the version Aeris Charts already resolves, so the time zone database is built once.
 chrono-tz = { version = "=0.10.4", default-features = false, features = ["std"] }
-display-info = "=0.5.9"
 embed-resource = "=3.0.11"
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "=0.4.3"
@@ -60,11 +59,6 @@ same-file = "=1.0.6"
 webpki-roots = "=1.0.9"
 sha2 = "=0.11.0"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
-wayland-client = { version = "=0.31.15", default-features = false, features = ["dlopen"] }
-wayland-protocols = { version = "=0.32.13", default-features = false, features = [
-    "client",
-    "unstable",
-] }
 windows-sys = { version = "=0.61.2", default-features = false }
 # Pinned to the version GPUI resolves; its safe API keeps registry access free of `unsafe`.
 windows-registry = "=0.6.1"

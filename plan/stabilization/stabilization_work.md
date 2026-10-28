@@ -538,8 +538,13 @@ still wait on the GUI checks and the remaining work on their lines.
   - Left:
     - Check: a development desktop start spawns no launcher child (process list); not run here.
 - [ ] M8.3 Remaining FFI moves to `platform_sys`
+  - Landed: `display_timing.rs` (display inventory, QPC and DWM composition probes) is deleted
+    with its `Win32_Graphics_Dwm` and `Win32_System_Performance` features and its
+    `display-info`, `wayland-client` and `wayland-protocols` dependencies (also dropped from the
+    workspace pins); no production or tool code used it. Its interim unsafe allowlist entry is
+    removed. Closes PL-10 (display_timing).
   - Left: move the power, network, session-shutdown and `CancelIoEx` FFI.
-  - Delete `display_timing.rs` and `NativeSessionShutdownMonitor`.
+  - Delete `NativeSessionShutdownMonitor`.
   - Restore `forbid(unsafe_code)` in `platform_runtime`. Closes PL-02.
   - The logoff flush check is maintainer-only.
 - [ ] M8.4 Account runtime vault and lock fixes

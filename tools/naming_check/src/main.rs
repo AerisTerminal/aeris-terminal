@@ -2353,10 +2353,6 @@ mod tests {
 
     const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[(&str, &str)] = &[
         (
-            "crates/platform_runtime/src/display_timing.rs",
-            "existing native display probes await the M8.3 FFI consolidation",
-        ),
-        (
             "crates/platform_runtime/src/io_cancellation.rs",
             "existing Windows CancelIoEx boundary awaits the M8.3 abort-latency decision",
         ),

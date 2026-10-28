@@ -6,7 +6,6 @@ pub mod browser;
 mod capability;
 mod credential_vault;
 pub mod data_root;
-mod display_timing;
 mod dns;
 mod durable_container;
 mod file_manager;
@@ -33,11 +32,6 @@ pub use data_root::{
     ParsedDataRootArguments, active_data_root, initialize_data_root,
     migrate_legacy_native_data_root, native_data_root, parse_data_root_arguments,
 };
-pub use display_timing::{
-    DisplayEnvironment, DisplayOutput, DisplayTimingError, NativeDisplayProbe, PresentationClock,
-};
-#[cfg(target_os = "windows")]
-pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
 pub use dns::resolve_addresses;
 pub use durable_container::{
     DURABLE_CONTAINER_MAGIC, DURABLE_CONTAINER_VERSION, DurableCandidate, DurableContainer,
