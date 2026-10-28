@@ -812,8 +812,8 @@ fn update_and_restart(
     wait_for_desktop_stop(&desktop)?;
 
     let update_result = (|| {
-        // Recovery may run candidate health checks, so it must happen only
-        // after the interactive desktop that requested the handoff is gone.
+        // Recovery may stop processes and switch the active release, so it must
+        // happen only after the interactive desktop that requested the handoff is gone.
         installer
             .recover(hooks)
             .map_err(|error| error.to_string())?;

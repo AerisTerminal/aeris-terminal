@@ -100,6 +100,7 @@ impl Lifecycle {
         self.crash_and_roll_back(&first);
         let fixed = self.update_after_quarantine(&first);
         self.hang_and_roll_back(&fixed);
+        self.launch_past_orphaned_entries();
         self.refuse_rollback_past_migrated_store(&fixed);
         assert_eq!(self.launcher(&["--recover".into()]).0, Ok(()));
     }
@@ -240,6 +241,36 @@ impl Lifecycle {
         self.wait_for_event(4, "launch", 2);
         assert_eq!(self.releases(), (Some(4), None));
         assert_eq!(self.quarantined_generation(), 5);
+        self.wait_for_installed_processes();
+    }
+
+    /// Entries no release record owns are moved under `orphaned/` and the active release
+    /// launches instead of the launch being blocked.
+    fn launch_past_orphaned_entries(&self) {
+        let stray_version = self.install_root.join("versions").join("stray-release");
+        fs::create_dir_all(&stray_version).expect("stray release directory");
+        let stray_manifest = self
+            .base
+            .join(".Aeris-lifecycle")
+            .join("manifests")
+            .join("stray-release.json");
+        fs::write(&stray_manifest, b"{}").expect("stray manifest");
+        assert_eq!(self.launcher(&["--launch-desktop".into()]).0, Ok(()));
+        self.wait_for_event(4, "launch", 3);
+        assert!(!stray_version.exists() && !stray_manifest.exists());
+        let batches = fs::read_dir(self.install_root.join("orphaned"))
+            .expect("orphaned batches")
+            .map(|entry| entry.expect("orphaned batch").path())
+            .collect::<Vec<_>>();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].join("versions").join("stray-release").is_dir());
+        assert!(
+            batches[0]
+                .join("manifests")
+                .join("stray-release.json")
+                .is_file()
+        );
+        assert_eq!(self.releases(), (Some(4), None));
         self.wait_for_installed_processes();
     }
 

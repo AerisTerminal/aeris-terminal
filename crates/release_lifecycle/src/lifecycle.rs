@@ -37,6 +37,8 @@ pub const ROLLBACK_COMPATIBILITY_FILENAME: &str = "rollback-compatibility.json";
 /// numbers/types/meaning, and permanently retired tags stay in the same epoch.
 pub const CURRENT_STATE_COMPATIBILITY_EPOCH: u32 = 1;
 const INVENTORY_SCHEMA_VERSION: u32 = 1;
+/// Orphaned-entry batches kept under the install root's `orphaned/`; older ones are removed.
+const MAXIMUM_ORPHAN_BATCHES: usize = 8;
 // The base64url copy of the raw manifest (4/3 of these bytes) must still fit
 // in the 1 MiB signed-manifest file and launcher channel-pointer bounds.
 const MAXIMUM_MANIFEST_BYTES: usize = 512 * 1024;
@@ -526,19 +528,19 @@ enum UpdateState {
     Preparing,
     Staged,
     ProcessesStopped,
-    Activated,
-    HealthChecked,
+    /// The candidate passed readiness on a copy of the user's data; the active pointer may
+    /// not have moved yet. Recovery finishes the update without running candidate code.
+    ReadinessPassed,
     Cleanup,
     RollingBack,
 }
 
 impl UpdateState {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::Preparing,
         Self::Staged,
         Self::ProcessesStopped,
-        Self::Activated,
-        Self::HealthChecked,
+        Self::ReadinessPassed,
         Self::Cleanup,
         Self::RollingBack,
     ];
@@ -549,8 +551,7 @@ fn update_journal_name(state: UpdateState) -> &'static str {
         UpdateState::Preparing => "update-0-preparing.json",
         UpdateState::Staged => "update-1-staged.json",
         UpdateState::ProcessesStopped => "update-2-processes-stopped.json",
-        UpdateState::Activated => "update-3-activated.json",
-        UpdateState::HealthChecked => "update-4-health-checked.json",
+        UpdateState::ReadinessPassed => "update-3-readiness-passed.json",
         UpdateState::Cleanup => "update-5-cleanup.json",
         UpdateState::RollingBack => "update-6-rolling-back.json",
     }
@@ -902,9 +903,9 @@ impl ReleaseInstaller {
             }
             return Err(error);
         }
-        self.commit_pointer(&candidate)?;
-        journal.state = UpdateState::Activated;
-        self.write_update_journal(&journal)?;
+        // Readiness runs the candidate on a copy of the user's data before the active
+        // pointer moves, and its outcome is journaled first, so recovery never has to run
+        // candidate code to decide whether the update stands.
         if hooks.health_check(&candidate).is_err() {
             journal.state = UpdateState::RollingBack;
             self.write_update_journal(&journal)?;
@@ -912,8 +913,9 @@ impl ReleaseInstaller {
             self.remove_update_journal()?;
             return Err(LifecycleError::HealthCheckFailed);
         }
-        journal.state = UpdateState::HealthChecked;
+        journal.state = UpdateState::ReadinessPassed;
         self.write_update_journal(&journal)?;
+        self.commit_pointer(&candidate)?;
         journal.state = UpdateState::Cleanup;
         self.write_update_journal(&journal)?;
         self.finish_successful_update(&journal)?;
@@ -925,7 +927,8 @@ impl ReleaseInstaller {
         })
     }
 
-    /// Resumes or rolls back an interrupted transaction deterministically.
+    /// Resumes or rolls back an interrupted transaction deterministically, without running
+    /// candidate code, then moves entries no release record owns into `orphaned/`.
     ///
     /// # Errors
     /// Returns a pending-cleanup category until exact owned artifacts are gone.
@@ -936,54 +939,47 @@ impl ReleaseInstaller {
         }
         let update_journal = self.read_update_journal()?;
         let rollback_journal = self.read_retained_rollback_journal()?;
-        if update_journal.is_some() && rollback_journal.is_some() {
-            return Err(LifecycleError::JournalCorrupt);
+        match (update_journal, rollback_journal) {
+            (Some(_), Some(_)) => return Err(LifecycleError::JournalCorrupt),
+            (None, Some(journal)) => self.resume_retained_rollback(journal, hooks)?,
+            (Some(journal), None) => self.resume_update(journal)?,
+            (None, None) => {}
         }
-        if let Some(journal) = rollback_journal {
-            return self.resume_retained_rollback(journal, hooks);
-        }
-        let Some(journal) = update_journal else {
-            return Ok(());
-        };
+        self.move_orphaned_entries()
+    }
+
+    fn resume_update(&self, mut journal: UpdateJournal) -> Result<(), LifecycleError> {
         let candidate_root = self.version_path(&journal.candidate)?;
         match journal.state {
             UpdateState::Preparing | UpdateState::Staged | UpdateState::ProcessesStopped => {
+                // Readiness had not passed; the candidate ran at most on a copy.
                 remove_owned_path(&candidate_root)
                     .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
                 self.remove_pointer(&journal.candidate)?;
                 self.remove_manifest(&journal.candidate)?;
                 self.remove_release_record_temporaries(&journal.candidate)?;
             }
-            UpdateState::Activated => {
-                // Activation may have been interrupted after the candidate was
-                // audited but before its health result became durable. Re-run
-                // the exact signed inventory audit before recovery executes any
-                // candidate code. If the candidate changed, stop with the
-                // journal intact: it may already have executed before the crash,
-                // so automatically downgrading persisted state is not provably safe.
-                self.audit_release(&journal.candidate, &self.policy)?;
-                if hooks.health_check(&journal.candidate).is_err() {
-                    let mut journal = journal;
+            UpdateState::ReadinessPassed => {
+                // A candidate that changed after readiness has never run against the
+                // user's data, so it is discarded rather than activated.
+                if self
+                    .audit_release(&journal.candidate, &self.policy)
+                    .is_err()
+                {
+                    aeris_observability::diagnostic!(
+                        "Aeris lifecycle discarded release {} because it changed after its readiness check",
+                        journal.candidate.install_generation
+                    );
                     journal.state = UpdateState::RollingBack;
                     self.write_update_journal(&journal)?;
                     self.restore_previous_after_candidate_failure(&journal)?;
                 } else {
-                    let mut journal = journal;
-                    journal.state = UpdateState::HealthChecked;
-                    self.write_update_journal(&journal)?;
+                    self.commit_pointer(&journal.candidate)?;
                     journal.state = UpdateState::Cleanup;
                     self.write_update_journal(&journal)?;
                     self.finish_successful_update(&journal)?;
                     self.audit_single_active(&journal.candidate)?;
-                    self.remove_release_record_temporaries(&journal.candidate)?;
                 }
-            }
-            UpdateState::HealthChecked => {
-                let mut journal = journal;
-                journal.state = UpdateState::Cleanup;
-                self.write_update_journal(&journal)?;
-                self.finish_successful_update(&journal)?;
-                self.audit_single_active(&journal.candidate)?;
                 self.remove_release_record_temporaries(&journal.candidate)?;
             }
             UpdateState::Cleanup => {
@@ -997,6 +993,111 @@ impl ReleaseInstaller {
             }
         }
         self.remove_update_journal()
+    }
+
+    /// Moves entries that neither the active nor the retained release owns out of
+    /// `versions/`, `active/` and `manifests/` into `orphaned/<time>/`, so a stray entry
+    /// does not block launch. Only the newest [`MAXIMUM_ORPHAN_BATCHES`] batches are kept.
+    fn move_orphaned_entries(&self) -> Result<(), LifecycleError> {
+        let Some(active) = self.active_release()? else {
+            return Ok(());
+        };
+        let retained = self.read_retained_known_good()?;
+        let owned = std::iter::once(&active)
+            .chain(retained.as_ref())
+            .collect::<Vec<_>>();
+        let directories = owned
+            .iter()
+            .map(|release| release.directory_name.clone())
+            .collect::<BTreeSet<_>>();
+        let records = owned
+            .iter()
+            .map(|release| pointer_name(release))
+            .collect::<BTreeSet<_>>();
+        let active_record = BTreeSet::from([pointer_name(&active)]);
+        let mut orphans = Vec::new();
+        for (category, directory, known, records_only) in [
+            (
+                "versions",
+                self.install_root.join("versions"),
+                &directories,
+                false,
+            ),
+            (
+                "active",
+                self.lifecycle_root.join("active"),
+                &active_record,
+                true,
+            ),
+            (
+                "manifests",
+                self.lifecycle_root.join("manifests"),
+                &records,
+                true,
+            ),
+        ] {
+            for path in unknown_entries(&directory, known, records_only)? {
+                orphans.push((category, path));
+            }
+        }
+        if orphans.is_empty() {
+            return Ok(());
+        }
+        let batch = self.create_orphan_batch()?;
+        for (category, source) in &orphans {
+            let destination = batch.join(category);
+            fs::create_dir_all(&destination).map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+            let name = source
+                .file_name()
+                .ok_or(LifecycleError::UpdatePendingCleanup)?;
+            aeris_platform_runtime::fs::move_file(source, &destination.join(name))
+                .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        }
+        aeris_observability::diagnostic!(
+            "Aeris lifecycle moved {} orphaned install entries aside",
+            orphans.len()
+        );
+        self.prune_orphan_batches()
+    }
+
+    fn orphaned_root(&self) -> PathBuf {
+        self.install_root.join("orphaned")
+    }
+
+    fn create_orphan_batch(&self) -> Result<PathBuf, LifecycleError> {
+        let root = self.orphaned_root();
+        fs::create_dir_all(&root).map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        // Zero-padded milliseconds sort in creation order; a same-millisecond batch takes
+        // the next free name.
+        for offset in 0..16_u128 {
+            let batch = root.join(format!("{:020}", now.saturating_add(offset)));
+            match fs::create_dir(&batch) {
+                Ok(()) => return Ok(batch),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(LifecycleError::UpdatePendingCleanup),
+            }
+        }
+        Err(LifecycleError::UpdatePendingCleanup)
+    }
+
+    fn prune_orphan_batches(&self) -> Result<(), LifecycleError> {
+        let mut batches = fs::read_dir(self.orphaned_root())
+            .map_err(|_| LifecycleError::UpdatePendingCleanup)?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|_| LifecycleError::UpdatePendingCleanup)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        batches.sort();
+        let excess = batches.len().saturating_sub(MAXIMUM_ORPHAN_BATCHES);
+        for batch in &batches[..excess] {
+            remove_owned_path(batch).map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        }
+        Ok(())
     }
 
     fn stage(
@@ -1205,10 +1306,8 @@ impl ReleaseInstaller {
         let mut rollback_policy = self.policy.clone();
         rollback_policy.minimum_install_generation = 0;
         if let Some(previous) = &journal.previous {
-            // Candidate code has already executed by the time a health check
-            // can fail. Never select an older binary after that point unless
-            // both signed releases declare the same persisted-state epoch.
-            self.verify_retained_rollback_compatibility(&journal.candidate, previous)?;
+            // The candidate never ran against the user's data (readiness uses a copy), so
+            // the previous release can always be selected again.
             self.audit_release(previous, &rollback_policy)?;
             self.commit_pointer(previous)
                 .map_err(|_| LifecycleError::RollbackFailed)?;
@@ -2160,6 +2259,35 @@ fn remove_lifecycle_root_after_uninstall(root: &Path) -> std::io::Result<()> {
     fs::remove_dir(root)
 }
 
+/// Entries of `directory` whose names are not in `known`; `records_only` skips staged
+/// temporaries, which their release-record cleanup removes.
+fn unknown_entries(
+    directory: &Path,
+    known: &BTreeSet<String>,
+    records_only: bool,
+) -> Result<Vec<PathBuf>, LifecycleError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(LifecycleError::UpdatePendingCleanup),
+    };
+    let mut unknown = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        let name = entry.file_name();
+        if records_only
+            && aeris_platform_runtime::fs::staged_temporary_destination_name(name.as_ref())
+                .is_some()
+        {
+            continue;
+        }
+        if !name.to_str().is_some_and(|name| known.contains(name)) {
+            unknown.push(entry.path());
+        }
+    }
+    Ok(unknown)
+}
+
 fn count_entries(path: &Path) -> Result<usize, LifecycleError> {
     fs::read_dir(path)
         .map_err(|_| LifecycleError::UpdatePendingCleanup)?
@@ -3039,6 +3167,65 @@ mod tests {
     }
 
     #[test]
+    fn recovery_moves_orphaned_entries_aside_and_keeps_bounded_batches() {
+        let root = temporary_root("orphaned-entries");
+        let (signed, key, bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let active = installer
+            .install(&signed, &bundle, &Hooks::default())
+            .expect("install")
+            .active;
+        let orphaned = root.join("install/orphaned");
+        for attempt in 0..=MAXIMUM_ORPHAN_BATCHES {
+            fs::create_dir_all(root.join(format!("install/versions/stray-{attempt}")))
+                .expect("stray release directory");
+            fs::write(
+                installer
+                    .lifecycle_root
+                    .join("manifests")
+                    .join(format!("stray-{attempt}.json")),
+                b"{}",
+            )
+            .expect("stray manifest");
+            assert_eq!(
+                installer.audit_active_release(),
+                Err(LifecycleError::UpdatePendingCleanup)
+            );
+            installer
+                .recover(&Hooks::default())
+                .expect("recovery moves strays aside");
+            assert_eq!(installer.audit_active_release(), Ok(Some(active.clone())));
+            let mut batches = fs::read_dir(&orphaned)
+                .expect("orphaned root")
+                .map(|entry| entry.expect("batch").path())
+                .collect::<Vec<_>>();
+            batches.sort();
+            assert_eq!(batches.len(), (attempt + 1).min(MAXIMUM_ORPHAN_BATCHES));
+            let newest = batches.last().expect("newest batch");
+            assert!(newest.join(format!("versions/stray-{attempt}")).is_dir());
+            assert!(
+                newest
+                    .join(format!("manifests/stray-{attempt}.json"))
+                    .is_file()
+            );
+        }
+        installer
+            .recover(&Hooks::default())
+            .expect("recovery without strays");
+        assert_eq!(
+            fs::read_dir(&orphaned).expect("orphaned root").count(),
+            MAXIMUM_ORPHAN_BATCHES,
+            "a recovery with nothing to move creates no batch"
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
     fn active_release_ignores_an_abandoned_staged_pointer() {
         let root = temporary_root("ignore-next-pointer");
         let (first, key, first_bundle) = release(&root, 1);
@@ -3188,8 +3375,8 @@ mod tests {
     }
 
     #[test]
-    fn activated_recovery_reaudits_candidate_before_executing_health() {
-        let root = temporary_root("activated-recovery-audit");
+    fn readiness_passed_recovery_discards_a_changed_candidate_without_running_it() {
+        let root = temporary_root("readiness-passed-recovery-audit");
         let (first, key, first_bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
             root.join("install"),
@@ -3222,47 +3409,41 @@ mod tests {
             .expect("commit candidate pointer");
         installer
             .write_update_journal(&UpdateJournal {
-                state: UpdateState::Activated,
+                state: UpdateState::ReadinessPassed,
                 candidate: candidate.clone(),
-                previous: Some(previous),
+                previous: Some(previous.clone()),
                 previous_retained: None,
             })
-            .expect("write activated journal");
+            .expect("write readiness-passed journal");
 
         fs::write(
             candidate_root.join("aeris_desktop"),
-            b"post-activation mutation",
+            b"post-readiness mutation",
         )
         .expect("mutate candidate desktop");
         let hooks = Hooks::default();
-        assert_eq!(
-            installer.recover(&hooks),
-            Err(LifecycleError::VerificationFailed)
-        );
+        installer
+            .recover(&hooks)
+            .expect("a changed candidate is discarded");
         assert_eq!(
             *hooks.health_checks.lock().expect("health counter locks"),
             0,
-            "recovery must not execute candidate health after inventory verification fails"
+            "recovery never runs candidate code"
         );
         assert_eq!(
             installer
-                .read_update_journal()
-                .expect("update journal reads")
-                .expect("activated journal remains")
-                .state,
-            UpdateState::Activated,
-            "verification failure remains durable for explicit remediation"
+                .audit_active_release()
+                .expect("active audit")
+                .expect("previous active"),
+            previous
         );
-        assert_eq!(
-            installer.active_release().expect("active pointer reads"),
-            Some(candidate),
-            "recovery must not guess that rollback is state-compatible after candidate tampering"
-        );
+        assert!(!candidate_root.exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
     #[test]
-    fn failed_health_check_never_rolls_back_across_state_compatibility_epochs() {
+    fn failed_readiness_keeps_the_previous_release_across_state_compatibility_epochs() {
         let root = temporary_root("health-rollback-compatibility");
         let (first, key, first_bundle) = release_with_compatibility_epoch(&root, 1, 1);
         let installer = ReleaseInstaller::new(
@@ -3285,22 +3466,23 @@ mod tests {
                     ..Hooks::default()
                 }
             ),
-            Err(LifecycleError::RollbackFailed)
+            Err(LifecycleError::HealthCheckFailed)
         );
         assert_eq!(
             installer
-                .active_release()
-                .expect("active")
-                .expect("candidate remains selected")
+                .audit_active_release()
+                .expect("active audit")
+                .expect("previous remains selected")
                 .install_generation,
-            2
+            1
         );
-        assert!(installer.update_journal_exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
     #[test]
-    fn recovery_restores_previous_after_partial_known_good_rotation_then_health_failure() {
+    fn readiness_passed_recovery_finishes_after_partial_known_good_rotation_without_running_the_candidate()
+     {
         let root = temporary_root("rollback-after-partial-cleanup");
         let (first, key, first_bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
@@ -3332,14 +3514,14 @@ mod tests {
             .commit_pointer(&candidate)
             .expect("commit candidate pointer");
         let journal = UpdateJournal {
-            state: UpdateState::Activated,
+            state: UpdateState::ReadinessPassed,
             candidate: candidate.clone(),
             previous: Some(previous.clone()),
             previous_retained: None,
         };
         installer
             .write_update_journal(&journal)
-            .expect("write activated journal");
+            .expect("write readiness-passed journal");
 
         // Reproduce the crash window: the previous release has already become
         // the known-good record and lost its active pointer, while the update
@@ -3358,30 +3540,31 @@ mod tests {
             candidate
         );
 
+        let hooks = Hooks {
+            fail_health: true,
+            ..Hooks::default()
+        };
         installer
-            .recover(&Hooks {
-                fail_health: true,
-                ..Hooks::default()
-            })
-            .expect("failed candidate recovers previous");
+            .recover(&hooks)
+            .expect("the passed candidate finishes activating");
+        assert_eq!(
+            *hooks.health_checks.lock().expect("health counter locks"),
+            0
+        );
         assert_eq!(
             installer
                 .audit_active_release()
                 .expect("active audit")
-                .expect("previous restored"),
-            previous
+                .expect("candidate active"),
+            candidate
         );
         assert_eq!(
             installer
                 .retained_known_good_release()
                 .expect("retained state"),
-            None
+            Some(previous)
         );
-        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
-        assert_eq!(
-            count_entries(&installer.lifecycle_root.join("manifests")),
-            Ok(1)
-        );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(2));
         assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
@@ -3637,8 +3820,8 @@ mod tests {
     }
 
     #[test]
-    fn health_checked_and_cleanup_recovery_never_rechecks_candidate_health() {
-        for state in [UpdateState::HealthChecked, UpdateState::Cleanup] {
+    fn readiness_passed_and_cleanup_recovery_never_rechecks_candidate_health() {
+        for state in [UpdateState::ReadinessPassed, UpdateState::Cleanup] {
             let root = temporary_root(&format!("durable-health-{state:?}"));
             let (first, key, first_bundle) = release(&root, 1);
             let installer = ReleaseInstaller::new(
@@ -3775,8 +3958,7 @@ mod tests {
             UpdateState::Preparing,
             UpdateState::Staged,
             UpdateState::ProcessesStopped,
-            UpdateState::Activated,
-            UpdateState::HealthChecked,
+            UpdateState::ReadinessPassed,
             UpdateState::Cleanup,
         ] {
             let root = temporary_root(&format!("recover-{state:?}"));
@@ -3808,10 +3990,7 @@ mod tests {
                 ReleaseInstaller::stage(&second, &second_bundle, &candidate_root)
                     .expect("stage interrupted candidate");
             }
-            if matches!(
-                state,
-                UpdateState::Activated | UpdateState::HealthChecked | UpdateState::Cleanup
-            ) {
+            if matches!(state, UpdateState::ReadinessPassed | UpdateState::Cleanup) {
                 installer
                     .commit_manifest(&second, &candidate)
                     .expect("commit interrupted manifest");
@@ -3833,10 +4012,7 @@ mod tests {
                 .active_release()
                 .expect("active")
                 .expect("one active release");
-            let expected = if matches!(
-                state,
-                UpdateState::Activated | UpdateState::HealthChecked | UpdateState::Cleanup
-            ) {
+            let expected = if matches!(state, UpdateState::ReadinessPassed | UpdateState::Cleanup) {
                 &candidate
             } else {
                 &previous
@@ -3845,10 +4021,7 @@ mod tests {
             let retained = installer
                 .retained_known_good_release()
                 .expect("retained release");
-            if matches!(
-                state,
-                UpdateState::Activated | UpdateState::HealthChecked | UpdateState::Cleanup
-            ) {
+            if matches!(state, UpdateState::ReadinessPassed | UpdateState::Cleanup) {
                 assert_eq!(retained.as_ref(), Some(&previous));
             } else {
                 assert_eq!(retained, None);
@@ -3879,7 +4052,7 @@ mod tests {
             previous_retained: None,
         };
         let activated = UpdateJournal {
-            state: UpdateState::Activated,
+            state: UpdateState::ReadinessPassed,
             candidate,
             previous: None,
             previous_retained: None,
@@ -3897,13 +4070,13 @@ mod tests {
                 .expect("read journal")
                 .expect("journal")
                 .state,
-            UpdateState::Activated
+            UpdateState::ReadinessPassed
         );
 
         fs::write(
             installer
                 .lifecycle_root
-                .join(update_journal_name(UpdateState::Activated)),
+                .join(update_journal_name(UpdateState::ReadinessPassed)),
             b"not-json",
         )
         .expect("corrupt newest slot");

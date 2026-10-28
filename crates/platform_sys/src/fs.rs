@@ -133,7 +133,8 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Moves a file for bounded housekeeping such as diagnostic-log rotation.
+/// Moves a file or directory within one volume for bounded housekeeping such as
+/// diagnostic-log rotation or setting aside orphaned install entries.
 ///
 /// # Errors
 /// Returns the operating-system error when the move fails.
