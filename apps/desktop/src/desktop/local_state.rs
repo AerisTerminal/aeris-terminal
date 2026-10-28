@@ -3,7 +3,7 @@ use aeris_platform_runtime::{
     DurableCandidate, DurableContainer, DurableFormat, DurableLoad, DurableSource,
 };
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
@@ -49,17 +49,61 @@ mod legacy_workspace_envelope {
     }
 }
 
+/// How the persisted workspace entered this session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RestoreOutcome {
+    /// No saved document existed; the fresh default is used.
+    Fresh,
+    /// The current primary document was used.
+    Restored,
+    /// The primary was rejected and an older durable copy was used instead.
+    RestoredFromFallback { quarantined: Option<PathBuf> },
+    /// A readable older document was upgraded in memory; the next save persists it.
+    /// `from` is 0 for the legacy frame, otherwise the container schema it held.
+    Migrated { from: u32 },
+    /// A newer version wrote the document; the session opens defaults and never writes it.
+    NewerVersion { found: u32 },
+    /// Every saved candidate was rejected; the fresh default is used.
+    Defaulted { reason: String },
+}
+
+impl RestoreOutcome {
+    /// Whether a saved document, migrated or not, is the session's workspace.
+    #[cfg(test)]
+    pub(super) const fn restored(&self) -> bool {
+        matches!(
+            self,
+            Self::Restored | Self::RestoredFromFallback { .. } | Self::Migrated { .. }
+        )
+    }
+}
+
+pub(super) struct RestoredWorkspace {
+    pub workspace: WorkspaceState,
+    pub outcome: RestoreOutcome,
+}
+
+pub(super) fn restore_workspace(path: &Path) -> RestoredWorkspace {
+    restore_workspace_result(path).unwrap_or_else(|error| {
+        diagnostic!("Aeris workspace restore skipped: {error}");
+        RestoredWorkspace {
+            workspace: default_workspace(),
+            outcome: RestoreOutcome::Defaulted { reason: error },
+        }
+    })
+}
+
 pub(super) fn load_workspace(path: &Path) -> WorkspaceState {
-    load_workspace_with_origin(path).0
+    restore_workspace(path).workspace
 }
 
 /// A recovered file is authoritative even when it holds the same symbol as
 /// the fresh default. Only a workspace with no readable saved file is fresh.
+#[cfg(test)]
 pub(super) fn load_workspace_with_origin(path: &Path) -> (WorkspaceState, bool) {
-    load_workspace_result(path).unwrap_or_else(|error| {
-        diagnostic!("Aeris workspace restore skipped: {error}");
-        (default_workspace(), false)
-    })
+    let restored = restore_workspace(path);
+    let from_file = restored.outcome.restored();
+    (restored.workspace, from_file)
 }
 
 /// Loads persisted workspace state for the release activation readiness gate.
@@ -70,7 +114,13 @@ pub(super) fn load_workspace_with_origin(path: &Path) -> (WorkspaceState, bool) 
 pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState, String> {
     let load = workspace_container(path).inspect(decode_workspace_candidate);
     report_workspace_rejections(&load);
-    if let Some((workspace, _)) = load.restored {
+    if let Some(newer) = &load.newer_version {
+        return Err(format!(
+            "workspace schema version {} is newer than this build",
+            newer.schema_version
+        ));
+    }
+    if let Some(((workspace, _), _)) = load.restored {
         return Ok(workspace);
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
@@ -83,16 +133,41 @@ pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState
     }
 }
 
-fn load_workspace_result(path: &Path) -> Result<(WorkspaceState, bool), String> {
+fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
     let load = workspace_container(path).load(decode_workspace_candidate);
     report_workspace_rejections(&load);
-    if let Some((workspace, _)) = load.restored {
-        return Ok((workspace, true));
+    if let Some(newer) = &load.newer_version {
+        return Ok(RestoredWorkspace {
+            workspace: default_workspace(),
+            outcome: RestoreOutcome::NewerVersion {
+                found: newer.schema_version,
+            },
+        });
+    }
+    if let Some(((workspace, from), source)) = load.restored {
+        let outcome = match source {
+            DurableSource::Primary if from == WORKSPACE_CONTAINER_SCHEMA => {
+                RestoreOutcome::Restored
+            }
+            DurableSource::Primary => RestoreOutcome::Migrated { from },
+            DurableSource::Staged(_) | DurableSource::Backup => {
+                RestoreOutcome::RestoredFromFallback {
+                    quarantined: load
+                        .rejected
+                        .iter()
+                        .find_map(|rejection| rejection.quarantined_as.clone()),
+                }
+            }
+        };
+        return Ok(RestoredWorkspace { workspace, outcome });
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if !legacy.is_file() {
         return if load.rejected.is_empty() {
-            Ok((default_workspace(), false))
+            Ok(RestoredWorkspace {
+                workspace: default_workspace(),
+                outcome: RestoreOutcome::Fresh,
+            })
         } else {
             Err(workspace_rejection_summary(&load))
         };
@@ -110,7 +185,10 @@ fn load_workspace_result(path: &Path) -> Result<(WorkspaceState, bool), String> 
             diagnostic!("Aeris workspace migration could not persist the current format: {error}");
         }
     }
-    Ok((workspace, true))
+    Ok(RestoredWorkspace {
+        workspace,
+        outcome: RestoreOutcome::Migrated { from: 0 },
+    })
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
@@ -124,29 +202,36 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn workspace_container(path: &Path) -> DurableContainer {
-    DurableContainer::new(path.to_path_buf(), MAXIMUM_WORKSPACE_FILE_BYTES)
+    DurableContainer::new(
+        path.to_path_buf(),
+        MAXIMUM_WORKSPACE_FILE_BYTES,
+        WORKSPACE_CONTAINER_SCHEMA,
+    )
 }
 
 /// Both the enveloped schema-1 payload and a released version's bare file are one encoded
-/// `WorkspaceState` message.
-fn decode_workspace_candidate(candidate: DurableCandidate<'_>) -> Result<WorkspaceState, String> {
-    match candidate.format {
+/// `WorkspaceState` message stored at schema 1; the decode returns the schema it read. The
+/// container fences a newer schema before this decoder runs, so it never sees one.
+fn decode_workspace_candidate(
+    candidate: DurableCandidate<'_>,
+) -> Result<(WorkspaceState, u32), String> {
+    let from = match candidate.format {
         DurableFormat::Legacy
         | DurableFormat::Envelope {
             schema_version: WORKSPACE_CONTAINER_SCHEMA,
-        } => {}
+        } => WORKSPACE_CONTAINER_SCHEMA,
         DurableFormat::Envelope { schema_version } => {
             return Err(format!(
                 "workspace schema version {schema_version} is unsupported"
             ));
         }
-    }
+    };
     WorkspaceState::decode(candidate.payload)
-        .map(restored_workspace)
+        .map(|workspace| (restored_workspace(workspace), from))
         .map_err(|error| error.to_string())
 }
 
-fn report_workspace_rejections(load: &DurableLoad<WorkspaceState>) {
+fn report_workspace_rejections<T>(load: &DurableLoad<T>) {
     for rejection in &load.rejected {
         diagnostic!("Aeris workspace file rejected: {rejection}");
     }
@@ -155,9 +240,16 @@ fn report_workspace_rejections(load: &DurableLoad<WorkspaceState>) {
     {
         diagnostic!("Aeris workspace restored from {source:?}");
     }
+    if let Some(newer) = &load.newer_version {
+        diagnostic!(
+            "Aeris workspace {} was written by a newer version (schema {}); this build reads up to schema {WORKSPACE_CONTAINER_SCHEMA}",
+            newer.path.display(),
+            newer.schema_version
+        );
+    }
 }
 
-fn workspace_rejection_summary(load: &DurableLoad<WorkspaceState>) -> String {
+fn workspace_rejection_summary<T>(load: &DurableLoad<T>) -> String {
     load.rejected
         .iter()
         .map(ToString::to_string)
@@ -212,7 +304,7 @@ fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(),
 pub(super) fn load_workspace_fixture(path: &Path) -> Result<WorkspaceState, String> {
     let load = workspace_container(path).inspect(decode_workspace_candidate);
     match load.restored {
-        Some((workspace, _)) => Ok(workspace),
+        Some(((workspace, _), _)) => Ok(workspace),
         None if load.rejected.is_empty() => Err("workspace fixture is unavailable".to_string()),
         None => Err(workspace_rejection_summary(&load)),
     }
@@ -1648,6 +1740,79 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_written_by_a_newer_version_opens_read_only_and_is_never_replaced() {
+        let path = temporary_workspace_path();
+        save_workspace_to_path(&workspace_with_revision(41), &path).expect("workspace saves");
+        let newer = DurableContainer::new(path.clone(), MAXIMUM_WORKSPACE_FILE_BYTES, 2);
+        newer
+            .write(2, &workspace_with_revision(42).encode_to_vec())
+            .expect("a newer schema writes");
+        let written = std::fs::read(&path).expect("newer primary");
+
+        let restored = restore_workspace(&path);
+        assert_eq!(restored.outcome, RestoreOutcome::NewerVersion { found: 2 });
+        assert_eq!(restored.workspace, super::default_workspace());
+        assert_eq!(std::fs::read(&path).expect("primary"), written);
+        assert!(
+            save_workspace_to_path(&workspace_with_revision(43), &path).is_err(),
+            "a newer document is never overwritten"
+        );
+        assert_eq!(std::fs::read(&path).expect("primary"), written);
+        assert!(
+            !workspace_container(&path).quarantine_path(1).exists(),
+            "a newer document is not quarantined"
+        );
+        assert!(
+            load_workspace_for_readiness(&path).is_err(),
+            "readiness refuses a workspace it cannot read"
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn a_corrupt_workspace_with_a_backup_reports_the_quarantined_copy() {
+        let path = temporary_workspace_path();
+        save_workspace_to_path(&workspace_with_revision(41), &path).expect("first saves");
+        save_workspace_to_path(&workspace_with_revision(42), &path).expect("second saves");
+        std::fs::write(&path, b"\x00AERISDC truncated").expect("corrupt primary writes");
+
+        let restored = restore_workspace(&path);
+        let RestoreOutcome::RestoredFromFallback { quarantined } = &restored.outcome else {
+            panic!("expected a fallback restore: {:?}", restored.outcome);
+        };
+        let quarantined = quarantined
+            .clone()
+            .expect("the corrupt primary was quarantined");
+        assert_eq!(quarantined, workspace_container(&path).quarantine_path(1));
+        assert!(quarantined.is_file());
+        assert_eq!(restored.workspace.workspace_revision, 41);
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn a_workspace_with_no_usable_copy_defaults_and_keeps_the_rejected_files() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("workspace directory");
+        std::fs::write(&path, b"\x00AERISDC truncated").expect("corrupt primary writes");
+
+        let restored = restore_workspace(&path);
+        let RestoreOutcome::Defaulted { reason } = &restored.outcome else {
+            panic!("expected a defaulted restore: {:?}", restored.outcome);
+        };
+        assert_ne!(reason, "");
+        assert_eq!(restored.workspace, super::default_workspace());
+        assert!(
+            workspace_container(&path).quarantine_path(1).is_file(),
+            "the unreadable primary is kept as a quarantined copy"
+        );
+        assert!(!path.exists());
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
     fn a_workspace_staged_by_a_crashed_write_is_restored() {
         let source = temporary_workspace_path();
         save_workspace(&workspace_with_revision(51), &source).expect("staged image saves");
@@ -2038,6 +2203,19 @@ mod tests {
         let restored =
             load_legacy_workspace_from_path(&legacy_path).expect("legacy workspace migrates");
         assert_eq!(restored, workspace);
+
+        let restored = restore_workspace(&current);
+        assert_eq!(restored.outcome, RestoreOutcome::Migrated { from: 0 });
+        assert_eq!(restored.workspace, workspace);
+        assert!(
+            !legacy_path.exists(),
+            "the migrated legacy frame is retired"
+        );
+        assert_eq!(
+            restore_workspace(&current).outcome,
+            RestoreOutcome::Restored,
+            "the migrated document opens as the current schema"
+        );
 
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
     }

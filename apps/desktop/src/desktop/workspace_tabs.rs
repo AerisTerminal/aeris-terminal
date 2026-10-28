@@ -162,20 +162,26 @@ impl TerminalApp {
         lifecycle: &DesktopLifecycle,
         dirty: &Arc<DirtySet>,
     ) -> Option<WorkspaceLayoutPersistence> {
-        (init.workspace_shell == WorkspaceShellKind::Tabs)
-            .then(|| {
-                WorkspaceLayoutPersistence::new(
-                    init.workspace_revision,
-                    init.layout_generation,
-                    lifecycle.persistence(),
-                    dirty.source_wake(AppSource::PersistenceReceipts),
-                )
-            })
-            .transpose()
-            .unwrap_or_else(|error| {
-                diagnostic!("Aeris workspace persistence could not start: {error}");
-                None
-            })
+        // A document written by a newer version opens read-only: no writer starts and
+        // nothing the user changes this session can overwrite it.
+        (init.workspace_shell == WorkspaceShellKind::Tabs
+            && !matches!(
+                init.restore_outcome,
+                local_state::RestoreOutcome::NewerVersion { .. }
+            ))
+        .then(|| {
+            WorkspaceLayoutPersistence::new(
+                init.workspace_revision,
+                init.layout_generation,
+                lifecycle.persistence(),
+                dirty.source_wake(AppSource::PersistenceReceipts),
+            )
+        })
+        .transpose()
+        .unwrap_or_else(|error| {
+            diagnostic!("Aeris workspace persistence could not start: {error}");
+            None
+        })
     }
 
     pub(super) fn new(
@@ -203,7 +209,8 @@ impl TerminalApp {
             watchlist: init.watchlist_entries.clone(),
         };
         let trading_store = start_trading_store(&lifecycle, frames.dirty(), cx);
-        Self {
+        let restore_outcome = init.restore_outcome.clone();
+        let mut terminal = Self {
             tabs,
             theme: AerisTheme::dark(),
             frames,
@@ -239,7 +246,68 @@ impl TerminalApp {
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
             provider_login: provider_login::ProviderLoginFlow::default(),
             chrome: AppChrome::new(init.chart_chrome),
-        }
+        };
+        terminal.post_workspace_restore_notice(&restore_outcome, cx);
+        terminal
+    }
+
+    /// Startup restore outcomes the user must see: a fallback restore, a default after
+    /// unreadable files, and a newer-version read-only session. Migrated and clean
+    /// restores are already in diagnostics.
+    fn post_workspace_restore_notice(
+        &mut self,
+        outcome: &local_state::RestoreOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = self
+            .lifecycle
+            .persistence()
+            .workspace_path()
+            .parent()
+            .map(std::path::Path::to_path_buf);
+        let (kind, title, detail, action) = match outcome {
+            local_state::RestoreOutcome::NewerVersion { .. } => (
+                "workspace_newer_version",
+                "Workspace opened read-only",
+                "This workspace was saved by a newer Aeris Terminal. Update the app to edit it; changes in this session will not be saved.",
+                folder.map(notification_center::NoticeAction::OpenFolder),
+            ),
+            local_state::RestoreOutcome::RestoredFromFallback { quarantined } => (
+                "workspace_fallback_restore",
+                "Workspace restored from a backup",
+                "The saved workspace could not be read, so the last working copy was used.",
+                quarantined
+                    .clone()
+                    .map(notification_center::NoticeAction::OpenFolder),
+            ),
+            local_state::RestoreOutcome::Defaulted { .. } => (
+                "workspace_defaulted",
+                "Workspace could not be restored",
+                "The saved workspace could not be read, so a fresh layout is used. The unreadable files were kept in the data folder.",
+                folder.map(notification_center::NoticeAction::OpenFolder),
+            ),
+            local_state::RestoreOutcome::Fresh
+            | local_state::RestoreOutcome::Restored
+            | local_state::RestoreOutcome::Migrated { .. } => return,
+        };
+        let Some(host) = toast_host(self.tabs.active()) else {
+            return;
+        };
+        self.notices.toaster_mut().post_notice(
+            host,
+            notification_center::UserNotice {
+                key: notification_center::NoticeKey { scope: 0, kind },
+                severity: notification_center::NoticeSeverity::Warning,
+                tone: notification_center::NoticeTone::Warning,
+                source: notification_center::NoticeSource::Persistence,
+                title,
+                detail: detail.into(),
+                action,
+                lifetime: notification_center::NoticeLifetime::UntilDismissed,
+            },
+            Instant::now(),
+        );
+        cx.notify();
     }
 
     pub(super) fn active_surface(&self) -> Entity<WorkspaceSurface> {

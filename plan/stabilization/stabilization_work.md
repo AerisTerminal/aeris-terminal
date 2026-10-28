@@ -320,11 +320,26 @@ only on the guarded GUI checks on their lines.
     restored from the backup); not run here. An envelope schema newer than 1 is rejected
     and quarantined like corruption until M7.8 adds `NewerVersion` read-only handling.
 - [ ] M7.8 Writer-owned workspace document and migration chain
+  - Landed: `RestoreOutcome` (`Fresh`, `Restored`, `RestoredFromFallback`, `Migrated`,
+    `NewerVersion`, `Defaulted`) in `desktop/local_state.rs`; `DurableContainer` carries the
+    newest supported schema and reports a newer-version file without quarantining it or
+    offering an older copy, and `write` never replaces a newer file or an unsupported schema.
+    A newer-version workspace opens read-only (no writer thread starts) with a persistent
+    notice; fallback restores and defaults post a persistent `UserNotice` with an Open folder
+    action via the new `platform_runtime::reveal_in_file_manager`. Readiness refuses a
+    newer-version workspace. Chart chrome with a newer schema is left untouched and its
+    session saves are skipped. Tests cover a newer workspace opening read-only and refusing
+    writes, a corrupt primary restoring the backup with the quarantined copy reported, a
+    corrupt document defaulting while keeping the rejected files, and the legacy frame
+    reporting `Migrated { from: 0 }`.
   - Left: the writer thread owns `WorkspaceDocument` and folds in chart chrome, deleting
     `ChartChromeShutdownWait`.
-  - An ordered migration chain to schema 3 with golden fixtures.
-  - `RestoreOutcome` notices with an Open folder action, a read-only newer-version mode and a
-    readiness dry run.
+  - An ordered migration chain to schema 3 with golden fixtures (the legacy color,
+    area-bottom and `legacy_*_contract` heuristics and the chrome key=value fold move into
+    the 2-to-3 step; the pre-v3 copy is kept).
+  - GUI checks: a corrupt workspace shows the notice with Open folder and the layout is not
+    silently replaced; a newer-version workspace shows the read-only notice; a copied real
+    workspace migrates intact.
   - Workspaces written by 1.0.0-1.2.0 must open unchanged in meaning, including saved layouts,
     watchlist flags and pane heights. Closes UI-09 and PL-18.
 - [ ] M7.9 Hollow candles as an Aeris Charts series style

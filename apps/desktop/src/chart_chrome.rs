@@ -4,11 +4,15 @@ use aeris_chart_integration::{
 use aeris_contracts::InstrumentSearchCategories;
 use aeris_observability::diagnostic;
 use aeris_platform_runtime::{
-    DurableCandidate, DurableContainer, DurableFormat, DurableRejection, DurableSource,
+    DurableCandidate, DurableContainer, DurableFormat, DurableNewerVersion, DurableRejection,
+    DurableSource,
 };
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -591,6 +595,8 @@ pub struct DesktopPersistence {
 struct DesktopPersistenceInner {
     root: PathBuf,
     save_state: Mutex<ChartChromeSaveState>,
+    /// Set when the saved file was written by a newer version: this session never writes it.
+    chrome_read_only: AtomicBool,
 }
 
 impl DesktopPersistence {
@@ -600,6 +606,7 @@ impl DesktopPersistence {
             inner: std::sync::Arc::new(DesktopPersistenceInner {
                 root,
                 save_state: Mutex::new(ChartChromeSaveState::default()),
+                chrome_read_only: AtomicBool::new(false),
             }),
         }
     }
@@ -616,7 +623,11 @@ impl DesktopPersistence {
 
     #[must_use]
     pub fn load_chart_chrome_preferences(&self) -> ChartChromePreferences {
-        load_chart_chrome_preferences_from(&self.chart_chrome_path())
+        let (preferences, _, newer) = restore_chart_chrome_preferences(&self.chart_chrome_path());
+        if newer.is_some() {
+            self.inner.chrome_read_only.store(true, Ordering::Release);
+        }
+        preferences
     }
 
     /// Queues the latest preferences without writing on the UI thread.
@@ -627,6 +638,10 @@ impl DesktopPersistence {
         &self,
         preferences: ChartChromePreferences,
     ) -> Result<bool, String> {
+        if self.inner.chrome_read_only.load(Ordering::Acquire) {
+            // A newer version owns the saved file; changes apply in memory for the session.
+            return Ok(false);
+        }
         self.inner
             .save_state
             .lock()
@@ -834,7 +849,11 @@ const MAXIMUM_CHART_CHROME_FILE_BYTES: usize = 12 * 1_048_576;
 const CHART_CHROME_CONTAINER_SCHEMA: u32 = 1;
 
 fn chart_chrome_container(path: &Path) -> DurableContainer {
-    DurableContainer::new(path.to_path_buf(), MAXIMUM_CHART_CHROME_FILE_BYTES)
+    DurableContainer::new(
+        path.to_path_buf(),
+        MAXIMUM_CHART_CHROME_FILE_BYTES,
+        CHART_CHROME_CONTAINER_SCHEMA,
+    )
 }
 
 /// Both the enveloped schema-1 payload and a released version's bare file are the same
@@ -858,18 +877,31 @@ fn decode_chart_chrome_candidate(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
     restore_chart_chrome_preferences(path).0
 }
 
 /// Restores the saved preferences, or the defaults when no file is usable, and reports
-/// every rejected file through observability.
+/// every rejected file through observability. A file written by a newer version is returned
+/// as the third element: it is not read, moved or overwritten.
 fn restore_chart_chrome_preferences(
     path: &Path,
-) -> (ChartChromePreferences, Vec<DurableRejection>) {
+) -> (
+    ChartChromePreferences,
+    Vec<DurableRejection>,
+    Option<DurableNewerVersion>,
+) {
     let load = chart_chrome_container(path).load(decode_chart_chrome_candidate);
     for rejection in &load.rejected {
         diagnostic!("Aeris chart preferences file rejected: {rejection}");
+    }
+    if let Some(newer) = &load.newer_version {
+        diagnostic!(
+            "Aeris chart preferences {} were written by a newer version (schema {}) and stay untouched",
+            newer.path.display(),
+            newer.schema_version
+        );
     }
     let preferences = if let Some((preferences, source)) = load.restored {
         if source != DurableSource::Primary {
@@ -882,7 +914,7 @@ fn restore_chart_chrome_preferences(
         }
         ChartChromePreferences::default()
     };
-    (preferences, load.rejected)
+    (preferences, load.rejected, load.newer_version)
 }
 
 fn run_chart_chrome_preferences_save_worker_to(
@@ -1403,7 +1435,7 @@ mod tests {
         let saved = std::fs::read(&path).expect("saved chrome");
         std::fs::write(&path, &saved[..saved.len() - 1]).expect("truncate chrome");
 
-        let (restored, rejected) = restore_chart_chrome_preferences(&path);
+        let (restored, rejected, _) = restore_chart_chrome_preferences(&path);
         assert_eq!(restored, first);
         assert_eq!(rejected.len(), 1);
         assert_eq!(
@@ -1419,7 +1451,7 @@ mod tests {
         std::fs::write(&path, vec![b'a'; MAXIMUM_CHART_CHROME_FILE_BYTES + 1])
             .expect("oversized chrome writes");
 
-        let (restored, rejected) = restore_chart_chrome_preferences(&path);
+        let (restored, rejected, _) = restore_chart_chrome_preferences(&path);
         assert_eq!(restored, ChartChromePreferences::default());
         assert_eq!(rejected.len(), 1);
         assert!(

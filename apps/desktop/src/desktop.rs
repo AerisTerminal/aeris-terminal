@@ -5302,6 +5302,7 @@ struct ConfiguredDesktop {
     layout: DesktopLayout,
     chart_chrome: chart_chrome::ChartChromePreferences,
     workspace_notice: Option<String>,
+    restore_outcome: local_state::RestoreOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -5313,13 +5314,16 @@ enum DesktopLayout {
 
 struct ConfiguredLifecycle {
     workspace: WorkspaceState,
+    restore_outcome: local_state::RestoreOutcome,
 }
 
 fn configure_desktop_state(
     services: &aeris_desktop::services::DesktopServices,
 ) -> ConfiguredLifecycle {
+    let restored = local_state::restore_workspace(&services.persistence.workspace_path());
     ConfiguredLifecycle {
-        workspace: local_state::load_workspace(&services.persistence.workspace_path()),
+        workspace: restored.workspace,
+        restore_outcome: restored.outcome,
     }
 }
 
@@ -5386,6 +5390,7 @@ fn configured_market_workers(
         layout,
         chart_chrome: services.persistence.load_chart_chrome_preferences(),
         workspace_notice: (!workspace_notice.is_empty()).then_some(workspace_notice),
+        restore_outcome: lifecycle.restore_outcome,
     }))
 }
 
@@ -5780,6 +5785,7 @@ fn mount_desktop(
     let layout = configured.layout;
     let chart_chrome = configured.chart_chrome;
     let workspace_notice = configured.workspace_notice;
+    let restore_outcome = configured.restore_outcome;
     if let Err(error) = bind_desktop_keys(cx) {
         diagnostic!("Aeris keyboard shortcuts are invalid: {error}");
         return None;
@@ -5847,6 +5853,7 @@ fn mount_desktop(
                     WorkspaceTabsRestore {
                         state: &restored_workspace,
                         notice: workspace_notice,
+                        restore_outcome,
                     },
                     workspace_factory,
                     &lifecycle,

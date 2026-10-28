@@ -1491,6 +1491,7 @@ pub(super) fn terminal_root(
             drawing_templates: Vec::new(),
             saved_layouts: Vec::new(),
             workspace_notice: None,
+            restore_outcome: local_state::RestoreOutcome::Restored,
         },
         lifecycle,
         window,
@@ -1512,6 +1513,9 @@ pub(super) struct TerminalShellInit {
     /// A tab showing no layout of this library is given a new one.
     pub(super) saved_layouts: Vec<WorkspaceSavedLayoutState>,
     pub(super) workspace_notice: Option<String>,
+    /// How the persisted workspace entered this session; a newer-version document is
+    /// read-only and surfaces a notice.
+    pub(super) restore_outcome: local_state::RestoreOutcome,
 }
 
 fn terminal_shell_root(
@@ -1588,6 +1592,7 @@ pub(super) fn restored_workspace_shell_plan(
 pub(super) struct WorkspaceTabsRestore<'a> {
     pub(super) state: &'a WorkspaceState,
     pub(super) notice: Option<String>,
+    pub(super) restore_outcome: local_state::RestoreOutcome,
 }
 
 /// Builds the open tab `tab` describes from the market panes started for it, which it takes
@@ -1692,6 +1697,7 @@ pub(super) fn workspace_tabs_root(
             drawing_templates: restored.state.drawing_templates.clone(),
             saved_layouts: restored.state.saved_layouts.clone(),
             workspace_notice: restored.notice,
+            restore_outcome: restored.restore_outcome,
         },
         lifecycle,
         window,

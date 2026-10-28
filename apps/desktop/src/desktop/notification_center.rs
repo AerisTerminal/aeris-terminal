@@ -36,15 +36,18 @@ pub(super) enum RetryTarget {
     ChartChromePreferences,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum NoticeAction {
     Retry(RetryTarget),
+    /// Opens the file manager at the quarantined copy or the workspace data folder.
+    OpenFolder(std::path::PathBuf),
 }
 
 impl NoticeAction {
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(&self) -> &'static str {
         match self {
             Self::Retry(_) => "Retry",
+            Self::OpenFolder(_) => "Open folder",
         }
     }
 }

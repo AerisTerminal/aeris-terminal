@@ -6,6 +6,10 @@
 //! temporary newer than the backup (a crash between staging and replacement), then the backup.
 //! A recovering load quarantines an unusable primary, keeping the newest
 //! [`MAXIMUM_QUARANTINED_COPIES`].
+//!
+//! A file whose schema is newer than this build supports was written by a newer version. It is
+//! not corruption: a load reports it without quarantining it or falling back to an older copy,
+//! and a write never replaces it.
 
 use aeris_observability::diagnostic;
 use aeris_platform_sys::fs::{
@@ -86,12 +90,21 @@ impl fmt::Display for DurableRejection {
     }
 }
 
-/// The outcome of a load: the decoded value, if any candidate was accepted, and every
-/// candidate rejected before it.
+/// A candidate file written by a newer version, with a schema this build cannot read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableNewerVersion {
+    pub path: PathBuf,
+    pub schema_version: u32,
+}
+
+/// The outcome of a load: the decoded value, if any candidate was accepted, every candidate
+/// rejected before it, and the newer-version file that stopped the load, if any.
 #[derive(Debug)]
 pub struct DurableLoad<T> {
     pub restored: Option<(T, DurableSource)>,
     pub rejected: Vec<DurableRejection>,
+    /// Set instead of `restored`: no older copy is offered in place of a newer one.
+    pub newer_version: Option<DurableNewerVersion>,
 }
 
 /// One durable file, its last-good backup and its quarantined copies.
@@ -99,6 +112,12 @@ pub struct DurableLoad<T> {
 pub struct DurableContainer {
     path: PathBuf,
     maximum_payload_bytes: usize,
+    newest_schema_version: u32,
+}
+
+enum Decoded<T> {
+    Value(T),
+    NewerVersion(u32),
 }
 
 enum ReadOutcome {
@@ -115,11 +134,13 @@ enum LoadMode {
 }
 
 impl DurableContainer {
+    /// `newest_schema_version` is the newest payload schema this build reads and writes.
     #[must_use]
-    pub fn new(path: PathBuf, maximum_payload_bytes: usize) -> Self {
+    pub fn new(path: PathBuf, maximum_payload_bytes: usize, newest_schema_version: u32) -> Self {
         Self {
             path,
             maximum_payload_bytes,
+            newest_schema_version,
         }
     }
 
@@ -160,9 +181,19 @@ impl DurableContainer {
     /// current primary to the backup.
     ///
     /// # Errors
-    /// Returns an error when the payload exceeds the bound, the current primary cannot be
-    /// read, or the backup or primary cannot be durably written.
+    /// Returns an error when the payload exceeds the bound, the schema is newer than this
+    /// build supports, the current primary was written with a newer schema or cannot be read,
+    /// or the backup or primary cannot be durably written.
     pub fn write(&self, schema_version: u32, payload: &[u8]) -> io::Result<()> {
+        if schema_version > self.newest_schema_version {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "schema {schema_version} is newer than the supported {}",
+                    self.newest_schema_version
+                ),
+            ));
+        }
         if payload.len() > self.maximum_payload_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -180,10 +211,22 @@ impl DurableContainer {
         let envelope = encode_envelope(schema_version, payload)?;
         match self.read_bounded(&self.path) {
             ReadOutcome::Bytes(current) if current == envelope => return Ok(()),
-            ReadOutcome::Bytes(current) if self.unwrap_envelope(&current).is_ok() => {
-                write_file_durably(&self.backup_path(), &current)?;
-            }
-            ReadOutcome::Missing | ReadOutcome::Unusable(_) | ReadOutcome::Bytes(_) => {}
+            ReadOutcome::Bytes(current) => match self.unwrap_envelope(&current) {
+                Ok((
+                    DurableFormat::Envelope {
+                        schema_version: found,
+                    },
+                    _,
+                )) if found > schema_version => {
+                    return Err(io::Error::other(format!(
+                        "the current file holds schema {found}, newer than {schema_version}, \
+                         and is not replaced"
+                    )));
+                }
+                Ok(_) => write_file_durably(&self.backup_path(), &current)?,
+                Err(_) => {}
+            },
+            ReadOutcome::Missing | ReadOutcome::Unusable(_) => {}
             ReadOutcome::Failed(error) => return Err(error),
         }
         let mut staged = StagedFile::create(&self.path)?;
@@ -208,11 +251,15 @@ impl DurableContainer {
             }),
             ReadOutcome::Unusable(reason) => rejected.push(self.reject_primary(mode, reason)),
             ReadOutcome::Bytes(bytes) => match self.decode_candidate(&bytes, &mut decode) {
-                Ok(value) => {
+                Ok(Decoded::Value(value)) => {
                     return DurableLoad {
                         restored: Some((value, DurableSource::Primary)),
                         rejected,
+                        newer_version: None,
                     };
+                }
+                Ok(Decoded::NewerVersion(schema_version)) => {
+                    return Self::newer_load(&self.path, schema_version, rejected);
                 }
                 Err(reason) => rejected.push(self.reject_primary(mode, reason)),
             },
@@ -225,11 +272,18 @@ impl DurableContainer {
         match self.staged_candidates(backup_modified) {
             Ok(candidates) => {
                 for staged in candidates {
-                    if let Some(value) = self.try_candidate(&staged, &mut decode, &mut rejected) {
-                        return DurableLoad {
-                            restored: Some((value, DurableSource::Staged(staged))),
-                            rejected,
-                        };
+                    match self.try_candidate(&staged, &mut decode, &mut rejected) {
+                        Some(Decoded::Value(value)) => {
+                            return DurableLoad {
+                                restored: Some((value, DurableSource::Staged(staged))),
+                                rejected,
+                                newer_version: None,
+                            };
+                        }
+                        Some(Decoded::NewerVersion(schema_version)) => {
+                            return Self::newer_load(&staged, schema_version, rejected);
+                        }
+                        None => {}
                     }
                 }
             }
@@ -240,10 +294,36 @@ impl DurableContainer {
             }),
         }
 
-        let restored = self
-            .try_candidate(&backup, &mut decode, &mut rejected)
-            .map(|value| (value, DurableSource::Backup));
-        DurableLoad { restored, rejected }
+        match self.try_candidate(&backup, &mut decode, &mut rejected) {
+            Some(Decoded::Value(value)) => DurableLoad {
+                restored: Some((value, DurableSource::Backup)),
+                rejected,
+                newer_version: None,
+            },
+            Some(Decoded::NewerVersion(schema_version)) => {
+                Self::newer_load(&backup, schema_version, rejected)
+            }
+            None => DurableLoad {
+                restored: None,
+                rejected,
+                newer_version: None,
+            },
+        }
+    }
+
+    fn newer_load<T>(
+        path: &Path,
+        schema_version: u32,
+        rejected: Vec<DurableRejection>,
+    ) -> DurableLoad<T> {
+        DurableLoad {
+            restored: None,
+            rejected,
+            newer_version: Some(DurableNewerVersion {
+                path: path.to_path_buf(),
+                schema_version,
+            }),
+        }
     }
 
     fn try_candidate<T, E: fmt::Display>(
@@ -251,7 +331,7 @@ impl DurableContainer {
         path: &Path,
         decode: &mut impl FnMut(DurableCandidate<'_>) -> Result<T, E>,
         rejected: &mut Vec<DurableRejection>,
-    ) -> Option<T> {
+    ) -> Option<Decoded<T>> {
         let reason = match self.read_bounded(path) {
             ReadOutcome::Missing => return None,
             ReadOutcome::Bytes(bytes) => match self.decode_candidate(&bytes, decode) {
@@ -273,9 +353,15 @@ impl DurableContainer {
         &self,
         bytes: &[u8],
         decode: &mut impl FnMut(DurableCandidate<'_>) -> Result<T, E>,
-    ) -> Result<T, String> {
+    ) -> Result<Decoded<T>, String> {
         let (format, payload) = self.unwrap_envelope(bytes)?;
+        if let DurableFormat::Envelope { schema_version } = format
+            && schema_version > self.newest_schema_version
+        {
+            return Ok(Decoded::NewerVersion(schema_version));
+        }
         decode(DurableCandidate { payload, format })
+            .map(Decoded::Value)
             .map_err(|error| format!("payload was rejected: {error}"))
     }
 
@@ -499,6 +585,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     const BOUND: usize = 1_024;
+    const NEWEST_SCHEMA: u32 = 7;
 
     fn fixture(label: &str) -> (PathBuf, DurableContainer) {
         let nonce = SystemTime::now()
@@ -509,7 +596,7 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("fixture root");
-        let container = DurableContainer::new(root.join("state.pb"), BOUND);
+        let container = DurableContainer::new(root.join("state.pb"), BOUND, NEWEST_SCHEMA);
         (root, container)
     }
 
@@ -559,7 +646,8 @@ mod tests {
     #[test]
     fn a_missing_directory_is_a_fresh_file_without_rejections() {
         let (root, _) = fixture("missing");
-        let container = DurableContainer::new(root.join("absent").join("state.pb"), BOUND);
+        let container =
+            DurableContainer::new(root.join("absent").join("state.pb"), BOUND, NEWEST_SCHEMA);
         for load in [container.load(accept_any), container.inspect(accept_any)] {
             assert!(load.restored.is_none());
             assert!(load.rejected.is_empty(), "{:?}", load.rejected);
@@ -749,10 +837,60 @@ mod tests {
         fs::write(container.path(), b"\0garbage").expect("corrupt primary");
         container.write(1, b"third").expect("third write");
         assert_eq!(
-            restored(DurableContainer::new(container.backup_path(), BOUND).inspect(accept_any)).0,
+            restored(
+                DurableContainer::new(container.backup_path(), BOUND, NEWEST_SCHEMA)
+                    .inspect(accept_any)
+            )
+            .0,
             b"good",
             "a corrupt primary is not rotated into the backup"
         );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_newer_schema_stops_the_load_without_quarantine_or_an_older_copy() {
+        let (root, container) = fixture("newer");
+        container.write(1, b"older").expect("older write");
+        let newer = DurableContainer::new(container.path().to_path_buf(), BOUND, 9);
+        newer.write(9, b"from a newer build").expect("newer write");
+        let written = fs::read(container.path()).expect("newer primary");
+
+        for load in [container.load(accept_any), container.inspect(accept_any)] {
+            assert!(load.restored.is_none(), "the older backup is not offered");
+            assert!(load.rejected.is_empty(), "{:?}", load.rejected);
+            assert_eq!(
+                load.newer_version,
+                Some(DurableNewerVersion {
+                    path: container.path().to_path_buf(),
+                    schema_version: 9,
+                })
+            );
+        }
+        assert_eq!(fs::read(container.path()).expect("primary"), written);
+        assert!(!container.quarantine_path(1).exists());
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_write_never_replaces_a_newer_file_or_writes_an_unsupported_schema() {
+        let (root, container) = fixture("newer-write");
+        container.write(1, b"older").expect("older write");
+        let newer = DurableContainer::new(container.path().to_path_buf(), BOUND, 9);
+        newer.write(9, b"from a newer build").expect("newer write");
+        let primary = fs::read(container.path()).expect("primary");
+        let backup = fs::read(container.backup_path()).expect("backup");
+
+        assert!(container.write(NEWEST_SCHEMA, b"overwrite").is_err());
+        assert_eq!(
+            container
+                .write(NEWEST_SCHEMA + 1, b"unsupported")
+                .expect_err("unsupported schema")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(fs::read(container.path()).expect("primary"), primary);
+        assert_eq!(fs::read(container.backup_path()).expect("backup"), backup);
         fs::remove_dir_all(root).expect("remove fixture");
     }
 }

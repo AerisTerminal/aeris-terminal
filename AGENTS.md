@@ -219,7 +219,14 @@ violations and missing verification explicitly, and never describe them as satis
   primary to `<name>.corrupt-1`, keeping the newest three; the readiness gate inspects
   read-only. The magic starts with NUL, which no released payload (protobuf, `key=value`
   text) can, so a file without it opens unchanged as a legacy payload and is enveloped on the
-  next save. `workspace_and_chart_chrome_persist_through_the_durable_container` rejects a
+  next save. An envelope whose schema is newer than the build's newest supported schema is a
+  newer-version document, not corruption: a load reports it without quarantining the file or
+  offering an older copy, a write never replaces it, the workspace opens read-only for the
+  session with a persistent notice, and the readiness gate refuses it. Restore outcomes the
+  user must see (fallback restore, defaulted layout, newer-version read-only) are persistent
+  `UserNotice`s with an Open folder action through
+  `platform_runtime::reveal_in_file_manager`.
+  `workspace_and_chart_chrome_persist_through_the_durable_container` rejects a
   second container or a direct writer, `.bak` or `read_to_string` path in those files.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
   `schema.rs` retains the V1–V30 migration sequence. V20 adds nullable verified market routes;

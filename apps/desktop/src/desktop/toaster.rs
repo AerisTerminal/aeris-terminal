@@ -433,7 +433,7 @@ impl Toaster {
             .notices()
             .iter()
             .find(|notice| &notice.key == key)
-            .and_then(|notice| notice.action)
+            .and_then(|notice| notice.action.clone())
     }
 
     fn motion_duration(&self, duration: Duration) -> Duration {
@@ -1451,8 +1451,10 @@ fn toast_card<H: ToastHost>(
                                         return;
                                     };
                                     action_host.update(cx, |host, host_cx| {
-                                        if host.toaster_mut().notice_action(key) == Some(action) {
-                                            host.activate_notice_action(action, host_cx);
+                                        if host.toaster_mut().notice_action(key).as_ref()
+                                            == Some(&action)
+                                        {
+                                            host.activate_notice_action(action.clone(), host_cx);
                                         }
                                     });
                                 }),
@@ -1519,6 +1521,18 @@ impl ToastHost for TerminalApp {
         match action {
             NoticeAction::Retry(RetryTarget::ChartChromePreferences) => {
                 self.save_chart_chrome_preferences(cx);
+            }
+            NoticeAction::OpenFolder(path) => {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(error) = aeris_platform_runtime::reveal_in_file_manager(&path) {
+                            diagnostic!(
+                                "Aeris could not open the folder {}: {error}",
+                                path.display()
+                            );
+                        }
+                    })
+                    .detach();
             }
         }
     }
@@ -2454,7 +2468,7 @@ mod tests {
                     source: notification_center::NoticeSource::Persistence,
                     title: "Chart preferences could not be saved",
                     detail: "Your preferences may not survive a restart.".into(),
-                    action: Some(action),
+                    action: Some(action.clone()),
                     lifetime: notification_center::NoticeLifetime::UntilCleared,
                 },
                 Instant::now(),
