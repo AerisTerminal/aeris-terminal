@@ -65,8 +65,11 @@ pub(super) enum LoginOperation {
     Forgetting,
 }
 
+/// Signing in to providers: each provider's connection view, the open login form, and the
+/// running login operations and server discovery.
 #[derive(Default)]
 pub(super) struct ProviderLoginFlow {
+    connections: DataConnections,
     form: Option<ProviderLoginForm>,
     operations: std::collections::BTreeMap<&'static str, gpui::Task<()>>,
     discovery: Option<gpui::Task<()>>,
@@ -81,6 +84,12 @@ struct ProviderLoginForm {
     dropdown: Option<LoginDropdown>,
     inputs: Vec<(&'static str, Entity<InputState>)>,
     message: Option<String>,
+}
+
+impl ProviderLoginFlow {
+    pub(super) const fn connections(&self) -> &DataConnections {
+        &self.connections
+    }
 }
 
 enum Systems {
@@ -150,7 +159,7 @@ impl TerminalApp {
         {
             Ok(servers) => servers,
             Err(error) => {
-                let view = self.data_connections.view_mut(provider);
+                let view = self.provider_login.connections.view_mut(provider);
                 view.message = Some(error);
                 view.failed = true;
                 cx.notify();
@@ -158,7 +167,12 @@ impl TerminalApp {
             }
         };
         let Some(first) = servers.first() else { return };
-        let saved = match &self.data_connections.view(provider).map(|view| &view.saved) {
+        let saved = match &self
+            .provider_login
+            .connections
+            .view(provider)
+            .map(|view| &view.saved)
+        {
             Some(SavedLogin::Saved(saved)) => Some(saved.clone()),
             _ => None,
         };
@@ -392,7 +406,7 @@ impl TerminalApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self.data_connections.view_mut(provider);
+        let view = self.provider_login.connections.view_mut(provider);
         if self.provider_login.operations.contains_key(provider.id()) {
             if operation != LoginOperation::Checking {
                 view.message = Some("A login change is already running; wait for it.".to_string());
@@ -449,7 +463,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self.data_connections.view_mut(provider);
+        let view = self.provider_login.connections.view_mut(provider);
         view.operation = None;
         match (operation, result) {
             (_, Ok(saved)) => {

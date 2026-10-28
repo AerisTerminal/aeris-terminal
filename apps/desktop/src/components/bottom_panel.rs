@@ -671,17 +671,19 @@ fn account_summaries(
 
 impl TerminalApp {
     fn toggle_bottom_panel(&mut self, cx: &mut Context<Self>) {
-        self.bottom_panel.open = !self.bottom_panel.open;
-        self.bottom_panel.account_menu_open = false;
-        if self.bottom_panel.open && self.bottom_panel.tab == BottomPanelTab::TradeHistory {
-            self.bottom_panel.history.reset_pages();
+        self.pages.bottom_panel.open = !self.pages.bottom_panel.open;
+        self.pages.bottom_panel.account_menu_open = false;
+        if self.pages.bottom_panel.open
+            && self.pages.bottom_panel.tab == BottomPanelTab::TradeHistory
+        {
+            self.pages.bottom_panel.history.reset_pages();
             self.request_history_page(cx);
         }
         cx.notify();
     }
 
     fn select_bottom_panel_tab(&mut self, tab: BottomPanelTab, cx: &mut Context<Self>) {
-        self.bottom_panel.select_tab(tab);
+        self.pages.bottom_panel.select_tab(tab);
         if tab == BottomPanelTab::TradeHistory {
             self.request_history_page(cx);
         }
@@ -689,13 +691,16 @@ impl TerminalApp {
     }
 
     pub(super) fn request_history_page(&mut self, cx: &mut Context<Self>) {
-        if !self.bottom_panel.open || self.bottom_panel.tab != BottomPanelTab::TradeHistory {
+        if !self.pages.bottom_panel.open
+            || self.pages.bottom_panel.tab != BottomPanelTab::TradeHistory
+        {
             return;
         }
         let Some((request_token, queries)) = self
+            .pages
             .bottom_panel
             .history
-            .request_page(&self.bottom_panel.filter)
+            .request_page(&self.pages.bottom_panel.filter)
         else {
             return;
         };
@@ -713,10 +718,10 @@ impl TerminalApp {
             // A retired terminal no longer needs its completed history page.
             terminal
                 .update(cx, |terminal, terminal_cx| {
-                    if terminal.bottom_panel.history.receive_page(
+                    if terminal.pages.bottom_panel.history.receive_page(
                         request_token,
                         result,
-                        &terminal.bottom_panel.filter,
+                        &terminal.pages.bottom_panel.filter,
                     ) {
                         terminal_cx.notify();
                     }
@@ -727,19 +732,19 @@ impl TerminalApp {
     }
 
     fn set_trade_history_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if self.bottom_panel.set_height(height) {
+        if self.pages.bottom_panel.set_height(height) {
             cx.notify();
         }
     }
 
     fn toggle_trade_history_account_menu(&mut self, cx: &mut Context<Self>) {
-        self.bottom_panel.account_menu_open = !self.bottom_panel.account_menu_open;
+        self.pages.bottom_panel.account_menu_open = !self.pages.bottom_panel.account_menu_open;
         cx.notify();
     }
 
     fn close_trade_history_account_menu(&mut self, cx: &mut Context<Self>) {
-        if self.bottom_panel.account_menu_open {
-            self.bottom_panel.account_menu_open = false;
+        if self.pages.bottom_panel.account_menu_open {
+            self.pages.bottom_panel.account_menu_open = false;
             cx.notify();
         }
     }
@@ -749,7 +754,7 @@ impl TerminalApp {
         filter: TradeHistoryAccountFilter,
         cx: &mut Context<Self>,
     ) {
-        self.bottom_panel.set_filter(filter);
+        self.pages.bottom_panel.set_filter(filter);
         self.request_history_page(cx);
         cx.notify();
     }

@@ -160,7 +160,7 @@ impl TerminalApp {
 
     pub(super) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.close(OverlayKind::CommandPalette);
-        self.chrome_focus.focus(window, cx);
+        self.window.chrome_focus().focus(window, cx);
         cx.notify();
     }
 
@@ -216,7 +216,7 @@ impl TerminalApp {
             }
             CommandId::ToggleFullscreen => {
                 window.toggle_fullscreen();
-                self.chrome_focus.focus(window, cx);
+                self.window.chrome_focus().focus(window, cx);
             }
             CommandId::MinimizeWindow => window.minimize_window(),
             CommandId::ZoomWindow => WindowCommand::MaximizeOrRestore.execute(window),
@@ -261,7 +261,7 @@ impl TerminalApp {
                     CommandId::FlattenAccount => TradingHotkey::FlattenAccount,
                     _ => TradingHotkey::KillSwitch,
                 };
-                self.chrome_focus.focus(window, cx);
+                self.window.chrome_focus().focus(window, cx);
                 self.run_trading_hotkey(hotkey, window, cx);
             }
         }
@@ -320,16 +320,19 @@ impl TerminalApp {
         const REDISPATCH_INTERVAL_NANOS: i64 = 15_000_000_000;
         const EVENT_GRACE_NANOS: i64 = 15 * 60 * 1_000_000_000;
         const MAXIMUM_EVENTS_PER_CHECK: usize = 16;
-        let now_instant = Instant::now();
-        if now_instant < self.next_event_risk_check {
+        if !self
+            .services
+            .event_risk_mut()
+            .claim_check(Instant::now(), CHECK_INTERVAL)
+        {
             return;
         }
-        self.next_event_risk_check = now_instant + CHECK_INTERVAL;
         let surface = self.active_surface();
         let (snapshot, maximum_lead_seconds) = {
             let surface = surface.read(cx);
             let maximum_lead_seconds = self
-                .trading_store
+                .services
+                .trading_store()
                 .read(cx)
                 .current()
                 .and_then(|set| {
@@ -350,24 +353,23 @@ impl TerminalApp {
             return;
         }
         let observed_unix_nanos = self.lifecycle.clock().wall_unix_nanos();
-        self.event_risk_dispatches.retain(|_, scheduled| {
-            scheduled
-                .checked_add(EVENT_GRACE_NANOS)
-                .is_some_and(|expires| expires >= observed_unix_nanos)
-        });
+        self.services
+            .event_risk_mut()
+            .expire(observed_unix_nanos, EVENT_GRACE_NANOS);
         let due = due_economic_event_triggers(
             &snapshot,
             maximum_lead_seconds,
             observed_unix_nanos,
-            &self.event_risk_dispatches,
+            self.services.event_risk().dispatched(),
             REDISPATCH_INTERVAL_NANOS,
             EVENT_GRACE_NANOS,
             MAXIMUM_EVENTS_PER_CHECK,
         );
         let service = self.lifecycle.trading().clone();
         for (key, _) in &due {
-            self.event_risk_dispatches
-                .insert(key.clone(), observed_unix_nanos);
+            self.services
+                .event_risk_mut()
+                .record(key.clone(), observed_unix_nanos);
         }
         if due.is_empty() {
             return;
@@ -437,13 +439,14 @@ impl TerminalApp {
                 workspaces: self.tabs.as_slice(),
                 unsaved: &unsaved,
                 start_page: self
-                    .layouts_ui
+                    .pages
+                    .layouts
                     .start_page_open()
-                    .then(|| self.layouts_ui.start_page_shown()),
-                market_summaries: &self.market_summaries,
+                    .then(|| self.pages.layouts.start_page_shown()),
+                market_summaries: self.market_watch.summaries(),
                 active: self.tabs.active_index(),
-                enabled: self.workspace_factory.is_some(),
-                error: self.workspace_error.as_deref(),
+                enabled: self.services.market_factory().is_some(),
+                error: self.notices.workspace_error(),
                 workspace_drag: self.tabs.drag(),
                 app_view: self.pages.view,
                 account: self.lifecycle.account(),
@@ -472,11 +475,11 @@ impl TerminalApp {
             TitleBarPlacement::Frameless => (
                 frameless_title_bar_row(
                     terminal,
-                    &self.frameless_title_bar,
+                    self.window.title_bar(),
                     || self.rendered_title_bar(terminal, window, cx),
                     now,
                 ),
-                frameless_reveal_zone(terminal, &self.frameless_title_bar),
+                frameless_reveal_zone(terminal, self.window.title_bar()),
             ),
             TitleBarPlacement::Hidden => (None, None),
         }
@@ -492,7 +495,7 @@ impl TerminalApp {
         bottom_panel::bottom_panel(
             bottom_panel::BottomPanelView {
                 terminal,
-                state: &self.bottom_panel,
+                state: &self.pages.bottom_panel,
                 chart: surface.chart.clone(),
                 attribution: terminal_chrome::attribution_for_session(
                     aeris_market_runtime::built_in_provider_presentations(),
@@ -519,7 +522,7 @@ impl TerminalApp {
             active,
             accounts_panel::ConnectionsView {
                 terminal,
-                data: &self.data_connections,
+                data: self.provider_login.connections(),
                 provider_login: &self.provider_login,
             },
             &self.theme,
@@ -539,17 +542,20 @@ impl TerminalApp {
         workspace_market_area(
             WorkspaceMarketArea {
                 terminal,
-                trading_store: &self.trading_store,
+                trading_store: self.services.trading_store(),
                 workspace: self.tabs.active(),
                 active_surface: active,
-                expanded_drawing_toolbar: self.chart_chrome.drawing_toolbar.shown().then_some(
-                    DrawingSidebar {
-                        menu: &self.drawing_tool_menu,
-                        favorites: self.chart_chrome.drawing_favorites,
-                    },
-                ),
+                expanded_drawing_toolbar: self
+                    .chrome
+                    .preferences()
+                    .drawing_toolbar
+                    .shown()
+                    .then_some(DrawingSidebar {
+                        menu: self.chrome.tool_menu(),
+                        favorites: self.chrome.preferences().drawing_favorites,
+                    }),
                 watchlist,
-                toaster: &self.toaster,
+                toaster: self.notices.toaster(),
                 theme: &self.theme,
             },
             cx,
@@ -599,8 +605,8 @@ impl Render for TerminalApp {
                 self.rendered_screener_page(&terminal, window, cx)
             }
         };
-        let fullscreen_focus = self.chrome_focus.clone();
-        page.track_focus(&self.chrome_focus)
+        let fullscreen_focus = self.window.chrome_focus().clone();
+        page.track_focus(self.window.chrome_focus())
             .on_key_down(cx.listener(Self::on_key_down))
             // Captured so a chart that consumes the release cannot leave a shortcut latched.
             .capture_key_up(cx.listener(|terminal, _, _, _| {
@@ -658,7 +664,10 @@ impl TerminalApp {
 
     /// The screener under the title bar. Only shell-level overlays apply on this page.
     fn rendered_screener_page(&self, terminal: &Entity<Self>, window: &Window, cx: &App) -> Div {
-        let placement = title_bar_placement(window.is_fullscreen(), self.chart_chrome.window_frame);
+        let placement = title_bar_placement(
+            window.is_fullscreen(),
+            self.chrome.preferences().window_frame,
+        );
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(terminal, window, placement, Instant::now(), cx);
         self.page_root()
@@ -668,7 +677,10 @@ impl TerminalApp {
                 &self.pages.screener,
                 &self.theme,
             ))
-            .children(fullscreen_hint_layer(&self.fullscreen_hint, &self.theme))
+            .children(fullscreen_hint_layer(
+                self.window.fullscreen_hint(),
+                &self.theme,
+            ))
             .children(frameless_reveal_zone)
             .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
@@ -687,13 +699,19 @@ impl TerminalApp {
         window: &Window,
         cx: &App,
     ) -> Div {
-        let placement = title_bar_placement(window.is_fullscreen(), self.chart_chrome.window_frame);
+        let placement = title_bar_placement(
+            window.is_fullscreen(),
+            self.chrome.preferences().window_frame,
+        );
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(terminal, window, placement, Instant::now(), cx);
         self.page_root()
             .children(title_bar)
             .child(start_page)
-            .children(fullscreen_hint_layer(&self.fullscreen_hint, &self.theme))
+            .children(fullscreen_hint_layer(
+                self.window.fullscreen_hint(),
+                &self.theme,
+            ))
             .children(frameless_reveal_zone)
             .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
@@ -720,12 +738,14 @@ impl TerminalApp {
             .chart
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
-        let placement = title_bar_placement(window.is_fullscreen(), self.chart_chrome.window_frame);
+        let placement = title_bar_placement(
+            window.is_fullscreen(),
+            self.chrome.preferences().window_frame,
+        );
         let now = Instant::now();
         // Header popups anchor below the title bar row, which moves while a frameless bar
         // slides; its animation redraws this view every frame, so the anchor follows it.
-        let title_bar_row_height =
-            placement.row_height(self.frameless_title_bar.visibility_at(now));
+        let title_bar_row_height = placement.row_height(self.window.title_bar().visibility_at(now));
         let overlay =
             self.rendered_chrome_overlay(&terminal, &active, title_bar_row_height, window, cx);
         let (context_menu, settings_menu) = self.chart_surface_menus(
@@ -737,7 +757,7 @@ impl TerminalApp {
         );
         let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size(), cx);
         let drawing_tool_menu = self.drawing_tool_menu_overlay(&terminal, window, cx);
-        let chart_top = if self.chart_fullscreen.is_some() {
+        let chart_top = if self.window.chart_fullscreen() {
             0.0
         } else {
             title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT
@@ -753,13 +773,14 @@ impl TerminalApp {
         let header = self.rendered_header(&terminal, &active, cx);
         let bottom_panel = self.rendered_bottom_panel(&terminal, &active, cx);
         let market = self.rendered_market_area(&terminal, &active, cx);
-        let fullscreen_hint = fullscreen_hint_layer(&self.fullscreen_hint, &self.theme);
+        let fullscreen_hint = fullscreen_hint_layer(self.window.fullscreen_hint(), &self.theme);
         let app_navigation = self.app_navigation_overlay(&terminal, window.viewport_size());
-        if self.chart_fullscreen.is_some() {
+        if self.window.chart_fullscreen() {
             // Every chart in the workspace layout fills the screen; a pane maximized with
             // Alt+click stays the only one shown, exactly as in the docked workspace.
             let workspace = self.tabs.active();
-            let charts = workspace_pane_grid(&terminal, workspace, &self.toaster, &self.theme, cx);
+            let toaster = self.notices.toaster();
+            let charts = workspace_pane_grid(&terminal, workspace, toaster, &self.theme, cx);
             return self
                 .page_root()
                 .child(
@@ -1541,7 +1562,7 @@ fn terminal_shell_root(
     let focus_terminal = terminal.clone();
     window.on_next_frame(move |window, cx| {
         focus_terminal.update(cx, |terminal, cx| {
-            terminal.chrome_focus.focus(window, cx);
+            terminal.window.chrome_focus().focus(window, cx);
         });
     });
     terminal

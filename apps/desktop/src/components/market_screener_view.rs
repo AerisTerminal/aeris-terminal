@@ -590,9 +590,9 @@ impl TerminalApp {
     pub(super) fn activate_market_screener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let workspace_id = self.tabs.active().id;
         self.pages.screener.ensure_worker(
-            self.workspace_factory.as_ref(),
+            self.services.market_factory(),
             workspace_id,
-            &self.market_frame_wake,
+            self.frames.market(),
         );
         self.ensure_market_screener_search(window, cx);
         self.pages.screener.refresh_now();

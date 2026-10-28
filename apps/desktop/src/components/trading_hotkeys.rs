@@ -134,7 +134,7 @@ impl TerminalApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mode = if self.chart_chrome.trading_shortcuts.one_click() {
+        let mode = if self.chrome.preferences().trading_shortcuts.one_click() {
             TradingShortcutMode::Confirm
         } else {
             TradingShortcutMode::OneClick
@@ -143,7 +143,7 @@ impl TerminalApp {
     }
 
     fn set_trading_shortcut_mode(&mut self, mode: TradingShortcutMode, cx: &mut Context<Self>) {
-        self.chart_chrome.trading_shortcuts = mode;
+        self.chrome.preferences_mut().trading_shortcuts = mode;
         // Surfaces save their own copy of the chrome preferences, so each one must carry the
         // new value or its next save would restore the old one.
         for workspace in self.tabs.iter() {
@@ -232,7 +232,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chart_chrome.trading_shortcuts.one_click() {
+        if self.chrome.preferences().trading_shortcuts.one_click() {
             self.send_confirmed_trade(&trade, cx);
         } else {
             self.keyboard_trading.confirmation = Some(TradingConfirmation {
@@ -241,7 +241,7 @@ impl TerminalApp {
                 skip_next_time: false,
             });
             // Enter and Escape answer the dialog from the shell, ahead of a focused chart.
-            self.chrome_focus.focus(window, cx);
+            self.window.chrome_focus().focus(window, cx);
         }
         cx.notify();
     }
@@ -250,7 +250,7 @@ impl TerminalApp {
         let surface = self.active_surface();
         let surface = surface.read(cx);
         let trading = &surface.trading_pnl;
-        let store = self.trading_store.read(cx);
+        let store = self.services.trading_store().read(cx);
         trading
             .order_entry
             .selected_account_id

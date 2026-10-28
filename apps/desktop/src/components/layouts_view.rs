@@ -183,10 +183,10 @@ impl TerminalApp {
     /// Shows the start page in the "New tab" placeholder, creating the placeholder when there
     /// is none. There is at most one.
     pub(super) fn open_start_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.layouts_ui.layout_menu_open = false;
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.layout_menu_open = false;
+        self.pages.layouts.card_menu = None;
         self.show_terminal_view(cx);
-        if self.layouts_ui.start_page.is_none() {
+        if self.pages.layouts.start_page.is_none() {
             let search =
                 cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Search layouts"));
             let changes = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
@@ -194,13 +194,13 @@ impl TerminalApp {
                     cx.notify();
                 }
             });
-            self.layouts_ui.start_page = Some(StartPage {
+            self.pages.layouts.start_page = Some(StartPage {
                 shown: false,
                 search,
                 _search_changes: changes,
             });
         }
-        let Some(page) = self.layouts_ui.start_page.as_mut() else {
+        let Some(page) = self.pages.layouts.start_page.as_mut() else {
             return;
         };
         let newly_shown = !page.shown;
@@ -214,14 +214,15 @@ impl TerminalApp {
                 cx,
             );
         }
-        self.workspace_error = None;
+        self.notices.clear_workspace_error();
         cx.notify();
     }
 
     /// Leaves the placeholder in the tab strip and shows the active workspace again.
     pub(super) fn hide_start_page(&mut self, cx: &mut Context<Self>) {
         let Some(page) = self
-            .layouts_ui
+            .pages
+            .layouts
             .start_page
             .as_mut()
             .filter(|page| page.shown)
@@ -229,7 +230,7 @@ impl TerminalApp {
             return;
         };
         page.shown = false;
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.card_menu = None;
         self.set_workspace_resource_class(
             self.tabs.active_index(),
             ConsumerResourceClass::Foreground,
@@ -240,10 +241,10 @@ impl TerminalApp {
 
     /// Removes the placeholder.
     pub(super) fn close_start_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.layouts_ui.start_page.take() else {
+        let Some(page) = self.pages.layouts.start_page.take() else {
             return;
         };
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.card_menu = None;
         if page.shown {
             self.set_workspace_resource_class(
                 self.tabs.active_index(),
@@ -261,11 +262,11 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = self.layout_library.unique_name(UNTITLED_LAYOUT_NAME);
+        let name = self.saved.layouts().unique_name(UNTITLED_LAYOUT_NAME);
         match self.add_workspace(&name, window, cx) {
             Ok(()) => self.close_start_page(window, cx),
             Err(error) => {
-                self.workspace_error = Some(error);
+                self.notices.show_workspace_error(error);
                 cx.notify();
             }
         }
@@ -279,11 +280,11 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.card_menu = None;
         match self.open_saved_layout(layout_id, window, cx) {
             Ok(()) => self.close_start_page(window, cx),
             Err(error) => {
-                self.workspace_error = Some(error);
+                self.notices.show_workspace_error(error);
                 cx.notify();
             }
         }
@@ -295,37 +296,37 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.layouts_ui.layout_menu_open = false;
+        self.pages.layouts.layout_menu_open = false;
         if let Err(error) = self.open_saved_layout(layout_id, window, cx) {
-            self.workspace_error = Some(error);
+            self.notices.show_workspace_error(error);
         }
         cx.notify();
     }
 
     fn copy_layout_from_start_page(&mut self, layout_id: u64, cx: &mut Context<Self>) {
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.card_menu = None;
         if let Err(error) = self.copy_saved_layout(layout_id, cx) {
-            self.workspace_error = Some(error);
+            self.notices.show_workspace_error(error);
         }
         cx.notify();
     }
 
     pub(super) fn toggle_layout_menu(&mut self, cx: &mut Context<Self>) {
-        self.layouts_ui.layout_menu_open = !self.layouts_ui.layout_menu_open;
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.layout_menu_open = !self.pages.layouts.layout_menu_open;
+        self.pages.layouts.card_menu = None;
         cx.notify();
     }
 
     fn toggle_layout_card_menu(&mut self, layout_id: u64, cx: &mut Context<Self>) {
-        self.layouts_ui.card_menu =
-            (self.layouts_ui.card_menu != Some(layout_id)).then_some(layout_id);
-        self.layouts_ui.layout_menu_open = false;
+        self.pages.layouts.card_menu =
+            (self.pages.layouts.card_menu != Some(layout_id)).then_some(layout_id);
+        self.pages.layouts.layout_menu_open = false;
         cx.notify();
     }
 
     pub(super) fn close_layout_menus(&mut self, cx: &mut Context<Self>) {
-        self.layouts_ui.layout_menu_open = false;
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.layout_menu_open = false;
+        self.pages.layouts.card_menu = None;
         cx.notify();
     }
 
@@ -338,21 +339,23 @@ impl TerminalApp {
     ) {
         let name = match purpose {
             LayoutNamePurpose::Rename(layout_id) => self
-                .layout_library
+                .saved
+                .layouts()
                 .get(layout_id)
                 .map(|layout| layout.name.clone()),
             LayoutNamePurpose::Copy => Some(self.copy_layout_name(&self.tabs.active().label)),
             LayoutNamePurpose::Create => {
-                Some(self.layout_library.unique_name(UNTITLED_LAYOUT_NAME))
+                Some(self.saved.layouts().unique_name(UNTITLED_LAYOUT_NAME))
             }
         };
         let Some(name) = name else {
-            self.workspace_error = Some("The layout no longer exists".to_string());
+            self.notices
+                .show_workspace_error("The layout no longer exists".to_string());
             cx.notify();
             return;
         };
-        self.layouts_ui.layout_menu_open = false;
-        self.layouts_ui.card_menu = None;
+        self.pages.layouts.layout_menu_open = false;
+        self.pages.layouts.card_menu = None;
         let input = cx.new(|input_cx| {
             InputState::new(window, input_cx)
                 .placeholder("Layout name")
@@ -370,7 +373,7 @@ impl TerminalApp {
                 InputEvent::Change => {
                     let name = input.read(cx).value();
                     let error = terminal.layout_name_problem(&name);
-                    if let Some(dialog) = terminal.layouts_ui.name_dialog.as_mut() {
+                    if let Some(dialog) = terminal.pages.layouts.name_dialog.as_mut() {
                         dialog.error = error;
                     }
                     cx.notify();
@@ -378,7 +381,7 @@ impl TerminalApp {
                 InputEvent::Focus | InputEvent::Blur => {}
             },
         );
-        self.layouts_ui.name_dialog = Some(LayoutNameDialog {
+        self.pages.layouts.name_dialog = Some(LayoutNameDialog {
             purpose,
             input,
             error: None,
@@ -389,20 +392,20 @@ impl TerminalApp {
 
     /// Why the open name dialog cannot use `name`, if it cannot.
     fn layout_name_problem(&self, name: &str) -> Option<String> {
-        let purpose = self.layouts_ui.name_dialog.as_ref()?.purpose;
+        let purpose = self.pages.layouts.name_dialog.as_ref()?.purpose;
         match purpose {
             LayoutNamePurpose::Rename(layout_id) => {
-                self.layout_library.check_rename(layout_id, name).err()
+                self.saved.layouts().check_rename(layout_id, name).err()
             }
             LayoutNamePurpose::Copy | LayoutNamePurpose::Create => {
-                self.layout_library.check_new_layout(name).err()
+                self.saved.layouts().check_new_layout(name).err()
             }
         }
     }
 
     /// Applies the name dialog's name, or shows why it cannot be used.
     pub(super) fn confirm_layout_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = self.layouts_ui.name_dialog.as_ref() else {
+        let Some(dialog) = self.pages.layouts.name_dialog.as_ref() else {
             return;
         };
         let purpose = dialog.purpose;
@@ -414,11 +417,11 @@ impl TerminalApp {
         };
         match result {
             Ok(()) => {
-                self.layouts_ui.name_dialog = None;
+                self.pages.layouts.name_dialog = None;
                 self.focus_workspace(window, cx);
             }
             Err(error) => {
-                if let Some(dialog) = self.layouts_ui.name_dialog.as_mut() {
+                if let Some(dialog) = self.pages.layouts.name_dialog.as_mut() {
                     dialog.error = Some(error);
                 }
             }
@@ -428,26 +431,26 @@ impl TerminalApp {
 
     /// Asks to confirm deleting a layout, or says why it cannot be deleted now.
     pub(super) fn request_layout_delete(&mut self, layout_id: u64, cx: &mut Context<Self>) {
-        self.layouts_ui.card_menu = None;
-        match self.layout_library.check_delete(
+        self.pages.layouts.card_menu = None;
+        match self.saved.layouts().check_delete(
             layout_id,
             &layout_tabs::open_layout_ids(self.tabs.as_slice()),
         ) {
             Ok(_) => {
-                self.workspace_error = None;
-                self.layouts_ui.delete_confirmation = Some(layout_id);
+                self.notices.clear_workspace_error();
+                self.pages.layouts.delete_confirmation = Some(layout_id);
             }
-            Err(error) => self.workspace_error = Some(error),
+            Err(error) => self.notices.show_workspace_error(error),
         }
         cx.notify();
     }
 
     pub(super) fn confirm_layout_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(layout_id) = self.layouts_ui.delete_confirmation.take() else {
+        let Some(layout_id) = self.pages.layouts.delete_confirmation.take() else {
             return;
         };
         if let Err(error) = self.delete_saved_layout(layout_id, cx) {
-            self.workspace_error = Some(error);
+            self.notices.show_workspace_error(error);
         }
         self.focus_start_page_search(window, cx);
         cx.notify();
@@ -455,7 +458,8 @@ impl TerminalApp {
 
     fn focus_start_page_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(page) = self
-            .layouts_ui
+            .pages
+            .layouts
             .start_page
             .as_ref()
             .filter(|page| page.shown)
@@ -463,7 +467,7 @@ impl TerminalApp {
             page.search
                 .update(cx, |search, search_cx| search.focus(window, search_cx));
         } else {
-            self.chrome_focus.focus(window, cx);
+            self.window.chrome_focus().focus(window, cx);
         }
     }
 
@@ -474,12 +478,12 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.layouts_ui.layout_menu_open = false;
-        self.layouts_ui.card_menu = None;
-        self.layouts_ui.name_dialog = None;
-        self.layouts_ui.delete_confirmation = None;
-        self.layouts_ui.close_prompt = Some(prompt);
-        self.chrome_focus.focus(window, cx);
+        self.pages.layouts.layout_menu_open = false;
+        self.pages.layouts.card_menu = None;
+        self.pages.layouts.name_dialog = None;
+        self.pages.layouts.delete_confirmation = None;
+        self.pages.layouts.close_prompt = Some(prompt);
+        self.window.chrome_focus().focus(window, cx);
         cx.notify();
     }
 
@@ -491,7 +495,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(prompt) = self.layouts_ui.close_prompt.take() else {
+        let Some(prompt) = self.pages.layouts.close_prompt.take() else {
             return;
         };
         let indices = match prompt {
@@ -506,7 +510,7 @@ impl TerminalApp {
         if save {
             for index in indices {
                 if let Err(error) = self.save_layout_tab(index, cx) {
-                    self.workspace_error = Some(error);
+                    self.notices.show_workspace_error(error);
                     cx.notify();
                     return;
                 }
@@ -525,10 +529,10 @@ impl TerminalApp {
 
     /// Closes the open layout dialog without acting.
     pub(super) fn cancel_layout_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.layouts_ui.name_dialog = None;
-        self.layouts_ui.delete_confirmation = None;
-        self.layouts_ui.close_prompt = None;
-        if self.layouts_ui.start_page_shown() {
+        self.pages.layouts.name_dialog = None;
+        self.pages.layouts.delete_confirmation = None;
+        self.pages.layouts.close_prompt = None;
+        if self.pages.layouts.start_page_shown() {
             self.focus_start_page_search(window, cx);
         } else {
             self.focus_workspace(window, cx);
@@ -542,7 +546,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.layouts_ui.start_page_shown() {
+        if self.pages.layouts.start_page_shown() {
             return;
         }
         self.run_layout_command(CommandId::SaveLayout, window, cx);
@@ -562,14 +566,15 @@ impl TerminalApp {
         cx: &App,
     ) -> Option<AnyElement> {
         let page = self
-            .layouts_ui
+            .pages
+            .layouts
             .start_page
             .as_ref()
             .filter(|page| page.shown)?;
         let theme = self.theme;
         let colors = theme.colors;
         let query = page.search.read(cx).value();
-        let layouts = matching_layouts(&self.layout_library, &query);
+        let layouts = matching_layouts(self.saved.layouts(), &query);
         let empty = (layouts.is_empty() && !query.trim().is_empty()).then(|| {
             div()
                 .text_sm()
@@ -600,11 +605,11 @@ impl TerminalApp {
                     .flex()
                     .child(Input::new(&page.search).platform(&theme).flex_1()),
             );
-        let error = self.workspace_error.clone().map(|error| {
+        let error = self.notices.workspace_error().map(|error| {
             div()
                 .text_sm()
                 .text_color(gpui_color(colors.text_danger))
-                .child(error)
+                .child(error.to_string())
         });
         Some(
             div()
@@ -662,7 +667,7 @@ impl TerminalApp {
     ) -> AnyElement {
         let layout_id = layout.layout_id;
         let open = terminal.clone();
-        let menu_open = self.layouts_ui.card_menu == Some(layout_id);
+        let menu_open = self.pages.layouts.card_menu == Some(layout_id);
         let toggle = terminal.clone();
         let dismiss = terminal.clone();
         let trigger = Button::new(("layout_card_more", layout_id), theme)
@@ -703,7 +708,7 @@ impl TerminalApp {
     pub(super) fn layout_menu_button(&self, terminal: &Entity<Self>, unsaved: bool) -> AnyElement {
         let theme = self.theme;
         let workspace = self.tabs.active();
-        let open = self.layouts_ui.layout_menu_open;
+        let open = self.pages.layouts.layout_menu_open;
         let toggle = terminal.clone();
         let dismiss = terminal.clone();
         let label = if unsaved {
@@ -732,7 +737,8 @@ impl TerminalApp {
 
     /// The header menu's rows for the most recently opened layouts other than the active one.
     fn recent_layout_rows(&self, terminal: &Entity<Self>, active_layout: u64) -> Vec<MenuRow> {
-        self.layout_library
+        self.saved
+            .layouts()
             .recently_used(RECENT_LAYOUT_LIMIT + 1)
             .into_iter()
             .filter(|layout| layout.layout_id != active_layout)
@@ -758,7 +764,8 @@ impl TerminalApp {
         let theme = self.theme;
         let active_layout = self.tabs.active().saved_layout_id;
         let autosave = self
-            .layout_library
+            .saved
+            .layouts()
             .get(active_layout)
             .is_some_and(|layout| layout.autosave);
         let action = |id: &'static str,
@@ -782,7 +789,7 @@ impl TerminalApp {
         .animate_from(PopupAnimationOrigin::new(1.0, 0.0))
         .child(
             action("layout_menu_save", "Save layout", |terminal, window, cx| {
-                terminal.layouts_ui.layout_menu_open = false;
+                terminal.pages.layouts.layout_menu_open = false;
                 terminal.run_layout_command(CommandId::SaveLayout, window, cx);
             })
             .detail("Ctrl+S")
@@ -851,12 +858,13 @@ impl TerminalApp {
         cx: &App,
     ) -> Option<AnyElement> {
         let theme = self.theme;
-        if let Some(prompt) = self.layouts_ui.close_prompt {
+        if let Some(prompt) = self.pages.layouts.close_prompt {
             return Some(self.close_prompt_dialog(terminal, prompt, cx));
         }
-        if let Some(layout_id) = self.layouts_ui.delete_confirmation {
+        if let Some(layout_id) = self.pages.layouts.delete_confirmation {
             let name = self
-                .layout_library
+                .saved
+                .layouts()
                 .get(layout_id)
                 .map_or_else(String::new, |layout| layout.name.clone());
             let cancel = terminal.clone();
@@ -881,7 +889,7 @@ impl TerminalApp {
                 .into_any_element(),
             );
         }
-        let dialog = self.layouts_ui.name_dialog.as_ref()?;
+        let dialog = self.pages.layouts.name_dialog.as_ref()?;
         let cancel = terminal.clone();
         let confirm = terminal.clone();
         Some(

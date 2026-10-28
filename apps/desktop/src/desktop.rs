@@ -5,8 +5,17 @@ mod accounts_panel;
 #[path = "desktop/alerts_controller.rs"]
 mod alerts_controller;
 use alerts_controller::{PriceAlertAnnouncement, PriceAlertDialogState, PriceAlertDropdown};
+#[path = "desktop/app_chrome.rs"]
+mod app_chrome;
 #[path = "components/app_navigation.rs"]
 mod app_navigation;
+use app_chrome::AppChrome;
+#[path = "desktop/app_notices.rs"]
+mod app_notices;
+use app_notices::AppNotices;
+#[path = "desktop/app_services.rs"]
+mod app_services;
+use app_services::AppServices;
 #[path = "assets.rs"]
 mod assets;
 #[path = "components/big_trades_dialog.rs"]
@@ -43,6 +52,9 @@ mod drawing_toolbar;
 mod engine_market_worker;
 #[path = "frame_poll_gate.rs"]
 mod frame_poll_gate;
+#[path = "desktop/frame_wakes.rs"]
+mod frame_wakes;
+use frame_wakes::FrameWakes;
 #[path = "components/frameless_title_bar.rs"]
 mod frameless_title_bar;
 #[path = "components/fullscreen_hint.rs"]
@@ -65,6 +77,9 @@ pub(super) fn default_workspace_for_test() -> WorkspaceState {
 mod market_screener;
 #[path = "components/market_screener_view.rs"]
 mod market_screener_view;
+#[path = "desktop/market_watch.rs"]
+mod market_watch;
+use market_watch::MarketWatch;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
 #[path = "desktop/notification_center.rs"]
@@ -98,6 +113,9 @@ mod provider_login;
 #[cfg(any(test, feature = "diagnostics"))]
 #[path = "readiness_conformance.rs"]
 mod readiness_conformance;
+#[path = "desktop/saved_workspace.rs"]
+mod saved_workspace;
+use saved_workspace::{SavedWorkspace, UnsavedEdit, WorkspaceSave, WorkspaceSnapshot};
 #[path = "components/side_panel_dock.rs"]
 mod side_panel_dock;
 #[path = "components/sign_in_gate.rs"]
@@ -129,6 +147,9 @@ mod trading_hotkeys;
 mod update;
 #[path = "components/volume_dialog.rs"]
 mod volume_dialog;
+#[path = "desktop/window_state.rs"]
+mod window_state;
+use window_state::{ActivityChange, WindowState};
 #[path = "components/watchlist_panel.rs"]
 mod watchlist_panel;
 #[path = "components/workspace_layout.rs"]
@@ -238,18 +259,16 @@ use chrome_menu::{
 };
 use command_palette::command_palette_layer;
 use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
-use drawing_context_toolbar::DrawingContextToolbar;
 use drawing_settings_dialog::{DrawingSettingsDialogState, drawing_settings_dialog_layer};
 use drawing_toolbar::{
-    DrawingFavoritesToolbar, DrawingSidebar, DrawingToolChoice, DrawingToolMenu,
-    DrawingToolbarState, drawing_favorites_default_origin, drawing_favorites_toolbar_layer,
-    drawing_tool_menu_layer, drawing_toolbar,
+    DrawingFavoritesToolbar, DrawingSidebar, DrawingToolChoice, DrawingToolbarState,
+    drawing_favorites_default_origin, drawing_favorites_toolbar_layer, drawing_tool_menu_layer,
+    drawing_toolbar,
 };
 use frameless_title_bar::{
-    FramelessTitleBar, TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row,
-    title_bar_placement,
+    TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row, title_bar_placement,
 };
-use fullscreen_hint::{FullscreenHint, fullscreen_hint_layer};
+use fullscreen_hint::fullscreen_hint_layer;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
     Entity, FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit,
@@ -324,11 +343,12 @@ use symbol_menu::{
 use terminal_chrome::{
     CaptionPlatform, CaptionPointerOwner, DrawingHistoryControl, WindowMoveGestureTransition,
     caption_keyboard_activates, caption_pointer_owner, connection_presentation,
+    window_move_gesture_transition,
 };
 use terminal_chrome::{
     WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, chrome_tooltip, exchange_mark,
     fullscreen_escape_command, header_icon, mark_tile, series_glyph, terminal_header,
-    watchlist_step, window_move_gesture_transition, workspace_title_bar,
+    watchlist_step, workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, restored_workspace_tab,
@@ -338,7 +358,7 @@ use time_sales_panel::TimeSalesPanelState;
 use toaster::Toaster;
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use volume_dialog::volume_dialog_layer;
-use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistFlagsView, WatchlistPanelState};
+use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
@@ -4813,15 +4833,6 @@ impl WatchlistEntry {
     }
 }
 
-/// Session-only watchlist flag UI: the color filter, its menu and the open flag picker.
-#[derive(Default)]
-struct WatchlistFlagState {
-    /// Shows only the watchlist rows flagged with this color.
-    filter: Option<String>,
-    filter_menu_open: bool,
-    picker: Option<WatchlistFlagPicker>,
-}
-
 /// The open color picker of one watchlist row's flag.
 #[derive(Clone)]
 struct WatchlistFlagPicker {
@@ -5125,74 +5136,22 @@ enum WorkspaceShellKind {
     Tabs,
 }
 
-/// Chart-only fullscreen state; see [`TerminalApp::toggle_chart_fullscreen`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ChartFullscreen {
-    /// Entering put the window into fullscreen, so leaving takes it out again.
-    restores_window: bool,
-}
-
-// The window, persistence and update-restart flags are still separate fields here.
-#[allow(clippy::struct_excessive_bools)]
 struct TerminalApp {
     tabs: TabStrip,
     theme: AerisTheme,
-    drawing_tool_menu: DrawingToolMenu,
-    /// Pointer offset from the favorites toolbar origin while its grip is dragged.
-    drawing_favorites_grab: Option<gpui::Point<Pixels>>,
-    window_active: bool,
-    frame_poll_gate: frame_poll_gate::FramePollGate,
-    market_frame_wake: UiWake,
-    market_wake_listener_started: Option<()>,
-    chrome_focus: FocusHandle,
+    frames: FrameWakes,
+    window: WindowState,
     lifecycle: DesktopLifecycle,
-    trading_store: Entity<trading_store::TradingStore>,
-    workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
-    watchlist: Vec<WatchlistEntry>,
-    watchlist_flags: WatchlistFlagState,
-    market_summaries: BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
-    persisted_watchlist: Vec<WorkspaceWatchlistEntryState>,
-    watchlist_persistence_dirty: bool,
-    workspace_persistence: Option<WorkspaceLayoutPersistence>,
-    persisted_layout: Vec<WorkspaceTabState>,
-    persisted_active_workspace_id: u64,
-    layout_library: LayoutLibrary,
-    persisted_layout_library_revision: u64,
-    /// The working drawing set of every saved layout an open tab shows, shared by those tabs.
-    layout_drawings: BTreeMap<u64, LayoutDrawings>,
-    workspace_error: Option<String>,
-    watchlist_drag: Option<WatchlistDragState>,
-    watchlist_scroll: ScrollHandle,
+    services: AppServices,
+    market_watch: MarketWatch,
+    saved: SavedWorkspace,
     chart_menus: ChartMenus,
-    chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
-    chart_settings_persistence_dirty: bool,
-    /// User-named drawing style templates of every kind, shared by every chart.
-    drawing_templates: Vec<WorkspaceDrawingTemplateState>,
-    drawing_templates_persistence_dirty: bool,
-    drawing_context_toolbar: DrawingContextToolbar,
     overlays: OverlayStack,
     pages: app_navigation::AppPages,
-    frameless_title_bar: FramelessTitleBar,
-    fullscreen_hint: FullscreenHint,
-    toaster: Toaster,
-    /// Shift+F chart-only fullscreen: only the workspace's charts show. Holds whether entering it
-    /// also put the window into fullscreen, so leaving restores the window as it was.
-    chart_fullscreen: Option<ChartFullscreen>,
-    bottom_panel: bottom_panel::BottomPanelState,
-    profile_refresh_on_activation: bool,
+    notices: AppNotices,
     keyboard_trading: trading_hotkeys::KeyboardTrading,
-    data_connections: DataConnections,
     provider_login: provider_login::ProviderLoginFlow,
-    linked_sync_revisions: BTreeMap<String, u64>,
-    event_risk_dispatches: BTreeMap<String, i64>,
-    next_event_risk_check: Instant,
-    updater: Option<DesktopUpdater>,
-    update_restart_persistence_pending: bool,
-    chart_chrome: chart_chrome::ChartChromePreferences,
-    window_move_pending: bool,
-    closing: bool,
-    /// The start page, layout menu and layout dialogs.
-    layouts_ui: layouts_view::LayoutsUi,
+    chrome: AppChrome,
 }
 
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {

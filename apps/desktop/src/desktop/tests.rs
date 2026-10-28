@@ -1488,16 +1488,16 @@ mod timeframe_input {
         second.display_symbol = "SECOND".to_string();
         cx.update(|_, cx| {
             terminal.update(cx, |terminal, _| {
-                terminal.watchlist = vec![
-                    WatchlistEntry {
-                        instrument: first.clone(),
-                        flag: None,
+                terminal.market_watch = MarketWatch::restore(vec![
+                    WorkspaceWatchlistEntryState {
+                        instrument: Some(first.clone()),
+                        flag_color: String::new(),
                     },
-                    WatchlistEntry {
-                        instrument: second.clone(),
-                        flag: None,
+                    WorkspaceWatchlistEntryState {
+                        instrument: Some(second.clone()),
+                        flag_color: String::new(),
                     },
-                ];
+                ]);
             });
         });
         let (provider, id) = (first.provider.clone(), first.instrument_id.clone());
@@ -1510,16 +1510,12 @@ mod timeframe_input {
         cx.read(|cx| {
             let terminal = terminal.read(cx);
             assert_eq!(
-                terminal.watchlist[0].flag.as_deref(),
+                terminal.market_watch.entries()[0].flag.as_deref(),
                 Some("#335CFF"),
                 "a first press flags the row in the default color"
             );
             assert!(
-                terminal
-                    .watchlist_flags
-                    .picker
-                    .as_ref()
-                    .is_some_and(|picker| picker.is_for(&terminal.watchlist[0])),
+                terminal.market_watch.picker_is_for(&provider, &id),
                 "and opens that row's color picker"
             );
         });
@@ -1532,7 +1528,7 @@ mod timeframe_input {
         cx.update(|_, cx| terminal.update(cx, TerminalApp::close_watchlist_flag_picker));
         cx.read(|cx| {
             let terminal = terminal.read(cx);
-            assert!(terminal.watchlist_flags.picker.is_none());
+            assert!(terminal.market_watch.flags_view().picker.is_none());
             let entries = terminal.watchlist_entries();
             assert_eq!(
                 entries[0].flag_color, "#F23645",
@@ -1560,11 +1556,11 @@ mod timeframe_input {
         cx.read(|cx| {
             let terminal = terminal.read(cx);
             assert!(
-                terminal.watchlist[0].flag.is_none(),
+                terminal.market_watch.entries()[0].flag.is_none(),
                 "a press on a flag clears it"
             );
             assert!(
-                terminal.watchlist_flags.filter.is_none(),
+                terminal.market_watch.flags_view().filter.is_none(),
                 "clearing the last flag of the filtered color ends the filter"
             );
             assert_eq!(terminal.watchlist_rows(cx).len(), 2);
@@ -1575,7 +1571,7 @@ mod timeframe_input {
     fn terminal_fixture_keeps_the_subscription_thread_off_the_gpui_scheduler() {
         let mut cx = TestAppContext::single();
         let (terminal, visual) = terminal_harness(&mut cx);
-        let store = visual.read(|app| terminal.read(app).trading_store.clone());
+        let store = visual.read(|app| terminal.read(app).services.trading_store().clone());
         assert!(
             cx.update(|app| store.update(app, |store, _| store.stop()))
                 .is_none(),
@@ -1643,7 +1639,14 @@ mod timeframe_input {
                     .is_some_and(|chart| chart.read(cx).has_keyboard_focus(window))
             })
         };
-        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.update(|window, cx| {
+            terminal
+                .read(cx)
+                .window
+                .chrome_focus()
+                .clone()
+                .focus(window, cx);
+        });
         cx.run_until_parked();
         assert!(workspace_focused(cx), "the shell counts as workspace focus");
 
@@ -1678,7 +1681,14 @@ mod timeframe_input {
         assert!(workspace_focused(cx));
 
         // Ctrl+Tab lands in the selected workspace, as a browser lands in the selected page.
-        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.update(|window, cx| {
+            terminal
+                .read(cx)
+                .window
+                .chrome_focus()
+                .clone()
+                .focus(window, cx);
+        });
         cx.run_until_parked();
         assert!(!chart_focused(cx));
         cx.simulate_keystrokes("ctrl-tab");
@@ -1737,7 +1747,14 @@ mod timeframe_input {
                 keystroke: gpui::Keystroke::parse(key).expect("key"),
             });
         };
-        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.update(|window, cx| {
+            terminal
+                .read(cx)
+                .window
+                .chrome_focus()
+                .clone()
+                .focus(window, cx);
+        });
         cx.run_until_parked();
 
         cx.simulate_keystrokes("ctrl-shift-x");
@@ -1758,7 +1775,7 @@ mod timeframe_input {
 
         cx.update(|_, cx| {
             terminal.update(cx, |terminal, _| {
-                terminal.chart_chrome.trading_shortcuts =
+                terminal.chrome.preferences_mut().trading_shortcuts =
                     crate::desktop::chart_chrome::TradingShortcutMode::OneClick;
             });
         });
@@ -2634,7 +2651,7 @@ mod timeframe_input {
     ) -> WorkspaceTabState {
         update_terminal(terminal, cx, |terminal, _, _| {
             let layout_id = terminal.tabs[index].saved_layout_id;
-            let library = &mut terminal.layout_library;
+            let library = terminal.saved.layouts_mut();
             library
                 .set_autosave(layout_id, false)
                 .expect("manual layout");
@@ -2672,12 +2689,19 @@ mod timeframe_input {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
         let page = |cx: &mut VisualTestContext| {
             cx.read(|cx| {
-                let layouts = &terminal.read(cx).layouts_ui;
+                let layouts = &terminal.read(cx).pages.layouts;
                 (layouts.start_page_open(), layouts.start_page_shown())
             })
         };
         let tab_count = |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).tabs.len());
-        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.update(|window, cx| {
+            terminal
+                .read(cx)
+                .window
+                .chrome_focus()
+                .clone()
+                .focus(window, cx);
+        });
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-t");
         assert_eq!(page(cx), (true, true), "Ctrl+T shows the start page");
@@ -2706,7 +2730,7 @@ mod timeframe_input {
         );
         cx.read(|cx| {
             let terminal = terminal.read(cx);
-            assert_eq!(terminal.workspace_error, None);
+            assert_eq!(terminal.notices.workspace_error(), None);
             assert_eq!(terminal.tabs.len(), 2);
             assert_eq!(terminal.tabs.active_index(), 1);
             let created = &terminal.tabs[1];
@@ -2717,7 +2741,8 @@ mod timeframe_input {
             );
             assert_eq!(
                 terminal
-                    .layout_library
+                    .saved
+                    .layouts()
                     .get(created.saved_layout_id)
                     .map(|layout| layout.name.as_str()),
                 Some(created.label.as_str())
@@ -2750,8 +2775,8 @@ mod timeframe_input {
         }
         cx.read(|cx| {
             let terminal = terminal.read(cx);
-            assert_eq!(terminal.workspace_error, None);
-            assert!(!terminal.layouts_ui.start_page_open());
+            assert_eq!(terminal.notices.workspace_error(), None);
+            assert!(!terminal.pages.layouts.start_page_open());
             assert_eq!(terminal.tabs.active_index(), 2);
         });
         assert_eq!(
@@ -2784,7 +2809,8 @@ mod timeframe_input {
                     cx,
                 );
                 let input = terminal
-                    .layouts_ui
+                    .pages
+                    .layouts
                     .name_input()
                     .expect("name field")
                     .clone();
@@ -2793,7 +2819,8 @@ mod timeframe_input {
                 });
                 terminal.confirm_layout_name(window, cx);
                 terminal
-                    .layouts_ui
+                    .pages
+                    .layouts
                     .name_dialog()
                     .map(|(_, error)| error.unwrap_or_default().to_string())
             })
@@ -2825,7 +2852,8 @@ mod timeframe_input {
             cx.read(|cx| {
                 terminal
                     .read(cx)
-                    .layout_library
+                    .saved
+                    .layouts()
                     .get(first_layout)
                     .map(|layout| layout.name.clone())
             }),
@@ -2844,7 +2872,7 @@ mod timeframe_input {
         })
         .expect("a copy");
         let dialog_open = |cx: &mut VisualTestContext| {
-            cx.read(|cx| terminal.read(cx).layouts_ui.name_dialog().is_some())
+            cx.read(|cx| terminal.read(cx).pages.layouts.name_dialog().is_some())
         };
         let open_rename = |cx: &mut VisualTestContext| {
             update_terminal(&terminal, cx, |terminal, window, cx| {
@@ -2864,7 +2892,8 @@ mod timeframe_input {
             cx.read(|cx| {
                 terminal
                     .read(cx)
-                    .layouts_ui
+                    .pages
+                    .layouts
                     .name_dialog()
                     .is_some_and(|(_, error)| error.is_some())
             }),
@@ -2872,7 +2901,8 @@ mod timeframe_input {
         );
         update_terminal(&terminal, cx, |terminal, window, cx| {
             let input = terminal
-                .layouts_ui
+                .pages
+                .layouts
                 .name_input()
                 .expect("name field")
                 .clone();
@@ -2899,9 +2929,9 @@ mod timeframe_input {
             cx.read(|cx| {
                 let terminal = terminal.read(cx);
                 (
-                    terminal.layouts_ui.delete_confirmation(),
-                    terminal.layout_library.get(open).is_some(),
-                    terminal.layout_library.get(copy).is_some(),
+                    terminal.pages.layouts.delete_confirmation(),
+                    terminal.saved.layouts().get(open).is_some(),
+                    terminal.saved.layouts().get(copy).is_some(),
                 )
             })
         };
@@ -2914,7 +2944,13 @@ mod timeframe_input {
             (None, true, true),
             "an open layout is not deleted"
         );
-        let error = cx.read(|cx| terminal.read(cx).workspace_error.clone());
+        let error = cx.read(|cx| {
+            terminal
+                .read(cx)
+                .notices
+                .workspace_error()
+                .map(str::to_string)
+        });
         assert!(
             error
                 .as_deref()
@@ -2941,7 +2977,7 @@ mod timeframe_input {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
         let open = tab_layouts(&terminal, cx)[0].0;
         update_terminal(&terminal, cx, |terminal, _, cx| {
-            while terminal.layout_library.states().len() < layout_library::MAXIMUM_SAVED_LAYOUTS {
+            while terminal.saved.layouts().states().len() < layout_library::MAXIMUM_SAVED_LAYOUTS {
                 terminal
                     .copy_saved_layout(open, cx)
                     .expect("room for another copy");
@@ -2959,9 +2995,9 @@ mod timeframe_input {
         update_terminal(&terminal, cx, TerminalApp::create_layout_from_start_page);
         cx.read(|cx| {
             let terminal = terminal.read(cx);
-            assert_eq!(terminal.workspace_error.as_ref(), Some(&full));
+            assert_eq!(terminal.notices.workspace_error(), Some(full.as_str()));
             assert_eq!(terminal.tabs.len(), 1, "no tab opens");
-            assert!(terminal.layouts_ui.start_page_shown());
+            assert!(terminal.pages.layouts.start_page_shown());
         });
 
         update_terminal(&terminal, cx, |terminal, window, cx| {
@@ -2971,15 +3007,15 @@ mod timeframe_input {
         cx.read(|cx| {
             let terminal = terminal.read(cx);
             assert_eq!(
-                terminal.layouts_ui.name_dialog(),
+                terminal.pages.layouts.name_dialog(),
                 Some((LayoutNamePurpose::Create, Some(full.as_str())))
             );
             assert_eq!(terminal.tabs.len(), 1);
             assert_eq!(
-                terminal.layout_library.states().len(),
+                terminal.saved.layouts().states().len(),
                 layout_library::MAXIMUM_SAVED_LAYOUTS
             );
-            assert!(terminal.layout_library.get(open).is_some());
+            assert!(terminal.saved.layouts().get(open).is_some());
         });
     }
 
@@ -3001,7 +3037,14 @@ mod timeframe_input {
             "a manual layout shows its unsaved changes"
         );
 
-        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.update(|window, cx| {
+            terminal
+                .read(cx)
+                .window
+                .chrome_focus()
+                .clone()
+                .focus(window, cx);
+        });
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-s");
         assert_eq!(unsaved(cx), [false], "Ctrl+S saves the layout");
@@ -3029,8 +3072,9 @@ mod timeframe_input {
     #[gpui::test]
     fn closing_a_tab_with_unsaved_changes_asks_to_save_or_discard(cx: &mut TestAppContext) {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
-        let prompt =
-            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).layouts_ui.close_prompt());
+        let prompt = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).pages.layouts.close_prompt())
+        };
         let open_tab = |name: &str, cx: &mut VisualTestContext| {
             update_terminal(&terminal, cx, |terminal, window, cx| {
                 terminal.add_workspace(name, window, cx).expect("a new tab");
@@ -3047,7 +3091,8 @@ mod timeframe_input {
             cx.read(|cx| {
                 terminal
                     .read(cx)
-                    .layout_library
+                    .saved
+                    .layouts()
                     .get(layout_id)
                     .and_then(|layout| layout.tab.clone())
             })
@@ -3104,7 +3149,10 @@ mod timeframe_input {
         let state = |cx: &mut VisualTestContext| {
             cx.read(|cx| {
                 let terminal = terminal.read(cx);
-                (terminal.layouts_ui.close_prompt(), terminal.closing)
+                (
+                    terminal.pages.layouts.close_prompt(),
+                    terminal.window.is_closing(),
+                )
             })
         };
         let should_close = |cx: &mut VisualTestContext| {
@@ -3132,7 +3180,8 @@ mod timeframe_input {
             cx.read(|cx| {
                 terminal
                     .read(cx)
-                    .layout_library
+                    .saved
+                    .layouts()
                     .get(layout_id)
                     .and_then(|layout| layout.tab.clone())
             }),
@@ -3149,9 +3198,9 @@ mod timeframe_input {
             cx,
             TerminalApp::window_should_close
         ));
-        assert!(cx.read(|cx| terminal.read(cx).closing));
+        assert!(cx.read(|cx| terminal.read(cx).window.is_closing()));
         assert_eq!(
-            cx.read(|cx| terminal.read(cx).layouts_ui.close_prompt()),
+            cx.read(|cx| terminal.read(cx).pages.layouts.close_prompt()),
             None
         );
         assert!(

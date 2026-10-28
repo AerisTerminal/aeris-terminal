@@ -8,11 +8,14 @@ const APP_NAVIGATION_MENU_WIDTH: f32 = 200.0;
 const APP_NAVIGATION_MENU_GAP: f32 = 4.0;
 const APP_NAVIGATION_ICON_SIZE: f32 = 16.0;
 
-/// The page shown under the title bar and the pages besides the terminal.
+/// The page shown under the title bar, the pages besides the terminal, the terminal page's
+/// bottom panel and the start page with its layout menu and dialogs.
 #[derive(Default)]
 pub(super) struct AppPages {
     pub(super) view: AppView,
     pub(super) screener: MarketScreener,
+    pub(super) bottom_panel: bottom_panel::BottomPanelState,
+    pub(super) layouts: layouts_view::LayoutsUi,
 }
 
 pub(super) fn app_navigation_button(
@@ -165,7 +168,7 @@ impl TerminalApp {
             }
             AppView::Terminal => {
                 self.show_terminal_view(cx);
-                self.chrome_focus.focus(window, cx);
+                self.window.chrome_focus().focus(window, cx);
             }
         }
     }

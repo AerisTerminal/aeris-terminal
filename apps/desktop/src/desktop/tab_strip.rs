@@ -1,8 +1,9 @@
-//! The workspace tab strip: the open tabs in display order, the selected tab and the tab a
-//! pointer is dragging. Every change that moves, adds or removes a tab keeps the selection on
+//! The workspace tab strip: the open tabs in display order, the selected tab, the tab a
+//! pointer is dragging and the linked-chart sync revisions its panes already applied. Every change that moves, adds or removes a tab keeps the selection on
 //! the same tab and refreshes the keyboard focus order; the terminal decides what to repaint,
 //! persist and retire.
 
+use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};
 
 use super::WorkspaceTab;
@@ -11,6 +12,8 @@ use super::WorkspaceTab;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 /// Space between the strip's left edge and its first tab.
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
+/// Chart sources whose last applied linked-chart sync revision the strip remembers.
+const MAXIMUM_LINKED_SYNC_SOURCES: usize = 64;
 
 /// A tab drag in progress: the dragged tab, where the pointer grabbed it and the last pointer
 /// position the strip reported.
@@ -84,6 +87,8 @@ pub(super) struct TabStrip {
     tabs: Vec<WorkspaceTab>,
     active: usize,
     drag: Option<WorkspaceDragState>,
+    /// The newest linked-chart sync revision applied from each source chart.
+    linked_sync: BTreeMap<String, u64>,
 }
 
 impl TabStrip {
@@ -97,9 +102,31 @@ impl TabStrip {
             tabs,
             active,
             drag: None,
+            linked_sync: BTreeMap::new(),
         };
         strip.refresh_focus_order();
         strip
+    }
+
+    /// Records a linked-chart sync event so linked panes apply it once. Refuses a revision at
+    /// or below the one already applied from `source`. A new source past the bound replaces the
+    /// first remembered source in key order.
+    pub(super) fn accept_linked_sync(&mut self, source: &str, revision: u64) -> bool {
+        if self
+            .linked_sync
+            .get(source)
+            .is_some_and(|applied| *applied >= revision)
+        {
+            return false;
+        }
+        if !self.linked_sync.contains_key(source)
+            && self.linked_sync.len() == MAXIMUM_LINKED_SYNC_SOURCES
+            && let Some(first) = self.linked_sync.keys().next().cloned()
+        {
+            self.linked_sync.remove(&first);
+        }
+        self.linked_sync.insert(source.to_string(), revision);
+        true
     }
 
     pub(super) fn as_slice(&self) -> &[WorkspaceTab] {
@@ -404,6 +431,31 @@ mod tests {
         assert_eq!(wrapped_workspace_index(1, 3, -1), Some(0));
         assert_eq!(wrapped_workspace_index(1, 3, 1), Some(2));
         assert_eq!(wrapped_workspace_index(0, 0, 1), None);
+    }
+
+    #[test]
+    fn linked_sync_applies_each_revision_once_within_its_bound() {
+        let mut strip = strip(&[1], None, &mut TestAppContext::single());
+        assert!(strip.accept_linked_sync("chart-a", 2));
+        assert!(
+            !strip.accept_linked_sync("chart-a", 2),
+            "a revision applies once"
+        );
+        assert!(
+            !strip.accept_linked_sync("chart-a", 1),
+            "an older revision is refused"
+        );
+        assert!(strip.accept_linked_sync("chart-a", 3));
+        for index in 1..MAXIMUM_LINKED_SYNC_SOURCES {
+            assert!(strip.accept_linked_sync(&format!("chart-b{index:02}"), 1));
+        }
+        assert_eq!(strip.linked_sync.len(), MAXIMUM_LINKED_SYNC_SOURCES);
+        assert!(strip.accept_linked_sync("chart-c", 1));
+        assert_eq!(strip.linked_sync.len(), MAXIMUM_LINKED_SYNC_SOURCES);
+        assert!(
+            strip.accept_linked_sync("chart-a", 1),
+            "the first source in key order was forgotten to make room"
+        );
     }
 
     #[test]

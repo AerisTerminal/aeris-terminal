@@ -687,7 +687,7 @@ impl TerminalApp {
         choice: DrawingToolChoice,
         cx: &mut Context<Self>,
     ) {
-        let favorites = &mut self.chart_chrome.drawing_favorites;
+        let favorites = &mut self.chrome.preferences_mut().drawing_favorites;
         let first = favorites.is_empty();
         match choice {
             DrawingToolChoice::Cursor => return,
@@ -701,7 +701,7 @@ impl TerminalApp {
     }
 
     pub(super) fn toggle_drawing_favorites_toolbar(&mut self, cx: &mut Context<Self>) {
-        let favorites = &mut self.chart_chrome.drawing_favorites;
+        let favorites = &mut self.chrome.preferences_mut().drawing_favorites;
         favorites.toolbar_visible = !favorites.toolbar_visible;
         self.commit_drawing_favorites(cx);
     }
@@ -711,7 +711,7 @@ impl TerminalApp {
         pointer: gpui::Point<Pixels>,
         origin: gpui::Point<Pixels>,
     ) {
-        self.drawing_favorites_grab = Some(pointer - origin);
+        self.chrome.begin_favorites_drag(pointer - origin);
     }
 
     /// Follows the pointer in memory only; the position is saved once when the drag ends.
@@ -721,10 +721,10 @@ impl TerminalApp {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let Some(grab) = self.drawing_favorites_grab else {
+        let Some(grab) = self.chrome.favorites_grab() else {
             return;
         };
-        let favorites = &mut self.chart_chrome.drawing_favorites;
+        let favorites = &mut self.chrome.preferences_mut().drawing_favorites;
         let count = favorite_entries(favorites).count();
         let toolbar = floating_toolbar_size(count, self.theme.dimensions.border_width);
         let origin = clamp_floating_toolbar_origin(pointer - grab, viewport, toolbar);
@@ -736,7 +736,7 @@ impl TerminalApp {
     }
 
     pub(super) fn end_drawing_favorites_move(&mut self, cx: &mut Context<Self>) {
-        if self.drawing_favorites_grab.take().is_some() {
+        if self.chrome.end_favorites_drag() {
             self.commit_drawing_favorites(cx);
         }
     }
@@ -744,7 +744,7 @@ impl TerminalApp {
     /// Every surface saves its own copy of the chrome preferences, so each one must hold the
     /// current favorites before any of them writes the shared file.
     fn commit_drawing_favorites(&mut self, cx: &mut Context<Self>) {
-        let favorites = self.chart_chrome.drawing_favorites;
+        let favorites = self.chrome.preferences().drawing_favorites;
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
@@ -898,7 +898,7 @@ fn drawing_tool_slot(
             canvas(
                 move |bounds, _, cx| {
                     bounds_terminal.update(cx, |terminal, terminal_cx| {
-                        if terminal.drawing_tool_menu.track_slot(index, bounds) {
+                        if terminal.chrome.tool_menu_mut().track_slot(index, bounds) {
                             terminal_cx.notify();
                         }
                     });

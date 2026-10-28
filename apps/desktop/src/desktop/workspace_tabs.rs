@@ -1,5 +1,6 @@
 //! Workspace tabs.
 
+use super::market_watch::{DragMove, FlagPress, PickerColor};
 use super::*;
 use aeris_observability::diagnostic;
 
@@ -14,18 +15,6 @@ pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize
     let item = items.remove(source);
     items.insert(destination, item);
     true
-}
-
-fn restore_watchlist(entries: Vec<WorkspaceWatchlistEntryState>) -> Vec<WatchlistEntry> {
-    entries
-        .into_iter()
-        .filter_map(|entry| {
-            Some(WatchlistEntry {
-                instrument: entry.instrument?,
-                flag: normalize_hex_color(&entry.flag_color),
-            })
-        })
-        .collect()
 }
 
 fn start_market_summary(
@@ -140,10 +129,13 @@ impl TerminalApp {
             let now = Instant::now();
             match event {
                 PaneNoticeEvent::Post(notice) => {
-                    app.toaster
-                        .post_notice(toaster::ToastStack::of(&surface), notice.clone(), now);
+                    app.notices.toaster_mut().post_notice(
+                        toaster::ToastStack::of(&surface),
+                        notice.clone(),
+                        now,
+                    );
                 }
-                PaneNoticeEvent::Clear(key) => app.toaster.clear_notice(key, now),
+                PaneNoticeEvent::Clear(key) => app.notices.toaster_mut().clear_notice(key, now),
             }
             cx.notify();
         })
@@ -181,80 +173,58 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let workspace_persistence = Self::start_workspace_layout_persistence(&init, &lifecycle);
-        let market_frame_wake = UiWake::default();
-        lifecycle.set_context_publication_wake(market_frame_wake.callback());
+        let frames = FrameWakes::default();
+        lifecycle.set_context_publication_wake(frames.market().callback());
         let mut tabs = TabStrip::new(init.workspaces, init.active_workspace_id);
-        Self::wire_restored_surfaces(tabs.as_slice(), tabs.active_index(), &market_frame_wake, cx);
+        Self::wire_restored_surfaces(tabs.as_slice(), tabs.active_index(), frames.market(), cx);
         let (layout_library, layout_drawings) = layout_tabs::restored_layouts(
             init.saved_layouts,
             &mut tabs,
             layout_tabs::now_unix_ms(&lifecycle),
             cx,
         );
-        let persisted_layout = workspace_layout_tabs(tabs.as_slice(), cx);
-        let persisted_active_workspace_id = tabs.active().id;
-        let trading_store = start_trading_store(&lifecycle, &market_frame_wake, cx);
+        let restored = WorkspaceSnapshot {
+            layout: workspace_layout_tabs(tabs.as_slice(), cx),
+            active_workspace_id: tabs.active().id,
+            watchlist: init.watchlist_entries.clone(),
+        };
+        let trading_store = start_trading_store(&lifecycle, frames.market(), cx);
         Self {
             tabs,
             theme: AerisTheme::dark(),
-            drawing_tool_menu: DrawingToolMenu::default(),
-            drawing_favorites_grab: None,
-            window_active: true,
-            frame_poll_gate: frame_poll_gate::FramePollGate::default(),
-            market_frame_wake,
-            market_wake_listener_started: None,
-            chrome_focus: cx.focus_handle().tab_stop(true),
+            frames,
+            window: WindowState::new(cx.focus_handle().tab_stop(true)),
             lifecycle,
-            trading_store: trading_store.clone(),
-            workspace_factory: init.workspace_factory,
-            persisted_watchlist: init.watchlist_entries.clone(),
-            watchlist: restore_watchlist(init.watchlist_entries),
-            watchlist_flags: WatchlistFlagState::default(),
-            market_summaries: BTreeMap::new(),
-            watchlist_persistence_dirty: false,
-            workspace_persistence,
-            persisted_layout,
-            persisted_active_workspace_id,
-            layout_library,
-            persisted_layout_library_revision: 0,
-            layout_drawings,
-            workspace_error: init.workspace_notice,
-            watchlist_drag: None,
-            watchlist_scroll: ScrollHandle::new(),
+            services: AppServices::new(
+                trading_store,
+                init.workspace_factory,
+                aeris_platform_runtime::active_data_root()
+                    .ok()
+                    .and_then(|root| {
+                        root.run_installed_app_side_effect(
+                            aeris_platform_runtime::InstalledAppSideEffect::Update,
+                            DesktopUpdater::new,
+                        )
+                    })
+                    .and_then(Result::ok),
+                Instant::now(),
+            ),
+            market_watch: MarketWatch::restore(init.watchlist_entries),
+            saved: SavedWorkspace::new(
+                workspace_persistence,
+                restored,
+                layout_library,
+                layout_drawings,
+                init.chart_settings_templates,
+                init.drawing_templates,
+            ),
             chart_menus: ChartMenus::default(),
-            chart_settings_templates: init.chart_settings_templates,
-            chart_settings_persistence_dirty: false,
-            drawing_templates: init.drawing_templates,
-            drawing_templates_persistence_dirty: false,
-            drawing_context_toolbar: DrawingContextToolbar::default(),
             overlays: OverlayStack::new(command_palette_input),
             pages: app_navigation::AppPages::default(),
-            frameless_title_bar: FramelessTitleBar::default(),
-            fullscreen_hint: FullscreenHint::default(),
-            toaster: Toaster::default(),
-            chart_fullscreen: None,
-            bottom_panel: bottom_panel::BottomPanelState::default(),
-            profile_refresh_on_activation: false,
+            notices: AppNotices::new(init.workspace_notice),
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
-            data_connections: DataConnections::default(),
             provider_login: provider_login::ProviderLoginFlow::default(),
-            linked_sync_revisions: BTreeMap::new(),
-            event_risk_dispatches: BTreeMap::new(),
-            next_event_risk_check: Instant::now(),
-            updater: aeris_platform_runtime::active_data_root()
-                .ok()
-                .and_then(|root| {
-                    root.run_installed_app_side_effect(
-                        aeris_platform_runtime::InstalledAppSideEffect::Update,
-                        DesktopUpdater::new,
-                    )
-                })
-                .and_then(Result::ok),
-            update_restart_persistence_pending: false,
-            chart_chrome: init.chart_chrome,
-            window_move_pending: false,
-            closing: false,
-            layouts_ui: layouts_view::LayoutsUi::default(),
+            chrome: AppChrome::new(init.chart_chrome),
         }
     }
 
@@ -264,7 +234,6 @@ impl TerminalApp {
     }
 
     pub(super) fn synchronize_linked_charts(&mut self, cx: &mut Context<Self>) {
-        const MAXIMUM_SYNC_SOURCES: usize = 64;
         let mut pending = Vec::new();
         let mut pending_instruments = Vec::new();
         for workspace in self.tabs.iter() {
@@ -304,21 +273,9 @@ impl TerminalApp {
             }
         }
         for (source_workspace, source_pane, group, event) in pending {
-            if self
-                .linked_sync_revisions
-                .get(&event.source)
-                .is_some_and(|revision| *revision >= event.revision)
-            {
+            if !self.tabs.accept_linked_sync(&event.source, event.revision) {
                 continue;
             }
-            if !self.linked_sync_revisions.contains_key(&event.source)
-                && self.linked_sync_revisions.len() == MAXIMUM_SYNC_SOURCES
-                && let Some(oldest) = self.linked_sync_revisions.keys().next().cloned()
-            {
-                self.linked_sync_revisions.remove(&oldest);
-            }
-            self.linked_sync_revisions
-                .insert(event.source.clone(), event.revision);
             for workspace in self.tabs.iter() {
                 for pane in &workspace.panes {
                     if (workspace.id, pane.id) == (source_workspace, source_pane) {
@@ -335,21 +292,7 @@ impl TerminalApp {
     }
 
     pub(super) fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
-        self.watchlist
-            .iter()
-            .map(|entry| WorkspaceWatchlistEntryState {
-                instrument: Some(entry.instrument.clone()),
-                flag_color: entry.flag.clone().unwrap_or_default(),
-            })
-            .collect()
-    }
-
-    fn visible_watchlist_indices(&self) -> Vec<usize> {
-        visible_watchlist_indices(
-            &self.watchlist,
-            self.watchlist_flags.filter.as_deref(),
-            self.watchlist_flags.picker.as_ref(),
-        )
+        self.market_watch.durable_entries()
     }
 
     pub(super) fn watchlist_rows(&self, cx: &App) -> Vec<WatchlistRow> {
@@ -360,14 +303,17 @@ impl TerminalApp {
             .pending_product()
             .or(surface.product.as_ref());
         let account = surface.trading_pnl.order_entry.selected_account_id.as_ref();
-        let store = self.trading_store.read(cx);
-        self.visible_watchlist_indices()
+        let store = self.services.trading_store().read(cx);
+        let entries = self.market_watch.entries();
+        self.market_watch
+            .visible_indices()
             .into_iter()
-            .filter_map(|index| self.watchlist.get(index))
+            .filter_map(|index| entries.get(index))
             .map(|entry| {
                 let instrument = &entry.instrument;
                 let summary = self
-                    .market_summaries
+                    .market_watch
+                    .summaries()
                     .get(&MarketSummaryKey::from_instrument(instrument));
                 WatchlistRow {
                     instrument: instrument.clone(),
@@ -412,14 +358,9 @@ impl TerminalApp {
     pub(super) fn watchlist_panel_state(&self, cx: &App) -> WatchlistPanelState {
         WatchlistPanelState {
             rows: self.watchlist_rows(cx),
-            drag: self.watchlist_drag.clone(),
-            scroll: self.watchlist_scroll.clone(),
-            flags: WatchlistFlagsView {
-                picker: self.watchlist_flags.picker.clone(),
-                filter: self.watchlist_flags.filter.clone(),
-                filter_menu_open: self.watchlist_flags.filter_menu_open,
-                colors: watchlist_flag_colors(&self.watchlist),
-            },
+            drag: self.market_watch.drag().cloned(),
+            scroll: self.market_watch.scroll().clone(),
+            flags: self.market_watch.flags_view(),
         }
     }
 
@@ -466,48 +407,44 @@ impl TerminalApp {
         });
         let desired = market_summary_requirements(
             tab_instruments,
-            self.watchlist.iter().map(|entry| &entry.instrument),
+            self.market_watch.instruments(),
             watchlist_visible,
         );
 
-        let stale = self
-            .market_summaries
-            .keys()
-            .filter(|key| !desired.contains_key(*key))
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in stale {
-            if let Some(mut entry) = self.market_summaries.remove(&key)
-                && let Some(retirement) = entry
-                    .worker
-                    .as_mut()
-                    .and_then(MarketDataWorker::begin_retirement)
+        for mut entry in self
+            .market_watch
+            .take_stale_summaries(|key| desired.contains_key(key))
+        {
+            if let Some(retirement) = entry
+                .worker
+                .as_mut()
+                .and_then(MarketDataWorker::begin_retirement)
             {
                 self.lifecycle.retire_market_worker(retirement, cx);
             }
         }
 
         let workspace_id = self.tabs.active().id;
-        let factory = self.workspace_factory.clone();
+        let factory = self.services.market_factory().cloned();
         for (key, (instrument, foreground)) in desired {
             let resource_class = if foreground {
                 ConsumerResourceClass::Foreground
             } else {
                 ConsumerResourceClass::Background
             };
-            if let Some(entry) = self.market_summaries.get_mut(&key) {
+            if let Some(entry) = self.market_watch.summaries_mut().get_mut(&key) {
                 entry.instrument = instrument;
                 entry.set_resource_class(resource_class);
                 continue;
             }
-            self.market_summaries.insert(
+            self.market_watch.summaries_mut().insert(
                 key,
                 start_market_summary(
                     factory.as_ref(),
                     workspace_id,
                     instrument,
                     resource_class,
-                    &self.market_frame_wake,
+                    self.frames.market(),
                 ),
             );
         }
@@ -518,20 +455,11 @@ impl TerminalApp {
         instrument: InstallProviderInstrument,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .watchlist
-            .iter()
-            .any(|entry| entry.is(&instrument.provider, &instrument.instrument_id))
-            || self.watchlist.len() >= local_state::MAXIMUM_WATCHLIST_ENTRIES
-        {
+        if !self.market_watch.add(instrument) {
             return;
         }
-        self.watchlist.push(WatchlistEntry {
-            instrument,
-            flag: None,
-        });
         self.sync_market_summaries(cx);
-        self.watchlist_persistence_dirty = true;
+        self.saved.mark_unsaved(UnsavedEdit::Watchlist);
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
@@ -542,18 +470,9 @@ impl TerminalApp {
         instrument_id: &str,
         cx: &mut Context<Self>,
     ) {
-        let before = self.watchlist.len();
-        self.watchlist
-            .retain(|entry| !entry.is(provider, instrument_id));
-        if self.watchlist.len() != before {
-            if self.watchlist_flags.picker.as_ref().is_some_and(|picker| {
-                picker.provider == provider && picker.instrument_id == instrument_id
-            }) {
-                self.watchlist_flags.picker = None;
-            }
-            self.release_unused_watchlist_flag_filter();
+        if self.market_watch.remove(provider, instrument_id) {
             self.sync_market_summaries(cx);
-            self.watchlist_persistence_dirty = true;
+            self.saved.mark_unsaved(UnsavedEdit::Watchlist);
             self.persist_workspace_layout_if_changed(cx);
             cx.notify();
         }
@@ -566,26 +485,12 @@ impl TerminalApp {
         cursor_offset_y: f32,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .watchlist
-            .iter()
-            .any(|entry| entry.is(provider, instrument_id))
+        if self
+            .market_watch
+            .begin_drag(provider, instrument_id, cursor_offset_y)
         {
-            return;
+            cx.notify();
         }
-        self.watchlist_drag = Some(WatchlistDragState {
-            provider: provider.to_string(),
-            instrument_id: instrument_id.to_string(),
-            cursor_offset_y: if cursor_offset_y.is_finite() {
-                cursor_offset_y.clamp(0.0, WATCHLIST_ROW_HEIGHT)
-            } else {
-                WATCHLIST_ROW_HEIGHT / 2.0
-            },
-            pointer_y: None,
-            body_top: 0.0,
-            scroll_offset_y: 0.0,
-        });
-        cx.notify();
     }
 
     pub(super) fn move_watchlist_drag(
@@ -597,45 +502,23 @@ impl TerminalApp {
         scroll_offset_y: f32,
         cx: &mut Context<Self>,
     ) {
-        let cursor_offset_y =
-            {
-                let Some(drag) = self.watchlist_drag.as_mut().filter(|drag| {
-                    drag.provider == provider && drag.instrument_id == instrument_id
-                }) else {
-                    return;
-                };
-                drag.pointer_y = Some(pointer_y);
-                drag.body_top = body_top;
-                drag.scroll_offset_y = scroll_offset_y;
-                drag.cursor_offset_y
-            };
-        // A flag filter hides rows, so the drop slot is the visible row's place in the list.
-        let visible = self.visible_watchlist_indices();
-        let Some(destination) = watchlist_drag_destination(
+        let DragMove::Placed { reordered } = self.market_watch.move_drag(
+            provider,
+            instrument_id,
             pointer_y,
             body_top,
             scroll_offset_y,
-            cursor_offset_y,
-            visible.len(),
-        )
-        .and_then(|row| visible.get(row).copied()) else {
+        ) else {
             return;
         };
-        let Some(source) = self
-            .watchlist
-            .iter()
-            .position(|entry| entry.is(provider, instrument_id))
-        else {
-            return;
-        };
-        if move_item(&mut self.watchlist, source, destination) {
-            self.watchlist_persistence_dirty = true;
+        if reordered {
+            self.saved.mark_unsaved(UnsavedEdit::Watchlist);
         }
         cx.notify();
     }
 
     pub(super) fn end_watchlist_drag(&mut self, cx: &mut Context<Self>) {
-        if self.watchlist_drag.take().is_none() {
+        if !self.market_watch.end_drag() {
             return;
         }
         self.persist_workspace_layout_if_changed(cx);
@@ -651,25 +534,17 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self
-            .watchlist
-            .iter_mut()
-            .find(|entry| entry.is(provider, instrument_id))
-        else {
-            return;
-        };
-        if entry.flag.take().is_none() {
-            entry.flag = Some(default_watchlist_flag_color(&self.theme));
-            self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
-            return;
+        let default_color = default_watchlist_flag_color(&self.theme);
+        match self
+            .market_watch
+            .press_flag(provider, instrument_id, default_color)
+        {
+            FlagPress::Missing => {}
+            FlagPress::Flagged => {
+                self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
+            }
+            FlagPress::Cleared => self.save_watchlist_flags(cx),
         }
-        if self.watchlist_flags.picker.as_ref().is_some_and(|picker| {
-            picker.provider == provider && picker.instrument_id == instrument_id
-        }) {
-            self.watchlist_flags.picker = None;
-        }
-        self.release_unused_watchlist_flag_filter();
-        self.save_watchlist_flags(cx);
     }
 
     /// A right press on a row's flag toggles its color picker, flagging the row first.
@@ -680,23 +555,17 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.watchlist_flags.picker.as_ref().is_some_and(|picker| {
-            picker.provider == provider && picker.instrument_id == instrument_id
-        }) {
+        if self.market_watch.picker_is_for(provider, instrument_id) {
             self.close_watchlist_flag_picker(cx);
             return;
         }
-        let Some(entry) = self
-            .watchlist
-            .iter_mut()
-            .find(|entry| entry.is(provider, instrument_id))
-        else {
-            return;
-        };
-        entry
-            .flag
-            .get_or_insert_with(|| default_watchlist_flag_color(&self.theme));
-        self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
+        let default_color = default_watchlist_flag_color(&self.theme);
+        if self
+            .market_watch
+            .ensure_flag(provider, instrument_id, default_color)
+        {
+            self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
+        }
     }
 
     fn show_watchlist_flag_picker(
@@ -707,17 +576,14 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let current = self
-            .watchlist
-            .iter()
-            .find(|entry| entry.is(provider, instrument_id))
-            .and_then(|entry| entry.flag.clone())
-            .unwrap_or_else(|| default_watchlist_flag_color(&self.theme));
+            .market_watch
+            .flag(provider, instrument_id)
+            .map_or_else(|| default_watchlist_flag_color(&self.theme), str::to_string);
         let input = cx.new(|input_cx| InputState::new(window, input_cx));
         input.update(cx, |input, input_cx| {
             input.set_value(current, window, input_cx);
         });
-        self.watchlist_flags.filter_menu_open = false;
-        self.watchlist_flags.picker = Some(WatchlistFlagPicker {
+        self.market_watch.open_picker(WatchlistFlagPicker {
             provider: provider.to_string(),
             instrument_id: instrument_id.to_string(),
             input,
@@ -728,57 +594,33 @@ impl TerminalApp {
 
     /// Recolors the flag whose picker is open. The change is saved when the picker closes.
     pub(super) fn apply_watchlist_flag_color(&mut self, color: &str, cx: &mut Context<Self>) {
-        let Some(picker) = self.watchlist_flags.picker.as_mut() else {
-            return;
-        };
-        let Some(color) = normalize_hex_color(color) else {
-            picker.error = Some("Enter a hex color such as #2962FF or #2962FF80.".to_string());
-            cx.notify();
-            return;
-        };
-        picker.error = None;
-        let picker = picker.clone();
-        if let Some(entry) = self.watchlist.iter_mut().find(|entry| picker.is_for(entry)) {
-            entry.flag = Some(color);
-            self.watchlist_persistence_dirty = true;
+        match self.market_watch.apply_picker_color(color) {
+            PickerColor::Closed => return,
+            PickerColor::Applied => self.saved.mark_unsaved(UnsavedEdit::Watchlist),
+            PickerColor::Rejected | PickerColor::Accepted => {}
         }
         cx.notify();
     }
 
     pub(super) fn close_watchlist_flag_picker(&mut self, cx: &mut Context<Self>) {
-        if self.watchlist_flags.picker.take().is_none() {
-            return;
+        if self.market_watch.close_picker() {
+            self.save_watchlist_flags(cx);
         }
-        self.release_unused_watchlist_flag_filter();
-        self.save_watchlist_flags(cx);
     }
 
     fn save_watchlist_flags(&mut self, cx: &mut Context<Self>) {
-        self.watchlist_persistence_dirty = true;
+        self.saved.mark_unsaved(UnsavedEdit::Watchlist);
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
-    /// Ends a flag filter once no row carries its color, so it never leaves the list empty.
-    fn release_unused_watchlist_flag_filter(&mut self) {
-        let unused = self.watchlist_flags.filter.as_ref().is_some_and(|filter| {
-            !self
-                .watchlist
-                .iter()
-                .any(|entry| entry.flag.as_ref() == Some(filter))
-        });
-        if unused {
-            self.watchlist_flags.filter = None;
-        }
-    }
-
     pub(super) fn toggle_watchlist_flag_filter_menu(&mut self, cx: &mut Context<Self>) {
-        self.watchlist_flags.filter_menu_open = !self.watchlist_flags.filter_menu_open;
+        self.market_watch.toggle_filter_menu();
         cx.notify();
     }
 
     pub(super) fn close_watchlist_flag_filter_menu(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.watchlist_flags.filter_menu_open) {
+        if self.market_watch.close_filter_menu() {
             cx.notify();
         }
     }
@@ -789,9 +631,7 @@ impl TerminalApp {
         filter: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.watchlist_flags.filter_menu_open = false;
-        self.watchlist_flags.filter = filter;
-        self.release_unused_watchlist_flag_filter();
+        self.market_watch.set_filter(filter);
         cx.notify();
     }
 
@@ -801,10 +641,10 @@ impl TerminalApp {
     /// tab, or the active pane's chrome or chart) rather than on a text field, so workspace
     /// shortcuts may act.
     pub(super) fn workspace_keyboard_focused(&self, window: &Window, cx: &App) -> bool {
-        if self.layouts_ui.covers_workspace() {
+        if self.pages.layouts.covers_workspace() {
             return false;
         }
-        self.chrome_focus.is_focused(window)
+        self.window.chrome_focus().is_focused(window)
             || self.tabs.active().focus.is_focused(window)
             || self
                 .active_surface()
@@ -816,9 +656,9 @@ impl TerminalApp {
     /// page, otherwise the shell.
     pub(super) fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pages.view != market_screener::AppView::Terminal
-            || self.layouts_ui.start_page_shown()
+            || self.pages.layouts.start_page_shown()
         {
-            self.chrome_focus.focus(window, cx);
+            self.window.chrome_focus().focus(window, cx);
             return;
         }
         self.active_surface()
@@ -856,16 +696,8 @@ impl TerminalApp {
     /// with Alt+click stays the only one). The window enters fullscreen unless it already is,
     /// and every toolbar and panel hides; leaving restores both.
     pub(super) fn toggle_chart_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.chart_fullscreen.take() {
-            if state.restores_window && window.is_fullscreen() {
-                window.toggle_fullscreen();
-            }
-        } else {
-            let restores_window = !window.is_fullscreen();
-            if restores_window {
-                window.toggle_fullscreen();
-            }
-            self.chart_fullscreen = Some(ChartFullscreen { restores_window });
+        if self.window.toggle_chart_fullscreen(window.is_fullscreen()) {
+            window.toggle_fullscreen();
         }
         cx.notify();
     }
@@ -873,17 +705,13 @@ impl TerminalApp {
     /// Leaving window fullscreen another way (F11, Esc, the system) also ends a chart-only
     /// fullscreen that entered it.
     pub(super) fn track_chart_fullscreen(&mut self, window: &Window) {
-        if self
-            .chart_fullscreen
-            .is_some_and(|state| state.restores_window && !window.is_fullscreen())
-        {
-            self.chart_fullscreen = None;
-        }
+        self.window.track_window_fullscreen(window.is_fullscreen());
     }
 
     /// Shows the next or previous watchlist symbol on the active chart.
     fn step_watchlist(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let visible = self.visible_watchlist_indices();
+        let visible = self.market_watch.visible_indices();
+        let entries = self.market_watch.entries();
         let current = {
             let surface = self.active_surface().read(cx);
             let active = surface
@@ -891,14 +719,14 @@ impl TerminalApp {
                 .pending_product()
                 .or(surface.product.as_ref());
             active.and_then(|active| {
-                visible.iter().position(|&index| {
-                    self.watchlist[index].is(&active.provider, &active.instrument_id)
-                })
+                visible
+                    .iter()
+                    .position(|&index| entries[index].is(&active.provider, &active.instrument_id))
             })
         };
         let Some(instrument) = watchlist_step(current, visible.len(), forward)
             .and_then(|row| visible.get(row))
-            .and_then(|&index| self.watchlist.get(index))
+            .and_then(|&index| entries.get(index))
             .map(|entry| entry.instrument.clone())
         else {
             return;
@@ -917,7 +745,7 @@ impl TerminalApp {
     }
 
     fn chart_chrome_for_new_surface(&self, cx: &App) -> chart_chrome::ChartChromePreferences {
-        let mut preferences = self.chart_chrome;
+        let mut preferences = *self.chrome.preferences();
         preferences.chart_type = self.active_surface().read(cx).chart_type(cx);
         preferences
     }
@@ -1043,7 +871,7 @@ impl TerminalApp {
         tool: DrawingToolChoice,
         cx: &mut Context<Self>,
     ) {
-        self.drawing_tool_menu.record(tool);
+        self.chrome.tool_menu_mut().record(tool);
         cx.notify();
         let panes: Vec<_> = self
             .tabs
@@ -1223,7 +1051,7 @@ impl TerminalApp {
             order_flow: surface.chart_order_flow_settings(cx)?,
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
-            chart_trade_buttons_visible: self.chart_chrome.chart_trade_buttons.shown(),
+            chart_trade_buttons_visible: self.chrome.preferences().chart_trade_buttons.shown(),
             legend: surface.chart_legend_options(cx)?,
         })
     }
@@ -1510,7 +1338,7 @@ impl TerminalApp {
             return;
         }
         if matches!(action, ChartSettingsAction::ToggleChartTradeButtons) {
-            let visible = !self.chart_chrome.chart_trade_buttons.shown();
+            let visible = !self.chrome.preferences().chart_trade_buttons.shown();
             self.set_chart_trade_buttons_visible(visible, cx);
             return;
         }
@@ -1683,7 +1511,7 @@ impl TerminalApp {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if index < self.chart_settings_templates.len()
+        if index < self.saved.chart_settings_templates().len()
             && self.chart_menus.confirm_template_delete(index)
         {
             cx.notify();
@@ -1700,9 +1528,7 @@ impl TerminalApp {
         let Some(index) = self.chart_menus.take_template_delete() else {
             return;
         };
-        if index < self.chart_settings_templates.len() {
-            self.chart_settings_templates.remove(index);
-            self.chart_settings_persistence_dirty = true;
+        if self.saved.remove_chart_settings_template(index) {
             self.persist_workspace_layout_if_changed(cx);
         }
         cx.notify();
@@ -1752,24 +1578,13 @@ impl TerminalApp {
         let Some(template) = self.current_chart_settings_template(menu, name.clone(), cx) else {
             return;
         };
-        if let Some(existing) = self
-            .chart_settings_templates
-            .iter_mut()
-            .find(|template| template.name.eq_ignore_ascii_case(&name))
-        {
-            *existing = template;
-        } else if self.chart_settings_templates.len()
-            < local_state::MAXIMUM_CHART_SETTINGS_TEMPLATES
-        {
-            self.chart_settings_templates.push(template);
-        } else {
+        if !self.saved.store_chart_settings_template(template) {
             self.chart_menus
                 .set_template_error("You can save up to 32 chart templates.");
             cx.notify();
             return;
         }
         self.chart_menus.show_template_menu();
-        self.chart_settings_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
@@ -1780,7 +1595,7 @@ impl TerminalApp {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(template) = self.chart_settings_templates.get(index).cloned() else {
+        let Some(template) = self.saved.chart_settings_templates().get(index).cloned() else {
             return;
         };
         self.apply_chart_settings_template_to_surface(menu, &template, cx);
@@ -1843,14 +1658,14 @@ impl TerminalApp {
             .kind()
             .is_some_and(OverlayKind::pins_title_bar)
             || self.tabs.is_dragging()
-            || self.window_move_pending
+            || self.window.move_pending()
     }
 
     /// Grows the frameless bar back. A pointer that only brushes the edge and leaves before
     /// it ever enters the bar produces no hover-out, so the conceal is armed right away.
     pub(super) fn reveal_frameless_title_bar(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.chart_chrome.window_frame.frameless()
-            && self.frameless_title_bar.reveal(Instant::now())
+        if self.chrome.preferences().window_frame.frameless()
+            && self.window.title_bar_mut().reveal(Instant::now())
         {
             self.release_frameless_title_bar(window, cx);
             cx.notify();
@@ -1862,13 +1677,13 @@ impl TerminalApp {
     /// which child occludes the bar, so each check reads the pointer position, and a pointer
     /// still resting on the bar postpones the conceal by another grace period.
     pub(super) fn release_frameless_title_bar(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !self.chart_chrome.window_frame.frameless()
-            || !self.frameless_title_bar.revealed()
+        if !self.chrome.preferences().window_frame.frameless()
+            || !self.window.title_bar().revealed()
             || self.frameless_title_bar_pinned()
         {
             return;
         }
-        let ticket = self.frameless_title_bar.request_conceal();
+        let ticket = self.window.title_bar_mut().request_conceal();
         cx.spawn_in(window, async move |terminal, cx| {
             loop {
                 cx.background_executor()
@@ -1876,7 +1691,8 @@ impl TerminalApp {
                     .await;
                 let held = terminal.update_in(cx, |terminal, window, terminal_cx| {
                     if !terminal
-                        .frameless_title_bar
+                        .window
+                        .title_bar()
                         .conceal_request_is_current(ticket)
                         || terminal.frameless_title_bar_pinned()
                     {
@@ -1886,10 +1702,10 @@ impl TerminalApp {
                     let pointer_y = window
                         .is_window_hovered()
                         .then(|| f32::from(window.mouse_position().y));
-                    if terminal.frameless_title_bar.holds_pointer(pointer_y, now) {
+                    if terminal.window.title_bar().holds_pointer(pointer_y, now) {
                         return true;
                     }
-                    if terminal.frameless_title_bar.conceal(now) {
+                    if terminal.window.title_bar_mut().conceal(now) {
                         terminal_cx.notify();
                     }
                     false
@@ -1909,14 +1725,14 @@ impl TerminalApp {
         window_frame: chart_chrome::WindowFrame,
         cx: &mut Context<Self>,
     ) {
-        if self.chart_chrome.window_frame == window_frame {
+        if self.chrome.preferences_mut().window_frame == window_frame {
             return;
         }
-        self.chart_chrome.window_frame = window_frame;
+        self.chrome.preferences_mut().window_frame = window_frame;
         if window_frame.frameless() {
-            self.frameless_title_bar.settle_revealed();
+            self.window.title_bar_mut().settle_revealed();
         } else {
-            self.frameless_title_bar.reset();
+            self.window.title_bar_mut().reset();
         }
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
@@ -1930,11 +1746,11 @@ impl TerminalApp {
     }
 
     pub(super) fn arm_profile_refresh_after_browser(&mut self) {
-        self.profile_refresh_on_activation = true;
+        self.window.arm_profile_refresh();
     }
 
     pub(super) fn retry_update_check(&mut self, cx: &mut Context<Self>) {
-        if let Some(updater) = self.updater.as_mut()
+        if let Some(updater) = self.services.updater_mut()
             && let Err(_error) = updater.request_check()
         {
             diagnostic!("Aeris update check degraded");
@@ -1949,7 +1765,7 @@ impl TerminalApp {
     }
 
     pub(super) fn restart_to_update(&mut self, cx: &mut Context<Self>) {
-        if let Some(updater) = self.updater.as_mut()
+        if let Some(updater) = self.services.updater_mut()
             && let Err(_error) = updater.request_restart()
         {
             diagnostic!("Aeris update restart degraded");
@@ -1971,7 +1787,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(host) = toast_host(self.tabs.active()) {
-            self.toaster.post_notice(
+            self.notices.toaster_mut().post_notice(
                 host,
                 notification_center::UserNotice {
                     key: notification_center::NoticeKey { scope: 0, kind },
@@ -2010,11 +1826,11 @@ impl TerminalApp {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        self.update_restart_persistence_pending = false;
-        self.workspace_error = Some(error.clone());
+        self.services.end_update_restart();
+        self.notices.show_workspace_error(error.clone());
         if let Some(cleanup) = self
-            .updater
-            .as_mut()
+            .services
+            .updater_mut()
             .and_then(|updater| updater.cancel_prepared_restart(error))
         {
             // PreparedRestart::drop only transfers child termination/reaping
@@ -2030,11 +1846,12 @@ impl TerminalApp {
         account_refresh: aeris_account_runtime::AccountRefreshQuiesce,
         cx: &mut Context<Self>,
     ) {
-        self.update_restart_persistence_pending = false;
-        let Some(updater) = self.updater.as_mut() else {
+        self.services.end_update_restart();
+        let Some(updater) = self.services.updater_mut() else {
             drop(account_refresh);
             self.resume_profile_after_failed_restart(cx);
-            self.workspace_error = Some("update client is unavailable".to_string());
+            self.notices
+                .show_workspace_error("update client is unavailable");
             cx.notify();
             return;
         };
@@ -2056,19 +1873,19 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.update_restart_persistence_pending || self.closing {
+        if self.services.update_restart_pending() || self.window.is_closing() {
             return;
         }
         self.persist_workspace_layout_if_changed(cx);
         let workspace_wait = self
-            .workspace_persistence
-            .as_ref()
+            .saved
+            .writer()
             .map(WorkspaceLayoutPersistence::shutdown_wait);
         let chart_chrome_wait = self.lifecycle.persistence().chart_chrome_shutdown_wait();
         let account_refresh = self.lifecycle.account_service().begin_refresh_quiesce();
         let account = self.lifecycle.account().cloned();
 
-        self.update_restart_persistence_pending = true;
+        self.services.await_update_restart_durability();
         let durability = cx.background_executor().spawn(async move {
             let account_refresh = account_refresh?;
             account_refresh.wait()?;
@@ -2090,8 +1907,8 @@ impl TerminalApp {
                     Ok((workspace_generation, chart_chrome_generation, account_refresh)) => {
                         let workspace_current = workspace_generation.is_none_or(|generation| {
                             terminal
-                                .workspace_persistence
-                                .as_ref()
+                                .saved
+                                .writer()
                                 .is_none_or(|persistence| {
                                     persistence.shutdown_generation_is_current(generation)
                                 })
@@ -2134,7 +1951,7 @@ impl TerminalApp {
     }
 
     pub(super) fn update_presentation(&self) -> Option<&UpdatePresentation> {
-        self.updater.as_ref().map(DesktopUpdater::presentation)
+        self.services.updater().map(DesktopUpdater::presentation)
     }
 
     /// Attribution follows any pane holding the provider's session, including recovery.
@@ -2174,8 +1991,8 @@ impl TerminalApp {
             viewport,
             platform_menu::PlatformMenuContent {
                 update: self.update_presentation(),
-                window_frame: self.chart_chrome.window_frame,
-                drawing_toolbar_visible: self.chart_chrome.drawing_toolbar.shown(),
+                window_frame: self.chrome.preferences().window_frame,
+                drawing_toolbar_visible: self.chrome.preferences().drawing_toolbar.shown(),
                 attribution: self.held_provider_attribution(cx),
                 now_unix_seconds: self
                     .lifecycle
@@ -2198,8 +2015,8 @@ impl TerminalApp {
         drawing_favorites_toolbar_layer(
             terminal,
             &DrawingFavoritesToolbar {
-                favorites: self.chart_chrome.drawing_favorites,
-                menu: &self.drawing_tool_menu,
+                favorites: self.chrome.preferences().drawing_favorites,
+                menu: self.chrome.tool_menu(),
                 state: self.active_surface().read(cx).drawing_toolbar_state(cx),
                 default_origin: drawing_favorites_default_origin(chart_top),
                 viewport: window.viewport_size(),
@@ -2214,7 +2031,7 @@ impl TerminalApp {
         window: &Window,
         cx: &App,
     ) -> Option<AnyElement> {
-        if !self.drawing_tool_menu.is_open() {
+        if !self.chrome.tool_menu().is_open() {
             return None;
         }
         let active_tool = self
@@ -2224,8 +2041,8 @@ impl TerminalApp {
             .active_tool;
         drawing_tool_menu_layer(
             terminal,
-            &self.drawing_tool_menu,
-            &self.chart_chrome.drawing_favorites,
+            self.chrome.tool_menu(),
+            &self.chrome.preferences().drawing_favorites,
             active_tool,
             window.viewport_size(),
             window.rem_size(),
@@ -2460,9 +2277,9 @@ impl TerminalApp {
             .and_then(|pane| pane.surface.read(cx).chart.clone())
             .map_or(
                 (
-                    self.chart_chrome.indicator_name_labels_visible,
-                    self.chart_chrome.indicator_value_labels_visible,
-                    self.chart_chrome.indicator_price_lines_visible,
+                    self.chrome.preferences().indicator_name_labels_visible,
+                    self.chrome.preferences().indicator_value_labels_visible,
+                    self.chrome.preferences().indicator_price_lines_visible,
                 ),
                 |chart| {
                     let chart = chart.read(cx);
@@ -2473,9 +2290,9 @@ impl TerminalApp {
                     )
                 },
             );
-        self.chart_chrome.indicator_name_labels_visible = names;
-        self.chart_chrome.indicator_value_labels_visible = values;
-        self.chart_chrome.indicator_price_lines_visible = price_lines;
+        self.chrome.preferences_mut().indicator_name_labels_visible = names;
+        self.chrome.preferences_mut().indicator_value_labels_visible = values;
+        self.chrome.preferences_mut().indicator_price_lines_visible = price_lines;
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
@@ -2497,10 +2314,11 @@ impl TerminalApp {
     pub(super) fn save_chart_chrome_preferences(&mut self, cx: &mut Context<Self>) {
         let active = self.active_surface();
         let active = active.read(cx);
-        self.chart_chrome.chart_type = active.chart_type(cx);
-        self.chart_chrome.symbol_search_categories = active.chart_chrome.symbol_search_categories;
-        self.chart_chrome.symbol_search_scope = active.chart_chrome.symbol_search_scope;
-        let preferences = self.chart_chrome;
+        self.chrome.preferences_mut().chart_type = active.chart_type(cx);
+        self.chrome.preferences_mut().symbol_search_categories =
+            active.chart_chrome.symbol_search_categories;
+        self.chrome.preferences_mut().symbol_search_scope = active.chart_chrome.symbol_search_scope;
+        let preferences = *self.chrome.preferences();
         let persistence = self.lifecycle.persistence().clone();
         match persistence.request_chart_chrome_preferences_save(preferences) {
             Ok(true) => {
@@ -2511,7 +2329,7 @@ impl TerminalApp {
                     let result = save.await;
                     if let Err(error) = terminal.update(cx, |terminal, cx| {
                         match result {
-                            Ok(()) => terminal.toaster.clear_notice(
+                            Ok(()) => terminal.notices.toaster_mut().clear_notice(
                                 &notification_center::NoticeKey {
                                     scope: 0,
                                     kind: "chart_chrome_save",
@@ -2538,7 +2356,7 @@ impl TerminalApp {
 
     fn post_chart_chrome_save_notice(&mut self, cx: &mut Context<Self>) {
         if let Some(host) = toast_host(self.tabs.active()) {
-            self.toaster.post_notice(
+            self.notices.toaster_mut().post_notice(
                 host,
                 notification_center::UserNotice {
                     key: notification_center::NoticeKey {
@@ -2596,45 +2414,20 @@ impl TerminalApp {
     }
 
     pub(super) fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
-        if self.closing {
+        if self.window.is_closing() {
             return;
         }
         let layout = workspace_layout_tabs(self.tabs.as_slice(), cx);
         self.autosave_layouts(&layout);
-        let Some(persistence) = self.workspace_persistence.as_ref() else {
-            return;
+        let snapshot = WorkspaceSnapshot {
+            layout,
+            active_workspace_id: self.tabs.active().id,
+            watchlist: self.watchlist_entries(),
         };
-        let active_workspace_id = self.tabs.active().id;
-        let watchlist = self.watchlist_entries();
-        let library_revision = self.layout_library.revision();
-        if layout == self.persisted_layout
-            && active_workspace_id == self.persisted_active_workspace_id
-            && library_revision == self.persisted_layout_library_revision
-            && !self.chart_settings_persistence_dirty
-            && !self.drawing_templates_persistence_dirty
-            && !self.watchlist_persistence_dirty
-            && watchlist == self.persisted_watchlist
-        {
-            return;
+        match self.saved.save_if_changed(snapshot) {
+            WorkspaceSave::Failed(error) => self.notices.show_workspace_error(error),
+            WorkspaceSave::Unavailable | WorkspaceSave::Unchanged | WorkspaceSave::Requested => {}
         }
-        if let Err(error) = persistence.request_with_chart_settings(
-            active_workspace_id,
-            layout.clone(),
-            self.chart_settings_templates.clone(),
-            watchlist.clone(),
-            self.drawing_templates.clone(),
-            self.layout_library.states(),
-        ) {
-            self.workspace_error = Some(error);
-            return;
-        }
-        self.persisted_layout = layout;
-        self.persisted_active_workspace_id = active_workspace_id;
-        self.persisted_layout_library_revision = library_revision;
-        self.chart_settings_persistence_dirty = false;
-        self.drawing_templates_persistence_dirty = false;
-        self.persisted_watchlist = watchlist;
-        self.watchlist_persistence_dirty = false;
     }
 
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
@@ -2647,7 +2440,7 @@ impl TerminalApp {
         };
         self.set_workspace_resource_class(previous, ConsumerResourceClass::Background, cx);
         self.set_workspace_resource_class(next, ConsumerResourceClass::Foreground, cx);
-        self.workspace_error = None;
+        self.notices.clear_workspace_error();
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
@@ -2743,7 +2536,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.layouts_ui.start_page_shown() {
+        if self.pages.layouts.start_page_shown() {
             self.close_start_page(window, cx);
             return;
         }
@@ -2856,7 +2649,7 @@ impl TerminalApp {
         } else if focus_next_workspace {
             self.focus_workspace(window, cx);
         }
-        self.workspace_error = None;
+        self.notices.clear_workspace_error();
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
@@ -2894,10 +2687,11 @@ impl TerminalApp {
     ) -> Result<(), String> {
         self.check_workspace_capacity()?;
         let factory = self
-            .workspace_factory
-            .clone()
+            .services
+            .market_factory()
+            .cloned()
             .ok_or_else(|| "This window cannot open another tab".to_string())?;
-        self.layout_library.check_new_layout(name)?;
+        self.saved.layouts().check_new_layout(name)?;
         let active = self.active_surface();
         let (product, interval) = {
             let active = active.read(cx);
@@ -2933,7 +2727,7 @@ impl TerminalApp {
         Self::wire_pane_notices(&surface, cx);
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
-            workspace.set_market_message_wake(self.market_frame_wake.callback());
+            workspace.set_market_message_wake(self.frames.market().callback());
         });
         let mut workspace = WorkspaceTab {
             id: workspace_id,
@@ -2973,7 +2767,7 @@ impl TerminalApp {
             cx,
         );
         self.tabs.push_active(workspace);
-        self.workspace_error = None;
+        self.notices.clear_workspace_error();
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
         Ok(())
@@ -2994,14 +2788,15 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(factory) = self.workspace_factory.clone() else {
-            self.workspace_error = Some("This window cannot open another chart pane".to_string());
+        let Some(factory) = self.services.market_factory().cloned() else {
+            self.notices
+                .show_workspace_error("This window cannot open another chart pane");
             cx.notify();
             return;
         };
         let workspace = self.tabs.active();
         if workspace.panes.len() >= CHART_PANE_CAPACITY {
-            self.workspace_error = Some(format!(
+            self.notices.show_workspace_error(format!(
                 "At most {CHART_PANE_CAPACITY} chart panes fit in one workspace"
             ));
             cx.notify();
@@ -3010,14 +2805,16 @@ impl TerminalApp {
         let (product, interval, drawing_tool, side_panels, side_panel_size) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.product.clone() else {
-                self.workspace_error = Some("The active pane has no market to copy".to_string());
+                self.notices
+                    .show_workspace_error("The active pane has no market to copy");
                 cx.notify();
                 return;
             };
             (
                 product,
                 source.interval,
-                self.drawing_tool_menu
+                self.chrome
+                    .tool_menu()
                     .armed_choice(source.drawing_toolbar_state(cx).active_tool),
                 source.chrome.side_panels(),
                 source.chrome.side_panel_size(),
@@ -3029,7 +2826,7 @@ impl TerminalApp {
         let pane = match factory.create_pane(workspace_id, product, interval) {
             Ok(pane) => pane,
             Err(error) => {
-                self.workspace_error = Some(error);
+                self.notices.show_workspace_error(error);
                 cx.notify();
                 return;
             }
@@ -3047,7 +2844,7 @@ impl TerminalApp {
         surface.update(cx, |surface, surface_cx| {
             surface.apply_theme(&self.theme, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Foreground, surface_cx);
-            surface.set_market_message_wake(self.market_frame_wake.callback());
+            surface.set_market_message_wake(self.frames.market().callback());
             surface.select_drawing_tool(drawing_tool, surface_cx);
             surface.chrome.set_side_panel_size(side_panel_size);
             surface.apply_side_panels(side_panels, surface_cx);
@@ -3071,7 +2868,7 @@ impl TerminalApp {
                 surface.set_market_resource_class(ConsumerResourceClass::Detached, surface_cx);
                 surface.retire_market_worker(surface_cx);
             });
-            self.workspace_error = Some(error.to_string());
+            self.notices.show_workspace_error(error.to_string());
             cx.notify();
             return;
         }
@@ -3088,7 +2885,7 @@ impl TerminalApp {
         );
         workspace.active_pane = insertion_index;
         workspace.generation = workspace.generation.saturating_add(1);
-        self.workspace_error = None;
+        self.notices.clear_workspace_error();
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
@@ -3125,7 +2922,7 @@ impl TerminalApp {
         workspace.swallow_pane_mouse_up = false;
         let removed_pane_id = workspace.panes[workspace.active_pane].id;
         if let Err(error) = workspace.layout.remove(removed_pane_id) {
-            self.workspace_error = Some(error.to_string());
+            self.notices.show_workspace_error(error.to_string());
             cx.notify();
             return;
         }
@@ -3166,7 +2963,7 @@ impl TerminalApp {
                 surface.apply_side_panels(removed_side_panels, surface_cx);
             });
         self.focus_workspace(window, cx);
-        self.workspace_error = None;
+        self.notices.clear_workspace_error();
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
@@ -3241,11 +3038,11 @@ impl TerminalApp {
     /// Shows or hides the drawing tools sidebar for every workspace and saves the choice.
     pub(super) fn set_drawing_toolbar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         let visibility = chart_chrome::ChromeVisibility::from_shown(visible);
-        if self.chart_chrome.drawing_toolbar == visibility {
+        if self.chrome.preferences_mut().drawing_toolbar == visibility {
             return;
         }
-        self.chart_chrome.drawing_toolbar = visibility;
-        self.drawing_tool_menu.close();
+        self.chrome.preferences_mut().drawing_toolbar = visibility;
+        self.chrome.tool_menu_mut().close();
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
@@ -3264,10 +3061,10 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let visibility = chart_chrome::ChromeVisibility::from_shown(visible);
-        if self.chart_chrome.chart_trade_buttons == visibility {
+        if self.chrome.preferences_mut().chart_trade_buttons == visibility {
             return;
         }
-        self.chart_chrome.chart_trade_buttons = visibility;
+        self.chrome.preferences_mut().chart_trade_buttons = visibility;
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
@@ -3280,12 +3077,12 @@ impl TerminalApp {
     }
 
     pub(super) fn toggle_drawing_tool_menu(&mut self, group: usize, cx: &mut Context<Self>) {
-        self.drawing_tool_menu.toggle(group);
+        self.chrome.tool_menu_mut().toggle(group);
         cx.notify();
     }
 
     pub(super) fn close_drawing_tool_menu(&mut self, cx: &mut Context<Self>) {
-        if self.drawing_tool_menu.close() {
+        if self.chrome.tool_menu_mut().close() {
             cx.notify();
         }
     }
@@ -3301,7 +3098,7 @@ impl TerminalApp {
     }
 
     fn retire_market_summaries(&mut self, cx: &App) {
-        for entry in self.market_summaries.values_mut() {
+        for entry in self.market_watch.summaries_mut().values_mut() {
             if let Some(retirement) = entry
                 .worker
                 .as_mut()
@@ -3313,13 +3110,13 @@ impl TerminalApp {
     }
 
     pub(super) fn claim_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.closing {
+        if self.window.is_closing() {
             return false;
         }
         self.sync_layout_drawings(cx);
         self.persist_workspace_layout_if_changed(cx);
-        self.closing = true;
-        if let Some(persistence) = self.workspace_persistence.as_ref() {
+        self.window.begin_closing();
+        if let Some(persistence) = self.saved.writer() {
             self.lifecycle
                 .await_workspace_persistence(persistence.shutdown_wait());
         }
@@ -3348,7 +3145,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.closing {
+        if self.window.is_closing() {
             return true;
         }
         if !self.unsaved_layout_names(cx).is_empty() {
@@ -3406,7 +3203,7 @@ impl TerminalApp {
             }
             return;
         }
-        if self.layouts_ui.modal_open() {
+        if self.pages.layouts.modal_open() {
             if event.keystroke.key.eq_ignore_ascii_case("escape") {
                 self.cancel_layout_modal(window, cx);
                 window.prevent_default();
@@ -3433,7 +3230,7 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.drawing_tool_menu.is_open() {
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.chrome.tool_menu().is_open() {
             self.close_drawing_tool_menu(cx);
             cx.stop_propagation();
             return;
@@ -3459,18 +3256,18 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.layouts_ui.menu_open() {
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.pages.layouts.menu_open() {
             self.close_layout_menus(cx);
             cx.stop_propagation();
             return;
         }
         if self.chart_menus.is_open()
             || self.pages.view != market_screener::AppView::Terminal
-            || self.layouts_ui.start_page_shown()
+            || self.pages.layouts.start_page_shown()
         {
             return;
         }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.chart_fullscreen.is_some() {
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.window.chart_fullscreen() {
             self.toggle_chart_fullscreen(window, cx);
             window.prevent_default();
             cx.stop_propagation();
@@ -3493,12 +3290,11 @@ impl TerminalApp {
 
     pub(super) fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let window_active = window.is_window_active();
-        let became_active = window_active && !self.window_active;
-        if !window_active && self.window_active {
+        let change = self.window.observe_activity(window_active);
+        if change == ActivityChange::Deactivated {
             // A key released in another window never reaches this one.
             self.keyboard_trading.release_key();
         }
-        self.window_active = window_active;
         if !window_active {
             self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
             if self.tabs.is_dragging() {
@@ -3506,20 +3302,18 @@ impl TerminalApp {
                 self.end_workspace_drag(window, cx);
             }
         }
-        if became_active {
-            if self.profile_refresh_on_activation {
-                self.profile_refresh_on_activation = false;
-                if let Some(account) = self.lifecycle.account()
-                    && account.request_profile_refresh_if_active().is_err()
-                {
-                    diagnostic!("Aeris profile refresh degraded");
-                    self.post_workspace_notice(
-                        "profile_refresh",
-                        "Account profile refresh unavailable",
-                        notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
-                        cx,
-                    );
-                }
+        if let ActivityChange::Activated { refresh_profile } = change {
+            if refresh_profile
+                && let Some(account) = self.lifecycle.account()
+                && account.request_profile_refresh_if_active().is_err()
+            {
+                diagnostic!("Aeris profile refresh degraded");
+                self.post_workspace_notice(
+                    "profile_refresh",
+                    "Account profile refresh unavailable",
+                    notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                    cx,
+                );
             }
             self.schedule_market_frame(window, cx);
         }
@@ -3530,9 +3324,7 @@ impl TerminalApp {
         event: WindowMoveGestureEvent,
         window: &mut Window,
     ) {
-        let transition = window_move_gesture_transition(self.window_move_pending, event);
-        self.window_move_pending = transition.pending;
-        if transition.start_move {
+        if self.window.move_gesture(event) {
             window.start_window_move();
         }
     }
@@ -3543,23 +3335,24 @@ impl TerminalApp {
     /// mailbox is drained at the active display's refresh rate without a second
     /// fixed-frequency timer in an individual chart or order-book surface.
     pub(super) fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.frame_poll_gate.try_schedule() {
+        if !self.frames.try_schedule_frame() {
             return;
         }
         let terminal = cx.entity();
         window.on_next_frame(move |window, cx| {
             let diagnostics = terminal.update(cx, |terminal, cx| {
-                terminal.frame_poll_gate.complete();
-                if !terminal.closing
+                terminal.frames.frame_ran();
+                if !terminal.window.is_closing()
                     && terminal
-                        .workspace_persistence
-                        .as_ref()
+                        .saved
+                        .writer()
                         .is_some_and(WorkspaceLayoutPersistence::poll)
                 {
-                    terminal.workspace_error = terminal
-                        .workspace_persistence
-                        .as_ref()
+                    let error = terminal
+                        .saved
+                        .writer()
                         .and_then(WorkspaceLayoutPersistence::error);
+                    terminal.notices.set_workspace_error(error);
                     cx.notify();
                 }
                 let authenticated = terminal
@@ -3569,7 +3362,7 @@ impl TerminalApp {
                 let mut diagnostics = Vec::new();
                 let mut summaries_changed = false;
                 if authenticated {
-                    for entry in terminal.market_summaries.values_mut() {
+                    for entry in terminal.market_watch.summaries_mut().values_mut() {
                         summaries_changed |= entry.poll();
                     }
                 }
@@ -3650,10 +3443,9 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.market_wake_listener_started.is_some() {
+        if !self.frames.claim_listener_start() {
             return;
         }
-        self.market_wake_listener_started = Some(());
         self.start_account_wake_listener(window, cx);
         cx.spawn_in(window, async move |terminal, cx| {
             loop {
@@ -3662,15 +3454,16 @@ impl TerminalApp {
                     .await;
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
-                        let restart_prepared = if let Some(updater) = terminal.updater.as_mut() {
-                            let update = updater.poll();
-                            if update.changed {
-                                terminal_cx.notify();
-                            }
-                            update.restart_prepared
-                        } else {
-                            false
-                        };
+                        let restart_prepared =
+                            if let Some(updater) = terminal.services.updater_mut() {
+                                let update = updater.poll();
+                                if update.changed {
+                                    terminal_cx.notify();
+                                }
+                                update.restart_prepared
+                            } else {
+                                false
+                            };
                         if restart_prepared {
                             terminal.prepare_update_restart_after_workspace_persistence(
                                 window,
@@ -3685,7 +3478,7 @@ impl TerminalApp {
             }
         })
         .detach();
-        let wake = self.market_frame_wake.clone();
+        let wake = self.frames.market().clone();
         self.lifecycle
             .trading_feedback()
             .set_request_wake(wake.callback());
@@ -3694,7 +3487,12 @@ impl TerminalApp {
                 wake.notified().await;
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
-                        if terminal.trading_store.read(terminal_cx).has_pending() {
+                        if terminal
+                            .services
+                            .trading_store()
+                            .read(terminal_cx)
+                            .has_pending()
+                        {
                             terminal.apply_trading_publication(terminal_cx);
                             terminal_cx.notify();
                         }
@@ -3779,7 +3577,7 @@ impl TerminalApp {
             if chart_has_market_data {
                 flags |= ChartContextMenuState::READY;
             }
-            if self.workspace_factory.is_some() && pane_count < CHART_PANE_CAPACITY {
+            if self.services.market_factory().is_some() && pane_count < CHART_PANE_CAPACITY {
                 flags |= ChartContextMenuState::SPLIT;
             }
             if has_drawings {
@@ -3811,7 +3609,7 @@ impl TerminalApp {
                             overlay: panel.template_overlay(),
                             name_input: panel.template_name(),
                             error: panel.template_error(),
-                            templates: &self.chart_settings_templates,
+                            templates: self.saved.chart_settings_templates(),
                             apply_to_all: self
                                 .tabs
                                 .iter()

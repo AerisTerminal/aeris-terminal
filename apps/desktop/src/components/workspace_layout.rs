@@ -661,7 +661,7 @@ impl TerminalApp {
                     pane_cx.notify();
                 });
             } else if let Some(host) = toast_host(self.tabs.active()) {
-                self.toaster.post_notice(
+                self.notices.toaster_mut().post_notice(
                     host,
                     notification_center::UserNotice {
                         key: notification_center::NoticeKey {
@@ -699,7 +699,7 @@ impl TerminalApp {
             return;
         };
         while let Some(result) = self.lifecycle.trading_feedback().take_unscoped_notice() {
-            self.toaster.post_notice(
+            self.notices.toaster_mut().post_notice(
                 host,
                 notification_center::UserNotice {
                     key: notification_center::NoticeKey {
@@ -738,9 +738,9 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let needs_refresh = !trading_projection_current(pane.read(cx));
-        if needs_refresh && self.trading_store.read(cx).current().is_some() {
+        if needs_refresh && self.services.trading_store().read(cx).current().is_some() {
             // Selection is rare; the event path is the only regular WorkingSet drain.
-            let store = self.trading_store.clone();
+            let store = self.services.trading_store().clone();
             pane.update(cx, |state, pane_cx| {
                 apply_trading_snapshot(state, &store, pane_cx);
             });
@@ -748,7 +748,7 @@ impl TerminalApp {
     }
 
     pub(super) fn apply_trading_publication(&mut self, cx: &mut Context<Self>) {
-        let view = self.trading_store.update(cx, |store, _| {
+        let view = self.services.trading_store().update(cx, |store, _| {
             store
                 .drain()
                 .cloned()
@@ -760,10 +760,12 @@ impl TerminalApp {
         let feedback = self.lifecycle.trading_feedback();
         feedback.record_venue_notices(&snapshot.venue_notices);
         if resync {
-            self.bottom_panel.invalidate_trading_revision();
+            self.pages.bottom_panel.invalidate_trading_revision();
         }
-        let (changed, accounts_changed) =
-            self.bottom_panel.apply_store(self.trading_store.read(cx));
+        let (changed, accounts_changed) = self
+            .pages
+            .bottom_panel
+            .apply_store(self.services.trading_store().read(cx));
         if changed {
             cx.notify();
         }
@@ -779,16 +781,17 @@ impl TerminalApp {
                     aeris_instruments::InstrumentId::try_new(product.instrument_id.clone()).ok()
                 });
                 let changed = self
-                    .trading_store
+                    .services
+                    .trading_store()
                     .read(cx)
                     .pane_changed(selected, instrument.as_ref());
                 if !changed {
                     continue;
                 }
                 #[cfg(test)]
-                self.trading_store.read(cx).note_pane_notify();
+                self.services.trading_store().read(cx).note_pane_notify();
                 pane.surface.update(cx, |state, state_cx| {
-                    apply_trading_snapshot(state, &self.trading_store, state_cx);
+                    apply_trading_snapshot(state, self.services.trading_store(), state_cx);
                 });
             }
         }

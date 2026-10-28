@@ -66,7 +66,11 @@ impl FullscreenHint {
 
 impl TerminalApp {
     pub(super) fn track_fullscreen_hint(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some(generation) = self.fullscreen_hint.observe(window.is_fullscreen()) else {
+        let Some(generation) = self
+            .window
+            .fullscreen_hint_mut()
+            .observe(window.is_fullscreen())
+        else {
             return;
         };
         cx.spawn(async move |terminal, cx| {
@@ -74,7 +78,10 @@ impl TerminalApp {
                 .timer(ENTER_DURATION + HOLD_DURATION)
                 .await;
             let leaving = terminal.update(cx, |terminal, terminal_cx| {
-                let leaving = terminal.fullscreen_hint.begin_leaving(generation);
+                let leaving = terminal
+                    .window
+                    .fullscreen_hint_mut()
+                    .begin_leaving(generation);
                 if leaving {
                     terminal_cx.notify();
                 }
@@ -85,7 +92,7 @@ impl TerminalApp {
             }
             cx.background_executor().timer(LEAVE_DURATION).await;
             if let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
-                if terminal.fullscreen_hint.finish(generation) {
+                if terminal.window.fullscreen_hint_mut().finish(generation) {
                     terminal_cx.notify();
                 }
             }) && terminal.upgrade().is_some()

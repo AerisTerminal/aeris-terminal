@@ -20,7 +20,7 @@ impl TerminalApp {
             self.release_frameless_title_bar(window, cx);
         }
         // The shell's key handler closes the dialog on Escape, so it needs keyboard focus.
-        self.chrome_focus.focus(window, cx);
+        self.window.chrome_focus().focus(window, cx);
         cx.notify();
     }
 
@@ -37,7 +37,7 @@ impl TerminalApp {
             .then(|| {
                 keyboard_shortcuts_dialog(
                     terminal,
-                    self.chart_chrome.trading_shortcuts,
+                    self.chrome.preferences().trading_shortcuts,
                     &self.theme,
                 )
             })

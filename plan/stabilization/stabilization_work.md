@@ -242,10 +242,20 @@ only on the guarded GUI checks on their lines.
     menu, the copy-feedback fence and the settings panel with its placement, section and one
     popover enum (dropdown, color picker, template menu or dialog) behind private fields.
     `TerminalApp` drops from 66 to 52 fields.
-  - Left: bring `TerminalApp` to 15 fields or fewer and remove `struct_excessive_bools`
-    (8 bools remain): window state, frame wakes, watchlist, layout persistence, style
-    templates, drawing chrome, services and provider connections still sit on it directly.
-  - Turn `#[path]` modules into directories, keeping the `LayoutLibrary` rules.
+    `desktop/window_state.rs` owns the chrome focus, window activity, closing phase, profile
+    refresh, move gesture, title bar, fullscreen hint and chart fullscreen;
+    `desktop/frame_wakes.rs` the market wake, frame poll gate and listener start;
+    `desktop/app_notices.rs` the toaster and workspace error; `desktop/app_services.rs` the
+    trading store, market factory, updater with its restart phase and the economic-event risk
+    schedule; `desktop/app_chrome.rs` the chart chrome preferences, drawing tool menu,
+    favorites drag and drawing context toolbar; `desktop/market_watch.rs` the watchlist rows,
+    flag filter and picker, row drag and market summaries; and `desktop/saved_workspace.rs`
+    the layout library with its drawing sets, the chart settings and drawing templates, and
+    the workspace writer with its last saved snapshot and one unsaved-edit set. `AppPages`
+    gains the bottom panel and layouts page, `ProviderLoginFlow` the data connections and
+    `TabStrip` the linked-chart sync revisions. The former bool clusters are enums,
+    `struct_excessive_bools` is removed, and `TerminalApp` drops from 52 to 15 fields.
+  - Left: turn `#[path]` modules into directories, keeping the `LayoutLibrary` rules.
   - GUI check of tabs, search and menus. Part of UI-07.
 - [ ] M7.6 Dirty-source `FrameScheduler`
   - Left: `DirtySet` and `FrameScheduler`, with layout persistence by revision.

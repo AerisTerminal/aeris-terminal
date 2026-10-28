@@ -195,11 +195,11 @@ impl TerminalApp {
     /// Closes whatever the toolbar had open once its drawing is no longer the one selected.
     pub(super) fn sync_drawing_context_toolbar(&mut self, cx: &mut Context<Self>) {
         let target = self.toolbar_target(cx);
-        if self.drawing_context_toolbar.target == target {
+        if self.chrome.context_toolbar().target == target {
             return;
         }
         self.end_drawing_toolbar_color_edit(cx);
-        let toolbar = &mut self.drawing_context_toolbar;
+        let toolbar = self.chrome.context_toolbar_mut();
         toolbar.target = target;
         toolbar.menu = None;
         toolbar.template_name = None;
@@ -208,7 +208,7 @@ impl TerminalApp {
 
     fn toggle_drawing_toolbar_menu(&mut self, menu: ToolbarMenu, cx: &mut Context<Self>) {
         self.end_drawing_toolbar_color_edit(cx);
-        let toolbar = &mut self.drawing_context_toolbar;
+        let toolbar = self.chrome.context_toolbar_mut();
         toolbar.menu = (toolbar.menu.as_ref() != Some(&menu)).then_some(menu);
         toolbar.template_name = None;
         toolbar.template_error = None;
@@ -216,7 +216,7 @@ impl TerminalApp {
     }
 
     fn close_drawing_toolbar_menu(&mut self, cx: &mut Context<Self>) {
-        let toolbar = &mut self.drawing_context_toolbar;
+        let toolbar = self.chrome.context_toolbar_mut();
         if toolbar.menu.take().is_some() {
             toolbar.template_name = None;
             toolbar.template_error = None;
@@ -251,7 +251,8 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let reopen = self
-            .drawing_context_toolbar
+            .chrome
+            .context_toolbar()
             .color_picker
             .as_ref()
             .is_none_or(|picker| picker.property != property);
@@ -279,7 +280,7 @@ impl TerminalApp {
         input.update(cx, |input, input_cx| {
             input.set_value(current, window, input_cx);
         });
-        self.drawing_context_toolbar.color_picker = Some(ToolbarColorPicker {
+        self.chrome.context_toolbar_mut().color_picker = Some(ToolbarColorPicker {
             surface: selected.surface,
             chart: selected.chart,
             property: property.to_string(),
@@ -295,7 +296,7 @@ impl TerminalApp {
 
     /// Ends the picker's session, keeping its edits as one undo step.
     fn end_drawing_toolbar_color_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(picker) = self.drawing_context_toolbar.color_picker.take() else {
+        let Some(picker) = self.chrome.context_toolbar_mut().color_picker.take() else {
             return;
         };
         // A settings dialog opened since kept the picker's edits and owns the session now.
@@ -310,7 +311,7 @@ impl TerminalApp {
     }
 
     fn set_drawing_toolbar_color(&mut self, color: &str, cx: &mut Context<Self>) {
-        let Some(picker) = self.drawing_context_toolbar.color_picker.as_mut() else {
+        let Some(picker) = self.chrome.context_toolbar_mut().color_picker.as_mut() else {
             return;
         };
         let normalized = normalize_hex_color(color);
@@ -401,7 +402,7 @@ impl TerminalApp {
                 diagnostic!("Live workspace could not save drawing template: {error}");
             }
         });
-        let toolbar = &mut self.drawing_context_toolbar;
+        let toolbar = self.chrome.context_toolbar_mut();
         toolbar.template_name = Some(TemplateNameField {
             input,
             _submit: submit,
@@ -413,12 +414,12 @@ impl TerminalApp {
     /// Saves the selected drawing's style under the typed name, replacing a template of the
     /// same kind and name.
     fn save_drawing_template(&mut self, cx: &mut Context<Self>) {
-        let Some(field) = &self.drawing_context_toolbar.template_name else {
+        let Some(field) = &self.chrome.context_toolbar().template_name else {
             return;
         };
         let name = field.input.read(cx).value().trim().to_string();
         let error = self.store_drawing_template(&name, cx).err();
-        let toolbar = &mut self.drawing_context_toolbar;
+        let toolbar = self.chrome.context_toolbar_mut();
         if error.is_none() {
             toolbar.template_name = None;
             toolbar.menu = None;
@@ -444,25 +445,19 @@ impl TerminalApp {
             name: name.to_string(),
             template_json,
         };
-        if let Some(existing) = self.drawing_templates.iter_mut().find(|existing| {
-            existing.kind == template.kind && existing.name.eq_ignore_ascii_case(name)
-        }) {
-            *existing = template;
-        } else if self.drawing_templates.len() < MAXIMUM_DRAWING_TEMPLATES {
-            self.drawing_templates.push(template);
-        } else {
+        if !self.saved.store_drawing_template(template) {
             return Err(format!(
                 "You can save up to {MAXIMUM_DRAWING_TEMPLATES} drawing templates."
             ));
         }
-        self.drawing_templates_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
         Ok(())
     }
 
     fn apply_drawing_template(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(json) = self
-            .drawing_templates
+            .saved
+            .drawing_templates()
             .get(index)
             .map(|template| template.template_json.clone())
         else {
@@ -476,7 +471,7 @@ impl TerminalApp {
             chart_cx.notify();
             applied
         });
-        let toolbar = &mut self.drawing_context_toolbar;
+        let toolbar = self.chrome.context_toolbar_mut();
         if applied {
             toolbar.menu = None;
             toolbar.template_error = None;
@@ -487,9 +482,7 @@ impl TerminalApp {
     }
 
     fn remove_drawing_template(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.drawing_templates.len() {
-            self.drawing_templates.remove(index);
-            self.drawing_templates_persistence_dirty = true;
+        if self.saved.remove_drawing_template(index) {
             self.persist_workspace_layout_if_changed(cx);
             cx.notify();
         }
@@ -500,7 +493,7 @@ impl TerminalApp {
         pointer: gpui::Point<Pixels>,
         origin: gpui::Point<Pixels>,
     ) {
-        self.drawing_context_toolbar.grab = Some(pointer - origin);
+        self.chrome.context_toolbar_mut().grab = Some(pointer - origin);
     }
 
     /// Follows the pointer in memory only; the position is saved once when the drag ends.
@@ -510,7 +503,7 @@ impl TerminalApp {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let Some(grab) = self.drawing_context_toolbar.grab else {
+        let Some(grab) = self.chrome.context_toolbar().grab else {
             return;
         };
         let Some(selected) = self.toolbar_drawing(cx) else {
@@ -519,8 +512,8 @@ impl TerminalApp {
         let toolbar = toolbar_size(&selected.settings, self.theme.dimensions.border_width);
         let origin = clamp_floating_toolbar_origin(pointer - grab, viewport, toolbar);
         let origin = Some((f32::from(origin.x), f32::from(origin.y)));
-        if self.chart_chrome.drawing_context_toolbar_origin != origin {
-            self.chart_chrome.drawing_context_toolbar_origin = origin;
+        if self.chrome.preferences().drawing_context_toolbar_origin != origin {
+            self.chrome.preferences_mut().drawing_context_toolbar_origin = origin;
             cx.notify();
         }
     }
@@ -528,10 +521,10 @@ impl TerminalApp {
     /// Every surface saves its own copy of the chrome preferences, so each one takes the new
     /// position before the shared file is written.
     pub(super) fn end_drawing_context_toolbar_move(&mut self, cx: &mut Context<Self>) {
-        if self.drawing_context_toolbar.grab.take().is_none() {
+        if self.chrome.context_toolbar_mut().grab.take().is_none() {
             return;
         }
-        let origin = self.chart_chrome.drawing_context_toolbar_origin;
+        let origin = self.chrome.preferences().drawing_context_toolbar_origin;
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
@@ -558,7 +551,8 @@ impl TerminalApp {
         let viewport = window.viewport_size();
         let panel_size = toolbar_size(settings, theme.dimensions.border_width);
         let stored = self
-            .chart_chrome
+            .chrome
+            .preferences()
             .drawing_context_toolbar_origin
             .map_or_else(
                 || default_origin(chart_top, viewport, panel_size),
@@ -567,9 +561,9 @@ impl TerminalApp {
         let origin = clamp_floating_toolbar_origin(stored, viewport, panel_size);
         let ui = ToolbarUi {
             terminal,
-            toolbar: &self.drawing_context_toolbar,
+            toolbar: self.chrome.context_toolbar(),
             settings,
-            templates: &self.drawing_templates,
+            templates: self.saved.drawing_templates(),
             theme,
         };
         let controls = toolbar_controls(settings)

@@ -1512,7 +1512,7 @@ fn swipe_capture<H: ToastHost>(host: Entity<H>) -> impl IntoElement {
 
 impl ToastHost for TerminalApp {
     fn toaster_mut(&mut self) -> &mut Toaster {
-        &mut self.toaster
+        self.notices.toaster_mut()
     }
 
     fn activate_notice_action(&mut self, action: NoticeAction, cx: &mut Context<Self>) {
@@ -1532,7 +1532,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let host = toast_host(self.tabs.active());
-        if self.toaster.post_trading_announcements(
+        if self.notices.toaster_mut().post_trading_announcements(
             announcements,
             snapshot,
             host,
@@ -1561,7 +1561,9 @@ impl TerminalApp {
                     continue;
                 };
                 for announcement in announcements {
-                    self.toaster.push_price_alert(host, announcement, now);
+                    self.notices
+                        .toaster_mut()
+                        .push_price_alert(host, announcement, now);
                 }
             }
         }
@@ -1577,25 +1579,32 @@ impl TerminalApp {
             .flat_map(|workspace| &workspace.panes)
             .map(|pane| ToastStack::of(&pane.surface))
             .collect();
-        self.toaster.retain_stacks(|stack| panes.contains(&stack));
+        self.notices
+            .toaster_mut()
+            .retain_stacks(|stack| panes.contains(&stack));
         for pane in &self.tabs.active().panes {
             let notice = pane_chart_notice(pane.surface.read(cx), cx);
-            self.toaster
-                .show_chart_status(ToastStack::of(&pane.surface), notice, now);
+            self.notices.toaster_mut().show_chart_status(
+                ToastStack::of(&pane.surface),
+                notice,
+                now,
+            );
         }
         self.announce_price_alerts(now, cx);
-        self.toaster
-            .tick(now, self.window_active, cx.reduce_motion());
-        if self.toaster.is_animating(now) {
+        let window_active = self.window.is_active();
+        self.notices
+            .toaster_mut()
+            .tick(now, window_active, cx.reduce_motion());
+        if self.notices.toaster().is_animating(now) {
             window.request_animation_frame();
         }
-        if let Some(deadline) = self.toaster.claim_wake() {
+        if let Some(deadline) = self.notices.toaster_mut().claim_wake() {
             cx.spawn(async move |terminal, cx| {
                 cx.background_executor()
                     .timer(deadline.saturating_duration_since(Instant::now()))
                     .await;
                 if let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.toaster.wake_fired(deadline);
+                    terminal.notices.toaster_mut().wake_fired(deadline);
                     terminal_cx.notify();
                 }) && terminal.upgrade().is_some()
                 {
