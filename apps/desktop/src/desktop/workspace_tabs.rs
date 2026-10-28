@@ -3051,6 +3051,24 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Refuses another workspace tab past the desktop's bound or the plan's limit.
+    pub(super) fn check_workspace_capacity(&self) -> Result<(), String> {
+        let open = self.workspaces.len();
+        if open >= MAXIMUM_OPEN_WORKSPACES {
+            return Err(format!(
+                "At most {MAXIMUM_OPEN_WORKSPACES} workspaces can be open"
+            ));
+        }
+        if let Some(maximum) = aeris_desktop::account::plan_policy().open_workspaces
+            && open >= maximum
+        {
+            return Err(format!(
+                "Your plan supports at most {maximum} open workspaces"
+            ));
+        }
+        Ok(())
+    }
+
     /// Opens a new tab with one chart of the active chart's market and interval, showing a
     /// new layout named `name`.
     ///
@@ -3064,12 +3082,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let maximum = current_plan_limits().workspaces;
-        if self.workspaces.len() >= maximum {
-            return Err(format!(
-                "Your plan supports at most {maximum} open workspaces"
-            ));
-        }
+        self.check_workspace_capacity()?;
         let factory = self
             .workspace_factory
             .clone()
@@ -3177,7 +3190,7 @@ impl TerminalApp {
         let workspace = &self.workspaces[self.active];
         if workspace.panes.len() >= CHART_PANE_CAPACITY {
             self.workspace_error = Some(format!(
-                "Development safety ceiling of {CHART_PANE_CAPACITY} chart panes reached"
+                "At most {CHART_PANE_CAPACITY} chart panes fit in one workspace"
             ));
             cx.notify();
             return;
@@ -3731,11 +3744,6 @@ impl TerminalApp {
         window.on_next_frame(move |window, cx| {
             let diagnostics = terminal.update(cx, |terminal, cx| {
                 terminal.frame_poll_gate.complete();
-                if let Some(account) = terminal.lifecycle.account()
-                    && account.poll()
-                {
-                    cx.notify();
-                }
                 if !terminal.closing
                     && terminal
                         .workspace_persistence
@@ -3840,9 +3848,7 @@ impl TerminalApp {
             return;
         }
         self.market_wake_listener_started = Some(());
-        // Authentication must progress even when a suspended provider has
-        // no events to wake this window. Poll only account presentation;
-        // a changed view schedules a frame that also drains retained data.
+        self.start_account_wake_listener(window, cx);
         cx.spawn_in(window, async move |terminal, cx| {
             loop {
                 cx.background_executor()
@@ -3864,13 +3870,6 @@ impl TerminalApp {
                                 window,
                                 terminal_cx,
                             );
-                            return;
-                        }
-                        if let Some(account) = terminal.lifecycle.account()
-                            && account.poll()
-                        {
-                            terminal.schedule_market_frame(window, terminal_cx);
-                            terminal_cx.notify();
                         }
                     })
                     .is_err()
@@ -3903,6 +3902,38 @@ impl TerminalApp {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    /// Re-renders when the account presentation changes. Authentication
+    /// must progress even when a suspended provider has no events to wake
+    /// this window, so a change also schedules a frame that drains retained
+    /// market data.
+    fn start_account_wake_listener(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self.lifecycle.account() else {
+            return;
+        };
+        let wake = UiWake::default();
+        let registration = wake.callback();
+        if let Err(error) = account.register_change_wake(&registration) {
+            diagnostic!("Aeris account change wake unavailable: {error}");
+            return;
+        }
+        cx.spawn_in(window, async move |terminal, cx| {
+            loop {
+                wake.notified().await;
+                if terminal
+                    .update_in(cx, |terminal, window, terminal_cx| {
+                        terminal.schedule_market_frame(window, terminal_cx);
+                        terminal_cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            drop(registration);
         })
         .detach();
     }

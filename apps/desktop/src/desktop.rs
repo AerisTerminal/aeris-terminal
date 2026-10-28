@@ -547,36 +547,9 @@ const CONTEXT_PANEL_MAXIMUM_HEIGHT: f32 = 640.0;
 const CONTEXT_PANEL_MINIMUM_CHART_HEIGHT: f32 = 160.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
-// PRE-PRODUCTION: re-enable this product restriction and qualify the production
-// value before publishing Aeris. Development keeps product gating disabled while
-// retaining a hard ceiling so pane-owned charts, market demand, persistence, and
-// worker queues remain bounded.
-const CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED: bool = false;
-const PRODUCTION_CHART_PANE_LIMIT: usize = 4;
-const DEVELOPMENT_CHART_PANE_SAFETY_CEILING: usize = 64;
-const CHART_PANE_CAPACITY: usize = if CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED {
-    PRODUCTION_CHART_PANE_LIMIT
-} else {
-    DEVELOPMENT_CHART_PANE_SAFETY_CEILING
-};
-
-#[derive(Clone, Copy)]
-struct PlanLimits {
-    workspaces: usize,
-    indicators_per_chart: usize,
-    extended_timeframes: bool,
-}
-
-fn current_plan_limits() -> PlanLimits {
-    // Authentication is mandatory, but billing is intentionally not a
-    // product-access boundary yet. Keep one capability shape
-    // until paid-plan enforcement is deliberately enabled.
-    PlanLimits {
-        workspaces: MAXIMUM_OPEN_WORKSPACES,
-        indicators_per_chart: usize::MAX,
-        extended_timeframes: true,
-    }
-}
+/// Hard ceiling that keeps pane-owned charts, market demand, persistence and
+/// worker queues bounded. Plan limits come from `account::plan_policy`.
+const CHART_PANE_CAPACITY: usize = 64;
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = MENU_SEPARATOR_HEIGHT;

@@ -3476,15 +3476,8 @@ fn workspace_tabs_switch_one_surface_and_preserve_stable_labels() {
 }
 
 #[test]
-fn development_chart_splitting_disables_the_product_restriction() {
-    const {
-        assert!(!super::CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED);
-        assert!(super::CHART_PANE_CAPACITY > super::PRODUCTION_CHART_PANE_LIMIT);
-    }
-    assert_eq!(
-        super::CHART_PANE_CAPACITY,
-        super::DEVELOPMENT_CHART_PANE_SAFETY_CEILING
-    );
+fn chart_splitting_is_bounded_only_by_the_pane_capacity() {
+    assert_eq!(super::CHART_PANE_CAPACITY, 64);
 
     let mut workspace = super::AerisChartWorkspace::new(1, super::CHART_PANE_CAPACITY)
         .expect("chart workspace root");

@@ -493,12 +493,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let maximum = current_plan_limits().workspaces;
-        if self.workspaces.len() >= maximum {
-            return Err(format!(
-                "Your plan supports at most {maximum} open workspaces"
-            ));
-        }
+        self.check_workspace_capacity()?;
         let factory = self
             .workspace_factory
             .clone()

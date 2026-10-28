@@ -2681,7 +2681,7 @@ impl WorkspaceSurface {
                 | ChartInterval::Hour12
                 | ChartInterval::Day1
         );
-        if !current_plan_limits().extended_timeframes && !starter_interval {
+        if !aeris_desktop::account::plan_policy().extended_timeframes && !starter_interval {
             self.series_message = "This timeframe requires a paid plan".to_string();
             Self::post_indicator_failure(
                 "series_selection",
@@ -8249,9 +8249,10 @@ impl WorkspaceSurface {
             Self::post_study_failure("Chart data is not available yet.", cx);
             return false;
         };
-        let maximum = current_plan_limits().indicators_per_chart;
-        let runtime_count = runtime_study_count(&self.studies);
-        if chart.read(cx).indicator_states().len() + runtime_count >= maximum {
+        if let Some(maximum) = aeris_desktop::account::plan_policy().studies_per_chart
+            && chart.read(cx).indicator_states().len() + runtime_study_count(&self.studies)
+                >= maximum
+        {
             Self::post_study_failure("This chart has reached its indicator limit.", cx);
             return false;
         }

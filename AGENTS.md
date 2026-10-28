@@ -478,7 +478,7 @@ Only the refresh token and the cached profile (`sub`, email, name, picture) are 
 vault; there is no lease, device key or entitlement, and every signed-in account shows the
 "Unlimited" plan. An unreachable provider keeps a saved session signed in (Offline) with bounded backoff;
 only a rejected refresh grant signs out. Sign-out revokes the refresh token, deletes the vault entries
-and returns to the sign-in gate. `apps/desktop/src/account.rs::sign_in_required` is the one policy:
+and returns to the sign-in gate. `apps/desktop/src/account/mod.rs::sign_in_required` is the one policy:
 every process except a validation data root installs the account session. Before the first usable
 session (signed in or the cached Offline one) only the local trading store, the account session and
 persistence paths exist: the desktop entrypoint shows the sign-in window, and
@@ -491,6 +491,13 @@ until exit because `MarketService::shutdown` is final and cannot restart in-proc
 starts nothing new. `tools/naming_check` keeps these owners out of the entrypoint. Tests must not call `start_restore` or touch
 the native vault; use injected vaults and `AccountService` test seams. Manage Profile opens
 `https://aeristerminal.com/account/`.
+
+The desktop `DesktopAccount` session paces its own status fetches on its poller thread and runs
+weakly held change wakes (at most 8) after each presentation change; the sign-in window and
+workspace windows re-render on those wakes and never poll it. Plan limits come only from
+`account::plan_policy()` (unrestricted for every account); workspace code never defines product
+limits, and its 8-tab and 64-pane bounds are resource bounds. `tools/naming_check` rejects window
+account polling and the removed plan placeholders.
 
 The sibling website is at `C:\Users\devraj\Downloads\Softwares\aeris-website`. Inspect both repositories for future auth/profile/subscription changes, and preserve unrelated edits there. Keep tokens and credentials out of UI and logs.
 

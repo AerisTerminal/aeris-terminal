@@ -1,20 +1,33 @@
 //! Desktop-owned account presentation over one in-process account runtime.
 //!
 //! Network and credential work stays off the GPUI thread, but there is no
-//! secondary process, local transport, or reconnect/replay layer.
+//! secondary process, local transport, or reconnect/replay layer. The account
+//! session paces its own status fetches and wakes registered windows when its
+//! presentation changes; windows never poll it.
+
+mod plan;
+
+pub use plan::{PlanPolicy, plan_policy};
 
 use aeris_observability::diagnostic;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
     },
     time::{Duration, Instant},
 };
 
 use aeris_account_runtime::AccountService;
 use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+
+/// A window's account-change callback. The session holds it weakly.
+pub type AccountChangeWake = Arc<dyn Fn() + Send + Sync>;
+
+/// Most change wakes one session holds at once: the sign-in window and each
+/// workspace window register one.
+const MAXIMUM_CHANGE_WAKES: usize = 8;
 
 /// Production account hub used by the native Manage Profile action.
 pub const MANAGE_PROFILE_URL: &str = "https://aeristerminal.com/account/";
@@ -337,12 +350,10 @@ pub struct AccountPresentation {
 struct AccountShared {
     generation: AtomicU64,
     pending: AtomicBool,
-    version: AtomicU64,
     view: Mutex<AccountView>,
     error: Mutex<Option<AccountError>>,
     last_status_poll: Mutex<Instant>,
     profile_refresh_until: Mutex<Option<Instant>>,
-    last_seen_version: Mutex<u64>,
     request_at: Mutex<Instant>,
     authorization_url: Mutex<Option<String>>,
     /// Bumped on every Begin/Cancel/SignOut submission. Status replies
@@ -360,6 +371,16 @@ struct AccountShared {
     /// the login request, cleared when the view leaves Authorizing.
     login_open: AtomicBool,
     requests: SyncSender<AccountRequest>,
+    /// Wakes the poller early so it re-plans its next tick.
+    poller: SyncSender<PollerEvent>,
+    change_wakes: Mutex<Vec<Weak<dyn Fn() + Send + Sync>>>,
+}
+
+/// What the account poller thread receives: a worker reply, or a request to
+/// re-plan its next tick after a new request started.
+enum PollerEvent {
+    Response(AccountResponse),
+    Replan,
 }
 
 /// Bounds how long one request may stay in flight. The account runtime answers
@@ -408,6 +429,17 @@ const PROFILE_REFRESH_POLL_WINDOW: Duration = Duration::from_secs(10);
 /// Idle refresh so restored sessions and runtime expiry reach the UI.
 const IDLE_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// When the poller ticks.
+#[derive(Clone, Copy)]
+enum Cadence {
+    /// After every event and whenever the next fetch or request deadline is due.
+    Paced,
+    /// Only after events, so tests that apply replies directly see no
+    /// background fetches.
+    #[cfg(test)]
+    OnEvents,
+}
+
 impl DesktopAccount {
     /// Creates one account session for the desktop instance.
     /// # Errors
@@ -419,6 +451,7 @@ impl DesktopAccount {
         Self::spawn_with_runtime(
             move |request| handle_account_request(&handler, request),
             Some(service),
+            Cadence::Paced,
         )
     }
 
@@ -448,30 +481,27 @@ impl DesktopAccount {
     /// authoritative account status.
     #[must_use]
     pub fn verification_pending(&self) -> bool {
-        !self.shared.initial_status_resolved.load(Ordering::Acquire)
-            || self.shared.view.lock().is_ok_and(|view| {
-                // Generation zero is startup restoration, not a new
-                // browser transaction. The first runtime reply can arrive before
-                // refresh/link verification finishes.
-                view.request_generation == 0 && view.state == AccountSessionState::Authorizing
-            })
+        verification_pending(&self.shared)
     }
 
-    /// Spawns one isolated session with a scripted worker. Production uses
-    /// [`handle_account_request`]; tests inject a fake runtime handler.
+    /// Spawns one isolated session with a scripted worker that ticks only
+    /// after events. Production uses [`handle_account_request`]; tests inject
+    /// a fake runtime handler.
     #[cfg(test)]
     fn spawn_with(
         handle: impl Fn(AccountRequest) -> AccountResponse + Send + 'static,
     ) -> Result<Self, String> {
-        Self::spawn_with_runtime(handle, None)
+        Self::spawn_with_runtime(handle, None, Cadence::OnEvents)
     }
 
     fn spawn_with_runtime(
         handle: impl Fn(AccountRequest) -> AccountResponse + Send + 'static,
         authoritative_runtime: Option<AccountService>,
+        cadence: Cadence,
     ) -> Result<Self, String> {
         let (request_tx, request_rx) = mpsc::sync_channel(2);
         let (result_tx, result_rx) = mpsc::sync_channel(2);
+        let poller_tx = result_tx.clone();
         std::thread::Builder::new()
             .name("aeris-account-client".to_string())
             .spawn(move || run_account_client_with(&request_rx, &result_tx, handle))
@@ -484,12 +514,10 @@ impl DesktopAccount {
         let shared = Arc::new(AccountShared {
             generation: AtomicU64::new(unix_millis()),
             pending: AtomicBool::new(false),
-            version: AtomicU64::new(0),
             view: Mutex::new(signed_out_view()),
             error: Mutex::new(None),
             last_status_poll: Mutex::new(now),
             profile_refresh_until: Mutex::new(None),
-            last_seen_version: Mutex::new(0),
             request_at: Mutex::new(now),
             authorization_url: Mutex::new(None),
             epoch: AtomicU64::new(0),
@@ -498,46 +526,47 @@ impl DesktopAccount {
             initial_status_resolved: AtomicBool::new(false),
             login_open: AtomicBool::new(false),
             requests: request_tx,
+            poller: poller_tx,
+            change_wakes: Mutex::new(Vec::new()),
         });
-        let poller = Arc::clone(&shared);
+        // The poller holds the session weakly: once every handle is dropped,
+        // the worker's request queue closes and both threads exit.
+        let poller = Arc::downgrade(&shared);
         std::thread::Builder::new()
             .name("aeris-account-poller".to_string())
-            .spawn(move || {
-                for response in result_rx {
-                    apply_account_response(&poller, response);
-                }
-            })
+            .spawn(move || run_account_poller(&poller, &result_rx, cadence))
             .map_err(|_| "desktop account client could not start".to_string())?;
-        let session = Self {
-            shared,
-            authoritative_runtime,
-        };
         // Fetch engine state at startup so a restored session (or an
         // runtime expiry) reaches the UI on the first frames.
-        session.queue_status();
-        Ok(session)
+        queue_status(&shared);
+        Ok(Self {
+            shared,
+            authoritative_runtime,
+        })
     }
 
-    /// Queues one generation-fenced status fetch when the reply slot is
-    /// free. Best-effort: a full queue retries on the next poll.
-    fn queue_status(&self) {
-        if self.shared.status_in_flight.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let seq = self.shared.status_seq.fetch_add(1, Ordering::AcqRel) + 1;
-        let epoch = self.shared.epoch.load(Ordering::Acquire);
-        if self
+    /// Registers a callback that runs on the account poller thread after
+    /// every presentation change. The session keeps only a weak reference,
+    /// so dropping the caller's last `Arc` unregisters it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session already holds its maximum number
+    /// of live wakes.
+    pub fn register_change_wake(&self, wake: &AccountChangeWake) -> Result<(), String> {
+        let mut wakes = self
             .shared
-            .requests
-            .try_send(AccountRequest::RefreshStatus { seq, epoch })
-            .is_err()
-        {
-            self.shared.status_in_flight.store(false, Ordering::Release);
-            return;
+            .change_wakes
+            .lock()
+            .map_err(|_| "account change wakes are unavailable".to_string())?;
+        wakes.retain(|registered| registered.strong_count() > 0);
+        if wakes.len() >= MAXIMUM_CHANGE_WAKES {
+            return Err(format!(
+                "at most {MAXIMUM_CHANGE_WAKES} account change wakes can be registered"
+            ));
         }
-        if let Ok(mut last) = self.shared.last_status_poll.lock() {
-            *last = Instant::now();
-        }
+        wakes.push(Arc::downgrade(wake));
+        Ok(())
     }
 
     /// Returns the owned settings-menu state for rendering.
@@ -614,17 +643,12 @@ impl DesktopAccount {
         }
         if self.shared.requests.try_send(request).is_err() {
             self.shared.pending.store(false, Ordering::Release);
-            self.fail(busy);
+            fail(&self.shared, busy);
             return Err(busy.to_string());
         }
         clear_transient_account_error(&self.shared);
+        replan_poller(&self.shared);
         Ok(())
-    }
-
-    /// Records one actionable failure for the menu error row.
-    fn fail(&self, error: &str) {
-        set_transient_account_error(&self.shared, error.to_string());
-        self.shared.version.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Cancels the pending account-runtime-owned login transaction.
@@ -748,76 +772,155 @@ impl DesktopAccount {
         }
         self.request_profile_refresh().map(|()| true)
     }
+}
 
-    /// Applies worker results and keeps the runtime account view fresh. Status
-    /// polling runs fast while a browser transaction is open and slowly
-    /// when idle, so restored sessions and runtime expiry reach the UI
-    /// without unnecessary runtime polling. Returns whether presentation changed.
-    #[must_use]
-    pub fn poll(&self) -> bool {
-        let mut changed = false;
-        let version = self.shared.version.load(Ordering::Acquire);
-        if let Ok(mut seen) = self.shared.last_seen_version.lock()
-            && *seen != version
+/// Runs the account poller: applies worker replies and paces status fetches.
+/// Fetches run fast while a browser transaction is open and slowly when idle,
+/// so restored sessions and runtime expiry reach the UI without unnecessary
+/// runtime requests.
+fn run_account_poller(
+    shared: &Weak<AccountShared>,
+    events: &Receiver<PollerEvent>,
+    cadence: Cadence,
+) {
+    let mut wait = Duration::ZERO;
+    loop {
+        let event = match cadence {
+            Cadence::Paced => events.recv_timeout(wait),
+            #[cfg(test)]
+            Cadence::OnEvents => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let response = match event {
+            Ok(PollerEvent::Response(response)) => Some(response),
+            Ok(PollerEvent::Replan) | Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        if let Some(response) = response {
+            apply_account_response(&shared, response);
+        }
+        wait = tick(&shared);
+    }
+}
+
+/// Expires a wedged request and queues a due status fetch. Returns how long
+/// the poller may wait before the next tick; a reply or a new request wakes
+/// it sooner.
+fn tick(shared: &AccountShared) -> Duration {
+    if shared.pending.load(Ordering::Acquire) {
+        let elapsed = shared
+            .request_at
+            .lock()
+            .map_or(REQUEST_TIMEOUT, |sent| sent.elapsed());
+        if let Some(remaining) = REQUEST_TIMEOUT.checked_sub(elapsed)
+            && !remaining.is_zero()
         {
-            *seen = version;
-            changed = true;
+            return remaining;
         }
-        if self.shared.pending.load(Ordering::Acquire) {
-            let expired = self
-                .shared
-                .request_at
-                .lock()
-                .is_ok_and(|sent| sent.elapsed() >= REQUEST_TIMEOUT);
-            if expired {
-                self.shared.pending.store(false, Ordering::Release);
-                self.fail("account request timed out; try again");
-                changed = true;
-            }
+        shared.pending.store(false, Ordering::Release);
+        fail(shared, "account request timed out; try again");
+    }
+    if shared.status_in_flight.load(Ordering::Acquire) {
+        return IDLE_STATUS_POLL_INTERVAL;
+    }
+    let interval = status_poll_interval(shared);
+    let elapsed = shared
+        .last_status_poll
+        .lock()
+        .map_or(interval, |last| last.elapsed());
+    if let Some(remaining) = interval.checked_sub(elapsed)
+        && !remaining.is_zero()
+    {
+        return remaining;
+    }
+    queue_status(shared);
+    if shared.status_in_flight.load(Ordering::Acquire) {
+        IDLE_STATUS_POLL_INTERVAL
+    } else {
+        // The worker queue was full; retry on the fast cadence.
+        STATUS_POLL_INTERVAL
+    }
+}
+
+fn status_poll_interval(shared: &AccountShared) -> Duration {
+    // An open transaction polls fast even before the first status lands;
+    // otherwise polling would wait on the view it is meant to fetch.
+    let transactional = shared.login_open.load(Ordering::Acquire)
+        || shared.view.lock().is_ok_and(|view| is_authorizing(&view));
+    let profile_refresh_active = shared.profile_refresh_until.lock().is_ok_and(|mut until| {
+        if until.is_some_and(|deadline| Instant::now() < deadline) {
+            true
+        } else {
+            *until = None;
+            false
         }
-        if !self.shared.pending.load(Ordering::Acquire)
-            && !self.shared.status_in_flight.load(Ordering::Acquire)
-        {
-            // An open transaction polls fast even before the first status
-            // lands; otherwise polling would wait on the view it is meant
-            // to fetch. Idle sessions poll slowly for restore and expiry.
-            let transactional = self.shared.login_open.load(Ordering::Acquire)
-                || self
-                    .shared
-                    .view
-                    .lock()
-                    .is_ok_and(|view| is_authorizing(&view));
-            let profile_refresh_active =
-                self.shared
-                    .profile_refresh_until
-                    .lock()
-                    .is_ok_and(|mut until| {
-                        if until.is_some_and(|deadline| Instant::now() < deadline) {
-                            true
-                        } else {
-                            *until = None;
-                            false
-                        }
-                    });
-            let interval = if self.verification_pending() {
-                INITIAL_STATUS_POLL_INTERVAL
-            } else if transactional {
-                STATUS_POLL_INTERVAL
-            } else if profile_refresh_active {
-                PROFILE_REFRESH_POLL_INTERVAL
-            } else {
-                IDLE_STATUS_POLL_INTERVAL
-            };
-            let due = self
-                .shared
-                .last_status_poll
-                .lock()
-                .map_or(true, |last| last.elapsed() >= interval);
-            if due {
-                self.queue_status();
-            }
-        }
-        changed
+    });
+    if verification_pending(shared) {
+        INITIAL_STATUS_POLL_INTERVAL
+    } else if transactional {
+        STATUS_POLL_INTERVAL
+    } else if profile_refresh_active {
+        PROFILE_REFRESH_POLL_INTERVAL
+    } else {
+        IDLE_STATUS_POLL_INTERVAL
+    }
+}
+
+fn verification_pending(shared: &AccountShared) -> bool {
+    !shared.initial_status_resolved.load(Ordering::Acquire)
+        || shared.view.lock().is_ok_and(|view| {
+            // Generation zero is startup restoration, not a new browser
+            // transaction. The first runtime reply can arrive before
+            // refresh/link verification finishes.
+            view.request_generation == 0 && view.state == AccountSessionState::Authorizing
+        })
+}
+
+/// Queues one generation-fenced status fetch when the reply slot is free.
+/// Best-effort: a full queue retries on the next tick.
+fn queue_status(shared: &AccountShared) {
+    if shared.status_in_flight.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let seq = shared.status_seq.fetch_add(1, Ordering::AcqRel) + 1;
+    let epoch = shared.epoch.load(Ordering::Acquire);
+    if shared
+        .requests
+        .try_send(AccountRequest::RefreshStatus { seq, epoch })
+        .is_err()
+    {
+        shared.status_in_flight.store(false, Ordering::Release);
+        return;
+    }
+    if let Ok(mut last) = shared.last_status_poll.lock() {
+        *last = Instant::now();
+    }
+}
+
+/// Wakes the poller so it re-plans its next tick. A full queue already holds
+/// a wake for it.
+fn replan_poller(shared: &AccountShared) {
+    if let Err(mpsc::TrySendError::Disconnected(_)) = shared.poller.try_send(PollerEvent::Replan) {
+        diagnostic!("Aeris account poller is unavailable");
+    }
+}
+
+/// Records one actionable failure for the menu error row.
+fn fail(shared: &AccountShared, error: &str) {
+    set_transient_account_error(shared, error.to_string());
+    publish_change(shared);
+}
+
+/// Runs every live change wake after a presentation change.
+fn publish_change(shared: &AccountShared) {
+    let wakes = shared.change_wakes.lock().map_or_else(
+        |_| Vec::new(),
+        |wakes| wakes.iter().filter_map(Weak::upgrade).collect::<Vec<_>>(),
+    );
+    for wake in wakes {
+        wake();
     }
 }
 
@@ -848,18 +951,18 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             clear_transient_account_error(shared);
             clear_login_action_error(shared);
             rewind_status_poll(shared);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::BrowserReopened => {
             shared.pending.store(false, Ordering::Release);
             clear_transient_account_error(shared);
             clear_login_action_error(shared);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::LoginActionFailed(error) => {
             shared.pending.store(false, Ordering::Release);
             set_login_action_error(shared, error);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::Status { view, seq, epoch } => {
             if seq != shared.status_seq.load(Ordering::Acquire) {
@@ -889,7 +992,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             } else {
                 clear_transient_account_error(shared);
             }
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::StatusFailed { seq, epoch, error } => {
             if seq != shared.status_seq.load(Ordering::Acquire) {
@@ -903,7 +1006,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             // retry while Reopen and Cancel stay enabled. The error is
             // actionable and clears on the next good fetch.
             set_transient_account_error(shared, error);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::ProfileRefreshQueued { view, epoch } => {
             if epoch != shared.epoch.load(Ordering::Acquire) {
@@ -916,28 +1019,28 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
                 *until = Instant::now().checked_add(PROFILE_REFRESH_POLL_WINDOW);
             }
             rewind_status_poll(shared);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::Cancelled(view) => {
             apply_retired_account_view(shared, view);
             clear_transient_account_error(shared);
             clear_login_action_error(shared);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::SignedOut(view) => {
             apply_retired_account_view(shared, view);
             clear_account_error(shared);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::SignOutFailed { view, error } => {
             apply_retired_account_view(shared, view);
             set_sign_out_cleanup_error(shared, error);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
         AccountResponse::Failed(error) => {
             shared.pending.store(false, Ordering::Release);
             set_transient_account_error(shared, error);
-            shared.version.fetch_add(1, Ordering::AcqRel);
+            publish_change(shared);
         }
     }
 }
@@ -1015,12 +1118,12 @@ fn set_sign_out_cleanup_error(shared: &AccountShared, message: String) {
     }
 }
 
-/// Forces the next poll to fetch immediately instead of waiting out the
-/// idle interval. Used when a transaction opens mid-idle-cycle.
+/// Makes the next tick fetch immediately under any interval. Used when a
+/// transaction opens or a profile refresh starts mid-cycle.
 fn rewind_status_poll(shared: &AccountShared) {
     if let Ok(mut last) = shared.last_status_poll.lock() {
         *last = Instant::now()
-            .checked_sub(STATUS_POLL_INTERVAL)
+            .checked_sub(IDLE_STATUS_POLL_INTERVAL)
             .unwrap_or_else(Instant::now);
     }
 }
@@ -1031,11 +1134,14 @@ fn is_authorizing(view: &AccountView) -> bool {
 
 fn run_account_client_with(
     requests: &Receiver<AccountRequest>,
-    results: &SyncSender<AccountResponse>,
+    results: &SyncSender<PollerEvent>,
     handle: impl Fn(AccountRequest) -> AccountResponse,
 ) {
     while let Ok(request) = requests.recv() {
-        if results.send(handle(request)).is_err() {
+        if results
+            .send(PollerEvent::Response(handle(request)))
+            .is_err()
+        {
             return;
         }
     }
@@ -1090,13 +1196,16 @@ pub fn sign_out(service: &AccountService) -> Result<AccountView, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountRequest, AccountResponse, DesktopAccount, MANAGE_PROFILE_URL, account_action_label,
-        account_state_label, open_login_browser_with, resolve_authoritative_authentication,
-        sanitized_plan_label, unavailable_menu_state,
+        AccountRequest, AccountResponse, Cadence, DesktopAccount, MANAGE_PROFILE_URL,
+        account_action_label, account_state_label, open_login_browser_with,
+        resolve_authoritative_authentication, sanitized_plan_label, unavailable_menu_state,
     };
     use aeris_account_runtime::{AccountService, AccountServiceConfig};
     use aeris_contracts::{AccountSessionState, AccountView};
-    use std::sync::{Arc, Mutex, atomic::Ordering};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     /// Scripted fake runtime behind an isolated desktop session. The worker
@@ -1235,12 +1344,11 @@ mod tests {
         (session, engine)
     }
 
-    /// Polls until the condition holds or the test times out. The worker
+    /// Waits until the condition holds or the test times out. The worker
     /// round-trips in milliseconds; the timeout only fires on real stalls.
-    fn wait_for(session: &DesktopAccount, what: &str, mut done: impl FnMut() -> bool) {
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let _changed = session.poll();
             if done() {
                 return;
             }
@@ -1249,7 +1357,7 @@ mod tests {
         }
     }
 
-    /// Rewinds the status clock so the next poll fetches immediately
+    /// Rewinds the status clock and wakes the poller so it fetches at once
     /// instead of waiting out the authorizing interval.
     fn rewind_status(session: &DesktopAccount) {
         use super::STATUS_POLL_INTERVAL;
@@ -1261,6 +1369,20 @@ mod tests {
             .expect("status clock locks") = Instant::now()
             .checked_sub(STATUS_POLL_INTERVAL + Duration::from_secs(1))
             .expect("test clock rewinds");
+        super::replan_poller(&session.shared);
+    }
+
+    /// A change wake that counts its calls, plus the handle that keeps it registered.
+    fn counting_wake(session: &DesktopAccount) -> (Arc<AtomicUsize>, super::AccountChangeWake) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let wake: super::AccountChangeWake = Arc::new(move || {
+            counter.fetch_add(1, Ordering::AcqRel);
+        });
+        session
+            .register_change_wake(&wake)
+            .expect("change wake registers");
+        (calls, wake)
     }
 
     fn view(state: AccountSessionState) -> AccountView {
@@ -1279,18 +1401,16 @@ mod tests {
     #[test]
     fn rollback_profile_refresh_skips_signed_out_and_queues_for_live_account() {
         let (session, engine) = scripted_session();
-        wait_for(&session, "initial signed-out status", || {
+        wait_for("initial signed-out status", || {
             !session.verification_pending()
         });
         assert_eq!(session.request_profile_refresh_if_active(), Ok(false));
 
         engine.lock().expect("engine locks").view = view(AccountSessionState::Active);
-        session.queue_status();
-        wait_for(&session, "verified account status", || {
-            session.authenticated()
-        });
+        super::queue_status(&session.shared);
+        wait_for("verified account status", || session.authenticated());
         assert_eq!(session.request_profile_refresh_if_active(), Ok(true));
-        wait_for(&session, "profile refresh reply", || {
+        wait_for("profile refresh reply", || {
             session
                 .shared
                 .profile_refresh_until
@@ -1604,13 +1724,10 @@ mod tests {
     #[test]
     fn durable_sign_out_failure_survives_status_poll_until_cleanup_succeeds() {
         use super::{AccountResponse, apply_account_response};
-        use std::sync::atomic::Ordering;
 
         let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
-        wait_for(&session, "startup status settles", || {
-            session.error().is_some()
-        });
-        let before_failure = session.shared.version.load(Ordering::Acquire);
+        wait_for("startup status settles", || session.error().is_some());
+        let (wakes, _registration) = counting_wake(&session);
         apply_account_response(
             &session.shared,
             AccountResponse::SignOutFailed {
@@ -1619,9 +1736,9 @@ mod tests {
             },
         );
         assert_eq!(
-            session.shared.version.load(Ordering::Acquire),
-            before_failure + 1,
-            "retired view and cleanup error publish as one versioned state"
+            wakes.load(Ordering::Acquire),
+            1,
+            "retired view and cleanup error publish as one change"
         );
 
         apply_account_response(
@@ -1651,15 +1768,15 @@ mod tests {
             Some("sign-out could not remove saved credentials; retry sign-out")
         );
 
-        let before_success = session.shared.version.load(Ordering::Acquire);
+        let before_success = wakes.load(Ordering::Acquire);
         apply_account_response(
             &session.shared,
             AccountResponse::SignedOut(view(AccountSessionState::SignedOut)),
         );
         assert_eq!(
-            session.shared.version.load(Ordering::Acquire),
+            wakes.load(Ordering::Acquire),
             before_success + 1,
-            "successful retry clears the sticky error in the same versioned publication"
+            "successful retry clears the sticky error in the same change"
         );
         assert!(session.error().is_none());
         assert!(!session.menu_state().retry_sign_out);
@@ -1704,8 +1821,9 @@ mod tests {
             )
             .expect("test account config builds"),
         );
-        let session = DesktopAccount::spawn_with_runtime(inert_engine, Some(runtime))
-            .expect("isolated session spawns");
+        let session =
+            DesktopAccount::spawn_with_runtime(inert_engine, Some(runtime), Cadence::OnEvents)
+                .expect("isolated session spawns");
         *session.shared.view.lock().expect("desktop view locks") =
             view(AccountSessionState::Active);
 
@@ -1749,6 +1867,7 @@ mod tests {
         DesktopAccount::spawn_with_runtime(
             move |request| super::handle_account_request(&handler, request),
             Some(service),
+            Cadence::OnEvents,
         )
         .expect("account session spawns")
     }
@@ -1776,9 +1895,7 @@ mod tests {
     #[test]
     fn failed_startup_status_remains_in_verification_state() {
         let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
-        wait_for(&session, "startup status failure", || {
-            session.error().is_some()
-        });
+        wait_for("startup status failure", || session.error().is_some());
         assert!(session.verification_pending());
     }
 
@@ -1864,13 +1981,13 @@ mod tests {
     fn browser_reopen_failure_surfaces_and_retry_clears_it() {
         let (session, engine) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "transaction open", || {
+        wait_for("transaction open", || {
             session.shared.login_open.load(Ordering::Acquire)
         });
         engine.lock().expect("engine locks").reopen = FakeReopen::Fail;
 
         session.reopen_browser().expect("reopen queues");
-        wait_for(&session, "reopen failure", || session.error().is_some());
+        wait_for("reopen failure", || session.error().is_some());
         assert_eq!(
             session.error().as_deref(),
             Some("system browser could not be opened")
@@ -1880,7 +1997,7 @@ mod tests {
 
         engine.lock().expect("engine locks").reopen = FakeReopen::Success;
         session.reopen_browser().expect("retry queues");
-        wait_for(&session, "reopen recovery", || session.error().is_none());
+        wait_for("reopen recovery", || session.error().is_none());
         assert_eq!(engine.lock().expect("engine locks").reopens, 2);
     }
 
@@ -1888,7 +2005,7 @@ mod tests {
     fn repeated_browser_reopen_clicks_collapse_to_one_bounded_worker_request() {
         let (session, engine) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "transaction open", || {
+        wait_for("transaction open", || {
             session.shared.login_open.load(Ordering::Acquire)
         });
         engine.lock().expect("engine locks").reopen = FakeReopen::Delay;
@@ -1912,7 +2029,7 @@ mod tests {
         // The transaction opens and polling starts at once: pending clears
         // while the browser holds the transaction, so Reopen and Cancel
         // stay enabled instead of sticking disabled.
-        wait_for(&session, "transaction open", || {
+        wait_for("transaction open", || {
             session.shared.login_open.load(Ordering::Acquire)
         });
         assert!(!session.shared.pending.load(Ordering::Acquire));
@@ -1924,7 +2041,7 @@ mod tests {
                 .expect("url slot locks")
                 .is_some()
         );
-        wait_for(&session, "authorizing view", || {
+        wait_for("authorizing view", || {
             session.presentation().action == "Waiting for browser"
         });
         // The browser callback completes inside the account runtime.
@@ -1933,7 +2050,7 @@ mod tests {
             .expect("engine locks")
             .complete_active("Ada Trader", "ada@example.com");
         rewind_status(&session);
-        wait_for(&session, "active profile", || {
+        wait_for("active profile", || {
             session.presentation().action == "Account"
         });
         let presentation = session.presentation();
@@ -1961,7 +2078,7 @@ mod tests {
         // still resolve instead of stranding pending state.
         let (session, engine) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "transaction open", || {
+        wait_for("transaction open", || {
             session.shared.login_open.load(Ordering::Acquire)
         });
         engine
@@ -1969,7 +2086,7 @@ mod tests {
             .expect("engine locks")
             .complete_active("Ada Trader", "ada@example.com");
         rewind_status(&session);
-        wait_for(&session, "active profile", || {
+        wait_for("active profile", || {
             session.presentation().action == "Account"
         });
         assert!(!session.shared.pending.load(Ordering::Acquire));
@@ -1983,11 +2100,11 @@ mod tests {
 
         let (session, _) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "authorizing view", || {
+        wait_for("authorizing view", || {
             session.presentation().action == "Waiting for browser"
         });
         session.request_cancel().expect("cancel queues");
-        wait_for(&session, "cancelled", || {
+        wait_for("cancelled", || {
             !session.shared.login_open.load(Ordering::Acquire)
                 && session.presentation().action == "Sign in"
         });
@@ -2003,7 +2120,7 @@ mod tests {
         session.request_sign_in().expect("first click queues");
         session.request_sign_in().expect("second click collapses");
         session.request_sign_in().expect("third click collapses");
-        wait_for(&session, "transaction open", || {
+        wait_for("transaction open", || {
             session.shared.login_open.load(Ordering::Acquire)
         });
         // One BeginLogin reached the engine despite three clicks; the
@@ -2021,13 +2138,13 @@ mod tests {
         session.request_sign_in().expect("sign-in queues");
         // The failure resolves to an error with retry enabled, never a
         // stuck disabled button.
-        wait_for(&session, "failure surfaces", || session.error().is_some());
+        wait_for("failure surfaces", || session.error().is_some());
         assert!(!session.shared.pending.load(Ordering::Acquire));
         assert!(!session.shared.login_open.load(Ordering::Acquire));
         // Recovery: the retry starts a fresh generation.
         engine.lock().expect("engine locks").begin_fails = false;
         session.request_sign_in().expect("retry queues");
-        wait_for(&session, "retry opens", || {
+        wait_for("retry opens", || {
             session.shared.login_open.load(Ordering::Acquire)
         });
         assert_eq!(engine.lock().expect("engine locks").begins, 2);
@@ -2041,7 +2158,7 @@ mod tests {
 
         let (session, _) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "authorizing view", || {
+        wait_for("authorizing view", || {
             session.presentation().action == "Waiting for browser"
         });
         // A superseded sequence number drops without touching the slot.
@@ -2076,7 +2193,7 @@ mod tests {
     fn status_failure_keeps_polling_and_clears_on_recovery() {
         let (session, engine) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "authorizing view", || {
+        wait_for("authorizing view", || {
             session.presentation().action == "Waiting for browser"
         });
         // Failing fetches surface an actionable error while the
@@ -2084,9 +2201,7 @@ mod tests {
         // Reopen/Cancel stay enabled throughout.
         engine.lock().expect("engine locks").fail_status = true;
         rewind_status(&session);
-        wait_for(&session, "fetch error surfaces", || {
-            session.error().is_some()
-        });
+        wait_for("fetch error surfaces", || session.error().is_some());
         assert!(
             session
                 .shared
@@ -2095,7 +2210,7 @@ mod tests {
         );
         engine.lock().expect("engine locks").fail_status = false;
         rewind_status(&session);
-        wait_for(&session, "error clears", || session.error().is_none());
+        wait_for("error clears", || session.error().is_none());
         assert_eq!(session.presentation().action, "Waiting for browser");
     }
 
@@ -2103,7 +2218,7 @@ mod tests {
     fn sign_out_clears_profile_and_allows_account_switch() {
         let (session, engine) = scripted_session();
         session.request_sign_in().expect("sign-in queues");
-        wait_for(&session, "authorizing view", || {
+        wait_for("authorizing view", || {
             session.presentation().action == "Waiting for browser"
         });
         engine
@@ -2111,20 +2226,18 @@ mod tests {
             .expect("engine locks")
             .complete_active("Ada Trader", "ada@example.com");
         rewind_status(&session);
-        wait_for(&session, "active profile", || {
+        wait_for("active profile", || {
             session.presentation().action == "Account"
         });
         session.request_sign_out().expect("sign-out queues");
-        wait_for(&session, "signed out", || {
-            session.presentation().action == "Sign in"
-        });
+        wait_for("signed out", || session.presentation().action == "Sign in");
         let cleared = session.presentation();
         assert_eq!(cleared.display_name, "");
         assert_eq!(cleared.email, "");
         assert_eq!(cleared.photo_url, "");
         // A second user signs in on a fresh generation with no carryover.
         session.request_sign_in().expect("second sign-in queues");
-        wait_for(&session, "authorizing again", || {
+        wait_for("authorizing again", || {
             session.presentation().action == "Waiting for browser"
         });
         engine
@@ -2132,7 +2245,7 @@ mod tests {
             .expect("engine locks")
             .complete_active("Bobgnome", "bob@example.com");
         rewind_status(&session);
-        wait_for(&session, "switched profile", || {
+        wait_for("switched profile", || {
             session.presentation().display_name == "Bobgnome"
         });
         assert_eq!(session.presentation().email, "bob@example.com");
@@ -2155,7 +2268,7 @@ mod tests {
             worker.lock().expect("engine locks").handle(request)
         })
         .expect("isolated session spawns");
-        wait_for(&session, "restored session", || {
+        wait_for("restored session", || {
             session.presentation().action == "Account"
         });
         assert!(!session.verification_pending());
@@ -2179,7 +2292,7 @@ mod tests {
             worker.lock().expect("engine locks").handle(request)
         })
         .expect("isolated session spawns");
-        wait_for(&session, "offline session", || {
+        wait_for("offline session", || {
             session.presentation().state == account_state_label(AccountSessionState::Offline)
         });
 
@@ -2201,11 +2314,73 @@ mod tests {
             .expect("request clock locks") = Instant::now()
             .checked_sub(REQUEST_TIMEOUT + Duration::from_secs(1))
             .expect("test clock rewinds");
-        assert!(session.poll());
+        let (wakes, _registration) = counting_wake(&session);
+        super::tick(&session.shared);
+        assert!(wakes.load(Ordering::Acquire) >= 1);
         assert!(!session.shared.pending.load(Ordering::Acquire));
         assert_eq!(
             session.error().as_deref(),
             Some("account request timed out; try again")
+        );
+    }
+
+    #[test]
+    fn paced_session_fetches_and_wakes_without_any_caller_polling() {
+        let engine = Arc::new(Mutex::new(FakeEngine {
+            view: view(AccountSessionState::SignedOut),
+            signed_out: view(AccountSessionState::SignedOut),
+            ..FakeEngine::default()
+        }));
+        let worker = Arc::clone(&engine);
+        let session = DesktopAccount::spawn_with_runtime(
+            move |request| worker.lock().expect("engine locks").handle(request),
+            None,
+            Cadence::Paced,
+        )
+        .expect("paced session spawns");
+        let (wakes, _registration) = counting_wake(&session);
+        session.request_sign_in().expect("sign-in queues");
+        wait_for("authorizing view", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        let before_completion = wakes.load(Ordering::Acquire);
+        assert!(before_completion >= 1);
+        // No rewind and no caller tick: the open transaction's own cadence
+        // must fetch the completed sign-in.
+        engine
+            .lock()
+            .expect("engine locks")
+            .complete_active("Ada Trader", "ada@example.com");
+        wait_for("active profile through the paced fetch", || {
+            session.presentation().action == "Account"
+        });
+        assert!(wakes.load(Ordering::Acquire) > before_completion);
+    }
+
+    #[test]
+    fn change_wakes_are_bounded_and_dropping_one_unregisters_it() {
+        use super::{AccountChangeWake, MAXIMUM_CHANGE_WAKES, publish_change};
+
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        wait_for("startup status settles", || session.error().is_some());
+        let (dropped_calls, dropped) = counting_wake(&session);
+        drop(dropped);
+        let live = (1..MAXIMUM_CHANGE_WAKES)
+            .map(|_| counting_wake(&session))
+            .collect::<Vec<_>>();
+        let (last_calls, _last) = counting_wake(&session);
+        let refused: AccountChangeWake = Arc::new(|| {});
+        assert!(
+            session.register_change_wake(&refused).is_err(),
+            "a full set of live wakes refuses another"
+        );
+
+        publish_change(&session.shared);
+        assert_eq!(dropped_calls.load(Ordering::Acquire), 0);
+        assert_eq!(last_calls.load(Ordering::Acquire), 1);
+        assert!(
+            live.iter()
+                .all(|(calls, _)| calls.load(Ordering::Acquire) == 1)
         );
     }
 }

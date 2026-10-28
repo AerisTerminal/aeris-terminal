@@ -12,7 +12,6 @@ const SIGN_IN_COLUMN_WIDTH: f32 = 360.0;
 const SIGN_IN_STATUS_HEIGHT: f32 = 40.0;
 const SIGN_IN_WINDOW_WIDTH: f32 = 480.0;
 const SIGN_IN_WINDOW_HEIGHT: f32 = 560.0;
-const SIGN_IN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What the gate offers, derived from the account presentation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -371,7 +370,7 @@ pub(super) fn open_sign_in_window(gate: SignInGate, cx: &mut App) {
             gate: Rc::clone(&gate),
             account,
         });
-        view.update(cx, |_, cx| SignInWindow::start_polling(window, cx));
+        view.update(cx, |view, cx| view.start_account_listener(window, cx));
         view
     });
     if let Err(error) = opened {
@@ -390,25 +389,31 @@ struct SignInWindow {
 }
 
 impl SignInWindow {
-    fn start_polling(window: &mut Window, cx: &mut Context<Self>) {
+    /// Follows the account session's change wakes. The first pass runs at
+    /// once so a session that settled before registration is not missed.
+    fn start_account_listener(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let wake = UiWake::default();
+        let registration = wake.callback();
+        if let Err(error) = self.account.register_change_wake(&registration) {
+            diagnostic!("Aeris sign-in change wake unavailable: {error}");
+        }
         cx.spawn_in(window, async move |view, cx| {
             loop {
-                cx.background_executor().timer(SIGN_IN_POLL_INTERVAL).await;
                 if view
-                    .update_in(cx, |view, window, cx| view.poll(window, cx))
+                    .update_in(cx, |view, window, cx| view.account_changed(window, cx))
                     .is_err()
                 {
                     break;
                 }
+                wake.notified().await;
             }
+            drop(registration);
         })
         .detach();
     }
 
-    fn poll(&self, window: &Window, cx: &mut Context<Self>) {
-        if self.account.poll() {
-            cx.notify();
-        }
+    fn account_changed(&self, window: &Window, cx: &mut Context<Self>) {
+        cx.notify();
         let startup = {
             let mut state = self.gate.borrow_mut();
             if !matches!(state.phase, GatePhase::SignedOut) {

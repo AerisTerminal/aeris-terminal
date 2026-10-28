@@ -192,10 +192,14 @@ record it on this line.
   - Left: guarded GUI screenshot check that the session-plan level, the picker swatches and the
     watchlist flag look unchanged. Closes UI-13.
 - [ ] M7.2 Account integration behind an account boundary
-  - Left: `account/` module with plan policy at the account boundary.
-  - Delete `CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED` and `current_plan_limits`.
-  - Replace the frame-loop, 100 ms and sign-in-gate account polling with an account-owned wake.
-  - The dormant-code parts are superseded by mandatory sign-in.
+  - Landed: `apps/desktop/src/account/` with `plan_policy()` (unrestricted) replacing
+    `CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED` and `current_plan_limits`; the 8-tab and 64-pane
+    bounds stay as resource bounds. The account poller paces its own status fetches and runs
+    weakly held change wakes, replacing the frame-loop, 100 ms timer and sign-in-window polls.
+    Account tests cover the paced fetch, the wake bound and unregistering; naming_check rejects the
+    removed polls and placeholders. The dormant-code parts are superseded by mandatory sign-in.
+  - Left: guarded GUI check that sign-in, sign-out and the Manage Profile refresh still update
+    the sign-in window and the account menu.
 - [ ] M7.3 `AerisChartView` emits host events
   - Left: make it an `EventEmitter<ChartHostEvent>` and delete the four `pending_*` request fields
     and their drains.

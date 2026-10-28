@@ -125,7 +125,7 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "chrome persistence receipts",
     ),
     (
-        "apps/desktop/src/account.rs",
+        "apps/desktop/src/account/mod.rs",
         1,
         "account authorization request",
     ),
@@ -4477,7 +4477,7 @@ mod tests {
         assert!(updater.contains("const UPDATE_BACKEND_CONFIGURED: bool = false"));
         // Sign-in is required except on a validation data root, which never
         // reaches the identity provider or a saved session.
-        let account = manifest("apps/desktop/src/account.rs");
+        let account = manifest("apps/desktop/src/account/mod.rs");
         assert!(!account.contains("AUTH_BACKEND_CONFIGURED"));
         assert!(account.contains("pub fn sign_in_required() -> bool"));
         assert!(account.contains("!root.is_validation()"));
@@ -4491,6 +4491,39 @@ mod tests {
                 .contains("sign_in_gate::sign_in_page("),
             "an installed but unauthenticated account session must cover the workspace"
         );
+    }
+
+    /// The account session paces its own status fetches and wakes windows on
+    /// change; windows never poll it, and plan limits come from the account
+    /// boundary.
+    #[test]
+    fn desktop_account_session_wakes_windows_and_owns_plan_policy() {
+        let account = manifest("apps/desktop/src/account/mod.rs");
+        assert!(account.contains("pub fn register_change_wake("));
+        assert!(!account.contains("pub fn poll("));
+        assert!(
+            manifest("apps/desktop/src/account/plan.rs").contains("pub const fn plan_policy()")
+        );
+        for relative in [
+            "apps/desktop/src/desktop.rs",
+            "apps/desktop/src/desktop/workspace_tabs.rs",
+            "apps/desktop/src/desktop/workspace_surface.rs",
+            "apps/desktop/src/desktop/layout_tabs.rs",
+            "apps/desktop/src/components/sign_in_gate.rs",
+        ] {
+            let source = manifest(relative);
+            for retired in [
+                "account.poll()",
+                "current_plan_limits",
+                "CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED",
+                "SIGN_IN_POLL_INTERVAL",
+            ] {
+                assert!(
+                    !source.contains(retired),
+                    "{relative} must not use {retired}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5434,7 +5467,7 @@ jobs:
             "crates/contracts/src/messages.rs",
             "crates/contracts/tests/",
             "crates/platform_runtime/src/browser.rs",
-            "apps/desktop/src/account.rs",
+            "apps/desktop/src/account/",
             "apps/desktop/src/desktop.rs",
             // Trading command adapters may construct provider-neutral trading account IDs;
             // they do not own SaaS identity or account-runtime state.
