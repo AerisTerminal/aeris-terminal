@@ -42,6 +42,9 @@ pub(super) struct StudiesController {
     /// The chart series (none when the selection cannot form one) whose deferred
     /// registration last failed to queue, and when it may be tried again.
     registration_retry: Option<(Option<BarSeriesKey>, Instant)>,
+    /// When automatic removals the command lane refused are retried, so a pane without further
+    /// market messages still sends them.
+    removal_retry: Option<Instant>,
     next_local_id: u64,
 }
 
@@ -58,6 +61,7 @@ impl Default for StudiesController {
             removing: HashSet::new(),
             deferred: Vec::new(),
             registration_retry: None,
+            removal_retry: None,
             next_local_id: 1,
         }
     }
@@ -263,16 +267,23 @@ impl StudiesController {
         self.registration_retry = None;
     }
 
-    /// The earliest retry deadline still ahead of `now`: a deferred registration or a held-back
-    /// automatic reinitialization. A passed deadline no longer holds anything back.
+    /// The earliest retry deadline still ahead of `now`: a deferred registration, a refused
+    /// automatic removal or a held-back automatic reinitialization. A passed deadline no longer
+    /// holds anything back.
     pub(super) fn next_retry_at(&self, now: Instant) -> Option<Instant> {
         let registration = self
             .registration_retry
             .as_ref()
             .filter(|_| self.next_deferred_index().is_some())
             .map(|(_, retry_at)| *retry_at);
+        let removal = self.removal_retry.filter(|_| {
+            self.automatic_removals
+                .iter()
+                .any(|study_id| !self.removing.contains(study_id))
+        });
         registration
             .into_iter()
+            .chain(removal)
             .chain(
                 self.reinitialization_retries
                     .values()
@@ -283,9 +294,10 @@ impl StudiesController {
     }
 
     /// Queues the removal of every cancelled study not already being removed. Returns whether
-    /// every one was queued.
+    /// every one was queued; a refusal sets the removal retry deadline unless one is still ahead.
     pub(super) fn dispatch_automatic_removals(
         &mut self,
+        now: Instant,
         mut try_remove: impl FnMut(StudyInstanceId) -> Result<(), TrySendError<StudyInstanceId>>,
     ) -> bool {
         let mut retry = self
@@ -300,9 +312,15 @@ impl StudiesController {
                 Ok(()) => {
                     self.removing.insert(study_id);
                 }
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => return false,
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                    if self.removal_retry.is_none_or(|retry_at| retry_at <= now) {
+                        self.removal_retry = Some(now + STUDY_RETRY_DELAY);
+                    }
+                    return false;
+                }
             }
         }
+        self.removal_retry = None;
         true
     }
 
@@ -717,6 +735,34 @@ mod tests {
         );
         studies.registration_succeeded();
         assert_eq!(studies.next_retry_at(now), Some(reinitialization_at));
+    }
+
+    #[test]
+    fn a_refused_automatic_removal_waits_for_its_own_retry_deadline() {
+        let now = Instant::now();
+        let later = now + STUDY_RETRY_DELAY;
+        let full = |received| Err(TrySendError::Full(received));
+        let mut studies = StudiesController::default();
+        studies.activate_for_removal(runtime(1, 1));
+
+        assert!(!studies.dispatch_automatic_removals(now, full));
+        assert_eq!(studies.next_retry_at(now), Some(later));
+        assert!(!studies.dispatch_automatic_removals(now + STUDY_RETRY_DELAY / 2, full));
+        assert_eq!(
+            studies.next_retry_at(now),
+            Some(later),
+            "a refusal before the deadline keeps it"
+        );
+        assert!(!studies.dispatch_automatic_removals(later, full));
+        assert_eq!(
+            studies.next_retry_at(later),
+            Some(later + STUDY_RETRY_DELAY),
+            "a refusal at the deadline sets the next one"
+        );
+
+        assert!(studies.dispatch_automatic_removals(later, |_| Ok(())));
+        assert!(studies.is_removing(study_id(1)));
+        assert_eq!(studies.next_retry_at(later), None);
     }
 
     #[test]

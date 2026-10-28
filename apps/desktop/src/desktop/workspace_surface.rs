@@ -4244,17 +4244,26 @@ impl WorkspaceSurface {
         engine_market_worker::series_key(product, self.interval)
     }
 
-    fn retry_automatic_study_removals(&mut self) -> bool {
+    /// Queues every automatic removal still waiting. A refused one arms the pane's study retry
+    /// timer, so it is sent again without another market message.
+    fn retry_automatic_study_removals(&mut self, cx: &mut Context<Self>) -> bool {
+        let now = cx.background_executor().now();
         let market_worker = &self.market_worker;
-        self.studies
-            .dispatch_automatic_removals(|study_id| market_worker.try_remove_study(study_id))
+        let dispatched = self
+            .studies
+            .dispatch_automatic_removals(now, |study_id| market_worker.try_remove_study(study_id));
+        if !dispatched {
+            self.arm_study_retry(cx);
+        }
+        dispatched
     }
 
     fn dispatch_runtime_study(
         &mut self,
         mut state: PendingRuntimeStudyState,
+        cx: &mut Context<Self>,
     ) -> Result<u64, Box<(PendingRuntimeStudyState, String)>> {
-        if !self.retry_automatic_study_removals() {
+        if !self.retry_automatic_study_removals(cx) {
             return Err(Box::new((
                 state,
                 "Study cancellation is waiting for runtime capacity".to_string(),
@@ -4308,7 +4317,7 @@ impl WorkspaceSurface {
         let Some(state) = self.studies.take_deferred(index) else {
             return;
         };
-        match self.dispatch_runtime_study(state) {
+        match self.dispatch_runtime_study(state, cx) {
             Ok(_) => {
                 self.studies.registration_succeeded();
                 cx.notify();
@@ -4336,8 +4345,9 @@ impl WorkspaceSurface {
         &mut self,
         study_id: StudyInstanceId,
         series: BarSeriesKey,
+        cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if !self.retry_automatic_study_removals() {
+        if !self.retry_automatic_study_removals(cx) {
             return Err("Study cancellation is waiting for runtime capacity".to_string());
         }
         let persisted = self
@@ -4373,8 +4383,8 @@ impl WorkspaceSurface {
     }
 
     /// Arms the pane's one study retry timer for the earliest deadline still holding a
-    /// registration or reinitialization back, so the retry runs even when no market message
-    /// arrives. Nothing is armed while no retry waits.
+    /// registration, automatic removal or reinitialization back, so the retry runs even when no
+    /// market message arrives. Nothing is armed while no retry waits.
     fn arm_study_retry(&mut self, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
         let deadline = self.studies.next_retry_at(now);
@@ -4405,7 +4415,7 @@ impl WorkspaceSurface {
     }
 
     fn dispatch_runtime_study_work(&mut self, cx: &mut Context<Self>) {
-        if !self.retry_automatic_study_removals() {
+        if !self.retry_automatic_study_removals(cx) {
             return;
         }
         self.dispatch_deferred_runtime_studies(cx);
@@ -4417,7 +4427,8 @@ impl WorkspaceSurface {
             .studies
             .stale_studies(&series, now, runtime_study_uses_current_chart);
         for study_id in stale {
-            if let Err(reason) = self.queue_runtime_study_reinitialization(study_id, series.clone())
+            if let Err(reason) =
+                self.queue_runtime_study_reinitialization(study_id, series.clone(), cx)
                 && self
                     .studies
                     .defer_reinitialization(study_id, series.clone(), now)
@@ -4449,9 +4460,9 @@ impl WorkspaceSurface {
         };
         if state.remove_on_registration {
             self.studies.activate_for_removal(runtime_state);
-            if !self.retry_automatic_study_removals() {
-                // The pending removal stays owned by StudiesController and
-                // subsequent study synchronization retries it.
+            if !self.retry_automatic_study_removals(cx) {
+                // The pending removal stays owned by StudiesController and its retry
+                // deadline sends it again.
                 diagnostic!("Automatic study removal is waiting for market worker capacity");
             }
             self.persistence.mark_dirty();
@@ -7109,7 +7120,7 @@ impl WorkspaceSurface {
         if self.studies.is_active(study_id) {
             self.apply_study_style(study_id, original.line_width, &original.output_colors, cx);
             if self
-                .request_study_settings(study_id, original.settings)
+                .request_study_settings(study_id, original.settings, cx)
                 .is_err()
             {
                 Self::post_study_failure("Study settings could not be restored. Try again.", cx);
@@ -7268,7 +7279,7 @@ impl WorkspaceSurface {
             })
             .collect::<Result<Vec<_>, _>>();
         self.apply_study_style(study_id, u32::from(line_width), &output_colors, cx);
-        self.request_study_settings(study_id, settings?)
+        self.request_study_settings(study_id, settings?, cx)
     }
 
     /// Reinitializes a study with `settings` unless it already computes them. While an earlier
@@ -7278,6 +7289,7 @@ impl WorkspaceSurface {
         &mut self,
         study_id: StudyInstanceId,
         settings: Vec<WorkspaceStudySettingState>,
+        cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let replacement = match self.studies.request_settings(study_id, settings) {
             StudySettingsRequest::Inactive => {
@@ -7290,7 +7302,7 @@ impl WorkspaceSurface {
             runtime_study_registration(&replacement, &series, self.studies.active())
                 .map(|registration| (series, registration))
         })?;
-        if !self.retry_automatic_study_removals() {
+        if !self.retry_automatic_study_removals(cx) {
             return Err("Study cancellation is waiting for runtime capacity".to_string());
         }
         match self
@@ -7319,7 +7331,7 @@ impl WorkspaceSurface {
         let Some(settings) = self.studies.take_queued_settings(study_id) else {
             return;
         };
-        let Err(message) = self.request_study_settings(study_id, settings) else {
+        let Err(message) = self.request_study_settings(study_id, settings, cx) else {
             return;
         };
         if let Some(dialog) = self.study_settings_dialog_mut()
@@ -7857,7 +7869,7 @@ impl WorkspaceSurface {
                 persist_on_registration: true,
                 blocked: false,
             };
-            if self.dispatch_runtime_study(state).is_err() {
+            if self.dispatch_runtime_study(state, cx).is_err() {
                 Self::post_study_failure("The study could not be queued. Try again.", cx);
                 return false;
             }

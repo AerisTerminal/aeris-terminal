@@ -282,13 +282,13 @@ only on the guarded GUI checks on their lines.
     dispatches recoveries its data bridge finds without waiting for the pane's next message.
     A deferred study registration or reinitialization arms one timer per pane for its
     earliest retry deadline (study times come from the GPUI executor clock), so the retry runs
-    without another market message; nothing is armed while no retry waits. GPUI tests cover an
-    idle terminal requesting no frame after setup, an over-budget pane draining on the next
-    frame, a deferred registration retrying on its timer alone and an idle pane arming no
+    without another market message; nothing is armed while no retry waits. An automatic study
+    removal refused by a full command lane records its own retry deadline on that timer,
+    cleared once every removal is sent. GPUI tests cover an idle terminal requesting no frame
+    after setup, an over-budget pane draining on the next frame, a deferred registration and a
+    refused automatic removal each retrying on the timer alone, and an idle pane arming no
     study retry.
-  - Left: an automatic study removal refused by a full command lane needs its own retry
-    deadline on the pane's study timer.
-  - Record idle CPU for 1, 4 and 16 panes, before and after. Closes UI-16.
+  - Left: record idle CPU for 1, 4 and 16 panes, before and after. Closes UI-16.
 - [ ] M7.7 Versioned, checksummed workspace container
   - Left: an envelope (magic, version, schema, length, sha256) on the durable writer, used for the
     workspace and chart-chrome files.

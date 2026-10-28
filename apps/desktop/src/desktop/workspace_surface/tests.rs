@@ -1464,8 +1464,9 @@ fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_
         resolved_chart_series: None,
     });
 
+    let now = Instant::now();
     let mut attempts = 0;
-    assert!(!studies.dispatch_automatic_removals(|received| {
+    assert!(!studies.dispatch_automatic_removals(now, |received| {
         attempts += 1;
         Err(TrySendError::Full(received))
     }));
@@ -1479,14 +1480,14 @@ fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_
         [] as [aeris_contracts::WorkspaceChartStudyState; 0]
     );
 
-    assert!(studies.dispatch_automatic_removals(|received| {
+    assert!(studies.dispatch_automatic_removals(now, |received| {
         attempts += 1;
         assert_eq!(received, study_id);
         Ok(())
     }));
     assert_eq!(attempts, 2);
     assert!(studies.is_removing(study_id));
-    assert!(studies.dispatch_automatic_removals(|_| panic!(
+    assert!(studies.dispatch_automatic_removals(now, |_| panic!(
         "an in-flight automatic removal must not be queued twice"
     )));
 
@@ -1506,7 +1507,8 @@ fn automatic_study_removal_retries_after_runtime_failure() {
         resolved_chart_series: None,
     });
 
-    assert!(studies.dispatch_automatic_removals(|received| {
+    let now = Instant::now();
+    assert!(studies.dispatch_automatic_removals(now, |received| {
         assert_eq!(received, study_id);
         Ok(())
     }));
@@ -1516,7 +1518,7 @@ fn automatic_study_removal_retries_after_runtime_failure() {
     assert!(studies.is_automatic_removal(study_id));
 
     let mut retries = 0;
-    assert!(studies.dispatch_automatic_removals(|received| {
+    assert!(studies.dispatch_automatic_removals(now, |received| {
         retries += 1;
         assert_eq!(received, study_id);
         Ok(())
@@ -2172,6 +2174,57 @@ mod instrument_drawings {
         assert!(
             !study_retry_armed(&surface, cx),
             "nothing is armed once the retry was queued"
+        );
+    }
+
+    #[gpui::test]
+    fn a_refused_automatic_study_removal_retries_without_another_market_message(
+        cx: &mut TestAppContext,
+    ) {
+        let study_id = StudyInstanceId::try_from_u64(9).expect("study id");
+        let (commands, requests) = mpsc::sync_channel(8);
+        let filler = commands.clone();
+        let (surface, cx) = open_surface_with_commands(cx, instrument("A"), None, commands);
+        requests.try_iter().for_each(drop);
+        while filler.try_send(MarketWorkerCommand::Shutdown).is_ok() {}
+
+        surface.update(cx, |surface, cx| {
+            surface.studies.activate_for_removal(RuntimeStudyState {
+                study_id,
+                persisted: legacy_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
+                resolved_chart_series: None,
+            });
+            surface.synchronize_runtime_studies(cx);
+        });
+        assert!(
+            cx.read(|cx| !surface.read(cx).studies.is_removing(study_id)),
+            "the full command lane refuses the removal"
+        );
+        assert!(study_retry_armed(&surface, cx));
+
+        let removals = |requests: &mpsc::Receiver<MarketWorkerCommand>| {
+            requests
+                .try_iter()
+                .filter(|command| {
+                    matches!(command, MarketWorkerCommand::RemoveStudy(removed) if *removed == study_id)
+                })
+                .count()
+        };
+        requests.try_iter().for_each(drop);
+        let before_deadline = STUDY_RETRY_DELAY
+            .checked_sub(Duration::from_millis(1))
+            .expect("the retry delay exceeds one millisecond");
+        cx.executor().advance_clock(before_deadline);
+        cx.run_until_parked();
+        assert_eq!(removals(&requests), 0, "the retry waits for its deadline");
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(removals(&requests), 1, "the armed timer sends the removal");
+        assert!(cx.read(|cx| surface.read(cx).studies.is_removing(study_id)));
+        assert!(
+            !study_retry_armed(&surface, cx),
+            "nothing is armed once the removal was sent"
         );
     }
 
