@@ -211,17 +211,6 @@ fn instrument_menu_requests_a_listing_only_when_idle_and_not_already_shown() {
     );
 }
 
-fn should_apply_rithmic_worker_stop(
-    disconnected: bool,
-    connection_state: Option<FeedConnectionState>,
-) -> bool {
-    disconnected
-        && matches!(
-            connection_state,
-            Some(state) if !matches!(state, FeedConnectionState::Stopped)
-        )
-}
-
 #[test]
 fn chrome_overlay_motion_opens_and_closes_in_opposite_directions() {
     let assert_progress = |actual: f32, expected: f32| {
@@ -4070,34 +4059,6 @@ fn terminal_session_stop_is_a_truthful_chart_error_with_or_without_data() {
         .placement,
         ChartNoticePlacement::Center
     );
-}
-
-#[test]
-fn dead_rithmic_worker_stop_transition_is_applied_once() {
-    assert!(should_apply_rithmic_worker_stop(
-        true,
-        Some(FeedConnectionState::Streaming)
-    ));
-    assert!(!should_apply_rithmic_worker_stop(
-        true,
-        Some(FeedConnectionState::Stopped)
-    ));
-    assert!(!should_apply_rithmic_worker_stop(
-        false,
-        Some(FeedConnectionState::Streaming)
-    ));
-    assert!(!should_apply_rithmic_worker_stop(true, None));
-}
-
-#[test]
-fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
-    let event = aeris_market_runtime::MarketRuntimeEvent::CatalogReady {
-        provider: "rithmic".into(),
-    };
-    assert!(matches!(
-        project_provider_catalog_event(event),
-        Some(ProviderCatalogEvent::CatalogReady { provider }) if provider == "rithmic"
-    ));
 }
 
 #[test]

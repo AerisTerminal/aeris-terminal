@@ -41,7 +41,7 @@ const DESKTOP_PROVIDER_FIXTURE_PATHS: &[&str] = &[
     "apps/desktop/src/test_support/mod.rs",
     "apps/desktop/src/test_support/fixture_market.rs",
     "apps/desktop/src/test_support/market_events.rs",
-    "apps/desktop/src/test_support/provider_instruments.rs",
+    "apps/desktop/src/test_support/providers.rs",
     "apps/desktop/src/desktop/pane_harness.rs",
     "apps/desktop/src/desktop/readiness_conformance.rs",
 ];
@@ -2074,19 +2074,19 @@ mod tests {
     fn desktop_provider_neutrality_excludes_only_gated_fixture_paths() {
         let gate = "#[cfg(any(test, feature = \"diagnostics\"))]\npub mod test_support;";
         let source = "const ID: &str = \"rithmic-test:\";";
-        let fixture = "apps/desktop/src/test_support/provider_instruments.rs";
+        let fixture = "apps/desktop/src/test_support/providers.rs";
         assert!(!super::desktop_provider_identity_at_path(
             fixture,
             source,
             gate,
-            "mod provider_instruments;",
+            "mod providers;",
             gate
         ));
         assert!(super::desktop_provider_identity_at_path(
             fixture,
             source,
             "pub mod test_support;",
-            "mod provider_instruments;",
+            "mod providers;",
             gate
         ));
         assert!(super::desktop_provider_identity_at_path(
@@ -2100,7 +2100,7 @@ mod tests {
             "apps/desktop/src/desktop/production.rs",
             source,
             gate,
-            "mod provider_instruments;",
+            "mod providers;",
             gate
         ));
         let readiness = "apps/desktop/src/desktop/readiness_conformance.rs";

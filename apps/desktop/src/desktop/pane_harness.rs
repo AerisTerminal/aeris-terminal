@@ -1936,6 +1936,171 @@ fn pane_harness_snapshot_order_new_old_commit(cx: &mut TestAppContext) {
     check_snapshot_switch_order([2, 1, 0], cx);
 }
 
+/// Seeded random interleavings of the commit, snapshot, tail update and readiness events
+/// from the retired and the committed selection generation: the chart is replaced only by
+/// the committed generation's snapshot after the commit, and retired-generation events
+/// never present old data as current. Tape fencing for the same switch is covered by
+/// `interval_switch_keeps_order_flow_off_the_superseded_chart` in `desktop/tests.rs`.
+#[gpui::test]
+fn pane_harness_seeded_switch_interleavings_project_only_the_committed_generation(
+    cx: &mut TestAppContext,
+) {
+    // Deterministic xorshift64; no new dependency.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for run in 0..12u64 {
+        // 1..=6 are the shuffled non-commit events; 0 is the selection commit.
+        let mut pool = [1u8, 2, 3, 4, 5, 6];
+        for index in (1..pool.len()).rev() {
+            let swap = usize::try_from(next() % (index as u64 + 1)).expect("small index");
+            pool.swap(index, swap);
+        }
+        let commit_at = usize::try_from(next() % 7).expect("small index");
+        let mut order = Vec::with_capacity(7);
+        order.extend_from_slice(&pool[..commit_at]);
+        order.push(0);
+        order.extend_from_slice(&pool[commit_at..]);
+        check_seeded_switch_order(run, &order, cx);
+    }
+}
+
+struct SeededSwitchFixture {
+    product: InstallProviderInstrument,
+    series: aeris_market_data::BarSeriesKey,
+    route: FixtureSeries,
+    events: FixtureMarketEvents,
+    sequence: u64,
+}
+
+impl SeededSwitchFixture {
+    fn message(&self, event: u8, harness: &PaneHarness) -> PaneProjectionEvent {
+        match event {
+            0 => PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
+                sequence: self.sequence,
+                succeeded: true,
+            }),
+            1 | 2 => {
+                let generation = if event == 1 { 1 } else { self.sequence };
+                runtime_bar_snapshot_message(
+                    &self.product,
+                    &self.series,
+                    fixture_bar(),
+                    &self.events,
+                    generation,
+                    14,
+                )
+            }
+            3 | 4 => {
+                let (generation, detail) = if event == 3 {
+                    (1, "retired")
+                } else {
+                    (self.sequence, "committed")
+                };
+                harness.fixture_readiness(
+                    generation,
+                    aeris_contracts::SeriesLoadState::Live,
+                    detail,
+                )
+            }
+            5 | 6 => {
+                let generation = if event == 5 { 1 } else { self.sequence };
+                PaneProjectionEvent::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection {
+                        event: self.events.update(
+                            &self.route,
+                            generation,
+                            2,
+                            aeris_market_runtime::SeriesTailOperation::Append,
+                            aeris_market_data::MarketBar {
+                                source_sequence: 2,
+                                exchange_timestamp_seconds: 600,
+                                exchange_timestamp_unix_nanos: 600_000_000_000,
+                                ..fixture_bar()
+                            },
+                            true,
+                        ),
+                        received_unix_nanos: Some(601_000_000_000),
+                        recovery_request_id: None,
+                        selection_generation: None,
+                    },
+                )
+            }
+            _ => panic!("unknown seeded event"),
+        }
+    }
+}
+
+fn check_seeded_switch_order(run: u64, order: &[u8], cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let original = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .chart
+            .as_ref()
+            .expect("original chart")
+            .entity_id()
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("interval selection");
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let series = engine_market_worker::series_key(&product, ChartInterval::Minute5)
+        .expect("replacement series");
+    let fixture = SeededSwitchFixture {
+        route: FixtureSeries {
+            series: series.clone(),
+            provider_generation: product.session_generation,
+            price_scale: u8::try_from(product.price_scale).expect("price scale"),
+            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+        },
+        product,
+        series,
+        events: FixtureMarketEvents::default(),
+        sequence,
+    };
+    let mut committed = false;
+    let mut installed = false;
+    for &event in order {
+        let message = fixture.message(event, &harness);
+        harness.publications.send(message).expect("fixture message");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1, "run {run} event {event}");
+            if event == 0 {
+                committed = true;
+            } else if event == 2 && committed {
+                installed = true;
+            }
+            assert_eq!(
+                pane.chart.as_ref().map(Entity::entity_id) != Some(original),
+                installed,
+                "run {run} event {event}: only the committed generation's snapshot replaces the chart"
+            );
+            assert_eq!(
+                pane.chart_pane_controller.chart_needs_replacement(),
+                committed && !installed,
+                "run {run} event {event}: retired events never settle the replacement"
+            );
+        });
+    }
+}
+
 #[gpui::test]
 fn pane_harness_rapid_interval_storm_keeps_final_day3_binding(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
@@ -4067,6 +4232,81 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
     });
 }
 
+/// A provider whose catalog becomes ready starts the first listing exactly once: a repeat
+/// while the listing is in flight or after it answered sends nothing, because the pane
+/// does not own reconnects or re-listing.
+#[gpui::test]
+fn pane_harness_catalog_ready_starts_one_first_listing_and_stops(cx: &mut TestAppContext) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let commands = harness.commands.as_ref().expect("command receiver");
+    while commands.try_recv().is_ok() {}
+    harness.pane.update(cx, |pane, _| {
+        pane.symbol_entry
+            .browser_mut()
+            .set_scope(SymbolSearchScope::Provider("hyperliquid"));
+    });
+    let ready = || {
+        PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(harness.market_events.catalog(
+                aeris_market_runtime::MarketRuntimeEvent::CatalogReady {
+                    provider: "hyperliquid".into(),
+                },
+            )),
+        )
+    };
+    harness
+        .publications
+        .send(ready())
+        .expect("catalog ready enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let first: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok())
+        .filter_map(|command| match command {
+            MarketWorkerCommand::ProviderSearch(request) => Some(request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        first.len(),
+        1,
+        "a ready catalog starts the first listing once"
+    );
+
+    harness.publications.send(ready()).expect("repeat ready");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    assert!(
+        commands.try_recv().is_err(),
+        "an in-flight listing is not duplicated"
+    );
+
+    complete_fixture_search(
+        &harness,
+        &first[0],
+        ProviderInstrumentSummary {
+            symbol: "BTC".into(),
+            display_symbol: "BTC-USDC".into(),
+            exchange: "Hyperliquid".into(),
+            ..ProviderInstrumentSummary::default()
+        },
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    harness
+        .publications
+        .send(ready())
+        .expect("post-answer ready");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    assert!(
+        commands.try_recv().is_err(),
+        "an answered listing is not repeated"
+    );
+}
 #[gpui::test]
 fn pane_harness_rithmic_product_opens_its_front_month_from_the_empty_query_listing(
     cx: &mut TestAppContext,

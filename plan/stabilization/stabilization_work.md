@@ -439,9 +439,23 @@ only on the guarded GUI checks on their lines.
     one frame budget) with no re-projection and no ordinal diffing.
   - Left: GUI Hyperliquid sweep-highlight check. Closes UI-14 with M7.3 and M7.9.
 - [ ] M7.12 Desktop tests against controller boundaries
-  - Left: rewrite `desktop/tests.rs`, `workspace_surface_tests.rs` and the chart_integration view
-    tests against controllers and `PaneHarness`.
-  - Map each deleted test to a behavior test, and add `test_support::providers`. Closes UI-15.
+  - Landed: `test_support::provider_instruments` renamed to `test_support::providers` per the
+    spec (design 11 §8 does not name the module; the work item does), with
+    `tools/naming_check` fixture paths and gate-test strings updated. The last guard-specific
+    tests are deleted from `desktop/tests.rs`: `should_apply_rithmic_worker_stop` plus
+    `dead_rithmic_worker_stop_transition_is_applied_once` (the production guard is gone; the
+    test asserted a test-local copy, so the invariant is structural; stop-transition behavior
+    is covered by `pane_harness_repeated_connection_stop_has_one_redacted_notice_and_streaming_clears`
+    and `worker_stop_preserves_a_concrete_startup_error`) and
+    `rithmic_catalog_ready_autoloads_once_without_owning_reconnects` (replaced by the harness
+    behavior test `pane_harness_catalog_ready_starts_one_first_listing_and_stops`; projection
+    pass-through stays covered by `catalog_rejection_lane_comes_from_the_runtime_not_the_reason`).
+    Added `pane_harness_seeded_switch_interleavings_project_only_the_committed_generation`
+    (seeded xorshift interleavings of commit/snapshot/tail-update/readiness from the retired
+    and committed generations; the tape leg of the interleaving requirement stays covered by
+    `interval_switch_keeps_order_flow_off_the_superseded_chart`).
+  - Left: tape events are not yet part of the seeded interleavings mix; GUI checks none.
+    Closes UI-15.
 
 ### M8 lifecycle and trim
 
