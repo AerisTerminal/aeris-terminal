@@ -212,13 +212,17 @@ violations and missing verification explicitly, and never describe them as satis
 - `release_lifecycle` (`crates/release_lifecycle`) owns the signed install, update, rollback and
   uninstall lifecycle, release delivery plans, rollout policy, the compiled release identity and the
   stable `aeris_launcher` binary; `platform_runtime` carries none of it and no `ed25519-dalek`,
-  `semver`, `same-file` or `sysinfo`. Only the desktop and `tools/release_packager` may depend on
+  `same-file` or `sysinfo`. Only the desktop and `tools/release_packager` may depend on
   it. The manifest and block-plan signers compile only under `cfg(test)` or its `producer` feature,
   which only `tools/release_packager` and the crate's own dev-dependency (for the launcher tests)
   enable. `platform_runtime::data_root` owns the owned-root safety check and legacy data-root
   migration that the lifecycle reuses. The launcher parses its command before loading the release
-  verifying key: `--launcher-identity` and `--remove-all-local-data` never load it, and
-  `ReleaseUninstaller` holds no key. The desktop spawns launcher promotion only on a plain start of
+  verifying key: `--launcher-identity`, `--remove-application` and `--remove-all-local-data` never
+  load it, and `ReleaseUninstaller` holds no key. The lifecycle installer (`tools/windows/aeris_setup.iss`)
+  asks before uninstalling, with "Remove my Aeris data" unchecked: by default (and always when
+  silent) it runs `--remove-application`, which keeps every data, cache, log and legacy root and
+  vault entry; only a ticked box or a pending full uninstall runs `--remove-all-local-data`. It
+  carries no Axiusflow cleanup. The desktop spawns launcher promotion only on a plain start of
   an installed release (install generation above 0) and reaps that child. The launcher waits on and
   detects processes through `platform_sys::process` (re-exported by `platform_runtime`), never
   sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the

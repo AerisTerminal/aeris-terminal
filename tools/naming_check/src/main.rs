@@ -5084,6 +5084,34 @@ mod tests {
             "pending uninstall cleanup must run before the bundled release installation hook"
         );
         assert!(!setup.contains("EnginePath"));
+        // Uninstall keeps the user's data unless they tick the box; silent uninstalls keep it.
+        let choice_start = setup
+            .find("function InitializeUninstall(): Boolean;")
+            .expect("uninstall data choice");
+        let choice = &setup[choice_start..];
+        for contract in [
+            "RemoveUserData := False;",
+            "if UninstallSilent then\n    exit;",
+            "RemoveData.Caption := 'Remove my Aeris data';",
+            "RemoveData.Checked := False;",
+            "RemoveUserData := RemoveData.Checked",
+            "if RemoveUserData then\n  begin\n    Removal := '--remove-all-local-data';",
+            "Removal := '--remove-application';",
+        ] {
+            assert!(
+                choice.contains(contract),
+                "Windows uninstall data choice lost {contract}"
+            );
+        }
+        assert_eq!(
+            setup.matches("--remove-all-local-data").count(),
+            2,
+            "only an explicit data removal or a pending full uninstall removes user data"
+        );
+        assert!(
+            !setup.to_ascii_lowercase().contains("axiusflow"),
+            "the lifecycle installer carries no Axiusflow cleanup"
+        );
     }
     #[test]
     fn platform_filesystem_assumptions_remain_explicitly_guarded() {

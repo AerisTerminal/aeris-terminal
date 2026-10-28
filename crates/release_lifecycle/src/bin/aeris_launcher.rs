@@ -95,7 +95,7 @@ fn user_launch_error_message(error: &str) -> String {
     format!("Aeris Terminal could not start.\n\n{detail}")
 }
 
-const LAUNCHER_USAGE: &str = "usage: aeris_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--prepare-update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher|--launcher-identity>";
+const LAUNCHER_USAGE: &str = "usage: aeris_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--prepare-update|--update-and-restart|--check-update|--recover|--remove-application|--remove-all-local-data|--promote-stable-launcher|--launcher-identity>";
 
 /// One parsed launcher invocation. Parsing completes before any key is
 /// loaded, so identity and uninstall never depend on packaging embedding the
@@ -103,8 +103,16 @@ const LAUNCHER_USAGE: &str = "usage: aeris_launcher <--launch-desktop|--install 
 #[derive(Debug, Eq, PartialEq)]
 enum LauncherCommand {
     LauncherIdentity,
-    RemoveAllLocalData,
+    Remove(RemovalScope),
     Verified(VerifiedCommand),
+}
+
+/// What an uninstall removes. Keeping the user's data is the default the
+/// installer offers; only an explicit choice removes everything.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemovalScope {
+    Application,
+    AllLocalData,
 }
 
 /// Commands that read, install or launch signed releases.
@@ -131,7 +139,8 @@ impl LauncherCommand {
         };
         let command = match command.to_str() {
             Some("--launcher-identity") => Self::LauncherIdentity,
-            Some("--remove-all-local-data") => Self::RemoveAllLocalData,
+            Some("--remove-application") => Self::Remove(RemovalScope::Application),
+            Some("--remove-all-local-data") => Self::Remove(RemovalScope::AllLocalData),
             Some("--promote-stable-launcher") => {
                 Self::Verified(VerifiedCommand::PromoteStableLauncher)
             }
@@ -162,8 +171,8 @@ fn run_with_key_source(
 ) -> Result<(), String> {
     match LauncherCommand::parse(arguments)? {
         LauncherCommand::LauncherIdentity => print_launcher_identity(),
-        LauncherCommand::RemoveAllLocalData => {
-            remove_all_local_data(&std::env::current_exe().map_err(redacted)?)
+        LauncherCommand::Remove(scope) => {
+            remove_local_install(&std::env::current_exe().map_err(redacted)?, scope)
         }
         LauncherCommand::Verified(command) => {
             let verifying_key = verifying_key()?;
@@ -188,7 +197,7 @@ fn print_launcher_identity() -> Result<(), String> {
     Ok(())
 }
 
-fn remove_all_local_data(executable: &Path) -> Result<(), String> {
+fn remove_local_install(executable: &Path, scope: RemovalScope) -> Result<(), String> {
     let install_root = launcher_install_root(executable)?;
     // The launcher runs from inside the tree this command deletes, and
     // Windows refuses to delete a running executable (proven by the failed
@@ -197,7 +206,7 @@ fn remove_all_local_data(executable: &Path) -> Result<(), String> {
     // permitted), then uninstall the original tree synchronously with an
     // honest exit code.
     let staged = relocate_running_binary(executable, &install_root).map_err(redacted)?;
-    let result = uninstall_from_root(&install_root);
+    let result = uninstall_from_root(&install_root, scope);
     remove_relocated_binary(&staged);
     result
 }
@@ -2009,16 +2018,18 @@ fn sweep_retired_binaries(directory: &Path) -> Result<(), std::io::Error> {
 }
 /// Uninstalls the explicit root. Uninstall verifies no release signature, so
 /// it works in a build without an embedded verifying key.
-fn uninstall_from_root(root: &Path) -> Result<(), String> {
+fn uninstall_from_root(root: &Path, scope: RemovalScope) -> Result<(), String> {
     let uninstaller = ReleaseUninstaller::new(root).map_err(|error| error.to_string())?;
     let hooks = NativeHooks {
         install_root: root.to_path_buf(),
     };
     let inventory = native_installation_inventory(root).map_err(|error| error.to_string())?;
-    uninstaller
-        .uninstall(&inventory, &hooks)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    match scope {
+        RemovalScope::Application => uninstaller.remove_application(&inventory, &hooks),
+        RemovalScope::AllLocalData => uninstaller.uninstall(&inventory, &hooks),
+    }
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 fn embedded_verifying_key() -> Result<VerifyingKey, String> {
@@ -3256,8 +3267,12 @@ mod tests {
             Ok(LauncherCommand::LauncherIdentity)
         );
         assert_eq!(
+            LauncherCommand::parse(launcher_arguments(&["--remove-application"])),
+            Ok(LauncherCommand::Remove(RemovalScope::Application))
+        );
+        assert_eq!(
             LauncherCommand::parse(launcher_arguments(&["--remove-all-local-data"])),
-            Ok(LauncherCommand::RemoveAllLocalData)
+            Ok(LauncherCommand::Remove(RemovalScope::AllLocalData))
         );
     }
 
@@ -3332,6 +3347,7 @@ mod tests {
         for arguments in [
             vec!["--unknown"],
             vec!["--launcher-identity", "extra"],
+            vec!["--remove-application", "extra"],
             vec!["--remove-all-local-data", "extra"],
             vec!["--install", "manifest.json"],
             vec!["--recover", "extra"],

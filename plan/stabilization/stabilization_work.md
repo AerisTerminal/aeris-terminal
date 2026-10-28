@@ -624,9 +624,16 @@ still wait on the GUI checks and the remaining work on their lines.
     source, base URL, request, HTTP status, unreadable or oversized body, rejected plan), and the
     launcher logs it and each failed file reconstruction before falling back to full downloads.
     A test covers each response failure; naming_check rejects `.ok()?` there.
-  - Left:
-    - LC-12: a "Remove my Aeris data" uninstall choice, with the Axiusflow lines removed from
-      `tools/windows/aeris_setup.iss`.
+  - Landed: LC-12. `tools/windows/aeris_setup.iss` asks before uninstalling, with "Remove my Aeris
+    data" unchecked. By default, and always for a silent uninstall, it runs the new launcher
+    `--remove-application` (`ReleaseUninstaller::remove_application`), which removes the install
+    and lifecycle roots and keeps every data, cache, log and legacy root and vault entry; a ticked
+    box runs `--remove-all-local-data`. A pending full uninstall is never downgraded. The Axiusflow
+    install-delete, Run value, close-resource and pending-uninstall lines are deleted, and the
+    script requires Inno Setup 6.6 or newer. A lifecycle test covers the kept data; naming_check
+    checks the choice and rejects Axiusflow in the script. The script compiles with Inno Setup 6.7.
+  - Left: the manual install and uninstall on a Windows VM (F17), checking the prompt and that
+    data is kept by default and removed only when ticked. Not run; maintainer-only.
 - [ ] M8.7 Release packager and end-to-end lifecycle harness
   - Left: `tools/release_packager`, with the key from a file and no publishing.
   - A `ReleaseSource` seam: HTTPS in production, a directory in tests.

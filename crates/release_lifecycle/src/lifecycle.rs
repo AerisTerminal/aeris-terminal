@@ -1509,6 +1509,43 @@ impl ReleaseUninstaller {
         })
     }
 
+    /// Removes the installed application (its release versions, launcher and lifecycle
+    /// records) and disables its registrations, keeping every data, cache, log and
+    /// legacy root and every vault entry.
+    ///
+    /// # Errors
+    /// Refuses while a full uninstall is pending, since that request must finish first.
+    /// A failed removal leaves the lifecycle records, so the next attempt resumes it.
+    pub fn remove_application<H: LifecycleHooks>(
+        &self,
+        inventory: &InstallationInventory,
+        hooks: &H,
+    ) -> Result<UninstallOutcome, LifecycleError> {
+        self.validate_inventory(inventory)?;
+        let lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
+        if self.lifecycle_root.join("uninstall.json").exists() {
+            return Err(LifecycleError::UninstallPendingCleanup);
+        }
+        hooks
+            .disable_registrations(&inventory.registrations)
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        hooks
+            .stop_owned_processes()
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        remove_owned_path(&self.install_root)
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        if self.install_root.exists() {
+            return Err(LifecycleError::UninstallPendingCleanup);
+        }
+        remove_lifecycle_root_after_uninstall(&self.lifecycle_root)
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        lock.release()?;
+        Ok(UninstallOutcome {
+            removed_roots: 2,
+            removed_vault_keys: 0,
+        })
+    }
+
     fn validate_inventory(&self, inventory: &InstallationInventory) -> Result<(), LifecycleError> {
         if inventory.schema_version != INVENTORY_SCHEMA_VERSION
             || inventory.install_root != self.install_root
@@ -4064,6 +4101,73 @@ mod tests {
         uninstaller
             .uninstall(&inventory, &hooks)
             .expect("repeated uninstall remains idempotent");
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn application_removal_keeps_user_data_and_vault_entries() {
+        let root = temporary_root("remove-application");
+        let (signed, key, bundle) = release(&root, 1);
+        let install_root = root.join("install");
+        let data_root = root.join("data");
+        let legacy_root = root.join("legacy");
+        let installer =
+            ReleaseInstaller::new(&install_root, key.verifying_key(), ReleasePolicy::native(0))
+                .expect("installer");
+        installer
+            .install(&signed, &bundle, &Hooks::default())
+            .expect("install");
+        fs::create_dir_all(&data_root).expect("data root");
+        fs::create_dir_all(&legacy_root).expect("legacy root");
+        fs::write(data_root.join("trading.sqlite3"), b"journal").expect("trading journal");
+        let (lifecycle_root, lock_path) = lifecycle_paths(&install_root).expect("lifecycle paths");
+        assert!(lifecycle_root.exists());
+        let inventory = InstallationInventory {
+            schema_version: INVENTORY_SCHEMA_VERSION,
+            install_root: install_root.clone(),
+            data_roots: vec![data_root.clone()],
+            cache_roots: Vec::new(),
+            log_roots: Vec::new(),
+            legacy_cleanup_roots: vec![legacy_root.clone()],
+            vault_entries: vec![VaultEntry {
+                service: "com.aeris.account".to_string(),
+                key: "account-refresh-default-v1".to_string(),
+            }],
+            registrations: vec!["start-menu:Aeris".to_string()],
+        };
+        let uninstaller = ReleaseUninstaller::new(&install_root).expect("uninstaller");
+        let hooks = Hooks::default();
+
+        let outcome = uninstaller
+            .remove_application(&inventory, &hooks)
+            .expect("application removal");
+        assert_eq!(outcome.removed_vault_keys, 0);
+        assert!(!install_root.exists());
+        assert!(!lifecycle_root.exists());
+        assert!(!lock_path.exists());
+        assert_eq!(
+            fs::read(data_root.join("trading.sqlite3")).expect("journal kept"),
+            b"journal"
+        );
+        assert!(legacy_root.exists());
+        assert!(hooks.deleted.lock().expect("deleted entries").is_empty());
+        uninstaller
+            .remove_application(&inventory, &hooks)
+            .expect("repeated application removal remains idempotent");
+
+        fs::create_dir_all(&install_root).expect("reinstalled root");
+        write_json_atomic(
+            &lifecycle_root,
+            "uninstall.json",
+            &UninstallJournal { started: true },
+        )
+        .expect("pending full uninstall");
+        assert_eq!(
+            uninstaller.remove_application(&inventory, &hooks),
+            Err(LifecycleError::UninstallPendingCleanup),
+            "a pending full uninstall is never downgraded to keeping data"
+        );
+        assert!(data_root.exists());
         let _ = remove_owned_path(&root);
     }
 

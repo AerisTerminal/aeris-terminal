@@ -19,6 +19,9 @@
 #ifndef OutputDir
   #error OutputDir must be supplied by the packaging tool
 #endif
+#if Ver < EncodeVer(6, 6)
+  #error Inno Setup 6.6 or newer is required for the uninstall data choice
+#endif
 
 [Setup]
 AppId={{08131BC4-8BBC-48B4-A67A-A032EE62FBD4}
@@ -53,21 +56,15 @@ VersionInfoProductVersion={#AppVersion}
 Type: files; Name: "{app}\aeris_desktop.exe"
 Type: files; Name: "{app}\aeris_engine.exe"
 Type: filesandordirs; Name: "{app}\.release-downloads"
-Type: filesandordirs; Name: "{localappdata}\Programs\Axiusflow"
-Type: filesandordirs; Name: "{localappdata}\Programs\Axiusflow-Uninstall"
-Type: filesandordirs; Name: "{localappdata}\Programs\.Axiusflow-lifecycle"
-Type: files; Name: "{localappdata}\Programs\.Axiusflow-lifecycle.lock"
-Type: filesandordirs; Name: "{autoprograms}\Axiusflow"
 
 [UninstallDelete]
-; --remove-all-local-data retires the running launcher outside {app}; it can be deleted once that
-; launcher has exited. Any other file in the staging directory is left in place.
+; Both launcher removal commands retire the running launcher outside {app}; it can be deleted once
+; that launcher has exited. Any other file in the staging directory is left in place.
 Type: files; Name: "{localappdata}\Programs\.Aeris-uninstall-stage\aeris_launcher.retired-*"
 Type: dirifempty; Name: "{localappdata}\Programs\.Aeris-uninstall-stage"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Aeris Engine"; Flags: deletevalue
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Axiusflow Engine"; Flags: deletevalue
 ; The desktop registers its notification identity under this key; uninstall removes it.
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\com.aeris.desktop"; Flags: uninsdeletekey
 
@@ -120,40 +117,6 @@ begin
       FindClose(FindRec);
     end;
   end;
-
-  VersionsRoot := ExpandConstant('{localappdata}\Programs\Axiusflow\versions');
-  if DirExists(VersionsRoot) and FindFirst(VersionsRoot + '\*', FindRec) then
-  begin
-    try
-      repeat
-        if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
-           (FindRec.Name <> '.') and (FindRec.Name <> '..') then
-        begin
-          DesktopPath := VersionsRoot + '\' + FindRec.Name + '\axiusflow_desktop.exe';
-          if FileExists(DesktopPath) then
-            RegisterCloseResource(DesktopPath);
-          DesktopPath := VersionsRoot + '\' + FindRec.Name + '\axiusflow_launcher.exe';
-          if FileExists(DesktopPath) then
-            RegisterCloseResource(DesktopPath);
-          DesktopPath := VersionsRoot + '\' + FindRec.Name + '\axiusflow_engine.exe';
-          if FileExists(DesktopPath) then
-            RegisterCloseResource(DesktopPath);
-        end;
-      until not FindNext(FindRec);
-    finally
-      FindClose(FindRec);
-    end;
-  end;
-
-  DesktopPath := ExpandConstant('{localappdata}\Programs\Axiusflow\axiusflow_launcher.exe');
-  if FileExists(DesktopPath) then
-    RegisterCloseResource(DesktopPath);
-  DesktopPath := ExpandConstant('{localappdata}\Programs\Axiusflow\axiusflow_desktop.exe');
-  if FileExists(DesktopPath) then
-    RegisterCloseResource(DesktopPath);
-  DesktopPath := ExpandConstant('{localappdata}\Programs\Axiusflow\axiusflow_engine.exe');
-  if FileExists(DesktopPath) then
-    RegisterCloseResource(DesktopPath);
 end;
 
 function FinishPendingUninstall(
@@ -194,40 +157,113 @@ begin
     ExpandConstant('{localappdata}\Programs\Aeris'),
     'Finishing the previous Aeris Terminal uninstall...',
     'Aeris Terminal could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.');
-  if Result <> '' then
+end;
+
+var
+  RemoveUserData: Boolean;
+
+function InitializeUninstall(): Boolean;
+var
+  Form: TSetupForm;
+  Prompt: TNewStaticText;
+  RemoveData: TNewCheckBox;
+  UninstallButton, CancelButton: TNewButton;
+  W: Integer;
+begin
+  { The user's data is kept unless they tick the box; a silent uninstall always keeps it. }
+  RemoveUserData := False;
+  Result := True;
+  if UninstallSilent then
     exit;
 
-  Result := FinishPendingUninstall(
-    ExpandConstant('{localappdata}\Programs\.Axiusflow-lifecycle\uninstall.json'),
-    ExpandConstant('{localappdata}\Programs\Axiusflow\axiusflow_launcher.exe'),
-    ExpandConstant('{localappdata}\Programs\Axiusflow'),
-    'Finishing the previous Axiusflow uninstall...',
-    'Axiusflow could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.');
+  Form := CreateCustomForm(ScaleX(440), ScaleY(140), False, True);
+  try
+    Form.Caption := 'Uninstall Aeris Terminal';
+
+    Prompt := TNewStaticText.Create(Form);
+    Prompt.Parent := Form;
+    Prompt.AutoSize := False;
+    Prompt.WordWrap := True;
+    Prompt.Left := ScaleX(12);
+    Prompt.Top := ScaleY(12);
+    Prompt.Width := Form.ClientWidth - ScaleX(24);
+    Prompt.Height := ScaleY(44);
+    Prompt.Caption := 'Aeris Terminal will be removed from this computer. Your trading journal, workspaces, settings and saved sign-ins are kept unless you choose to remove them.';
+
+    RemoveData := TNewCheckBox.Create(Form);
+    RemoveData.Parent := Form;
+    RemoveData.Left := ScaleX(12);
+    RemoveData.Top := ScaleY(62);
+    RemoveData.Width := Form.ClientWidth - ScaleX(24);
+    RemoveData.Height := ScaleY(20);
+    RemoveData.Caption := 'Remove my Aeris data';
+    RemoveData.Checked := False;
+
+    UninstallButton := TNewButton.Create(Form);
+    UninstallButton.Parent := Form;
+    UninstallButton.Caption := 'Uninstall';
+    UninstallButton.ModalResult := mrOk;
+    UninstallButton.Default := True;
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Caption := 'Cancel';
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+
+    W := Form.CalculateButtonWidth([UninstallButton.Caption, CancelButton.Caption]);
+    UninstallButton.Width := W;
+    CancelButton.Width := W;
+    UninstallButton.Height := ScaleY(23);
+    CancelButton.Height := ScaleY(23);
+    UninstallButton.Top := Form.ClientHeight - ScaleY(23 + 12);
+    CancelButton.Top := UninstallButton.Top;
+    CancelButton.Left := Form.ClientWidth - ScaleX(12) - W;
+    UninstallButton.Left := CancelButton.Left - ScaleX(6) - W;
+
+    Form.ActiveControl := UninstallButton;
+    if Form.ShowModal() = mrOk then
+      RemoveUserData := RemoveData.Checked
+    else
+      Result := False;
+  finally
+    Form.Free();
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ResultCode: Integer;
   Launcher: String;
+  Removal: String;
+  FailureMessage: String;
 begin
   if CurUninstallStep <> usUninstall then
     exit;
+
+  if RemoveUserData then
+  begin
+    Removal := '--remove-all-local-data';
+    FailureMessage := 'Aeris Terminal could not remove all local application data. Uninstall has stopped so cleanup can be retried safely.';
+  end
+  else
+  begin
+    Removal := '--remove-application';
+    FailureMessage := 'Aeris Terminal could not be removed. Uninstall has stopped so it can be retried safely; your Aeris data was not removed.';
+  end;
 
   Launcher := ExpandConstant('{app}\aeris_launcher.exe');
   if (not FileExists(Launcher)) or
      (not Exec(
        Launcher,
-       '--remove-all-local-data',
+       Removal,
        ExpandConstant('{app}'),
        SW_HIDE,
        ewWaitUntilTerminated,
        ResultCode)) or
      (ResultCode <> 0) then
   begin
-    MsgBox(
-      'Aeris Terminal could not remove all local application data. Uninstall has stopped so cleanup can be retried safely.',
-      mbError,
-      MB_OK);
+    MsgBox(FailureMessage, mbError, MB_OK);
     Abort;
   end;
 end;
