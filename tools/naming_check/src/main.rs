@@ -5045,7 +5045,9 @@ mod tests {
             "current_update_check_report",
             "QUARANTINED_RELEASE_FILE",
             "failed release could not be quarantined",
-            "EARLY_DESKTOP_STARTUP_WINDOW",
+            "STARTUP_COMPLETE_TIMEOUT",
+            "marker.process_id == process_id",
+            "stop_unfinished_desktop(&mut child)",
             "rollback_to_retained_known_good",
             "prepared_matches_current_offer",
             "&current.channel.signed_release == prepared",
@@ -5055,6 +5057,22 @@ mod tests {
             "command.arg(\"--workspace-tabs\")",
         ] {
             assert!(launcher.contains(contract), "launcher lost {contract}");
+        }
+        // Probation ends only on the marker the desktop records once a window is open.
+        for (path, call) in [
+            (
+                "apps/desktop/src/desktop.rs",
+                "update::record_startup_complete(cx)",
+            ),
+            (
+                "apps/desktop/src/desktop/sign_in_gate.rs",
+                "super::update::record_startup_complete(cx)",
+            ),
+        ] {
+            assert!(
+                production_prefix(&manifest(path)).contains(call),
+                "{path} must record the startup-complete marker"
+            );
         }
         let channel_validation = launcher
             .find("fn checked_release_channel(")

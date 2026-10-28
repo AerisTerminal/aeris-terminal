@@ -20,8 +20,8 @@ use crate::{
     ReleaseManifest, ReleasePolicy, ReleaseUninstaller, SignedBlockPlan, SignedReleaseManifest,
     UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY, VaultEntry, channel_pointer_path,
     current_release_identity, decode_and_verify_block_plan, installer_filename,
-    native_install_root, native_installation_inventory, read_live_store_schema, release_config,
-    release_directory_path,
+    native_install_root, native_installation_inventory, read_live_store_schema,
+    read_startup_complete, release_config, release_directory_path,
     release_source::{HttpsReleaseSource, ReleaseSource, ReleaseSourceError},
     rollout_eligible, trading_database_path, verify_release_file, verify_release_manifest,
 };
@@ -45,8 +45,10 @@ const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const PREPARED_UPDATE_FILE: &str = "prepared-update.json";
 const QUARANTINED_RELEASE_FILE: &str = ".release-quarantine.json";
 const MAXIMUM_QUARANTINE_BYTES: u64 = 4 * 1024;
-const EARLY_DESKTOP_STARTUP_WINDOW: Duration = Duration::from_secs(5);
-const EARLY_DESKTOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How long a new release's desktop has to record the startup-complete marker during
+/// probation before the launcher stops it and rolls back.
+const STARTUP_COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
+const DESKTOP_PROBATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Runs the native launcher for this process's arguments: the release origin is the
 /// configuration packaging embedded and HTTPS.
@@ -1959,10 +1961,14 @@ fn uninstall_from_root(root: &Path, scope: RemovalScope) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EarlyDesktopStartup {
-    Running,
+enum DesktopProbation {
+    /// The desktop recorded the startup-complete marker.
+    Completed,
+    /// The desktop exited cleanly before recording it, as a second instance does.
     ExitedSuccessfully,
     ExitedUnsuccessfully,
+    /// The desktop neither recorded the marker nor exited within the bound.
+    TimedOut,
 }
 
 fn launch_active_desktop(
@@ -1986,8 +1992,10 @@ fn launch_active_desktop(
             None
         }
     };
+    // Read before the desktop starts: the marker it records proves only its own start.
+    let accepted = release_accepted(install_root, &active);
     let launcher_generation = current_release_identity().install_generation;
-    // A retained predecessor means this launch is still inside the bounded
+    // A retained predecessor means this launch may still be inside the bounded
     // rollback probation window. Do not let the candidate desktop spawn its
     // versioned launcher helper until that window has passed: on Windows the
     // helper executable would lock the very candidate directory rollback must
@@ -2000,7 +2008,7 @@ fn launch_active_desktop(
         );
     let mut child = match spawn_desktop_release(installer, &active, suppress_launcher_promotion) {
         Ok(child) => child,
-        Err(error) if retained.is_some() => {
+        Err(error) if retained.is_some() && !accepted => {
             aeris_observability::diagnostic!(
                 "Aeris Terminal active release {} failed to start; restoring retained known-good release",
                 active.install_generation
@@ -2013,8 +2021,24 @@ fn launch_active_desktop(
     if retained.is_none() {
         return Ok(());
     }
-    match observe_early_desktop_startup(&mut child, EARLY_DESKTOP_STARTUP_WINDOW) {
-        Ok(EarlyDesktopStartup::ExitedUnsuccessfully) => {
+    let probation = if accepted {
+        Ok(DesktopProbation::Completed)
+    } else {
+        observe_desktop_probation(&mut child, install_root, &active, STARTUP_COMPLETE_TIMEOUT)
+    };
+    match probation {
+        Ok(DesktopProbation::Completed) => {
+            if should_promote_after_probation(&active, launcher_generation)
+                && let Err(error) = spawn_active_launcher_promotion(installer)
+            {
+                aeris_observability::diagnostic!(
+                    "Aeris Terminal launcher promotion deferred: {error}"
+                );
+            }
+            Ok(())
+        }
+        Ok(DesktopProbation::ExitedSuccessfully) => Ok(()),
+        Ok(DesktopProbation::ExitedUnsuccessfully) => {
             aeris_observability::diagnostic!(
                 "Aeris Terminal active release {} exited during startup; restoring retained known-good release",
                 active.install_generation
@@ -2027,15 +2051,15 @@ fn launch_active_desktop(
                 "active Aeris desktop exited during startup",
             )
         }
-        Ok(EarlyDesktopStartup::Running | EarlyDesktopStartup::ExitedSuccessfully) => {
-            if should_promote_after_probation(&active, launcher_generation)
-                && let Err(error) = spawn_active_launcher_promotion(installer)
-            {
-                aeris_observability::diagnostic!(
-                    "Aeris Terminal launcher promotion deferred: {error}"
-                );
-            }
-            Ok(())
+        Ok(DesktopProbation::TimedOut) => {
+            aeris_observability::diagnostic!(
+                "Aeris Terminal active release {} did not finish starting; restoring retained known-good release",
+                active.install_generation
+            );
+            let startup_error = "active Aeris desktop did not finish starting";
+            stop_unfinished_desktop(&mut child)
+                .map_err(|error| format!("{startup_error}; {error}"))?;
+            rollback_and_launch_retained(installer, hooks, install_root, &active, startup_error)
         }
         Err(error) => {
             aeris_observability::diagnostic!(
@@ -2046,6 +2070,21 @@ fn launch_active_desktop(
     }
 }
 
+/// Whether a desktop of the active release finished starting in an earlier launch, which
+/// ends its probation.
+fn release_accepted(install_root: &Path, active: &ActiveRelease) -> bool {
+    match read_startup_complete(install_root) {
+        Ok(marker) => marker.is_some_and(|marker| {
+            marker.is_release(active.install_generation, &active.release_identity)
+        }),
+        Err(error) => {
+            aeris_observability::diagnostic!(
+                "Aeris Terminal startup-complete marker could not be read: {error}"
+            );
+            false
+        }
+    }
+}
 fn should_promote_after_probation(active: &ActiveRelease, launcher_generation: u64) -> bool {
     launcher_generation < active.install_generation
 }
@@ -2095,21 +2134,63 @@ fn spawn_desktop_release(
         .map_err(|_| "active Aeris process could not be started".to_string())
 }
 
-fn observe_early_desktop_startup(
+/// Waits until the desktop `child` of `active` records the startup-complete marker, exits or
+/// runs past `timeout`. A marker that cannot be read counts as not yet recorded, because the
+/// starting desktop replaces it.
+fn observe_desktop_probation(
     child: &mut std::process::Child,
-    window: Duration,
-) -> Result<EarlyDesktopStartup, String> {
-    let deadline = Instant::now() + window;
-    loop {
-        match child.try_wait().map_err(redacted)? {
-            Some(status) if status.success() => return Ok(EarlyDesktopStartup::ExitedSuccessfully),
-            Some(_) => return Ok(EarlyDesktopStartup::ExitedUnsuccessfully),
-            None if Instant::now() >= deadline => return Ok(EarlyDesktopStartup::Running),
-            None => thread::sleep(EARLY_DESKTOP_POLL_INTERVAL),
+    install_root: &Path,
+    active: &ActiveRelease,
+    timeout: Duration,
+) -> Result<DesktopProbation, String> {
+    let deadline = Instant::now() + timeout;
+    let process_id = child.id();
+    let mut marker_error = None;
+    let mut completed = || match read_startup_complete(install_root) {
+        Ok(marker) => marker.is_some_and(|marker| {
+            marker.process_id == process_id
+                && marker.is_release(active.install_generation, &active.release_identity)
+        }),
+        Err(error) => {
+            marker_error = Some(error);
+            false
         }
+    };
+    let probation = loop {
+        if completed() {
+            break DesktopProbation::Completed;
+        }
+        match child.try_wait().map_err(redacted)? {
+            // The marker can land between the read above and the exit.
+            Some(_) if completed() => break DesktopProbation::Completed,
+            Some(status) if status.success() => break DesktopProbation::ExitedSuccessfully,
+            Some(_) => break DesktopProbation::ExitedUnsuccessfully,
+            None if Instant::now() >= deadline => break DesktopProbation::TimedOut,
+            None => thread::sleep(DESKTOP_PROBATION_POLL_INTERVAL),
+        }
+    };
+    if probation != DesktopProbation::Completed
+        && let Some(error) = marker_error
+    {
+        aeris_observability::diagnostic!(
+            "Aeris Terminal startup-complete marker was unreadable during probation: {error}"
+        );
     }
+    Ok(probation)
 }
 
+/// Ends a desktop that did not finish starting, so the rollback can remove its release.
+fn stop_unfinished_desktop(child: &mut std::process::Child) -> Result<(), String> {
+    if child.try_wait().map_err(redacted)?.is_none() {
+        child
+            .kill()
+            .map_err(|_| "the unfinished desktop could not be stopped".to_string())?;
+    }
+    child
+        .wait()
+        .map(|_| ())
+        .map_err(|_| "the unfinished desktop did not exit".to_string())
+}
 fn rollback_and_launch_retained(
     installer: &ReleaseInstaller,
     hooks: &NativeHooks,
@@ -2349,7 +2430,8 @@ mod tests {
     use crate::{
         BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor, BlockPlan,
         LAUNCHER_PROTOCOL_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
-        ReleaseInstallerMetadata, RolloutMetadata, sign_block_plan, sign_release_manifest,
+        ReleaseInstallerMetadata, RolloutMetadata, StartupComplete, record_startup_complete,
+        sign_block_plan, sign_release_manifest,
     };
     use ed25519_dalek::SigningKey;
 
@@ -2932,24 +3014,59 @@ mod tests {
     }
 
     #[test]
-    fn early_nonzero_exit_is_detected_but_observation_is_bounded() {
+    fn probation_ends_on_the_child_marker_an_exit_or_the_bound() {
+        let base = temporary_base("probation");
+        let active = ActiveRelease {
+            release_identity: "probation-release-0007".to_string(),
+            install_generation: 7,
+            directory_name: "00000000000000000007-release-0007".to_string(),
+        };
         let mut failed = startup_exit_child(0, 7);
         assert_eq!(
-            observe_early_desktop_startup(&mut failed, Duration::from_secs(5))
+            observe_desktop_probation(&mut failed, &base, &active, Duration::from_secs(5))
                 .expect("failed startup observes"),
-            EarlyDesktopStartup::ExitedUnsuccessfully
+            DesktopProbation::ExitedUnsuccessfully
         );
-
-        let mut still_starting = startup_exit_child(1_000, 7);
+        let mut closed = startup_exit_child(0, 0);
         assert_eq!(
-            observe_early_desktop_startup(&mut still_starting, Duration::from_millis(50))
-                .expect("bounded startup observes"),
-            EarlyDesktopStartup::Running
+            observe_desktop_probation(&mut closed, &base, &active, Duration::from_secs(5))
+                .expect("clean exit observes"),
+            DesktopProbation::ExitedSuccessfully
         );
-        let _ = still_starting.kill();
-        let _ = still_starting.wait();
-    }
 
+        let mut hanging = startup_exit_child(10_000, 7);
+        // A marker from another process or another release does not end probation.
+        record_startup_complete(
+            &base,
+            &StartupComplete::for_current_process(7, "probation-release-0007"),
+        )
+        .expect("marker of another process");
+        assert_eq!(
+            observe_desktop_probation(&mut hanging, &base, &active, Duration::from_millis(50))
+                .expect("bounded startup observes"),
+            DesktopProbation::TimedOut
+        );
+        let mut marker = StartupComplete::for_current_process(6, "probation-release-0006");
+        marker.process_id = hanging.id();
+        record_startup_complete(&base, &marker).expect("marker of another release");
+        assert_eq!(
+            observe_desktop_probation(&mut hanging, &base, &active, Duration::from_millis(50))
+                .expect("bounded startup observes"),
+            DesktopProbation::TimedOut
+        );
+        marker = StartupComplete::for_current_process(7, "probation-release-0007");
+        marker.process_id = hanging.id();
+        record_startup_complete(&base, &marker).expect("marker of the child");
+        assert_eq!(
+            observe_desktop_probation(&mut hanging, &base, &active, Duration::from_secs(5))
+                .expect("completed startup observes"),
+            DesktopProbation::Completed
+        );
+        assert!(release_accepted(&base, &active));
+        stop_unfinished_desktop(&mut hanging).expect("unfinished desktop stops");
+        assert!(hanging.try_wait().expect("child status").is_some());
+        fs::remove_dir_all(base).expect("probation fixture removes");
+    }
     #[test]
     fn relocate_moves_binary_outside_install_root() {
         // Fixture copies only: the test binary itself is never renamed.

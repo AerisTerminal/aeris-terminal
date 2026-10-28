@@ -226,7 +226,14 @@ violations and missing verification explicitly, and never describe them as satis
   silent) it runs `--remove-application`, which keeps every data, cache, log and legacy root and
   vault entry; only a ticked box or a pending full uninstall runs `--remove-all-local-data`. It
   carries no Axiusflow cleanup. The desktop spawns launcher promotion only on a plain start of
-  an installed release (install generation above 0) and reaps that child. The launcher waits on and
+  an installed release (install generation above 0) and reaps that child. While a retained
+  known-good release exists, a release generation stays on probation until a desktop it started
+  records the install-root `.startup-complete.json` marker (generation, release identity, process
+  ID; written off the UI thread once its first sign-in or workspace window opens, never on a
+  validation root). The launcher waits up to 60 seconds for its own child's marker; an
+  unsuccessful exit or no marker in time (the child is stopped) quarantines the release and rolls
+  back. A marker for the active generation from an earlier launch ends probation, and
+  `tools/naming_check` keeps both the launcher bound and the desktop calls. The launcher waits on and
   detects processes through `platform_sys::process` (re-exported by `platform_runtime`), never
   sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the
   install root; later launcher starts and the uninstaller delete it by that exact name, never
@@ -242,8 +249,8 @@ violations and missing verification explicitly, and never describe them as satis
   (a write-ahead log holding frames counts as the failed release's schema) and leaves the failed
   release active instead of restoring one that cannot open that store. Its `lifecycle_e2e` test runs
   `run_launcher` against a local `DirectorySource` through install, update, readiness rejection,
-  block-plan delivery, activation, crash rollback, quarantine and a rollback refused past a
-  migrated store. The installed desktop and launcher
+  block-plan delivery, activation, probation, crash and hang rollback, quarantine and a rollback
+  refused past a migrated store. The installed desktop and launcher
   there are copies of the `aeris_lifecycle_fixture` binary; never copy a test executable into a
   release, because antivirus heuristics quarantine a program that copies and runs its own image.
 - The release packaging variables (`AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,

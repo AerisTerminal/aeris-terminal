@@ -889,6 +889,34 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
     }
 }
 
+/// Records that this installed desktop finished starting, which ends a new
+/// release's launcher probation. The write runs on the background executor;
+/// development builds (generation 0) and validation roots record nothing.
+pub(super) fn record_startup_complete(cx: &gpui::App) {
+    let Some(marker) = aeris_release_lifecycle::StartupComplete::for_current_release() else {
+        return;
+    };
+    if !aeris_platform_runtime::active_data_root().is_ok_and(|root| {
+        root.allows_installed_app_side_effect(
+            aeris_platform_runtime::InstalledAppSideEffect::StartupCompleteMarker,
+        )
+    }) {
+        return;
+    }
+    cx.background_executor()
+        .spawn(async move {
+            let recorded = aeris_release_lifecycle::native_install_root()
+                .map_err(|error| error.to_string())
+                .and_then(|root| aeris_release_lifecycle::record_startup_complete(&root, &marker));
+            if let Err(error) = recorded {
+                aeris_observability::diagnostic!(
+                    "Aeris startup-complete marker could not be recorded: {error}"
+                );
+            }
+        })
+        .detach();
+}
+
 /// Only a plain start of an installed release (generation above 0) has a
 /// signed versioned launcher to promote; development and directly packaged
 /// builds have none.

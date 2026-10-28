@@ -1,6 +1,7 @@
 //! End-to-end release lifecycle. The packager builds signed releases whose desktop and launcher
 //! are copies of the `aeris_lifecycle_fixture` program, and the launcher installs, updates,
-//! checks readiness, activates, rolls back and quarantines them from a local directory origin.
+//! checks readiness, activates, holds probation, rolls back and quarantines them from a local
+//! directory origin.
 //! The desktop's own readiness on a copy of the trading database is covered by the desktop's
 //! tests; here the fixture desktop answers with the shared readiness report.
 
@@ -23,7 +24,8 @@ use aeris_platform_runtime::{
 use aeris_release_lifecycle::{
     ActiveRelease, BLOCK_PLAN_FILENAME, LifecycleError, LiveStoreSchema, RELEASE_MANIFEST_FILENAME,
     ReleaseInstaller, ReleaseOrigin, ReleasePolicy, RolloutMetadata, channel_pointer_path,
-    installer_filename, read_live_store_schema, run_launcher, trading_database_path,
+    installer_filename, read_live_store_schema, read_startup_complete, run_launcher,
+    trading_database_path,
 };
 use aeris_release_packager::{
     BlockPlanSummary, ChannelRequest, PackagedRelease, ReleaseRequest, desktop_file_name,
@@ -42,6 +44,8 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(60);
 const EVENTS_FILE: &str = "fixture-events.log";
 /// The trading store schema of every fixture release except the one that migrates past it.
 const STORE_SCHEMA: u32 = 30;
+/// The launcher's probation bound for a new release's desktop to finish starting.
+const STARTUP_COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[test]
 fn packaged_releases_install_update_roll_back_and_quarantine() {
@@ -95,6 +99,7 @@ impl Lifecycle {
         self.reject_candidate();
         self.crash_and_roll_back(&first);
         let fixed = self.update_after_quarantine(&first);
+        self.hang_and_roll_back(&fixed);
         self.refuse_rollback_past_migrated_store(&fixed);
         assert_eq!(self.launcher(&["--recover".into()]).0, Ok(()));
     }
@@ -206,23 +211,51 @@ impl Lifecycle {
         self.wait_for_event(4, "launch", 1);
         self.wait_for_event(4, "promote", 2);
         assert_eq!(self.releases(), (Some(4), Some(1)));
+        assert_eq!(self.startup_complete_generation(), Some(4));
         self.wait_for_installed_processes();
         fixed
+    }
+
+    /// A release that never finishes starting is stopped once probation runs out, then
+    /// quarantined and rolled back like a crash.
+    fn hang_and_roll_back(&self, fixed: &PackagedRelease) {
+        let hanging = self.package(
+            5,
+            "e2e-accept-hang-0005",
+            Some(&fixed.directory),
+            STORE_SCHEMA,
+        );
+        self.publish(&hanging);
+        assert_eq!(self.launcher(&["--update".into()]).0, Ok(()));
+        assert_eq!(self.releases(), (Some(5), Some(4)));
+        self.wait_for_event(5, "promote", 1);
+        self.wait_for_installed_processes();
+        let started = Instant::now();
+        assert_eq!(self.launcher(&["--launch-desktop".into()]).0, Ok(()));
+        assert!(
+            started.elapsed() >= STARTUP_COMPLETE_TIMEOUT,
+            "probation ended early"
+        );
+        assert_eq!(self.events_of(5, "launch"), 1);
+        self.wait_for_event(4, "launch", 2);
+        assert_eq!(self.releases(), (Some(4), None));
+        assert_eq!(self.quarantined_generation(), 5);
+        self.wait_for_installed_processes();
     }
 
     /// A release that migrates the trading store and then crashes cannot roll back to one
     /// that does not open the migrated store: it stays active and is not quarantined.
     fn refuse_rollback_past_migrated_store(&self, fixed: &PackagedRelease) {
         let migrating = self.package(
-            5,
-            "e2e-accept-crash-0005",
+            6,
+            "e2e-accept-crash-0006",
             Some(&fixed.directory),
             STORE_SCHEMA + 1,
         );
         self.publish(&migrating);
         assert_eq!(self.launcher(&["--update".into()]).0, Ok(()));
-        assert_eq!(self.releases(), (Some(5), Some(4)));
-        self.wait_for_event(5, "promote", 1);
+        assert_eq!(self.releases(), (Some(6), Some(4)));
+        self.wait_for_event(6, "promote", 1);
         self.wait_for_installed_processes();
         self.write_trading_store(STORE_SCHEMA + 1);
         let (launch, _) = self.launcher(&["--launch-desktop".into()]);
@@ -231,9 +264,9 @@ impl Lifecycle {
             refusal.contains(&LifecycleError::RollbackStoreSchemaNewer.to_string()),
             "{refusal}"
         );
-        assert_eq!(self.events_of(5, "launch"), 1);
-        assert_eq!(self.releases(), (Some(5), Some(4)));
-        assert_eq!(self.quarantined_generation(), 3);
+        assert_eq!(self.events_of(6, "launch"), 1);
+        assert_eq!(self.releases(), (Some(6), Some(4)));
+        assert_eq!(self.quarantined_generation(), 5);
         self.wait_for_installed_processes();
     }
 
@@ -281,6 +314,12 @@ impl Lifecycle {
             }
         }
         fs::write(database, header).expect("trading database header");
+    }
+
+    fn startup_complete_generation(&self) -> Option<u64> {
+        read_startup_complete(&self.install_root)
+            .expect("startup-complete marker")
+            .map(|marker| marker.install_generation)
     }
 
     fn quarantined_generation(&self) -> u64 {

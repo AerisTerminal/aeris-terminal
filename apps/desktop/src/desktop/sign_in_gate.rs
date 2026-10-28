@@ -381,6 +381,7 @@ pub(super) fn open_sign_in_window(gate: SignInGate, cx: &mut App) {
         return;
     }
     cx.activate(true);
+    super::update::record_startup_complete(cx);
 }
 
 struct SignInWindow {

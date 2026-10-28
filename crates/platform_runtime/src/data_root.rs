@@ -30,6 +30,7 @@ pub enum InstalledAppSideEffect {
     LauncherPromotion,
     Update,
     NotificationIdentityRegistration,
+    StartupCompleteMarker,
 }
 
 impl DataRoot {
@@ -631,6 +632,7 @@ mod tests {
             InstalledAppSideEffect::LauncherPromotion,
             InstalledAppSideEffect::Update,
             InstalledAppSideEffect::NotificationIdentityRegistration,
+            InstalledAppSideEffect::StartupCompleteMarker,
         ] {
             assert!(!validation.allows_installed_app_side_effect(side_effect));
             assert_eq!(
@@ -660,6 +662,7 @@ mod tests {
             InstalledAppSideEffect::LauncherPromotion,
             InstalledAppSideEffect::Update,
             InstalledAppSideEffect::NotificationIdentityRegistration,
+            InstalledAppSideEffect::StartupCompleteMarker,
         ] {
             assert!(production.allows_installed_app_side_effect(side_effect));
             assert_eq!(
@@ -669,7 +672,7 @@ mod tests {
                 Some(())
             );
         }
-        assert_eq!(production_invocations, 3);
+        assert_eq!(production_invocations, 4);
         fs::remove_dir_all(validation_parent).expect("cleanup");
     }
 

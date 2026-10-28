@@ -2,8 +2,9 @@
 //! release as the desktop, it writes the readiness report the launcher asks for and records each
 //! launch; copied as the launcher, it answers the promotion the launcher schedules after an
 //! update. The release identity, which the version directory name carries, says how the desktop
-//! behaves: `-reject-` fails readiness and `-crash-` exits with an error right after a normal
-//! launch. Under any other file name it does nothing.
+//! behaves: `-reject-` fails readiness, `-crash-` exits with an error right after a normal
+//! launch and `-hang-` keeps running without finishing its start; any other release records
+//! the startup-complete marker and exits. Under any other file name it does nothing.
 //!
 //! The test copies this small program rather than itself: an executable that copies and runs
 //! its own image is what antivirus heuristics report as self-replicating malware.
@@ -14,16 +15,21 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
+    thread,
+    time::Duration,
 };
 
 use aeris_release_lifecycle::{
     PRODUCTION_VAULT_NAMESPACE, READINESS_REPORT_SCHEMA_VERSION, ReadinessReport, ServiceReadiness,
-    ServiceStarted,
+    ServiceStarted, StartupComplete, record_startup_complete,
 };
 
 /// Events the installed roles record, one `<generation> <event>` line each, beside the
 /// install root. The test reads the same file name.
 const EVENTS_FILE: &str = "fixture-events.log";
+/// How long a hanging desktop runs if the launcher never stops it, so a failed test leaves
+/// no process behind for long.
+const HANG_LIMIT: Duration = Duration::from_mins(5);
 
 fn main() -> ExitCode {
     let Ok(executable) = std::env::current_exe() else {
@@ -49,6 +55,7 @@ fn exit(result: io::Result<u8>) -> ExitCode {
 struct Installed {
     generation: u64,
     release_identity: String,
+    install_root: PathBuf,
     events: PathBuf,
 }
 
@@ -62,14 +69,15 @@ impl Installed {
             .and_then(|name| name.to_str())
             .and_then(|name| name.split_once('-'))
             .ok_or_else(invalid)?;
-        let base = version
+        let install_root = version
             .parent()
             .and_then(Path::parent)
-            .and_then(Path::parent)
             .ok_or_else(invalid)?;
+        let base = install_root.parent().ok_or_else(invalid)?;
         Ok(Self {
             generation: generation.parse().map_err(|_| invalid())?,
             release_identity: release_identity.to_string(),
+            install_root: install_root.to_path_buf(),
             events: base.join(EVENTS_FILE),
         })
     }
@@ -120,11 +128,19 @@ fn desktop(executable: &Path, arguments: &[OsString]) -> io::Result<u8> {
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
     installed.record(format!("launch {}", launch.join(" ")).trim_end())?;
-    Ok(if installed.release_identity.contains("-crash-") {
-        3
-    } else {
-        0
-    })
+    if installed.release_identity.contains("-crash-") {
+        return Ok(3);
+    }
+    if installed.release_identity.contains("-hang-") {
+        thread::sleep(HANG_LIMIT);
+        return Ok(4);
+    }
+    record_startup_complete(
+        &installed.install_root,
+        &StartupComplete::for_current_process(installed.generation, &installed.release_identity),
+    )
+    .map_err(io::Error::other)?;
+    Ok(0)
 }
 
 fn launcher(executable: &Path, arguments: &[OsString]) -> io::Result<u8> {

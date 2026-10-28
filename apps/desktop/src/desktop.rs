@@ -5855,6 +5855,9 @@ fn mount_desktop(
         }
     }
     cx.activate(true);
+    if !cx.windows().is_empty() {
+        update::record_startup_complete(cx);
+    }
     existing_root
 }
 

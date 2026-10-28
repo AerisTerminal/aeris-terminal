@@ -663,8 +663,16 @@ still wait on the GUI checks and the remaining work on their lines.
     quarantine, so the failed release stays active. Unit tests cover the header read and the gate;
     `lifecycle_e2e` opens the real store through the trading owner and adds a release that
     migrates to schema 31, crashes and is not rolled back.
+  - Landed: LC-09. An installed desktop records `.startup-complete.json` in the install root
+    (generation, release identity, process ID) on the background executor once its first
+    sign-in or workspace window opens; validation roots and development builds record nothing.
+    With a retained release, the launcher waits up to 60 s for its own child's marker; an
+    unsuccessful exit or no marker in time (the child is stopped) quarantines and rolls back, and
+    a clean exit without a marker (a second instance) neither accepts nor rolls back (D24). A
+    unit test covers the marker, the process and release match and the bound; `lifecycle_e2e`
+    adds a release that hangs, is stopped after 60 s and rolled back. The installed desktop
+    writing its marker is not yet exercised on an installed app.
   - Left:
-    - LC-09: a startup-complete marker and probation.
     - LC-18: readiness journaled before Activated, plus `orphaned/`.
     - LC-06: all verification before READY.
     - End-to-end tests for each.
@@ -722,6 +730,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D21 | Readiness copy | (2026-10-28) The readiness copy is a file copy of the database and its sidecars, not `VACUUM INTO`: a read-only SQLite connection to a WAL database creates `-wal` and `-shm` beside it. The instance lock keeps the copied files consistent. |
 | D22 | Manifest decode | (2026-10-28) Reading a signed-manifest envelope decodes its exact bytes into the typed manifest before the key is known, so a manifest with an unknown field is refused as early as possible. No outcome depends on a field until `verify_release_manifest` has checked the signature over those bytes, and the private fields keep the decoded manifest equal to the signed bytes. |
 | D23 | Lifecycle harness scope | (2026-10-28) M8.7's end-to-end harness covers install, update, readiness rejection, activation, crash rollback and quarantine. The probation, hang and schema-gated rollback scenarios need LC-09's startup-complete marker and LC-05's manifest `max_store_schema`, so they are added to the same harness with those fixes in M8.8. Readiness on the database copy stays covered by the desktop's tests. |
+| D24 | Probation acceptance | (2026-10-28) A release generation is accepted once a desktop it started records the startup-complete marker; later launches of that generation skip probation, so only a release that has never finished starting is rolled back for a crash or a hang. The marker is written when the first window opens (the sign-in window counts) so a user who has not signed in within 60 s does not trigger a rollback. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in
