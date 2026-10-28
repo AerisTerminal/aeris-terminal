@@ -36,8 +36,7 @@ pub const MAXIMUM_BLOCK_PLAN_BLOCKS: usize = 4096;
 /// Maximum number of network range requests a valid plan may require.
 pub const MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS: usize = 256;
 
-// Stable wire-domain identifier. This predates the Aeris product rename
-// and must remain unchanged so existing signed block plans stay verifiable.
+// Changing this prefix invalidates every published block-plan signature.
 const BLOCK_PLAN_SIGNING_DOMAIN: &[u8] = b"AERIS_RELEASE_BLOCK_PLAN_V1\0";
 
 /// One independently signed reconstruction plan.
@@ -371,7 +370,7 @@ mod tests {
             release_identity: identity.to_string(),
             install_generation: generation,
             channel: "stable".to_string(),
-            minimum_version: "0.2.0".to_string(),
+            minimum_launcher_protocol: crate::LAUNCHER_PROTOCOL_VERSION,
             platform: std::env::consts::OS.to_string(),
             architecture: std::env::consts::ARCH.to_string(),
             files: vec![ReleaseFile {

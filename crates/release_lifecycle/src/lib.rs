@@ -22,9 +22,8 @@ pub use lifecycle::{
     ReleasePolicy, ReleaseUninstaller, RollbackCompatibilityMetadata, RolloutMetadata,
     SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
     native_installation_inventory, verify_release_file, verify_release_manifest,
-    verify_release_manifest_signature,
 };
-pub use protocol::{UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY};
+pub use protocol::{LAUNCHER_PROTOCOL_VERSION, UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY};
 pub use readiness::{
     PRODUCTION_VAULT_NAMESPACE, READINESS_REPORT_SCHEMA_VERSION, ReadinessRejection,
     ReadinessReport, ServiceReadiness, ServiceStarted, VALIDATION_VAULT_NAMESPACE,

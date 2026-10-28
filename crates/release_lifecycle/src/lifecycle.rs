@@ -26,6 +26,8 @@ use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 
+use crate::LAUNCHER_PROTOCOL_VERSION;
+
 pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const RELEASE_CHANNEL_SCHEMA_VERSION: u32 = 1;
 pub const ROLLBACK_COMPATIBILITY_SCHEMA_VERSION: u32 = 1;
@@ -35,7 +37,12 @@ pub const ROLLBACK_COMPATIBILITY_FILENAME: &str = "rollback-compatibility.json";
 /// numbers/types/meaning, and permanently retired tags stay in the same epoch.
 pub const CURRENT_STATE_COMPATIBILITY_EPOCH: u32 = 1;
 const INVENTORY_SCHEMA_VERSION: u32 = 1;
-const MAXIMUM_MANIFEST_BYTES: usize = 1024 * 1024;
+// The base64url copy of the raw manifest (4/3 of these bytes) must still fit
+// in the 1 MiB signed-manifest file and launcher channel-pointer bounds.
+const MAXIMUM_MANIFEST_BYTES: usize = 512 * 1024;
+const MAXIMUM_SIGNED_MANIFEST_FILE_BYTES: u64 = 1024 * 1024;
+// Changing this prefix invalidates every published manifest signature.
+const RELEASE_MANIFEST_SIGNING_DOMAIN: &[u8] = b"AERIS_RELEASE_MANIFEST_V1\0";
 const MAXIMUM_ROLLBACK_COMPATIBILITY_BYTES: u64 = 1024;
 const MAXIMUM_RELEASE_FILES: usize = 256;
 const MAXIMUM_OWNED_ROOTS: usize = 64;
@@ -79,19 +86,77 @@ pub struct ReleaseManifest {
     pub release_identity: String,
     pub install_generation: u64,
     pub channel: String,
-    pub minimum_version: String,
+    pub minimum_launcher_protocol: u32,
     pub platform: String,
     pub architecture: String,
     pub files: Vec<ReleaseFile>,
     pub rollout: RolloutMetadata,
 }
 
-/// Manifest plus an Ed25519 signature over its canonical JSON representation.
+/// The exact signed manifest bytes, their Ed25519 signature and the manifest
+/// they decode to.
+///
+/// The signature covers `AERIS_RELEASE_MANIFEST_V1\0` followed by the raw
+/// bytes, never a re-serialization, so a serde or field-order change cannot
+/// alter what was signed. The bytes decode with `deny_unknown_fields`, and the
+/// fields are private so the decoded manifest always matches the bytes. No
+/// field is trusted until [`verify_release_manifest`] has checked the
+/// signature.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(
+    try_from = "SignedReleaseManifestWire",
+    into = "SignedReleaseManifestWire"
+)]
 pub struct SignedReleaseManifest {
-    pub manifest: ReleaseManifest,
-    pub signature: String,
+    manifest: ReleaseManifest,
+    manifest_bytes: Vec<u8>,
+    signature: String,
+}
+
+impl SignedReleaseManifest {
+    #[must_use]
+    pub const fn manifest(&self) -> &ReleaseManifest {
+        &self.manifest
+    }
+
+    #[must_use]
+    pub fn into_manifest(self) -> ReleaseManifest {
+        self.manifest
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedReleaseManifestWire {
+    manifest_b64url: String,
+    signature: String,
+}
+
+impl TryFrom<SignedReleaseManifestWire> for SignedReleaseManifest {
+    type Error = LifecycleError;
+
+    fn try_from(wire: SignedReleaseManifestWire) -> Result<Self, Self::Error> {
+        if wire.manifest_b64url.len() > MAXIMUM_MANIFEST_BYTES.div_ceil(3) * 4 {
+            return Err(LifecycleError::InvalidManifest);
+        }
+        let manifest_bytes = URL_SAFE_NO_PAD
+            .decode(&wire.manifest_b64url)
+            .map_err(|_| LifecycleError::InvalidManifest)?;
+        Ok(Self {
+            manifest: decode_manifest_bytes(&manifest_bytes)?,
+            manifest_bytes,
+            signature: wire.signature,
+        })
+    }
+}
+
+impl From<SignedReleaseManifest> for SignedReleaseManifestWire {
+    fn from(signed: SignedReleaseManifest) -> Self {
+        Self {
+            manifest_b64url: URL_SAFE_NO_PAD.encode(&signed.manifest_bytes),
+            signature: signed.signature,
+        }
+    }
 }
 
 /// Mutable channel metadata. The embedded signed release remains the trust
@@ -129,7 +194,7 @@ pub struct ReleaseInstallerMetadata {
 pub struct ReleasePolicy {
     pub platform: String,
     pub architecture: String,
-    pub current_version: String,
+    pub launcher_protocol: u32,
     pub minimum_install_generation: u64,
     pub maximum_release_bytes: u64,
 }
@@ -140,7 +205,7 @@ impl ReleasePolicy {
         Self {
             platform: std::env::consts::OS.to_string(),
             architecture: std::env::consts::ARCH.to_string(),
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            launcher_protocol: LAUNCHER_PROTOCOL_VERSION,
             minimum_install_generation,
             maximum_release_bytes: MAXIMUM_RELEASE_BYTES,
         }
@@ -313,14 +378,19 @@ pub fn sign_release_manifest(
     key: &SigningKey,
 ) -> Result<SignedReleaseManifest, LifecycleError> {
     validate_manifest_shape(&manifest)?;
-    let canonical = canonical_manifest(&manifest)?;
+    let manifest_bytes =
+        serde_json::to_vec(&manifest).map_err(|_| LifecycleError::InvalidManifest)?;
+    let message = manifest_signing_message(&manifest_bytes)?;
     Ok(SignedReleaseManifest {
         manifest,
-        signature: URL_SAFE_NO_PAD.encode(key.sign(&canonical).to_bytes()),
+        manifest_bytes,
+        signature: URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
     })
 }
 
-/// Verifies signature, bounds, platform, architecture, and downgrade policy.
+/// Verifies the signature over the exact manifest bytes first, then the
+/// manifest shape, bounds, platform, architecture, launcher protocol and
+/// downgrade policy.
 ///
 /// # Errors
 /// Returns a redacted validation category without exposing manifest payloads.
@@ -329,24 +399,20 @@ pub fn verify_release_manifest(
     key: &VerifyingKey,
     policy: &ReleasePolicy,
 ) -> Result<(), LifecycleError> {
-    validate_manifest_shape(&signed.manifest)?;
-    let canonical = canonical_manifest(&signed.manifest)?;
+    let message = manifest_signing_message(&signed.manifest_bytes)?;
     let bytes = URL_SAFE_NO_PAD
         .decode(&signed.signature)
         .map_err(|_| LifecycleError::InvalidSignature)?;
     let signature = Signature::from_slice(&bytes).map_err(|_| LifecycleError::InvalidSignature)?;
-    key.verify(&canonical, &signature)
+    key.verify(&message, &signature)
         .map_err(|_| LifecycleError::InvalidSignature)?;
+    validate_manifest_shape(&signed.manifest)?;
     if signed.manifest.platform != policy.platform
         || signed.manifest.architecture != policy.architecture
     {
         return Err(LifecycleError::IncompatibleRelease);
     }
-    let minimum_version = semver::Version::parse(&signed.manifest.minimum_version)
-        .map_err(|_| LifecycleError::InvalidManifest)?;
-    let current_version = semver::Version::parse(&policy.current_version)
-        .map_err(|_| LifecycleError::IncompatibleRelease)?;
-    if current_version < minimum_version {
+    if policy.launcher_protocol < signed.manifest.minimum_launcher_protocol {
         return Err(LifecycleError::IncompatibleRelease);
     }
     if signed.manifest.install_generation < policy.minimum_install_generation {
@@ -364,35 +430,22 @@ pub fn verify_release_manifest(
     Ok(())
 }
 
-/// Verifies only the cryptographic signature over a release manifest.
-///
-/// This is intentionally narrower than [`verify_release_manifest`]. Release
-/// publication uses it only to authenticate an already-published predecessor
-/// whose inventory may belong to a retired architecture. New candidates must
-/// still pass the full current manifest-shape and policy validation.
-///
-/// # Errors
-/// Returns an error when the canonical manifest cannot be serialized or the
-/// signature is malformed or does not match the supplied key.
-pub fn verify_release_manifest_signature(
-    signed: &SignedReleaseManifest,
-    key: &VerifyingKey,
-) -> Result<(), LifecycleError> {
-    let canonical = canonical_manifest(&signed.manifest)?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(&signed.signature)
-        .map_err(|_| LifecycleError::InvalidSignature)?;
-    let signature = Signature::from_slice(&bytes).map_err(|_| LifecycleError::InvalidSignature)?;
-    key.verify(&canonical, &signature)
-        .map_err(|_| LifecycleError::InvalidSignature)
-}
-
-fn canonical_manifest(manifest: &ReleaseManifest) -> Result<Vec<u8>, LifecycleError> {
-    let bytes = serde_json::to_vec(manifest).map_err(|_| LifecycleError::InvalidManifest)?;
-    if bytes.len() > MAXIMUM_MANIFEST_BYTES {
+fn manifest_signing_message(manifest_bytes: &[u8]) -> Result<Vec<u8>, LifecycleError> {
+    if manifest_bytes.is_empty() || manifest_bytes.len() > MAXIMUM_MANIFEST_BYTES {
         return Err(LifecycleError::InvalidManifest);
     }
-    Ok(bytes)
+    let mut message =
+        Vec::with_capacity(RELEASE_MANIFEST_SIGNING_DOMAIN.len() + manifest_bytes.len());
+    message.extend_from_slice(RELEASE_MANIFEST_SIGNING_DOMAIN);
+    message.extend_from_slice(manifest_bytes);
+    Ok(message)
+}
+
+fn decode_manifest_bytes(manifest_bytes: &[u8]) -> Result<ReleaseManifest, LifecycleError> {
+    if manifest_bytes.is_empty() || manifest_bytes.len() > MAXIMUM_MANIFEST_BYTES {
+        return Err(LifecycleError::InvalidManifest);
+    }
+    serde_json::from_slice(manifest_bytes).map_err(|_| LifecycleError::InvalidManifest)
 }
 
 fn validate_manifest_shape(manifest: &ReleaseManifest) -> Result<(), LifecycleError> {
@@ -400,8 +453,7 @@ fn validate_manifest_shape(manifest: &ReleaseManifest) -> Result<(), LifecycleEr
         || manifest.install_generation == 0
         || !valid_identifier(&manifest.release_identity, 128)
         || !valid_identifier(&manifest.channel, 32)
-        || manifest.minimum_version.len() > 64
-        || semver::Version::parse(&manifest.minimum_version).is_err()
+        || manifest.minimum_launcher_protocol == 0
         || !valid_identifier(&manifest.platform, 32)
         || !valid_identifier(&manifest.architecture, 32)
         || !valid_identifier(&manifest.rollout.cohort, 64)
@@ -1973,7 +2025,7 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LifecycleError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| LifecycleError::JournalCorrupt)?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || metadata.len() > MAXIMUM_MANIFEST_BYTES as u64
+        || metadata.len() > MAXIMUM_SIGNED_MANIFEST_FILE_BYTES
     {
         return Err(LifecycleError::JournalCorrupt);
     }
@@ -2361,7 +2413,7 @@ mod tests {
             release_identity: format!("release-{generation}"),
             install_generation: generation,
             channel: "stable".to_string(),
-            minimum_version: "0.1.0".to_string(),
+            minimum_launcher_protocol: LAUNCHER_PROTOCOL_VERSION,
             platform: std::env::consts::OS.to_string(),
             architecture: std::env::consts::ARCH.to_string(),
             files,
@@ -2444,11 +2496,25 @@ mod tests {
         let _ = remove_owned_path(&root);
     }
 
+    fn with_manifest_bytes(
+        signed: &SignedReleaseManifest,
+        manifest_bytes: &[u8],
+    ) -> Result<SignedReleaseManifest, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "manifest_b64url": URL_SAFE_NO_PAD.encode(manifest_bytes),
+            "signature": signed.signature,
+        }))
+    }
+
     #[test]
     fn tampered_manifest_and_bundle_fail_closed() {
         let root = temporary_root("tamper");
-        let (mut signed, key, _bundle) = release(&root, 1);
-        signed.manifest.channel = "preview".to_string();
+        let (signed, key, _bundle) = release(&root, 1);
+        let mut manifest = signed.manifest.clone();
+        manifest.channel = "preview".to_string();
+        let tampered_bytes = serde_json::to_vec(&manifest).expect("tampered manifest encodes");
+        let signed = with_manifest_bytes(&signed, &tampered_bytes).expect("tampered bytes decode");
+        assert_eq!(signed.manifest().channel, "preview");
         assert_eq!(
             verify_release_manifest(&signed, &key.verifying_key(), &ReleasePolicy::native(0)),
             Err(LifecycleError::InvalidSignature)
@@ -2468,8 +2534,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_engine_manifest_signature_can_be_authenticated_without_reaccepting_its_shape() {
-        let root = temporary_root("legacy-signature");
+    fn signature_is_checked_over_raw_bytes_before_the_manifest_shape() {
+        let root = temporary_root("signature-order");
         let (signed, key, _bundle) = release(&root, 1);
         let mut manifest = signed.manifest;
         manifest.files.insert(
@@ -2483,18 +2549,106 @@ mod tests {
                 executable: true,
             },
         );
-        let canonical = canonical_manifest(&manifest).expect("legacy canonical manifest");
-        let legacy = SignedReleaseManifest {
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("engine manifest encodes");
+        let message = manifest_signing_message(&manifest_bytes).expect("bounded manifest");
+        let engine = SignedReleaseManifest {
             manifest,
-            signature: URL_SAFE_NO_PAD.encode(key.sign(&canonical).to_bytes()),
+            manifest_bytes,
+            signature: URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
         };
 
         assert_eq!(
-            verify_release_manifest(&legacy, &key.verifying_key(), &ReleasePolicy::native(0)),
-            Err(LifecycleError::InvalidManifest)
+            verify_release_manifest(&engine, &key.verifying_key(), &ReleasePolicy::native(0)),
+            Err(LifecycleError::InvalidManifest),
+            "an authentic manifest with a retired engine file fails its shape check"
         );
-        verify_release_manifest_signature(&legacy, &key.verifying_key())
-            .expect("legacy predecessor signature verifies cryptographically");
+        let other_key = SigningKey::from_bytes(&[0xa5; 32]);
+        assert_eq!(
+            verify_release_manifest(
+                &engine,
+                &other_key.verifying_key(),
+                &ReleasePolicy::native(0)
+            ),
+            Err(LifecycleError::InvalidSignature),
+            "the signature is checked before any manifest field"
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn manifest_signature_vector_covers_the_domain_and_exact_bytes() {
+        const MANIFEST: &str = concat!(
+            r#"{"schema_version":1,"release_identity":"release-1","install_generation":1,"#,
+            r#""channel":"stable","minimum_launcher_protocol":1,"platform":"windows","#,
+            r#""architecture":"x86_64","files":[{"role":"desktop","path":"aeris_desktop","#,
+            r#""url":"https://releases.aeris.test/1/aeris_desktop","size":7,"#,
+            r#""sha256":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE","executable":true}],"#,
+            r#""rollout":{"cohort":"all","percentage":100}}"#
+        );
+        const SIGNATURE: &str = "4iuCXDOHwRSBEEBGMQp4d_oobnv9YQG6FD_zJz84e7r12DbZ-qraF1e7EKRKa9U3A7_IjPUnl-5xZ1JvZS-wBw";
+        assert_eq!(
+            RELEASE_MANIFEST_SIGNING_DOMAIN,
+            b"AERIS_RELEASE_MANIFEST_V1\0"
+        );
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let message = manifest_signing_message(MANIFEST.as_bytes()).expect("bounded manifest");
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
+            SIGNATURE
+        );
+        assert_ne!(
+            URL_SAFE_NO_PAD.encode(key.sign(MANIFEST.as_bytes()).to_bytes()),
+            SIGNATURE,
+            "the signature is domain separated"
+        );
+        let wire = serde_json::json!({
+            "manifest_b64url": URL_SAFE_NO_PAD.encode(MANIFEST),
+            "signature": SIGNATURE,
+        });
+        let signed: SignedReleaseManifest =
+            serde_json::from_value(wire.clone()).expect("vector decodes");
+        let policy = ReleasePolicy {
+            platform: "windows".to_string(),
+            architecture: "x86_64".to_string(),
+            launcher_protocol: LAUNCHER_PROTOCOL_VERSION,
+            minimum_install_generation: 0,
+            maximum_release_bytes: MAXIMUM_RELEASE_BYTES,
+        };
+        verify_release_manifest(&signed, &key.verifying_key(), &policy)
+            .expect("published bytes keep verifying");
+        assert_eq!(signed.manifest().release_identity, "release-1");
+        assert_eq!(
+            serde_json::to_value(&signed).expect("signed manifest encodes"),
+            wire,
+            "the exact signed bytes round-trip unchanged"
+        );
+    }
+
+    #[test]
+    fn signed_manifest_rejects_unknown_fields_inside_and_outside_the_signature() {
+        let root = temporary_root("unknown-fields");
+        let (signed, key, _bundle) = release(&root, 1);
+        let mut value = serde_json::to_value(&signed.manifest).expect("manifest encodes");
+        value["unsigned_extension"] = serde_json::json!(true);
+        let manifest_bytes = serde_json::to_vec(&value).expect("extended manifest encodes");
+        let message = manifest_signing_message(&manifest_bytes).expect("bounded manifest");
+        let wire = serde_json::json!({
+            "manifest_b64url": URL_SAFE_NO_PAD.encode(&manifest_bytes),
+            "signature": URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
+        });
+        assert!(
+            serde_json::from_value::<SignedReleaseManifest>(wire).is_err(),
+            "a signed manifest field this release does not know is refused"
+        );
+
+        let mut wire = serde_json::to_value(&signed).expect("signed manifest encodes");
+        wire["manifest"] = serde_json::to_value(&signed.manifest).expect("manifest encodes");
+        assert!(
+            serde_json::from_value::<SignedReleaseManifest>(wire).is_err(),
+            "an envelope field outside the signature is refused"
+        );
+        let oversized = vec![b' '; MAXIMUM_MANIFEST_BYTES + 1];
+        assert!(with_manifest_bytes(&signed, &oversized).is_err());
         let _ = remove_owned_path(&root);
     }
 
@@ -2536,15 +2690,21 @@ mod tests {
     }
 
     #[test]
-    fn release_minimum_version_is_enforced_after_signature_verification() {
-        let root = temporary_root("minimum-version");
+    fn release_minimum_launcher_protocol_is_enforced_after_signature_verification() {
+        let root = temporary_root("launcher-protocol");
         let (signed, key, _) = release(&root, 1);
         let mut manifest = signed.manifest;
-        manifest.minimum_version = "999.0.0".to_string();
+        manifest.minimum_launcher_protocol = LAUNCHER_PROTOCOL_VERSION + 1;
         let signed = sign_release_manifest(manifest, &key).expect("sign incompatible release");
         assert_eq!(
             verify_release_manifest(&signed, &key.verifying_key(), &ReleasePolicy::native(0)),
             Err(LifecycleError::IncompatibleRelease)
+        );
+        let mut manifest = signed.manifest;
+        manifest.minimum_launcher_protocol = 0;
+        assert_eq!(
+            sign_release_manifest(manifest, &key),
+            Err(LifecycleError::InvalidManifest)
         );
         let _ = remove_owned_path(&root);
     }

@@ -2637,13 +2637,7 @@ mod tests {
             "the launcher waits on processes through platform_sys::process, not sysinfo scans"
         );
         let platform = manifest("crates/platform_runtime/Cargo.toml");
-        for moved in [
-            "ed25519-dalek",
-            "semver",
-            "same-file",
-            "sysinfo",
-            "embed-resource",
-        ] {
+        for moved in ["ed25519-dalek", "same-file", "sysinfo", "embed-resource"] {
             assert!(
                 !platform
                     .lines()
@@ -4779,8 +4773,8 @@ mod tests {
     fn signed_transactional_lifecycle_remains_release_lifecycle_owned() {
         let lifecycle = manifest("crates/release_lifecycle/src/lifecycle.rs");
         for contract in [
-            "key.verify(&canonical, &signature)",
-            "current_version < minimum_version",
+            "key.verify(&message, &signature)",
+            "policy.launcher_protocol < signed.manifest.minimum_launcher_protocol",
             "verify_candidate_inventory(&root, &signed.manifest.files)",
             "enum UpdateState",
             "pub fn recover<",

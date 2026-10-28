@@ -263,8 +263,8 @@ fn run_verified(
                 .audit_active_release()
                 .map_err(|error| error.to_string())?
                 .is_some_and(|active| {
-                    active.install_generation == signed.manifest.install_generation
-                        && active.release_identity == signed.manifest.release_identity
+                    active.install_generation == signed.manifest().install_generation
+                        && active.release_identity == signed.manifest().release_identity
                 })
             {
                 // A user may re-run the same standard Windows installer. The
@@ -274,7 +274,7 @@ fn run_verified(
                 verify_release_manifest(
                     &signed,
                     &verifying_key,
-                    &ReleasePolicy::native(signed.manifest.install_generation),
+                    &ReleasePolicy::native(signed.manifest().install_generation),
                 )
                 .map_err(|error| error.to_string())?;
                 return Ok(());
@@ -509,7 +509,7 @@ fn install_remote_update(
     let signed = &checked.channel.signed_release;
     if reconcile_same_generation_launcher(
         checked.active.as_ref(),
-        signed.manifest.install_generation,
+        signed.manifest().install_generation,
         || spawn_active_launcher_promotion(installer),
     ) {
         return Ok(());
@@ -617,14 +617,15 @@ fn download_release_bundle(
     prepare_secure_directory(&downloads_root)?;
     let bundle_root = downloads_root.join(format!(
         "{:020}-{}",
-        signed.manifest.install_generation, signed.manifest.release_identity
+        signed.manifest().install_generation,
+        signed.manifest().release_identity
     ));
     prepare_secure_directory(&bundle_root)?;
     let download_agent = release_http_agent(RELEASE_HTTP_TIMEOUT);
     let block_delivery = active.and_then(|active| {
         verified_block_delivery(installer, active, signed, verifying_key, &download_agent)
     });
-    for file in &signed.manifest.files {
+    for file in &signed.manifest().files {
         if block_delivery.as_ref().is_some_and(|delivery| {
             delivery
                 .signed_plan
@@ -829,7 +830,8 @@ fn preflight_update_restart(
     let signed_release = channel.signed_release;
     let bundle_root = downloads_root.join(format!(
         "{:020}-{}",
-        signed_release.manifest.install_generation, signed_release.manifest.release_identity
+        signed_release.manifest().install_generation,
+        signed_release.manifest().release_identity
     ));
     require_existing_secure_directory(&bundle_root)?;
     verify_prepared_bundle(&bundle_root, &signed_release)?;
@@ -856,7 +858,7 @@ fn verify_prepared_bundle(
     bundle_root: &Path,
     signed_release: &SignedReleaseManifest,
 ) -> Result<(), String> {
-    for file in &signed_release.manifest.files {
+    for file in &signed_release.manifest().files {
         verify_release_file(&bundle_root.join(&file.path), file)
             .map_err(|_| "prepared update artifact verification failed".to_string())?;
     }
@@ -908,10 +910,10 @@ fn verify_prepared_channel_with_policy(
     .map_err(|error| error.to_string())?;
     validate_release_channel(channel, base_url)?;
     let signed = &channel.signed_release;
-    if signed.manifest.channel != RELEASE_CHANNEL {
+    if signed.manifest().channel != RELEASE_CHANNEL {
         return Err("prepared release manifest does not match the stable channel".to_string());
     }
-    if signed.manifest.install_generation <= active.install_generation {
+    if signed.manifest().install_generation <= active.install_generation {
         return Err("no newer prepared Aeris update is available".to_string());
     }
     if !release_offer_eligible(channel, Some(active), install_root, quarantined) {
@@ -1058,7 +1060,7 @@ fn release_offer_eligible(
     }) {
         return false;
     }
-    rollout_eligible(&channel.signed_release.manifest.rollout, install_root)
+    rollout_eligible(&channel.signed_release.manifest().rollout, install_root)
 }
 
 fn checked_release_channel(
@@ -1093,11 +1095,11 @@ fn checked_release_channel(
     )
     .map_err(|error| error.to_string())?;
     validate_release_channel(&channel, base_url)?;
-    if signed.manifest.channel != RELEASE_CHANNEL {
+    if signed.manifest().channel != RELEASE_CHANNEL {
         return Err("release channel manifest does not match the stable channel".to_string());
     }
     if let Some(active) = &active
-        && signed.manifest.install_generation < active.install_generation
+        && signed.manifest().install_generation < active.install_generation
     {
         return Err("release channel generation regressed below the active release".to_string());
     }
@@ -1265,7 +1267,7 @@ fn fetch_release_channel(agent: &ureq::Agent, url: &str) -> Result<ReleaseChanne
 }
 
 fn validate_release_channel(channel: &ReleaseChannelPointer, base_url: &str) -> Result<(), String> {
-    let manifest = &channel.signed_release.manifest;
+    let manifest = channel.signed_release.manifest();
     if channel.schema_version != RELEASE_CHANNEL_SCHEMA_VERSION
         || channel.channel != manifest.channel
         || channel.platform != manifest.platform
@@ -1393,7 +1395,7 @@ fn verified_block_delivery(
     let source_manifest = installer.verified_release_manifest(active).ok()?;
     let source_root = installer.release_directory(active).ok()?;
     let base_url = embedded_release_base_url().ok()?;
-    let target_manifest = &target.manifest;
+    let target_manifest = target.manifest();
     let url = format!(
         "{base_url}/{}/{}/{}-{}/{}",
         target_manifest.platform,
@@ -1418,7 +1420,7 @@ fn verified_block_delivery(
     }
     let signed_plan = decode_and_verify_block_plan(
         &bytes,
-        &source_manifest.manifest,
+        source_manifest.manifest(),
         target_manifest,
         verifying_key,
     )
@@ -1456,7 +1458,7 @@ fn reconstruct_release_file_with_fetch(
     mut fetch: impl FnMut(&ReleaseFile, u64, u32) -> Result<Vec<u8>, String>,
 ) -> Result<(), String> {
     let source = source_manifest
-        .manifest
+        .manifest()
         .files
         .iter()
         .find(|file| file.path == plan.path)
@@ -2330,8 +2332,9 @@ fn redacted<E>(_error: E) -> String {
 mod tests {
     use super::*;
     use aeris_release_lifecycle::{
-        BLOCK_PLAN_BLOCK_BYTES, BlockDescriptor, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
-        ReleaseInstallerMetadata, ReleaseManifest, RolloutMetadata, sign_release_manifest,
+        BLOCK_PLAN_BLOCK_BYTES, BlockDescriptor, LAUNCHER_PROTOCOL_VERSION,
+        RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole, ReleaseInstallerMetadata,
+        ReleaseManifest, RolloutMetadata, sign_release_manifest,
     };
     use ed25519_dalek::SigningKey;
 
@@ -2369,7 +2372,7 @@ mod tests {
             release_identity: identity.to_string(),
             install_generation: generation,
             channel: "stable".to_string(),
-            minimum_version: env!("CARGO_PKG_VERSION").to_string(),
+            minimum_launcher_protocol: LAUNCHER_PROTOCOL_VERSION,
             platform: std::env::consts::OS.to_string(),
             architecture: std::env::consts::ARCH.to_string(),
             files: vec![file],
@@ -2441,7 +2444,7 @@ mod tests {
         let target_bytes = [reused.clone(), downloaded.clone()].concat();
         let (_, source_channel) = prepared_channel_fixture(7, &source_bytes);
         let source_manifest = source_channel.signed_release;
-        let source = &source_manifest.manifest.files[0];
+        let source = &source_manifest.manifest().files[0];
         fs::write(source_root.join(&source.path), &source_bytes).expect("source artifact");
         let target = ReleaseFile {
             size: target_bytes.len() as u64,
@@ -2503,7 +2506,7 @@ mod tests {
             vec![7_u8; usize::try_from(BLOCK_PLAN_BLOCK_BYTES).expect("block size fits usize")];
         let (_, source_channel) = prepared_channel_fixture(7, &bytes);
         let source_manifest = source_channel.signed_release;
-        let source = &source_manifest.manifest.files[0];
+        let source = &source_manifest.manifest().files[0];
         fs::write(source_root.join(&source.path), &bytes).expect("source artifact");
         let target = ReleaseFile {
             sha256: URL_SAFE_NO_PAD.encode([99_u8; 32]),
@@ -2619,7 +2622,16 @@ mod tests {
         );
 
         let mut tampered = channel.clone();
-        tampered.signed_release.manifest.install_generation = 9;
+        let mut tampered_manifest = channel.signed_release.manifest().clone();
+        tampered_manifest.install_generation = 9;
+        let mut wire =
+            serde_json::to_value(&channel.signed_release).expect("signed release encodes");
+        wire["manifest_b64url"] = serde_json::Value::String(
+            URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&tampered_manifest).expect("tampered manifest encodes")),
+        );
+        tampered.signed_release =
+            serde_json::from_value(wire).expect("unsigned tampered bytes decode");
         assert!(
             verify_prepared_channel_with_policy(
                 &tampered,
@@ -2639,7 +2651,7 @@ mod tests {
             channel.install_generation, channel.release_identity
         ));
         fs::create_dir_all(&bundle).expect("prepared bundle directory");
-        let file = &channel.signed_release.manifest.files[0];
+        let file = &channel.signed_release.manifest().files[0];
         fs::write(bundle.join(&file.path), payload).expect("prepared artifact writes");
         verify_prepared_bundle(&bundle, &channel.signed_release)
             .expect("exact cached artifact verifies");
@@ -2664,13 +2676,13 @@ mod tests {
             directory_name: "00000000000000000007-aaaaaaaaaaaaaaaa".to_string(),
         };
 
-        channel.signed_release.manifest.rollout = RolloutMetadata {
+        let mut manifest = channel.signed_release.manifest().clone();
+        manifest.rollout = RolloutMetadata {
             cohort: "hold".to_string(),
             percentage: 0,
         };
         channel.signed_release =
-            sign_release_manifest(channel.signed_release.manifest.clone(), &signing_key)
-                .expect("held rollout resigns");
+            sign_release_manifest(manifest, &signing_key).expect("held rollout resigns");
         assert!(!release_offer_eligible(
             &channel,
             Some(&active),
@@ -2695,13 +2707,13 @@ mod tests {
             .is_err()
         );
 
-        channel.signed_release.manifest.rollout = RolloutMetadata {
+        let mut manifest = channel.signed_release.manifest().clone();
+        manifest.rollout = RolloutMetadata {
             cohort: "canary".to_string(),
             percentage: 100,
         };
         channel.signed_release =
-            sign_release_manifest(channel.signed_release.manifest.clone(), &signing_key)
-                .expect("canary rollout resigns");
+            sign_release_manifest(manifest, &signing_key).expect("canary rollout resigns");
         assert!(release_offer_eligible(&channel, Some(&active), &base, None));
 
         let quarantined = QuarantinedRelease {
@@ -2783,7 +2795,7 @@ mod tests {
         assert!(!prepared_matches_current_offer(&prepared, &held));
 
         let mut changed_same_identity = prepared_channel.clone();
-        let mut changed_manifest = changed_same_identity.signed_release.manifest.clone();
+        let mut changed_manifest = changed_same_identity.signed_release.manifest().clone();
         changed_manifest.rollout.percentage = 50;
         changed_same_identity.signed_release =
             sign_release_manifest(changed_manifest, &signing_key).expect("changed offer signs");
@@ -3021,7 +3033,7 @@ mod tests {
             release_identity: identity.to_string(),
             install_generation: 7,
             channel: "stable".to_string(),
-            minimum_version: env!("CARGO_PKG_VERSION").to_string(),
+            minimum_launcher_protocol: LAUNCHER_PROTOCOL_VERSION,
             platform: std::env::consts::OS.to_string(),
             architecture: std::env::consts::ARCH.to_string(),
             files,

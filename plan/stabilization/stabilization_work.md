@@ -612,9 +612,15 @@ still wait on the GUI checks and the remaining work on their lines.
     and the desktop; the transitional aliases are deleted. Block plans sign under
     `AERIS_RELEASE_BLOCK_PLAN_V1`. naming_check rejects `AXIUSFLOW` in Rust sources (PL-16
     tokens part). No launcher has shipped, so no old token is still accepted.
+  - Landed: LC-03. A signed manifest carries its exact bytes as `manifest_b64url` and an Ed25519
+    signature over `AERIS_RELEASE_MANIFEST_V1\0` followed by those bytes. The bytes decode with
+    `deny_unknown_fields`, the fields are private, and `verify_release_manifest` checks the
+    signature before any field (D22). The signature-only predecessor check is deleted; it had no
+    caller. Tests pin a signature vector and cover tampered bytes, unknown fields inside and
+    outside the signature, and the size bound.
+  - Landed: LC-19. Manifests carry `minimum_launcher_protocol`, compared with
+    `LAUNCHER_PROTOCOL_VERSION` (1) instead of the product version; `semver` is removed.
   - Left:
-    - LC-03: a domain-separated raw-bytes signature with `deny_unknown_fields`.
-    - LC-19: `LAUNCHER_PROTOCOL_VERSION`.
     - LC-08: typed block errors.
     - LC-12: a "Remove my Aeris data" uninstall choice, with the Axiusflow lines removed from
       `tools/windows/aeris_setup.iss`.
@@ -682,6 +688,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D19 | Order | M6, then M7, then M8; one commit per item or coherent part of an item. |
 | D20 | Readiness providers | (2026-10-28) Readiness keeps `provider_count > 0`. It counts providers registered with the market runtime, which needs no sign-in, login or network, so a fresh install passes; zero means a broken build. |
 | D21 | Readiness copy | (2026-10-28) The readiness copy is a file copy of the database and its sidecars, not `VACUUM INTO`: a read-only SQLite connection to a WAL database creates `-wal` and `-shm` beside it. The instance lock keeps the copied files consistent. |
+| D22 | Manifest decode | (2026-10-28) Reading a signed-manifest envelope decodes its exact bytes into the typed manifest before the key is known, so a manifest with an unknown field is refused as early as possible. No outcome depends on a field until `verify_release_manifest` has checked the signature over those bytes, and the private fields keep the decoded manifest equal to the signed bytes. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in
