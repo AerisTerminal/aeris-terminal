@@ -1244,8 +1244,14 @@ mod tests {
 
     #[test]
     fn restart_ack_is_rejected_when_helper_exits_immediately_after_it() {
-        let child = acknowledgement_child(true);
-        assert!(wait_for_restart_ready(child).is_err());
+        let mut child = acknowledgement_child(true);
+        // Process teardown can outlast the 150 ms stability window on a loaded
+        // runner; the acknowledgement stays readable in the pipe after exit.
+        child.wait().expect("ack fixture exits");
+        assert_eq!(
+            wait_for_restart_ready(child).err().as_deref(),
+            Some("update restart helper stopped before shutdown")
+        );
     }
 
     #[test]
