@@ -708,11 +708,14 @@ still wait on the GUI checks and the remaining work on their lines.
   - Landed: `study_sdk -> market_runtime` recorded as the accepted facade (D27), so
     `cargo tree -p aeris_study_sdk` still lists the adapters by decision. Closes PL-13 and PL-14.
 - [ ] M8.10 Dependency hygiene
+  - Landed: PL-17. The user agent already came from `CARGO_PKG_VERSION`. The context worker now
+    handles queued commands before its next refresh, and `request_reply` refuses a full queue and
+    waits at most four request timeouts (one in-flight refresh makes at most three requests) before
+    returning an explicit timeout. A test stalls the worker's fetch and gets that timeout.
   - Left:
     - Fetch the avatar with ureq and remove `reqwest_client` (AC-07).
     - Remove unused crates and put `rpassword` behind a feature.
     - Centralize pins and dedupe sysinfo.
-    - Give the context `request_reply` a timeout (PL-17).
     - GUI smoke test.
   - Also covers the remaining TR-12 items and PL-15.
 - [ ] M8.11 Vendor and tooling trim

@@ -20,7 +20,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -31,6 +31,8 @@ const COMMAND_CAPACITY: usize = 64;
 const REPLY_CAPACITY: usize = 1;
 const MAXIMUM_STATUS_DETAIL_BYTES: usize = 256;
 const CONTEXT_VAULT_SERVICE: &str = "aeris-context-data";
+/// Most official-source requests one source refresh makes (EIA and USDA FAS make three).
+const MAXIMUM_REQUESTS_PER_REFRESH: u32 = 3;
 type Reply<T> = SyncSender<Result<T, String>>;
 type PublicationWake = Arc<dyn Fn() + Send + Sync>;
 type SharedPublicationWake = Arc<Mutex<Option<PublicationWake>>>;
@@ -164,6 +166,8 @@ impl ContextView {
 #[derive(Clone)]
 pub struct ContextService {
     commands: SyncSender<Command>,
+    /// Covers one in-flight refresh plus the credential operation itself.
+    reply_timeout: Duration,
     runtime: Arc<ContextRuntime>,
     view: ContextView,
 }
@@ -271,6 +275,7 @@ impl ContextService {
             .map_err(|error| format!("failed to start context runtime: {error}"))?;
         Ok(Self {
             commands,
+            reply_timeout: config.request_timeout * (MAXIMUM_REQUESTS_PER_REFRESH + 1),
             runtime: Arc::new(ContextRuntime {
                 stopping,
                 worker: Mutex::new(Some(worker)),
@@ -335,12 +340,23 @@ impl ContextService {
 
     fn request_reply<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (sender, receiver) = mpsc::sync_channel(REPLY_CAPACITY);
-        self.commands
-            .send(command(sender))
-            .map_err(|_| "context runtime is stopped".to_string())?;
-        receiver
-            .recv()
-            .map_err(|_| "context runtime stopped before replying".to_string())?
+        match self.commands.try_send(command(sender)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err("context command queue is full".to_string()),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err("context runtime is stopped".to_string());
+            }
+        }
+        match receiver.recv_timeout(self.reply_timeout) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Err(
+                "context runtime did not reply in time; the change may still be applied"
+                    .to_string(),
+            ),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err("context runtime stopped before replying".to_string())
+            }
+        }
     }
 
     /// Stops the worker within an explicit caller-owned deadline.
@@ -428,38 +444,63 @@ impl Coordinator {
             if self.stopping.load(Ordering::Acquire) {
                 return;
             }
+            // Queued commands go before the next refresh, so a credential reply waits for at
+            // most the one refresh already in flight.
+            match receiver.try_recv() {
+                Ok(command) => {
+                    if self.handle(command) {
+                        continue;
+                    }
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Empty) => {}
+            }
             if let Some(source) = self.next_due_source() {
                 self.refresh(source);
                 continue;
             }
             match receiver.recv_timeout(Duration::from_secs(1)) {
-                Ok(Command::Refresh(source)) => {
-                    self.requested.insert(source);
-                }
-                Ok(Command::StoreCredential(source, value, reply)) => {
-                    let result = source.credential_key().map_or_else(
-                        || Err(format!("{} does not use an API key", source.label())),
-                        |key| self.credentials.store(key, &value),
-                    );
-                    if result.is_ok() {
-                        self.requested.insert(source);
+                Ok(command) => {
+                    if !self.handle(command) {
+                        return;
                     }
-                    let _ = reply.send(result);
                 }
-                Ok(Command::DeleteCredential(source, reply)) => {
-                    let result = source.credential_key().map_or_else(
-                        || Err(format!("{} does not use an API key", source.label())),
-                        |key| self.credentials.delete(key),
-                    );
-                    if result.is_ok() {
-                        self.requested.insert(source);
-                    }
-                    let _ = reply.send(result);
-                }
-                Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+
+    /// Applies one command; returns `false` when the worker must stop.
+    fn handle(&mut self, command: Command) -> bool {
+        match command {
+            Command::Refresh(source) => {
+                self.requested.insert(source);
+            }
+            Command::StoreCredential(source, value, reply) => {
+                let result = source.credential_key().map_or_else(
+                    || Err(format!("{} does not use an API key", source.label())),
+                    |key| self.credentials.store(key, &value),
+                );
+                if result.is_ok() {
+                    self.requested.insert(source);
+                }
+                let _ = reply.send(result);
+            }
+            Command::DeleteCredential(source, reply) => {
+                let result = source.credential_key().map_or_else(
+                    || Err(format!("{} does not use an API key", source.label())),
+                    |key| self.credentials.delete(key),
+                );
+                if result.is_ok() {
+                    self.requested.insert(source);
+                }
+                let _ = reply.send(result);
+            }
+            Command::Shutdown => return false,
+        }
+        true
     }
 
     fn next_due_source(&mut self) -> Option<ContextSource> {
@@ -765,6 +806,67 @@ mod tests {
         service
             .shutdown(Duration::from_secs(1))
             .expect("context service stops");
+    }
+
+    /// Reports each fetch it starts and blocks it until the test drops the release sender.
+    struct StalledFetcher {
+        entered: Mutex<mpsc::Sender<()>>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl ContextFetcher for StalledFetcher {
+        fn fetch(
+            &self,
+            source: ContextSource,
+            _credential: Option<&str>,
+            _fetched_unix_seconds: i64,
+        ) -> Result<SourcePublication, ContextFetchError> {
+            let _ = self
+                .entered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(());
+            let release = self
+                .release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = release.recv();
+            Ok(SourcePublication::empty(source))
+        }
+    }
+
+    #[test]
+    fn credential_reply_times_out_while_the_worker_is_stalled() {
+        let (release, stalled) = mpsc::channel();
+        let (entered, fetching) = mpsc::channel();
+        let config = ContextServiceConfig {
+            request_timeout: Duration::from_secs(1),
+            ..ContextServiceConfig::default()
+        };
+        let service = ContextService::start_with(
+            config,
+            Box::new(StalledFetcher {
+                entered: Mutex::new(entered),
+                release: Mutex::new(stalled),
+            }),
+            Box::new(MemoryCredentials::default()),
+        )
+        .expect("stalled context service starts");
+        fetching
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker starts its first refresh");
+        let started = Instant::now();
+        let error = service
+            .store_api_key(ContextSource::Fred, "fixture-key".to_string())
+            .expect_err("a stalled worker cannot reply");
+        let waited = started.elapsed();
+        assert!(error.contains("did not reply in time"), "{error}");
+        assert!(waited >= Duration::from_secs(4), "{waited:?}");
+        assert!(waited < Duration::from_secs(8), "{waited:?}");
+        drop(release);
+        service
+            .shutdown(Duration::from_secs(2))
+            .expect("context service stops once released");
     }
 
     #[test]
