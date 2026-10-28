@@ -120,9 +120,12 @@ violations and missing verification explicitly, and never describe them as satis
   owner; no process-wide `DesktopAccount::shared()` or account-service singleton lookup.
 - Desktop market consumers, bridge wakes and shutdown use the instance's `DesktopServices` market
   owner; no process-wide market runtime or `shared_market_runtime()` lookup.
-- Desktop workspace and chart-chrome persistence paths and chart-chrome save receipts come from
-  the instance's `DesktopServices` persistence owner. No process-global chart-chrome save state
-  or implicit process-wide workspace path lookup may return.
+- Desktop workspace persistence paths come from the instance's `DesktopServices` persistence
+  owner, and chart chrome is one `WorkspaceState` section saved through the window's one
+  workspace writer; the legacy chart-chrome file is read-only fold input to the migration
+  chain and is never written again. No separate chart-chrome writer, save receipt,
+  process-global chart-chrome save state or implicit process-wide workspace path lookup
+  may return.
 - Saved layouts are owned by the desktop `LayoutLibrary` (bounded at 100; creating past the
   bound is refused, never evicts a user layout). Every workspace tab shows one saved layout, and
   a layout's chart drawings are one per-instrument `LayoutDrawings` set shared by every pane of
@@ -210,7 +213,7 @@ violations and missing verification explicitly, and never describe them as satis
   parent directory on Unix. Production code must use this writer instead of raw `fs::write` or
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
-- The workspace (`workspace-state.pb`) and chart-chrome files persist only through
+- The workspace file (`workspace-state.pb`) persists only through
   `platform_runtime::DurableContainer`, the one container implementation, built on
   `StagedFile`: `magic | envelope_version | schema_version | len | sha256 | payload` with a
   12 MB payload bound. A write first copies a valid current file to `<name>.bak`; loads try
@@ -224,18 +227,23 @@ violations and missing verification explicitly, and never describe them as satis
   a released 1.x build's bare payload carries its document schema in the payload
   `schema_revision` (never past 2, so a bare payload past that is rejected as
   unrecognizable), and the envelope schema is authoritative once present. The chain runs
-  before the sanitizer on every load and is persisted at the first schema 3 write, which
-  preserves the pre-migration payload as `workspace-state.pb.pre-v3` exactly once (the one
-  raw `fs::write` allowlist entry in `local_state.rs`) and keeps the frame file. An envelope
-  whose schema is newer than the build's newest supported schema is a
+  before the sanitizer on every load and is persisted at the first current-schema write,
+  which preserves the pre-migration payload as `workspace-state.pb.pre-v3` exactly once (the
+  one raw `fs::write` allowlist entry in `local_state.rs`) and keeps the frame file. The
+  final chain step folds the legacy chart-chrome `key=value` file into the document's
+  `chart_chrome` section: the file is read once through `DurableContainer::inspect` (never
+  quarantined, moved or rewritten, and left in place afterwards), a missing or unusable file
+  leaves the section at its defaults, and a document that already has chrome keeps it. An
+  envelope whose schema is newer than the build's newest supported schema is a
   newer-version document, not corruption: a load reports it without quarantining the file or
   offering an older copy, a write never replaces it, the workspace opens read-only for the
   session with a persistent notice, and the readiness gate refuses it. Restore outcomes the
   user must see (fallback restore, defaulted layout, newer-version read-only) are persistent
   `UserNotice`s with an Open folder action through
   `platform_runtime::reveal_in_file_manager`.
-  `workspace_and_chart_chrome_persist_through_the_durable_container` rejects a
-  second container or a direct writer, `.bak` or `read_to_string` path in those files.
+  `the_workspace_persists_through_the_durable_container` rejects a
+  second container or a direct writer, `.bak` or `read_to_string` path in the workspace
+  file's owner and any container or file writer in `chart_chrome.rs`.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
   `schema.rs` retains the V1–V30 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills

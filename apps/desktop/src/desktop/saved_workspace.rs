@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use super::chart_drawings::LayoutDrawings;
 use super::layout_library::LayoutLibrary;
 use super::local_state::{MAXIMUM_CHART_SETTINGS_TEMPLATES, MAXIMUM_DRAWING_TEMPLATES};
-use super::workspace_persistence::WorkspaceLayoutPersistence;
+use super::workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceSaveContent};
 use super::{
-    WorkspaceChartSettingsTemplateState, WorkspaceDrawingTemplateState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChromeState, WorkspaceDrawingTemplateState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState,
 };
 
 /// A change the compared snapshot does not show, so it is saved even when the snapshot is.
@@ -33,12 +33,14 @@ impl UnsavedEdit {
     }
 }
 
-/// The open tabs and watchlist as the workspace file stores them.
+/// The open tabs, watchlist and shell chrome as the workspace file stores them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct WorkspaceSnapshot {
     pub(super) layout: Vec<WorkspaceTabState>,
     pub(super) active_workspace_id: u64,
     pub(super) watchlist: Vec<WorkspaceWatchlistEntryState>,
+    /// Chart chrome preferences persist with the document through the same writer.
+    pub(super) chart_chrome: WorkspaceChromeState,
 }
 
 /// What a save request did.
@@ -202,14 +204,15 @@ impl SavedWorkspace {
         if self.is_saved(&snapshot, library_revision) {
             return WorkspaceSave::Unchanged;
         }
-        if let Err(error) = writer.request_with_chart_settings(
-            snapshot.active_workspace_id,
-            snapshot.layout.clone(),
-            self.chart_settings_templates.clone(),
-            snapshot.watchlist.clone(),
-            self.drawing_templates.clone(),
-            self.layouts.states(),
-        ) {
+        if let Err(error) = writer.request_with_chart_settings(WorkspaceSaveContent {
+            active_workspace_id: snapshot.active_workspace_id,
+            workspace_tabs: snapshot.layout.clone(),
+            chart_settings_templates: self.chart_settings_templates.clone(),
+            watchlist_entries: snapshot.watchlist.clone(),
+            drawing_templates: self.drawing_templates.clone(),
+            saved_layouts: self.layouts.states(),
+            chart_chrome: snapshot.chart_chrome.clone(),
+        }) {
             return WorkspaceSave::Failed(error);
         }
         self.record_saved(snapshot, library_revision);
@@ -275,6 +278,17 @@ mod tests {
         assert!(
             !saved.is_saved(&snapshot(2), revision),
             "a changed snapshot"
+        );
+        let chrome_changed = WorkspaceSnapshot {
+            chart_chrome: WorkspaceChromeState {
+                chart_type: "line".to_string(),
+                ..WorkspaceChromeState::default()
+            },
+            ..snapshot(1)
+        };
+        assert!(
+            !saved.is_saved(&chrome_changed, revision),
+            "a changed chrome preference"
         );
         assert!(
             !saved.is_saved(&snapshot(1), revision + 1),

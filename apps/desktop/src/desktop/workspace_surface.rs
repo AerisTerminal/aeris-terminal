@@ -2476,7 +2476,7 @@ impl WorkspaceSurface {
         self.chrome.close_symbol_provider_menu();
         if self.symbol_entry.set_scope(scope) {
             self.chart_chrome.symbol_search_scope = scope;
-            self.save_chart_chrome_preferences(cx);
+            Self::emit_chart_chrome_changed(cx);
             self.chrome.set_selection(0);
         }
         // An empty query opens each provider's own listing: its markets, or its
@@ -2524,7 +2524,7 @@ impl WorkspaceSurface {
             return;
         }
         self.chart_chrome.symbol_search_categories = categories;
-        self.save_chart_chrome_preferences(cx);
+        Self::emit_chart_chrome_changed(cx);
         self.search_symbol_input(cx);
         cx.notify();
     }
@@ -5854,28 +5854,14 @@ impl WorkspaceSurface {
         if let Some(snapshot) = self.order_flow.tape().cloned() {
             self.apply_trade_tape_to_chart(&snapshot, cx);
         }
-        self.save_chart_chrome_preferences(cx);
+        Self::emit_chart_chrome_changed(cx);
         cx.notify();
     }
 
-    /// Queues the durable chrome preferences off the UI thread; the save worker coalesces.
-    fn save_chart_chrome_preferences(&self, cx: &mut Context<Self>) {
-        let preferences = self.chart_chrome;
-        let persistence = self.lifecycle.persistence().clone();
-        match persistence.request_chart_chrome_preferences_save(preferences) {
-            Ok(true) => cx
-                .background_executor()
-                .spawn(async move {
-                    if let Err(error) = persistence.run_chart_chrome_preferences_save_worker() {
-                        diagnostic!("Aeris chart chrome could not be saved: {error}");
-                    }
-                })
-                .detach(),
-            Ok(false) => {}
-            Err(error) => {
-                diagnostic!("Aeris chart chrome could not be saved: {error}");
-            }
-        }
+    /// Pane-local durable chrome (chart type, symbol search) changed; the window folds the
+    /// change into its one workspace save.
+    fn emit_chart_chrome_changed(cx: &mut Context<Self>) {
+        cx.emit(ChartChromeChangedEvent);
     }
 
     fn refresh_instrument_listing(&mut self, cx: &mut Context<Self>) {

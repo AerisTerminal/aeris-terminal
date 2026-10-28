@@ -241,6 +241,7 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
             template_json: r#"{"name":"Orange","kind":"trend_line","options":{}}"#.into(),
         }],
         saved_layouts: Vec::new(),
+        chart_chrome: None,
     };
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");

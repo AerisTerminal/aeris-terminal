@@ -191,8 +191,6 @@ impl DesktopLifecycle {
             .drain(..)
             .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
-        let persistence = self.services.persistence.clone();
-        let chart_chrome_persistence = persistence.chart_chrome_shutdown_wait();
         let market = self.services.market.clone();
         let trading = self.services.trading.clone();
         let context = self.context.clone();
@@ -210,21 +208,11 @@ impl DesktopLifecycle {
             {
                 account_failure = Some(error);
             }
+            // The one workspace writer owns chart chrome too, so these waits drain both.
             for persistence in workspace_persistence {
                 if let Err(error) = persistence.wait(Duration::from_secs(2)) {
                     failure = Some(error);
                 }
-            }
-            match chart_chrome_persistence.wait(Duration::from_secs(2)) {
-                Ok(generation)
-                    if persistence.chart_chrome_shutdown_generation_is_current(generation) => {}
-                Ok(_) => {
-                    failure = Some(
-                        "chart preferences changed while desktop shutdown was preparing"
-                            .to_string(),
-                    );
-                }
-                Err(error) => failure = Some(error),
             }
             for retirement in retirements {
                 if !retirement.await {

@@ -12,6 +12,18 @@ struct WorkspaceLayoutRequest {
     watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     drawing_templates: Vec<WorkspaceDrawingTemplateState>,
     saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
+    chart_chrome: aeris_contracts::WorkspaceChromeState,
+}
+
+/// One save's document content; the persistence owner assigns the layout generation.
+pub(super) struct WorkspaceSaveContent {
+    pub(super) active_workspace_id: u64,
+    pub(super) workspace_tabs: Vec<WorkspaceTabState>,
+    pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
+    pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
+    pub(super) drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    pub(super) saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
+    pub(super) chart_chrome: aeris_contracts::WorkspaceChromeState,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -25,6 +37,18 @@ struct WorkspaceLayoutDurability {
     result: Result<(), String>,
 }
 
+/// The receipt slot the writer publishes and shutdown waiters block on: the condvar wakes a
+/// waiter the moment a receipt or a newer request lands, instead of polling on a sleep.
+type DurabilitySlot = (Mutex<Option<WorkspaceLayoutDurability>>, std::sync::Condvar);
+
+fn publish_durability(slot: &DurabilitySlot, receipt: Option<WorkspaceLayoutDurability>) {
+    let (latest, published) = slot;
+    *latest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = receipt;
+    published.notify_all();
+}
+
 pub(super) struct WorkspaceLayoutShutdownWait {
     state: WorkspaceLayoutShutdownWaitState,
 }
@@ -36,7 +60,7 @@ enum WorkspaceLayoutShutdownWaitState {
     },
     Pending {
         expected_generation: u64,
-        durability: Arc<Mutex<Option<WorkspaceLayoutDurability>>>,
+        durability: Arc<DurabilitySlot>,
         latest_requested_generation: Arc<AtomicU64>,
     },
 }
@@ -54,6 +78,10 @@ impl WorkspaceLayoutShutdownWait {
                 latest_requested_generation,
             } => (expected_generation, durability, latest_requested_generation),
         };
+        let (latest, published) = &*durability;
+        let mut receipt = latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let deadline = Instant::now() + timeout;
         loop {
             if latest_requested_generation.load(std::sync::atomic::Ordering::Acquire)
@@ -63,12 +91,7 @@ impl WorkspaceLayoutShutdownWait {
                     "workspace layout changed after shutdown persistence was claimed".to_string(),
                 );
             }
-            if let Some(completion) = durability
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .cloned()
-            {
+            if let Some(completion) = receipt.as_ref().cloned() {
                 if completion.request_generation > expected_generation {
                     return Err(
                         "workspace layout changed after shutdown persistence was claimed"
@@ -79,10 +102,14 @@ impl WorkspaceLayoutShutdownWait {
                     return completion.result.map(|()| expected_generation);
                 }
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err("workspace layout save timed out during shutdown".to_string());
             }
-            std::thread::sleep(Duration::from_millis(5));
+            let (guard, _timed_out) = published
+                .wait_timeout(receipt, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            receipt = guard;
         }
     }
 }
@@ -92,7 +119,7 @@ pub(super) struct WorkspaceLayoutPersistence {
     latest: Arc<Mutex<Option<WorkspaceLayoutRequest>>>,
     wake: SyncSender<()>,
     result: Arc<Mutex<Option<WorkspaceLayoutCompletion>>>,
-    durability: Arc<Mutex<Option<WorkspaceLayoutDurability>>>,
+    durability: Arc<DurabilitySlot>,
     latest_requested_generation: Arc<AtomicU64>,
     workspace_revision: Rc<Cell<u64>>,
     layout_generation: Rc<Cell<u64>>,
@@ -110,7 +137,8 @@ impl WorkspaceLayoutPersistence {
         let latest = Arc::new(Mutex::new(None));
         let (wake_tx, wake_rx) = mpsc::sync_channel(1);
         let result = Arc::new(Mutex::new(None));
-        let durability = Arc::new(Mutex::new(None));
+        let durability: Arc<DurabilitySlot> =
+            Arc::new((Mutex::new(None), std::sync::Condvar::new()));
         let latest_requested_generation = Arc::new(AtomicU64::new(layout_generation));
         let worker_latest = Arc::clone(&latest);
         let worker_result = Arc::clone(&result);
@@ -144,12 +172,7 @@ impl WorkspaceLayoutPersistence {
 
     pub(super) fn request_with_chart_settings(
         &self,
-        active_workspace_id: u64,
-        workspace_tabs: Vec<WorkspaceTabState>,
-        chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
-        watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
-        drawing_templates: Vec<WorkspaceDrawingTemplateState>,
-        saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
+        content: WorkspaceSaveContent,
     ) -> Result<(), String> {
         let Some(generation) = self.layout_generation.get().checked_add(1) else {
             let error = "workspace layout generation is exhausted".to_string();
@@ -161,18 +184,22 @@ impl WorkspaceLayoutPersistence {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutRequest {
             layout_generation: generation,
-            active_workspace_id,
-            workspace_tabs,
-            chart_settings_templates,
-            watchlist_entries,
-            drawing_templates,
-            saved_layouts,
+            active_workspace_id: content.active_workspace_id,
+            workspace_tabs: content.workspace_tabs,
+            chart_settings_templates: content.chart_settings_templates,
+            watchlist_entries: content.watchlist_entries,
+            drawing_templates: content.drawing_templates,
+            saved_layouts: content.saved_layouts,
+            chart_chrome: content.chart_chrome,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
                 self.layout_generation.set(generation);
                 self.latest_requested_generation
                     .store(generation, std::sync::atomic::Ordering::Release);
+                // A pending shutdown wait observes the newer generation at once instead of
+                // waiting out its deadline.
+                self.durability.1.notify_all();
                 self.pending.set(true);
                 self.error.borrow_mut().take();
                 Ok(())
@@ -196,14 +223,15 @@ impl WorkspaceLayoutPersistence {
         active_workspace_id: u64,
         workspace_tabs: Vec<WorkspaceTabState>,
     ) -> Result<(), String> {
-        self.request_with_chart_settings(
+        self.request_with_chart_settings(WorkspaceSaveContent {
             active_workspace_id,
             workspace_tabs,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+            chart_settings_templates: Vec::new(),
+            watchlist_entries: Vec::new(),
+            drawing_templates: Vec::new(),
+            saved_layouts: Vec::new(),
+            chart_chrome: aeris_contracts::WorkspaceChromeState::default(),
+        })
     }
 
     pub(super) fn poll(&self) -> bool {
@@ -275,7 +303,7 @@ fn run_workspace_layout_persistence(
     latest: &Mutex<Option<WorkspaceLayoutRequest>>,
     wake: &Receiver<()>,
     result: &Mutex<Option<WorkspaceLayoutCompletion>>,
-    durability: &Mutex<Option<WorkspaceLayoutDurability>>,
+    durability: &DurabilitySlot,
     persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
     completion_wake: &(dyn Fn() + Send + Sync),
 ) {
@@ -316,13 +344,15 @@ fn run_workspace_layout_persistence(
             .iter()
             .map(|layout| WorkspaceSavedLayoutState::clone(layout))
             .collect();
+        current.chart_chrome = Some(request.chart_chrome);
         let completed = local_state::save_workspace(&current, &path).map(|()| current);
-        *durability
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutDurability {
-            request_generation,
-            result: completed.as_ref().map(|_| ()).map_err(Clone::clone),
-        });
+        publish_durability(
+            durability,
+            Some(WorkspaceLayoutDurability {
+                request_generation,
+                result: completed.as_ref().map(|_| ()).map_err(Clone::clone),
+            }),
+        );
         *result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutCompletion {
@@ -344,7 +374,7 @@ mod tests {
                 latest: Arc::new(Mutex::new(None)),
                 wake,
                 result: Arc::new(Mutex::new(None)),
-                durability: Arc::new(Mutex::new(None)),
+                durability: Arc::new((Mutex::new(None), std::sync::Condvar::new())),
                 latest_requested_generation: Arc::new(AtomicU64::new(1)),
                 workspace_revision: Rc::new(Cell::new(1)),
                 layout_generation: Rc::new(Cell::new(1)),
@@ -434,18 +464,19 @@ mod tests {
             template_json: r#"{"name":"Orange","kind":"trend_line","options":{}}"#.to_string(),
         };
         state
-            .request_with_chart_settings(
-                7,
-                vec![],
-                vec![template.clone()],
-                vec![watchlist_entry.clone()],
-                vec![drawing_template.clone()],
-                local_state::default_workspace()
+            .request_with_chart_settings(WorkspaceSaveContent {
+                active_workspace_id: 7,
+                workspace_tabs: vec![],
+                chart_settings_templates: vec![template.clone()],
+                watchlist_entries: vec![watchlist_entry.clone()],
+                drawing_templates: vec![drawing_template.clone()],
+                saved_layouts: local_state::default_workspace()
                     .saved_layouts
                     .into_iter()
                     .map(Arc::new)
                     .collect(),
-            )
+                chart_chrome: aeris_contracts::WorkspaceChromeState::default(),
+            })
             .expect("request");
 
         let latest = state.latest.lock().expect("latest");
@@ -460,7 +491,7 @@ mod tests {
     fn shutdown_wait_observes_latest_active_workspace_durability_without_stealing_ui_result() {
         let (state, _receiver) = persistence();
         state.request(42, vec![]).expect("request");
-        *state.durability.lock().expect("durability") = Some(WorkspaceLayoutDurability {
+        *state.durability.0.lock().expect("durability") = Some(WorkspaceLayoutDurability {
             request_generation: 2,
             result: Ok(()),
         });
@@ -491,7 +522,7 @@ mod tests {
     fn shutdown_wait_surfaces_current_persistence_failure() {
         let (state, _receiver) = persistence();
         state.request(7, vec![]).expect("request");
-        *state.durability.lock().expect("durability") = Some(WorkspaceLayoutDurability {
+        *state.durability.0.lock().expect("durability") = Some(WorkspaceLayoutDurability {
             request_generation: 2,
             result: Err("disk write failed".to_string()),
         });
@@ -523,7 +554,7 @@ mod tests {
         state.request(7, vec![]).expect("first request");
         let wait = state.shutdown_wait();
         state.request(8, vec![]).expect("newer request");
-        *state.durability.lock().expect("durability") = Some(WorkspaceLayoutDurability {
+        *state.durability.0.lock().expect("durability") = Some(WorkspaceLayoutDurability {
             request_generation: 2,
             result: Ok(()),
         });
@@ -596,5 +627,79 @@ mod tests {
             Some("workspace layout generation is exhausted")
         );
         assert!(!state.shutdown_generation_is_current(1));
+    }
+
+    fn temporary_workspace_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "aeris-workspace-persistence-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ))
+    }
+
+    #[test]
+    fn chrome_changes_save_through_the_one_workspace_writer() {
+        let root = temporary_workspace_root("chrome-writer");
+        let owner = aeris_desktop::chart_chrome::DesktopPersistence::new(root.clone());
+        let writer = WorkspaceLayoutPersistence::new(1, 1, &owner, Arc::new(|| {}))
+            .expect("workspace writer starts");
+        let chrome = aeris_desktop::chart_chrome::ChartChromePreferences {
+            chart_type: aeris_chart_integration::ChartType::Line,
+            ..aeris_desktop::chart_chrome::ChartChromePreferences::default()
+        }
+        .to_workspace_chrome();
+
+        writer
+            .request_with_chart_settings(WorkspaceSaveContent {
+                active_workspace_id: 1,
+                workspace_tabs: local_state::default_workspace().workspace_tabs,
+                chart_settings_templates: Vec::new(),
+                watchlist_entries: Vec::new(),
+                drawing_templates: Vec::new(),
+                saved_layouts: Vec::new(),
+                chart_chrome: chrome.clone(),
+            })
+            .expect("a chrome change requests a workspace save");
+        let generation = writer
+            .shutdown_wait()
+            .wait(Duration::from_secs(10))
+            .expect("the one writer drains the save before shutdown");
+        assert!(writer.shutdown_generation_is_current(generation));
+
+        let saved = local_state::load_workspace(&owner.workspace_path());
+        assert_eq!(
+            saved.chart_chrome,
+            Some(chrome),
+            "chrome preferences persist inside the workspace document"
+        );
+        std::fs::remove_dir_all(&root).expect("fixture root removed");
+    }
+
+    #[test]
+    fn a_newer_request_wakes_a_pending_shutdown_wait_through_the_condvar() {
+        let (state, _receiver) = persistence();
+        state.request(7, vec![]).expect("first request");
+        let wait = state.shutdown_wait();
+        let latest_requested = Arc::clone(&state.latest_requested_generation);
+        let durability = Arc::clone(&state.durability);
+        let waker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            latest_requested.store(3, std::sync::atomic::Ordering::Release);
+            let (_, published) = &*durability;
+            published.notify_all();
+        });
+
+        let started = Instant::now();
+        assert_eq!(
+            wait.wait(Duration::from_secs(30)),
+            Err("workspace layout changed after shutdown persistence was claimed".to_string())
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the condvar wakes the wait instead of letting it time out"
+        );
+        waker.join().expect("waker completes");
     }
 }

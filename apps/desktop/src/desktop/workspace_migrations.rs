@@ -5,14 +5,19 @@
 //! release wrote a bare protobuf file, which predates the envelope, so a bare document's
 //! schema is its payload revision; the legacy `workspace-state.frame` is schema 0. Each step
 //! is a pure function on the document, later steps only append, and a step never edits an
-//! earlier one. `local_state`'s sanitize pass stays the last step after the chain.
+//! earlier one; the final step needs the legacy chart-chrome file, so it takes that file's
+//! payload as input and `local_state` reads it at the chain boundary. `local_state`'s
+//! sanitize pass stays the last step after the chain.
 
 use aeris_chart_integration::{AerisChartTheme, ChartIndicator, ChartThemeColors};
 use aeris_contracts::{
     WorkspaceChartAppearanceState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspacePaneState, WorkspaceState,
 };
+use aeris_observability::diagnostic;
+use aeris_platform_runtime::{DurableCandidate, DurableContainer, DurableFormat, DurableSource};
 use prost::Message as _;
+use std::path::Path;
 
 use super::workspace_surface::{
     THEME_APPEARANCE_COLOR, default_runtime_study, runtime_managed_indicator,
@@ -26,7 +31,9 @@ use super::workspace_surface::{
 /// - 3: chart appearance colors carry explicit theme provenance, and runtime-managed legacy
 ///   indicator entries are materialized into the native study graph, so restore reads both
 ///   plainly without re-deriving either.
-pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 3;
+/// - 4: chart chrome preferences fold from the legacy chart-chrome `key=value` file into the
+///   document; the old file is never written again and stays in place.
+pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 4;
 
 pub(super) const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
 
@@ -106,8 +113,13 @@ pub(super) fn raw_proto_document_schema(workspace: &WorkspaceState) -> Result<u3
 }
 
 /// The ordered chain from `from` to the current schema, in memory; persisting the result is
-/// the caller's choice.
-pub(super) fn migrate_workspace(mut workspace: WorkspaceState, from: u32) -> WorkspaceState {
+/// the caller's choice. `legacy_chrome` is the legacy chart-chrome file's payload when the
+/// caller read one; only the final step uses it.
+pub(super) fn migrate_workspace(
+    mut workspace: WorkspaceState,
+    from: u32,
+    legacy_chrome: Option<&str>,
+) -> WorkspaceState {
     debug_assert!(from <= CURRENT_WORKSPACE_SCHEMA);
     if from < 2 {
         migrate_1_to_2(&mut workspace);
@@ -115,8 +127,79 @@ pub(super) fn migrate_workspace(mut workspace: WorkspaceState, from: u32) -> Wor
     if from < 3 {
         migrate_2_to_3(&mut workspace);
     }
+    if from < 4 {
+        fold_chart_chrome(&mut workspace, legacy_chrome);
+    }
     workspace.schema_revision = CURRENT_WORKSPACE_SCHEMA;
     workspace
+}
+
+/// The same bound as the workspace file.
+const MAXIMUM_CHART_CHROME_FILE_BYTES: usize = 12 * 1_048_576;
+/// The durable-container schema the legacy chart-chrome `key=value` payload was enveloped
+/// under; a released 1.x build's bare file holds the same text.
+const LEGACY_CHART_CHROME_CONTAINER_SCHEMA: u32 = 1;
+
+/// The legacy chart-chrome `key=value` payload beside the workspace file, when one is
+/// readable. The fold inspects read-only: the old file is never written, moved or
+/// quarantined, and a payload a newer version wrote stays untouched and unfolded.
+pub(super) fn legacy_chart_chrome_payload(workspace_path: &Path) -> Option<String> {
+    let chrome_path = aeris_desktop::chart_chrome::chart_chrome_path(workspace_path.parent()?);
+    let load = DurableContainer::new(
+        chrome_path,
+        MAXIMUM_CHART_CHROME_FILE_BYTES,
+        LEGACY_CHART_CHROME_CONTAINER_SCHEMA,
+    )
+    .inspect(decode_legacy_chart_chrome);
+    for rejection in &load.rejected {
+        diagnostic!("Aeris chart preferences file rejected during the workspace fold: {rejection}");
+    }
+    if let Some(newer) = &load.newer_version {
+        diagnostic!(
+            "Aeris chart preferences {} were written by a newer version (schema {}); the workspace fold leaves them untouched",
+            newer.path.display(),
+            newer.schema_version
+        );
+        return None;
+    }
+    let (contents, source) = load.restored?;
+    if source != DurableSource::Primary {
+        diagnostic!("Aeris chart preferences folded from {source:?}");
+    }
+    Some(contents)
+}
+
+/// Both the enveloped schema-1 payload and a released version's bare file are the same
+/// `key=value` text.
+fn decode_legacy_chart_chrome(candidate: DurableCandidate<'_>) -> Result<String, String> {
+    match candidate.format {
+        DurableFormat::Legacy
+        | DurableFormat::Envelope {
+            schema_version: LEGACY_CHART_CHROME_CONTAINER_SCHEMA,
+        } => {}
+        DurableFormat::Envelope { schema_version } => {
+            return Err(format!(
+                "chart chrome schema version {schema_version} is unsupported"
+            ));
+        }
+    }
+    std::str::from_utf8(candidate.payload)
+        .map(str::to_owned)
+        .map_err(|error| error.to_string())
+}
+
+/// Step 3 to 4: the legacy chart-chrome file's preferences join the document. A document
+/// that already carries chrome keeps it; without a readable legacy file the preferences
+/// default on open.
+fn fold_chart_chrome(workspace: &mut WorkspaceState, legacy_chrome: Option<&str>) {
+    if workspace.chart_chrome.is_some() {
+        return;
+    }
+    let Some(contents) = legacy_chrome else {
+        return;
+    };
+    let preferences = aeris_desktop::chart_chrome::parse_chart_chrome_preferences(contents);
+    workspace.chart_chrome = Some(preferences.to_workspace_chrome());
 }
 
 /// Revision 1 docked the order ticket inside the order book; revision 2 gave it the order
@@ -303,7 +386,7 @@ mod tests {
         });
         workspace.schema_revision = 1;
 
-        let migrated = migrate_workspace(workspace, 1);
+        let migrated = migrate_workspace(workspace, 1, None);
         assert_eq!(migrated.schema_revision, CURRENT_WORKSPACE_SCHEMA);
         let chart = migrated.workspace_tabs[0].panes[0]
             .chart
@@ -312,7 +395,7 @@ mod tests {
         assert_eq!(chart.studies.len(), 1);
         assert_eq!(chart.indicators, Vec::new());
 
-        let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA);
+        let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA, None);
         assert_eq!(again, migrated, "running the chain again changes nothing");
     }
 
@@ -324,7 +407,7 @@ mod tests {
         workspace.schema_revision = 2;
         workspace.workspace_tabs[0].panes[0].side_panel_visibility = 0b001;
 
-        let migrated = migrate_workspace(workspace, 1);
+        let migrated = migrate_workspace(workspace, 1, None);
 
         assert_eq!(
             migrated.workspace_tabs[0].panes[0].side_panel_visibility, 0b001,
@@ -362,7 +445,7 @@ mod tests {
                 ..Default::default()
             }];
 
-        let migrated = migrate_workspace(workspace, 2);
+        let migrated = migrate_workspace(workspace, 2, None);
 
         let chart = migrated.workspace_tabs[0].panes[0]
             .chart
@@ -404,7 +487,7 @@ mod tests {
         });
         second.schema_revision = 2;
 
-        let migrated = migrate_workspace(workspace, 2);
+        let migrated = migrate_workspace(workspace, 2, None);
         let appearance = migrated.workspace_tabs[0].panes[0]
             .chart
             .as_ref()
@@ -422,7 +505,7 @@ mod tests {
             );
         }
 
-        let migrated = migrate_workspace(second, 2);
+        let migrated = migrate_workspace(second, 2, None);
         let appearance = migrated.workspace_tabs[0].panes[0]
             .chart
             .as_ref()
@@ -462,7 +545,7 @@ mod tests {
         });
         workspace.schema_revision = 2;
 
-        let migrated = migrate_workspace(workspace, 2);
+        let migrated = migrate_workspace(workspace, 2, None);
         let chart = migrated.workspace_tabs[0].panes[0]
             .chart
             .as_ref()
@@ -484,5 +567,163 @@ mod tests {
             vec![ChartIndicator::Volume.identifier()],
             "engine-managed entries stay in the engine's list"
         );
+    }
+
+    /// A released 1.2.0 chart-chrome file, byte for byte.
+    const GOLDEN_LEGACY_CHROME: &str = "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nsymbol_search_scope=exchange:rithmic:CBOT\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n";
+
+    #[test]
+    fn the_final_step_folds_the_legacy_chart_chrome_file_into_the_document() {
+        let workspace = default_workspace();
+
+        let migrated = migrate_workspace(workspace, 2, Some(GOLDEN_LEGACY_CHROME));
+
+        assert_eq!(migrated.schema_revision, CURRENT_WORKSPACE_SCHEMA);
+        let chrome = migrated.chart_chrome.as_ref().expect("chrome folded");
+        assert_eq!(
+            *chrome,
+            aeris_contracts::WorkspaceChromeState {
+                indicator_name_labels_visible: false,
+                indicator_value_labels_visible: true,
+                indicator_price_lines_visible: false,
+                chart_type: "bars".to_string(),
+                symbol_search_futures: true,
+                symbol_search_equities: false,
+                symbol_search_scope: "exchange:rithmic:CBOT".to_string(),
+                window_frame: "frameless".to_string(),
+                drawing_toolbar_visible: false,
+                drawing_favorites: "trend_line,stamp:star".to_string(),
+                drawing_favorites_toolbar_visible: false,
+                drawing_favorites_origin: Some(aeris_contracts::WorkspaceChromePoint {
+                    x: 120.5,
+                    y: 80.0,
+                }),
+                trading_shortcuts: "one_click".to_string(),
+                chart_trade_buttons_visible: false,
+                drawing_context_toolbar_origin: Some(aeris_contracts::WorkspaceChromePoint {
+                    x: 640.0,
+                    y: 96.5,
+                }),
+            },
+            "the fold carries the legacy values verbatim"
+        );
+        let preferences =
+            aeris_desktop::chart_chrome::ChartChromePreferences::from_workspace_chrome(Some(
+                chrome,
+            ));
+        assert_eq!(
+            preferences.chart_type,
+            aeris_chart_integration::ChartType::Bars,
+            "the folded document restores the user's chart type"
+        );
+
+        // A minimal 1.0.0-era file folds with defaults for the keys it never had.
+        let migrated = migrate_workspace(default_workspace(), 1, Some("chart_type=line\n"));
+        let chrome = migrated.chart_chrome.as_ref().expect("chrome folded");
+        assert_eq!(chrome.chart_type, "line");
+        assert!(chrome.indicator_name_labels_visible);
+        assert_eq!(chrome.window_frame, "framed");
+        assert!(chrome.drawing_toolbar_visible);
+    }
+
+    #[test]
+    fn the_chrome_fold_keeps_document_chrome_and_survives_a_missing_file() {
+        let mut workspace = default_workspace();
+        workspace.chart_chrome = Some(aeris_contracts::WorkspaceChromeState {
+            chart_type: "line".to_string(),
+            ..aeris_contracts::WorkspaceChromeState::default()
+        });
+
+        let migrated = migrate_workspace(workspace, 3, Some(GOLDEN_LEGACY_CHROME));
+        assert_eq!(
+            migrated
+                .chart_chrome
+                .as_ref()
+                .map(|chrome| chrome.chart_type.as_str()),
+            Some("line"),
+            "a document that already carries chrome is never refolded"
+        );
+
+        let missing = migrate_workspace(default_workspace(), 3, None);
+        assert_eq!(
+            missing.chart_chrome, None,
+            "without a readable legacy file the preferences default on open"
+        );
+        assert_eq!(missing.schema_revision, CURRENT_WORKSPACE_SCHEMA);
+    }
+
+    fn temporary_workspace_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "aeris-workspace-migrations-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ))
+    }
+
+    #[test]
+    fn the_legacy_chrome_read_is_read_only_and_covers_bare_and_enveloped_files() {
+        let root = temporary_workspace_root("chrome-fold");
+        let workspace_path = root.join("workspace-state.pb");
+        let chrome_path = aeris_desktop::chart_chrome::chart_chrome_path(&root);
+
+        assert_eq!(legacy_chart_chrome_payload(&workspace_path), None);
+
+        std::fs::create_dir_all(chrome_path.parent().expect("chrome directory"))
+            .expect("chrome directory");
+        std::fs::write(&chrome_path, GOLDEN_LEGACY_CHROME).expect("bare chrome file writes");
+        assert_eq!(
+            legacy_chart_chrome_payload(&workspace_path).as_deref(),
+            Some(GOLDEN_LEGACY_CHROME),
+            "a released bare key=value file folds"
+        );
+        assert_eq!(
+            std::fs::read(&chrome_path).expect("chrome file remains"),
+            GOLDEN_LEGACY_CHROME.as_bytes(),
+            "the fold never writes the old chrome file"
+        );
+        assert!(
+            !chrome_path.with_extension("bak").exists(),
+            "a read-only fold leaves no backup behind"
+        );
+
+        // The enveloped schema 1 payload an M7.7-era build wrote folds the same way.
+        DurableContainer::new(
+            chrome_path.clone(),
+            MAXIMUM_CHART_CHROME_FILE_BYTES,
+            LEGACY_CHART_CHROME_CONTAINER_SCHEMA,
+        )
+        .write(LEGACY_CHART_CHROME_CONTAINER_SCHEMA, b"chart_type=line\n")
+        .expect("enveloped chrome fixture writes");
+        assert_eq!(
+            legacy_chart_chrome_payload(&workspace_path).as_deref(),
+            Some("chart_type=line\n")
+        );
+
+        // An unusable primary still folds the container's backup, exactly like the retired
+        // loader recovered it, and nothing is quarantined or moved.
+        let oversized = vec![b'a'; MAXIMUM_CHART_CHROME_FILE_BYTES + 1];
+        std::fs::write(&chrome_path, &oversized).expect("oversized chrome fixture writes");
+        assert_eq!(
+            legacy_chart_chrome_payload(&workspace_path).as_deref(),
+            Some(GOLDEN_LEGACY_CHROME),
+            "the fold recovers the last good chrome from the container backup"
+        );
+        assert_eq!(
+            std::fs::read(&chrome_path).expect("oversized chrome file remains"),
+            oversized,
+            "a rejected chrome file is not quarantined or moved by the fold"
+        );
+
+        // With no usable copy at all the fold is empty and the file stays put.
+        std::fs::remove_file(chrome_path.with_extension("bak")).expect("backup removed");
+        assert_eq!(legacy_chart_chrome_payload(&workspace_path), None);
+        assert_eq!(
+            std::fs::read(&chrome_path).expect("oversized chrome file remains"),
+            oversized
+        );
+
+        std::fs::remove_dir_all(&root).expect("fixture root removed");
     }
 }

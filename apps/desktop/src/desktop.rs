@@ -121,14 +121,14 @@ use aeris_contracts::{
     SearchProviderInstruments, SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState,
     WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
     WorkspaceChartPaneHeightState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
-    WorkspaceChartStudyState, WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
-    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
-    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSavedLayoutState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceChartStudyState, WorkspaceChromeState, WorkspaceCumulativeDeltaState,
+    WorkspaceDeltaHistogramState, WorkspaceDrawingTemplateState, WorkspaceLayoutState,
+    WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
@@ -951,6 +951,12 @@ enum PaneNoticeEvent {
 }
 
 impl gpui::EventEmitter<PaneNoticeEvent> for WorkspaceSurface {}
+
+/// A pane changed durable chart chrome; the window folds the change into its one workspace
+/// save through `DesktopServices`' workspace writer.
+struct ChartChromeChangedEvent;
+
+impl gpui::EventEmitter<ChartChromeChangedEvent> for WorkspaceSurface {}
 
 /// Pane-only choices and feedback. Runtime-derived facts stay in the shared store.
 #[derive(Default)]
@@ -5383,13 +5389,18 @@ fn configured_market_workers(
             workspace_factory = Some(group.factory);
             (Vec::new(), group.initial, lifecycle, workspace_notice)
         };
+    // Chart chrome restores with the document: the schema 4 migration folded the legacy
+    // chart-chrome file into it, and the file is never read outside the fold.
+    let chart_chrome = chart_chrome::ChartChromePreferences::from_workspace_chrome(
+        lifecycle.workspace.chart_chrome.as_ref(),
+    );
     Ok(Some(ConfiguredDesktop {
         market_workers,
         workspace_panes,
         restored_workspace: lifecycle.workspace.clone(),
         workspace_factory,
         layout,
-        chart_chrome: services.persistence.load_chart_chrome_preferences(),
+        chart_chrome,
         workspace_notice: (!workspace_notice.is_empty()).then_some(workspace_notice),
         restore_outcome: lifecycle.restore_outcome,
     }))

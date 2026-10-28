@@ -1119,7 +1119,7 @@ fn migrated_chart_studies(chart: WorkspaceChartState) -> WorkspaceChartState {
     let mut workspace = super::super::local_state::default_workspace();
     workspace.schema_revision = 2;
     workspace.workspace_tabs[0].panes[0].chart = Some(chart);
-    let migrated = super::super::workspace_migrations::migrate_workspace(workspace, 2);
+    let migrated = super::super::workspace_migrations::migrate_workspace(workspace, 2, None);
     migrated.workspace_tabs[0].panes[0]
         .chart
         .clone()

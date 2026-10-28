@@ -17,8 +17,7 @@
 //! already announced.
 
 use super::notification_center::{
-    NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, RetryTarget,
-    UserNotice,
+    NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, UserNotice,
 };
 use super::*;
 use gpui::{DispatchPhase, EntityId, MouseMoveEvent, MouseUpEvent};
@@ -1519,9 +1518,6 @@ impl ToastHost for TerminalApp {
 
     fn activate_notice_action(&mut self, action: NoticeAction, cx: &mut Context<Self>) {
         match action {
-            NoticeAction::Retry(RetryTarget::ChartChromePreferences) => {
-                self.save_chart_chrome_preferences(cx);
-            }
             NoticeAction::OpenFolder(path) => {
                 cx.background_executor()
                     .spawn(async move {
@@ -1750,7 +1746,7 @@ mod tests {
         let now = Instant::now();
         let key = notification_center::NoticeKey {
             scope: 0,
-            kind: "chart_chrome_save",
+            kind: "workspace_save",
         };
         toaster.post_notice(
             stack(1),
@@ -1759,9 +1755,9 @@ mod tests {
                 severity: notification_center::NoticeSeverity::Error,
                 tone: notification_center::NoticeTone::Loss,
                 source: notification_center::NoticeSource::Persistence,
-                title: "Chart preferences could not be saved",
-                detail: "Your latest chart preferences may not survive a restart.".into(),
-                action: Some(NoticeAction::Retry(RetryTarget::ChartChromePreferences)),
+                title: "Workspace could not be saved",
+                detail: "Your latest changes may not survive a restart.".into(),
+                action: None,
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             },
             now,
@@ -2451,13 +2447,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn retry_button_dispatches_without_dismissing_the_notice(cx: &mut TestAppContext) {
+    fn action_button_dispatches_without_dismissing_the_notice(cx: &mut TestAppContext) {
         let (view, cx) = harness(cx);
         let key = notification_center::NoticeKey {
             scope: 0,
-            kind: "chart_chrome_save",
+            kind: "workspace_save",
         };
-        let action = NoticeAction::Retry(RetryTarget::ChartChromePreferences);
+        let action = NoticeAction::OpenFolder(std::path::PathBuf::from("workspace"));
         view.update(cx, |host, cx| {
             host.toaster.post_notice(
                 stack(1),
@@ -2466,8 +2462,8 @@ mod tests {
                     severity: notification_center::NoticeSeverity::Error,
                     tone: notification_center::NoticeTone::Loss,
                     source: notification_center::NoticeSource::Persistence,
-                    title: "Chart preferences could not be saved",
-                    detail: "Your preferences may not survive a restart.".into(),
+                    title: "Workspace could not be saved",
+                    detail: "Your changes may not survive a restart.".into(),
                     action: Some(action.clone()),
                     lifetime: notification_center::NoticeLifetime::UntilCleared,
                 },
@@ -2478,12 +2474,16 @@ mod tests {
         cx.run_until_parked();
         let button = cx
             .debug_bounds("toast_action")
-            .expect("rendered retry action");
+            .expect("rendered notice action");
         cx.simulate_click(button.center(), Modifiers::none());
         cx.run_until_parked();
         view.read_with(cx, |host, _| {
             assert_eq!(host.actions, [action]);
-            assert_eq!(host.toaster.notices().len(), 1, "retry awaits its result");
+            assert_eq!(
+                host.toaster.notices().len(),
+                1,
+                "the action awaits its result"
+            );
             assert_eq!(host.toaster.live_notice_cards(stack(1)), 1);
         });
         view.update(cx, |host, cx| {

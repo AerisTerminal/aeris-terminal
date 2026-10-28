@@ -31,14 +31,8 @@ pub(super) enum NoticeSource {
     Provider(&'static str),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RetryTarget {
-    ChartChromePreferences,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum NoticeAction {
-    Retry(RetryTarget),
     /// Opens the file manager at the quarantined copy or the workspace data folder.
     OpenFolder(std::path::PathBuf),
 }
@@ -46,7 +40,6 @@ pub(super) enum NoticeAction {
 impl NoticeAction {
     pub(super) fn label(&self) -> &'static str {
         match self {
-            Self::Retry(_) => "Retry",
             Self::OpenFolder(_) => "Open folder",
         }
     }
@@ -139,7 +132,9 @@ mod tests {
     fn notification_existing_key_replaces_in_place() {
         let mut center = NotificationCenter::default();
         let mut actionable = notice(1, NoticeLifetime::UntilCleared);
-        actionable.action = Some(NoticeAction::Retry(RetryTarget::ChartChromePreferences));
+        actionable.action = Some(NoticeAction::OpenFolder(std::path::PathBuf::from(
+            "workspace",
+        )));
         center.post(actionable);
         let mut changed = notice(1, NoticeLifetime::UntilCleared);
         changed.detail = "Connection restored".into();

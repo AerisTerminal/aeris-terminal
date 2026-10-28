@@ -150,6 +150,13 @@ impl TerminalApp {
             cx.notify();
         })
         .detach();
+        cx.subscribe(
+            surface,
+            |app, _surface, _event: &ChartChromeChangedEvent, cx| {
+                app.save_chart_chrome_preferences(cx);
+            },
+        )
+        .detach();
         surface.update(cx, |surface, cx| {
             surface.emit_initial_price_alert_restore_notice(cx);
             surface.emit_initial_chart_failure_notice(cx);
@@ -207,6 +214,7 @@ impl TerminalApp {
             layout: workspace_layout_tabs(tabs.as_slice(), cx),
             active_workspace_id: tabs.active().id,
             watchlist: init.watchlist_entries.clone(),
+            chart_chrome: init.chart_chrome.to_workspace_chrome(),
         };
         let trading_store = start_trading_store(&lifecycle, frames.dirty(), cx);
         let restore_outcome = init.restore_outcome.clone();
@@ -1970,7 +1978,6 @@ impl TerminalApp {
             .saved
             .writer()
             .map(WorkspaceLayoutPersistence::shutdown_wait);
-        let chart_chrome_wait = self.lifecycle.persistence().chart_chrome_shutdown_wait();
         let account_refresh = self.lifecycle.account_service().begin_refresh_quiesce();
         let account = self.lifecycle.account().cloned();
 
@@ -1982,18 +1989,15 @@ impl TerminalApp {
                 Some(wait) => Some(wait.wait(Duration::from_secs(2))?),
                 None => None,
             };
-            let chart_chrome_generation = chart_chrome_wait.wait(Duration::from_secs(2))?;
-            Ok::<_, String>((
-                workspace_generation,
-                chart_chrome_generation,
-                account_refresh,
-            ))
+            Ok::<_, String>((workspace_generation, account_refresh))
         });
         cx.spawn_in(window, async move |terminal, cx| {
             let durable_generations = durability.await;
             let update = terminal.update_in(cx, |terminal, _, terminal_cx| {
                 match durable_generations {
-                    Ok((workspace_generation, chart_chrome_generation, account_refresh)) => {
+                    Ok((workspace_generation, account_refresh)) => {
+                        // The workspace writer owns chrome too, so its one generation fence
+                        // covers both.
                         let workspace_current = workspace_generation.is_none_or(|generation| {
                             terminal
                                 .saved
@@ -2002,11 +2006,7 @@ impl TerminalApp {
                                     persistence.shutdown_generation_is_current(generation)
                                 })
                         });
-                        let chart_chrome_current = terminal
-                            .lifecycle
-                            .persistence()
-                            .chart_chrome_shutdown_generation_is_current(chart_chrome_generation);
-                        if workspace_current && chart_chrome_current {
+                        if workspace_current {
                             terminal.commit_update_restart_after_persistence(
                                 account_refresh,
                                 terminal_cx,
@@ -2397,75 +2397,22 @@ impl TerminalApp {
         self.save_chart_chrome_preferences(cx);
     }
 
-    /// Queues the durable chrome preferences off the UI thread. Chart type and the symbol
-    /// search categories and scope change inside a workspace, so they are taken from the
-    /// active one first.
+    /// Records the durable chrome preferences with the workspace; the one workspace writer
+    /// coalesces and saves them with the rest of the document, so a chrome change has the
+    /// same durability receipt as a layout change. Chart type and the symbol search
+    /// categories and scope change inside a workspace, so they are taken from the active
+    /// one first.
     pub(super) fn save_chart_chrome_preferences(&mut self, cx: &mut Context<Self>) {
-        let active = self.active_surface();
-        let active = active.read(cx);
-        self.chrome.preferences_mut().chart_type = active.chart_type(cx);
-        self.chrome.preferences_mut().symbol_search_categories =
-            active.chart_chrome.symbol_search_categories;
-        self.chrome.preferences_mut().symbol_search_scope = active.chart_chrome.symbol_search_scope;
-        let preferences = *self.chrome.preferences();
-        let persistence = self.lifecycle.persistence().clone();
-        match persistence.request_chart_chrome_preferences_save(preferences) {
-            Ok(true) => {
-                let save = cx
-                    .background_executor()
-                    .spawn(async move { persistence.run_chart_chrome_preferences_save_worker() });
-                cx.spawn(async move |terminal, cx| {
-                    let result = save.await;
-                    if let Err(error) = terminal.update(cx, |terminal, cx| {
-                        match result {
-                            Ok(()) => terminal.notices.toaster_mut().clear_notice(
-                                &notification_center::NoticeKey {
-                                    scope: 0,
-                                    kind: "chart_chrome_save",
-                                },
-                                Instant::now(),
-                            ),
-                            Err(_error) => terminal.post_chart_chrome_save_notice(cx),
-                        }
-                        cx.notify();
-                    }) {
-                        diagnostic!(
-                            "Chart preference save result could not reach the desktop: {error}"
-                        );
-                    }
-                })
-                .detach();
-            }
-            Ok(false) => {}
-            Err(_error) => {
-                self.post_chart_chrome_save_notice(cx);
-            }
+        {
+            let active = self.active_surface();
+            let active = active.read(cx);
+            self.chrome.preferences_mut().chart_type = active.chart_type(cx);
+            self.chrome.preferences_mut().symbol_search_categories =
+                active.chart_chrome.symbol_search_categories;
+            self.chrome.preferences_mut().symbol_search_scope =
+                active.chart_chrome.symbol_search_scope;
         }
-    }
-
-    fn post_chart_chrome_save_notice(&mut self, cx: &mut Context<Self>) {
-        if let Some(host) = toast_host(self.tabs.active()) {
-            self.notices.toaster_mut().post_notice(
-                host,
-                notification_center::UserNotice {
-                    key: notification_center::NoticeKey {
-                        scope: 0,
-                        kind: "chart_chrome_save",
-                    },
-                    severity: notification_center::NoticeSeverity::Error,
-                    tone: notification_center::NoticeTone::Loss,
-                    source: notification_center::NoticeSource::Persistence,
-                    title: "Chart preferences could not be saved",
-                    detail: "Your latest chart preferences may not survive a restart.".into(),
-                    action: Some(notification_center::NoticeAction::Retry(
-                        notification_center::RetryTarget::ChartChromePreferences,
-                    )),
-                    lifetime: notification_center::NoticeLifetime::UntilCleared,
-                },
-                Instant::now(),
-            );
-            cx.notify();
-        }
+        self.record_layout_change(cx);
     }
 
     pub(super) fn resize_workspace_split(
@@ -2525,6 +2472,7 @@ impl TerminalApp {
             layout,
             active_workspace_id: self.tabs.active().id,
             watchlist: self.watchlist_entries(),
+            chart_chrome: self.chrome.preferences().to_workspace_chrome(),
         };
         match self.saved.save_if_changed(snapshot) {
             WorkspaceSave::Failed(error) => self.notices.show_workspace_error(error),

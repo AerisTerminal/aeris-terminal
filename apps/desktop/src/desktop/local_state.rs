@@ -104,8 +104,8 @@ pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState
             newer.schema_version
         ));
     }
-    if let Some(((workspace, _), _)) = load.restored {
-        return Ok(workspace);
+    if let Some(((workspace, from), _)) = load.restored {
+        return Ok(migrate_restored_workspace(workspace, from, path));
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if legacy.is_file() {
@@ -129,6 +129,7 @@ fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
         });
     }
     if let Some(((workspace, from), source)) = load.restored {
+        let workspace = migrate_restored_workspace(workspace, from, path);
         let outcome = match source {
             DurableSource::Primary if from == CURRENT_WORKSPACE_SCHEMA => RestoreOutcome::Restored,
             DurableSource::Primary => RestoreOutcome::Migrated { from },
@@ -155,8 +156,8 @@ fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
         };
     }
     let (workspace, raw_payload) = load_legacy_workspace_from_path(&legacy)?;
-    // The raw frame payload is preserved before the first schema 3 write; the frame file
-    // itself stays for manual recovery.
+    // The raw frame payload is preserved before the first current-schema write; the frame
+    // file itself stays for manual recovery.
     preserve_pre_migration_copy(path, &raw_payload);
     if let Err(error) = save_workspace_to_path(&workspace, path) {
         diagnostic!("Aeris workspace migration could not persist the current format: {error}");
@@ -201,9 +202,10 @@ fn workspace_container(path: &Path) -> DurableContainer {
 }
 
 /// A payload is one encoded `WorkspaceState` message at the envelope schema, or — for a bare
-/// file from a released 1.x build — at its payload revision; the migration chain lifts either
-/// to the current schema and the decode returns the schema it read. The container fences a
-/// newer schema before this decoder runs, so it never sees one.
+/// file from a released 1.x build — at its payload revision; the decode returns the document
+/// as written and the schema it read, and the caller runs the migration chain (the chrome
+/// fold needs the file path, which a candidate does not carry). The container fences a newer
+/// schema before this decoder runs, so it never sees one.
 fn decode_workspace_candidate(
     candidate: DurableCandidate<'_>,
 ) -> Result<(WorkspaceState, u32), String> {
@@ -227,9 +229,25 @@ fn decode_workspace_candidate(
         DurableFormat::Legacy => raw_proto_document_schema(&workspace)?,
         DurableFormat::Envelope { .. } => from,
     };
-    Ok((
-        restored_workspace(workspace_migrations::migrate_workspace(workspace, from)),
+    Ok((workspace, from))
+}
+
+/// The chain from the schema a document was read at, with the legacy chart-chrome payload
+/// handed to the final step when the fold will run; the sanitize pass stays last.
+fn migrate_restored_workspace(
+    workspace: WorkspaceState,
+    from: u32,
+    workspace_path: &Path,
+) -> WorkspaceState {
+    let legacy_chrome = if from < CURRENT_WORKSPACE_SCHEMA && workspace.chart_chrome.is_none() {
+        workspace_migrations::legacy_chart_chrome_payload(workspace_path)
+    } else {
+        None
+    };
+    restored_workspace(workspace_migrations::migrate_workspace(
+        workspace,
         from,
+        legacy_chrome.as_deref(),
     ))
 }
 
@@ -265,7 +283,7 @@ fn load_legacy_workspace_from_path(path: &Path) -> Result<(WorkspaceState, Vec<u
     let bytes = read_bounded(path)?;
     let workspace =
         workspace_migrations::migrate_legacy_frame(&bytes, MAXIMUM_WORKSPACE_FILE_BYTES)?;
-    let migrated = restored_workspace(workspace_migrations::migrate_workspace(workspace, 0));
+    let migrated = migrate_restored_workspace(workspace, 0, path);
     Ok((migrated, bytes[4..].to_vec()))
 }
 
@@ -298,7 +316,7 @@ fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(),
 pub(super) fn load_workspace_fixture(path: &Path) -> Result<WorkspaceState, String> {
     let load = workspace_container(path).inspect(decode_workspace_candidate);
     match load.restored {
-        Some(((workspace, _), _)) => Ok(workspace),
+        Some(((workspace, from), _)) => Ok(migrate_restored_workspace(workspace, from, path)),
         None if load.rejected.is_empty() => Err("workspace fixture is unavailable".to_string()),
         None => Err(workspace_rejection_summary(&load)),
     }
@@ -369,6 +387,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         watchlist_entries: Vec::new(),
         drawing_templates: Vec::new(),
         saved_layouts: vec![saved_layout],
+        chart_chrome: None,
     }
 }
 
@@ -1492,7 +1511,7 @@ mod tests {
         closed_book.side_panel_visibility = 0b010;
         legacy.workspace_tabs[0].panes.push(closed_book);
 
-        let migrated = workspace_migrations::migrate_workspace(legacy, 1);
+        let migrated = workspace_migrations::migrate_workspace(legacy, 1, None);
 
         assert_eq!(migrated.schema_revision, CURRENT_WORKSPACE_SCHEMA);
         let panes = &migrated.workspace_tabs[0].panes;
@@ -1501,7 +1520,8 @@ mod tests {
 
         let mut current = migrated;
         current.workspace_tabs[0].panes[0].side_panel_visibility = 0b001;
-        let remigrated = workspace_migrations::migrate_workspace(current, CURRENT_WORKSPACE_SCHEMA);
+        let remigrated =
+            workspace_migrations::migrate_workspace(current, CURRENT_WORKSPACE_SCHEMA, None);
         assert_eq!(
             remigrated.workspace_tabs[0].panes[0].side_panel_visibility, 0b001,
             "a current workspace may keep the order book open without the ticket"
@@ -2203,6 +2223,7 @@ mod tests {
         let expected = sanitize_workspace(workspace_migrations::migrate_workspace(
             legacy_document.clone(),
             0,
+            None,
         ));
         assert_eq!(restored, expected);
         assert_eq!(raw_payload, payload);
@@ -2217,7 +2238,7 @@ mod tests {
         assert_eq!(
             std::fs::read(parent.join("workspace-state.pb.pre-v3")).expect("pre-migration copy"),
             payload,
-            "the raw frame payload is preserved before the first schema 3 write"
+            "the raw frame payload is preserved before the first current-schema write"
         );
         assert_eq!(
             restore_workspace(&current).outcome,
@@ -2229,18 +2250,18 @@ mod tests {
     }
 
     #[test]
-    fn the_first_schema_3_save_preserves_a_pre_migration_copy_once() {
+    fn the_first_current_schema_save_preserves_a_pre_migration_copy_once() {
         let path = temporary_workspace_path();
         let artifact = workspace_with_revision(12);
         write_workspace_artifact(&path, &artifact);
         let raw = std::fs::read(&path).expect("released artifact bytes");
         let copy_path = path.with_file_name("workspace-state.pb.pre-v3");
 
-        save_workspace_to_path(&workspace_with_revision(13), &path).expect("schema 3 saves");
+        save_workspace_to_path(&workspace_with_revision(13), &path).expect("workspace saves");
         assert_eq!(
             std::fs::read(&copy_path).expect("pre-migration copy"),
             raw,
-            "the first schema 3 write preserves the pre-migration payload"
+            "the first current-schema write preserves the pre-migration payload"
         );
         assert!(
             std::fs::read(&path)
@@ -2296,6 +2317,75 @@ mod tests {
         assert_eq!(restored.outcome, RestoreOutcome::Migrated { from: 1 });
         assert_eq!(restored.workspace.schema_revision, CURRENT_WORKSPACE_SCHEMA);
         assert_eq!(restored.workspace.workspace_revision, 21);
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn the_chrome_fold_reads_the_legacy_file_once_and_leaves_it_untouched() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        let chrome_path = aeris_desktop::chart_chrome::chart_chrome_path(parent);
+        std::fs::create_dir_all(chrome_path.parent().expect("chrome directory"))
+            .expect("chrome directory");
+        let legacy_chrome =
+            "chart_type=line\nwindow_frame=frameless\ntrading_shortcuts=one_click\n";
+        std::fs::write(&chrome_path, legacy_chrome).expect("legacy chrome file writes");
+        write_workspace_artifact(&path, &workspace_with_revision(9));
+
+        let restored = restore_workspace(&path);
+        assert_eq!(restored.outcome, RestoreOutcome::Migrated { from: 2 });
+        let chrome = restored
+            .workspace
+            .chart_chrome
+            .as_ref()
+            .expect("chrome folded");
+        assert_eq!(chrome.chart_type, "line");
+        assert_eq!(chrome.window_frame, "frameless");
+        assert_eq!(chrome.trading_shortcuts, "one_click");
+        assert_eq!(
+            std::fs::read_to_string(&chrome_path).expect("chrome file remains"),
+            legacy_chrome,
+            "the old chrome file is never written again"
+        );
+
+        save_workspace_to_path(&restored.workspace, &path).expect("migrated workspace saves");
+        assert_eq!(
+            std::fs::read_to_string(&chrome_path).expect("chrome file remains"),
+            legacy_chrome,
+            "saving the folded document leaves the old chrome file untouched"
+        );
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn folded_chrome_preferences_survive_a_restart_without_the_legacy_file() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        let chrome_path = aeris_desktop::chart_chrome::chart_chrome_path(parent);
+        std::fs::create_dir_all(chrome_path.parent().expect("chrome directory"))
+            .expect("chrome directory");
+        std::fs::write(&chrome_path, "chart_type=bars\n").expect("legacy chrome file writes");
+        write_workspace_artifact(&path, &workspace_with_revision(3));
+
+        let restored = restore_workspace(&path).workspace;
+        assert_eq!(
+            restored
+                .chart_chrome
+                .as_ref()
+                .map(|chrome| chrome.chart_type.as_str()),
+            Some("bars")
+        );
+        save_workspace_to_path(&restored, &path).expect("folded workspace saves");
+        std::fs::remove_file(&chrome_path).expect("legacy chrome file removed");
+
+        let reopened = restore_workspace(&path);
+        assert_eq!(reopened.outcome, RestoreOutcome::Restored);
+        let chrome = reopened
+            .workspace
+            .chart_chrome
+            .as_ref()
+            .expect("chrome survives the restart");
+        assert_eq!(chrome.chart_type, "bars");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
     }
 }

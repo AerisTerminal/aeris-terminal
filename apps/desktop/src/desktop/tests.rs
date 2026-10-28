@@ -5243,7 +5243,7 @@ fn migrated_chart_appearance(
         .chart
         .get_or_insert_with(Default::default)
         .appearance = Some(appearance);
-    super::workspace_migrations::migrate_workspace(workspace, 2).workspace_tabs[0].panes[0]
+    super::workspace_migrations::migrate_workspace(workspace, 2, None).workspace_tabs[0].panes[0]
         .chart
         .as_ref()
         .and_then(|chart| chart.appearance.clone())

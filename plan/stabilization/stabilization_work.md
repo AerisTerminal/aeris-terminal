@@ -327,8 +327,7 @@ only on the guarded GUI checks on their lines.
     A newer-version workspace opens read-only (no writer thread starts) with a persistent
     notice; fallback restores and defaults post a persistent `UserNotice` with an Open folder
     action via the new `platform_runtime::reveal_in_file_manager`. Readiness refuses a
-    newer-version workspace. Chart chrome with a newer schema is left untouched and its
-    session saves are skipped. Tests cover a newer workspace opening read-only and refusing
+    newer-version workspace. Tests cover a newer workspace opening read-only and refusing
     writes, a corrupt primary restoring the backup with the quarantined copy reported, a
     corrupt document defaulting while keeping the rejected files, and the legacy frame
     reporting `Migrated { from: 0 }`.
@@ -345,8 +344,22 @@ only on the guarded GUI checks on their lines.
     preserves the pre-migration payload as `workspace-state.pb.pre-v3` exactly once and keeps
     the frame file. Golden tests cover each step, idempotence, the write-once copy, the
     bare-revision fence and an enveloped schema 1 development file.
-  - Left: the writer thread owns `WorkspaceDocument` and folds in chart chrome, deleting
-    `ChartChromeShutdownWait`; the chrome key=value fold moves into the chain then.
+  - Landed (chrome fold, one writer): document schema 4 adds `WorkspaceState.chart_chrome`
+    (`WorkspaceChromeState`, tag 22) and the final chain step folds the legacy chart-chrome
+    `key=value` file into it — read once through `DurableContainer::inspect` (never
+    quarantined, moved or rewritten; the file stays in place), skipped when the document
+    already has chrome, and absent or unusable files leave the defaults. Enum fields persist
+    as the legacy string identifiers so unknown values fall back to defaults. The separate
+    chrome save thread, its receipts (`ChartChromeShutdownWait`, `ChartChromeSaveState`) and
+    the chrome notice retry action are deleted: pane chrome changes emit
+    `ChartChromeChangedEvent`, `WorkspaceTabs` syncs them into `AppChrome` and marks the
+    layout save due, and the window's one workspace writer persists layout and chrome in the
+    same generation sequence (its condvar-based shutdown wait is the one receipt; a newer
+    request wakes a pending wait immediately). Golden tests cover the 1.2.0 chrome file
+    byte-for-byte, the read-only fold, a missing file, restart survival without the legacy
+    file, chrome saving through the one writer and the condvar wake.
+  - Left: the writer thread owns `WorkspaceDocument` (instead of re-reading the file per
+    save) and the readiness dry run.
   - GUI checks: a corrupt workspace shows the notice with Open folder and the layout is not
     silently replaced; a newer-version workspace shows the read-only notice; a copied real
     workspace migrates intact.

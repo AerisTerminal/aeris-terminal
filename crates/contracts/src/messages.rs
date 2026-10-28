@@ -204,6 +204,68 @@ pub struct WorkspaceState {
     /// Bounded library of user-named saved layouts; every workspace tab shows one of them.
     #[prost(message, repeated, tag = "21")]
     pub saved_layouts: Vec<WorkspaceSavedLayoutState>,
+    /// Durable shell chrome preferences. Absent before schema 4 folds the legacy
+    /// chart-chrome key=value file into the document.
+    #[prost(message, optional, tag = "22")]
+    pub chart_chrome: Option<WorkspaceChromeState>,
+}
+
+/// Durable shell chrome that follows the user across charts and workspaces. Enum values are
+/// the same stable identifiers the legacy chart-chrome key=value file carried, so the
+/// schema 4 fold copies them verbatim and unknown identifiers fall back to the defaults.
+#[allow(clippy::struct_excessive_bools)] // Protobuf mirrors independent persisted UI toggles.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct WorkspaceChromeState {
+    #[prost(bool, tag = "1")]
+    pub indicator_name_labels_visible: bool,
+    #[prost(bool, tag = "2")]
+    pub indicator_value_labels_visible: bool,
+    #[prost(bool, tag = "3")]
+    pub indicator_price_lines_visible: bool,
+    /// The Aeris Charts chart type identifier, for example `candles`.
+    #[prost(string, tag = "4")]
+    pub chart_type: String,
+    /// Instrument categories the symbol menu searches.
+    #[prost(bool, tag = "5")]
+    pub symbol_search_futures: bool,
+    #[prost(bool, tag = "6")]
+    pub symbol_search_equities: bool,
+    /// `all`, `provider:<id>` or `exchange:<id>:<code>`.
+    #[prost(string, tag = "7")]
+    pub symbol_search_scope: String,
+    /// `framed` or `frameless`.
+    #[prost(string, tag = "8")]
+    pub window_frame: String,
+    /// The drawing tools sidebar along the left edge of the charts.
+    #[prost(bool, tag = "9")]
+    pub drawing_toolbar_visible: bool,
+    /// Comma-separated drawing kind names and `stamp:` keys, encoded as the legacy file did;
+    /// unknown names are skipped so a newer document never fails to load.
+    #[prost(string, tag = "10")]
+    pub drawing_favorites: String,
+    #[prost(bool, tag = "11")]
+    pub drawing_favorites_toolbar_visible: bool,
+    /// Window-relative logical origin the favorites toolbar was dragged to.
+    #[prost(message, optional, tag = "12")]
+    pub drawing_favorites_origin: Option<WorkspaceChromePoint>,
+    /// `confirm` or `one_click`.
+    #[prost(string, tag = "13")]
+    pub trading_shortcuts: String,
+    /// The Buy / quantity / Sell bar under each chart's symbol legend.
+    #[prost(bool, tag = "14")]
+    pub chart_trade_buttons_visible: bool,
+    /// Window-relative logical origin the selected-drawing toolbar was dragged to.
+    #[prost(message, optional, tag = "15")]
+    pub drawing_context_toolbar_origin: Option<WorkspaceChromePoint>,
+}
+
+/// A window-relative logical position in the chrome preferences.
+#[derive(Clone, Copy, PartialEq, prost::Message)]
+pub struct WorkspaceChromePoint {
+    #[prost(float, tag = "1")]
+    pub x: f32,
+    #[prost(float, tag = "2")]
+    pub y: f32,
 }
 
 /// One user-named saved layout: a pane arrangement plus the drawings of every instrument

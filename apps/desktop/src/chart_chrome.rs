@@ -1,20 +1,8 @@
 use aeris_chart_integration::{
     ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
 };
-use aeris_contracts::InstrumentSearchCategories;
-use aeris_observability::diagnostic;
-use aeris_platform_runtime::{
-    DurableCandidate, DurableContainer, DurableFormat, DurableNewerVersion, DurableRejection,
-    DurableSource,
-};
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use aeris_contracts::{InstrumentSearchCategories, WorkspaceChromePoint, WorkspaceChromeState};
+use std::path::{Path, PathBuf};
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;
 pub const CHART_CONTROL_SIZE: f32 = 32.0;
@@ -586,166 +574,115 @@ impl Default for ChartChromePreferences {
     }
 }
 
-/// Per-desktop durable state. Clones share one bounded saver.
-#[derive(Clone)]
-pub struct DesktopPersistence {
-    inner: std::sync::Arc<DesktopPersistenceInner>,
+fn workspace_chrome_point(origin: Option<(f32, f32)>) -> Option<WorkspaceChromePoint> {
+    origin.map(|(x, y)| WorkspaceChromePoint { x, y })
 }
 
-struct DesktopPersistenceInner {
+fn chrome_point_origin(point: Option<&WorkspaceChromePoint>) -> Option<(f32, f32)> {
+    let point = point?;
+    (point.x.is_finite() && point.y.is_finite()).then_some((point.x, point.y))
+}
+
+impl ChartChromePreferences {
+    /// The durable workspace-document form of the preferences.
+    #[must_use]
+    pub fn to_workspace_chrome(&self) -> WorkspaceChromeState {
+        WorkspaceChromeState {
+            indicator_name_labels_visible: self.indicator_name_labels_visible,
+            indicator_value_labels_visible: self.indicator_value_labels_visible,
+            indicator_price_lines_visible: self.indicator_price_lines_visible,
+            chart_type: self.chart_type.identifier().to_string(),
+            symbol_search_futures: self.symbol_search_categories.futures,
+            symbol_search_equities: self.symbol_search_categories.equities,
+            symbol_search_scope: self.symbol_search_scope.encode(),
+            window_frame: self.window_frame.identifier().to_string(),
+            drawing_toolbar_visible: self.drawing_toolbar.shown(),
+            drawing_favorites: self.drawing_favorites.encode_tools(),
+            drawing_favorites_toolbar_visible: self.drawing_favorites.toolbar_visible,
+            drawing_favorites_origin: workspace_chrome_point(self.drawing_favorites.toolbar_origin),
+            trading_shortcuts: self.trading_shortcuts.identifier().to_string(),
+            chart_trade_buttons_visible: self.chart_trade_buttons.shown(),
+            drawing_context_toolbar_origin: workspace_chrome_point(
+                self.drawing_context_toolbar_origin,
+            ),
+        }
+    }
+
+    /// Restores the preferences from their document form; missing or unrecognized values
+    /// fall back to the defaults, exactly like the legacy key=value parser.
+    #[must_use]
+    pub fn from_workspace_chrome(state: Option<&WorkspaceChromeState>) -> Self {
+        let mut preferences = Self::default();
+        let Some(state) = state else {
+            return preferences;
+        };
+        preferences.indicator_name_labels_visible = state.indicator_name_labels_visible;
+        preferences.indicator_value_labels_visible = state.indicator_value_labels_visible;
+        preferences.indicator_price_lines_visible = state.indicator_price_lines_visible;
+        if let Some(chart_type) = ChartType::from_identifier(&state.chart_type) {
+            preferences.chart_type = chart_type;
+        }
+        preferences.symbol_search_categories = InstrumentSearchCategories {
+            futures: state.symbol_search_futures,
+            equities: state.symbol_search_equities,
+        };
+        // A search that excludes every category would never return anything.
+        if !preferences.symbol_search_categories.futures
+            && !preferences.symbol_search_categories.equities
+        {
+            preferences.symbol_search_categories = InstrumentSearchCategories::ALL;
+        }
+        preferences.symbol_search_scope = SymbolSearchScope::parse(&state.symbol_search_scope);
+        if let Some(window_frame) = WindowFrame::from_identifier(&state.window_frame) {
+            preferences.window_frame = window_frame;
+        }
+        preferences.drawing_toolbar = ChromeVisibility::from_shown(state.drawing_toolbar_visible);
+        let mut favorites = DrawingFavorites {
+            toolbar_visible: state.drawing_favorites_toolbar_visible,
+            toolbar_origin: chrome_point_origin(state.drawing_favorites_origin.as_ref()),
+            ..DrawingFavorites::default()
+        };
+        favorites.parse_tools(&state.drawing_favorites);
+        preferences.drawing_favorites = favorites;
+        preferences.trading_shortcuts =
+            TradingShortcutMode::from_identifier(&state.trading_shortcuts);
+        preferences.chart_trade_buttons =
+            ChromeVisibility::from_shown(state.chart_trade_buttons_visible);
+        preferences.drawing_context_toolbar_origin =
+            chrome_point_origin(state.drawing_context_toolbar_origin.as_ref());
+        preferences
+    }
+}
+
+/// Per-desktop durable state paths. Chart chrome preferences persist inside the workspace
+/// document through the one workspace writer; the legacy chart-chrome file is read once by
+/// the schema 4 migration fold and never written again.
+#[derive(Clone)]
+pub struct DesktopPersistence {
     root: PathBuf,
-    save_state: Mutex<ChartChromeSaveState>,
-    /// Set when the saved file was written by a newer version: this session never writes it.
-    chrome_read_only: AtomicBool,
 }
 
 impl DesktopPersistence {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            inner: std::sync::Arc::new(DesktopPersistenceInner {
-                root,
-                save_state: Mutex::new(ChartChromeSaveState::default()),
-                chrome_read_only: AtomicBool::new(false),
-            }),
-        }
+        Self { root }
     }
 
     #[must_use]
     pub fn workspace_path(&self) -> PathBuf {
-        self.inner.root.join("workspace-state.pb")
+        self.root.join("workspace-state.pb")
     }
 
     #[must_use]
     pub fn chart_chrome_path(&self) -> PathBuf {
-        self.inner.root.join("desktop").join("chart-chrome")
-    }
-
-    #[must_use]
-    pub fn load_chart_chrome_preferences(&self) -> ChartChromePreferences {
-        let (preferences, _, newer) = restore_chart_chrome_preferences(&self.chart_chrome_path());
-        if newer.is_some() {
-            self.inner.chrome_read_only.store(true, Ordering::Release);
-        }
-        preferences
-    }
-
-    /// Queues the latest preferences without writing on the UI thread.
-    ///
-    /// # Errors
-    /// Returns an error if the save state is poisoned or its generation is exhausted.
-    pub fn request_chart_chrome_preferences_save(
-        &self,
-        preferences: ChartChromePreferences,
-    ) -> Result<bool, String> {
-        if self.inner.chrome_read_only.load(Ordering::Acquire) {
-            // A newer version owns the saved file; changes apply in memory for the session.
-            return Ok(false);
-        }
-        self.inner
-            .save_state
-            .lock()
-            .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?
-            .request(preferences)
-    }
-
-    #[must_use]
-    pub fn chart_chrome_shutdown_wait(&self) -> ChartChromeShutdownWait {
-        ChartChromeShutdownWait {
-            inner: self.inner.clone(),
-            expected_generation: self
-                .inner
-                .save_state
-                .lock()
-                .map(|state| state.latest_requested_generation)
-                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string()),
-        }
-    }
-
-    #[must_use]
-    pub fn chart_chrome_shutdown_generation_is_current(&self, generation: u64) -> bool {
-        self.inner
-            .save_state
-            .lock()
-            .is_ok_and(|state| chart_chrome_generation_is_current(&state, generation))
-    }
-
-    /// # Errors
-    /// Returns an error if the queued save cannot reach durable storage.
-    pub fn run_chart_chrome_preferences_save_worker(&self) -> Result<(), String> {
-        run_chart_chrome_preferences_save_worker_to(
-            &self.chart_chrome_path(),
-            &self.inner.save_state,
-        )
+        chart_chrome_path(&self.root)
     }
 }
 
-#[derive(Default)]
-struct ChartChromeSaveState {
-    worker_active: bool,
-    latest: Option<(u64, ChartChromePreferences)>,
-    latest_requested_generation: u64,
-    completed: Option<ChartChromeSaveCompletion>,
-}
-
-#[derive(Clone)]
-struct ChartChromeSaveCompletion {
-    generation: u64,
-    result: Result<(), String>,
-}
-
-impl ChartChromeSaveState {
-    fn request(&mut self, preferences: ChartChromePreferences) -> Result<bool, String> {
-        let generation = self
-            .latest_requested_generation
-            .checked_add(1)
-            .ok_or_else(|| {
-                "desktop chart chrome persistence generation is exhausted".to_string()
-            })?;
-        self.latest_requested_generation = generation;
-        self.latest = Some((generation, preferences));
-        if self.worker_active {
-            Ok(false)
-        } else {
-            self.worker_active = true;
-            Ok(true)
-        }
-    }
-
-    fn take_next(&mut self) -> Option<(u64, ChartChromePreferences)> {
-        self.latest.take()
-    }
-
-    fn finish(&mut self) {
-        self.worker_active = false;
-    }
-
-    #[cfg(test)]
-    fn fail_latest(&mut self, error: String) {
-        let generation = self.latest_requested_generation;
-        self.latest = None;
-        if generation != 0 {
-            self.completed = Some(ChartChromeSaveCompletion {
-                generation,
-                result: Err(error),
-            });
-        }
-        self.finish();
-    }
-}
-
-pub struct ChartChromeShutdownWait {
-    inner: std::sync::Arc<DesktopPersistenceInner>,
-    expected_generation: Result<u64, String>,
-}
-
-impl ChartChromeShutdownWait {
-    /// # Errors
-    /// Returns an error on save failure, a newer request, or timeout.
-    pub fn wait(self, timeout: Duration) -> Result<u64, String> {
-        let expected_generation = self.expected_generation?;
-        wait_for_chart_chrome_generation(&self.inner.save_state, expected_generation, timeout)
-    }
+/// The legacy chart-chrome key=value file under one desktop data root.
+#[must_use]
+pub fn chart_chrome_path(root: &Path) -> PathBuf {
+    root.join("desktop").join("chart-chrome")
 }
 
 fn parse_chrome_flag(value: &str) -> bool {
@@ -814,281 +751,35 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
     preferences
 }
 
-#[must_use]
-pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
-    let favorites = preferences.drawing_favorites;
-    let origin = favorites
-        .toolbar_origin
-        .map(|(x, y)| format!("drawing_favorites_origin={x},{y}\n"))
-        .unwrap_or_default();
-    let context_origin = preferences
-        .drawing_context_toolbar_origin
-        .map(|(x, y)| format!("drawing_context_toolbar_origin={x},{y}\n"))
-        .unwrap_or_default();
-    format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nsymbol_search_scope={}\nwindow_frame={}\ndrawing_toolbar={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\ntrading_shortcuts={}\nchart_trade_buttons={}\n{origin}{context_origin}",
-        u8::from(preferences.indicator_name_labels_visible),
-        u8::from(preferences.indicator_value_labels_visible),
-        u8::from(preferences.indicator_price_lines_visible),
-        preferences.chart_type.identifier(),
-        u8::from(preferences.symbol_search_categories.futures),
-        u8::from(preferences.symbol_search_categories.equities),
-        preferences.symbol_search_scope.encode(),
-        preferences.window_frame.identifier(),
-        u8::from(preferences.drawing_toolbar.shown()),
-        favorites.encode_tools(),
-        u8::from(favorites.toolbar_visible),
-        preferences.trading_shortcuts.identifier(),
-        u8::from(preferences.chart_trade_buttons.shown()),
-    )
-}
-
-/// The same bound as the workspace file.
-const MAXIMUM_CHART_CHROME_FILE_BYTES: usize = 12 * 1_048_576;
-/// The durable-container schema of the chart chrome payload, UTF-8 `key=value` lines.
-const CHART_CHROME_CONTAINER_SCHEMA: u32 = 1;
-
-fn chart_chrome_container(path: &Path) -> DurableContainer {
-    DurableContainer::new(
-        path.to_path_buf(),
-        MAXIMUM_CHART_CHROME_FILE_BYTES,
-        CHART_CHROME_CONTAINER_SCHEMA,
-    )
-}
-
-/// Both the enveloped schema-1 payload and a released version's bare file are the same
-/// `key=value` text.
-fn decode_chart_chrome_candidate(
-    candidate: DurableCandidate<'_>,
-) -> Result<ChartChromePreferences, String> {
-    match candidate.format {
-        DurableFormat::Legacy
-        | DurableFormat::Envelope {
-            schema_version: CHART_CHROME_CONTAINER_SCHEMA,
-        } => {}
-        DurableFormat::Envelope { schema_version } => {
-            return Err(format!(
-                "chart chrome schema version {schema_version} is unsupported"
-            ));
-        }
-    }
-    std::str::from_utf8(candidate.payload)
-        .map(parse_chart_chrome_preferences)
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
-    restore_chart_chrome_preferences(path).0
-}
-
-/// Restores the saved preferences, or the defaults when no file is usable, and reports
-/// every rejected file through observability. A file written by a newer version is returned
-/// as the third element: it is not read, moved or overwritten.
-fn restore_chart_chrome_preferences(
-    path: &Path,
-) -> (
-    ChartChromePreferences,
-    Vec<DurableRejection>,
-    Option<DurableNewerVersion>,
-) {
-    let load = chart_chrome_container(path).load(decode_chart_chrome_candidate);
-    for rejection in &load.rejected {
-        diagnostic!("Aeris chart preferences file rejected: {rejection}");
-    }
-    if let Some(newer) = &load.newer_version {
-        diagnostic!(
-            "Aeris chart preferences {} were written by a newer version (schema {}) and stay untouched",
-            newer.path.display(),
-            newer.schema_version
-        );
-    }
-    let preferences = if let Some((preferences, source)) = load.restored {
-        if source != DurableSource::Primary {
-            diagnostic!("Aeris chart preferences restored from {source:?}");
-        }
-        preferences
-    } else {
-        if !load.rejected.is_empty() {
-            diagnostic!("Aeris chart preferences use defaults: no saved file was usable");
-        }
-        ChartChromePreferences::default()
-    };
-    (preferences, load.rejected, load.newer_version)
-}
-
-fn run_chart_chrome_preferences_save_worker_to(
-    path: &Path,
-    state: &Mutex<ChartChromeSaveState>,
-) -> Result<(), String> {
-    loop {
-        let (generation, next) = {
-            let mut state = state
-                .lock()
-                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
-            let Some(next) = state.take_next() else {
-                state.finish();
-                return Ok(());
-            };
-            next
-        };
-        let result = save_chart_chrome_preferences_to(path, next);
-        let mut state = state
-            .lock()
-            .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
-        state.completed = Some(ChartChromeSaveCompletion {
-            generation,
-            result: result.clone(),
-        });
-        if let Err(error) = result
-            && state.latest.is_none()
-        {
-            state.finish();
-            return Err(error);
-        }
-    }
-}
-
-fn wait_for_chart_chrome_generation(
-    state: &Mutex<ChartChromeSaveState>,
-    expected_generation: u64,
-    timeout: Duration,
-) -> Result<u64, String> {
-    if expected_generation == 0 {
-        return Ok(0);
-    }
-    let deadline = Instant::now() + timeout;
-    loop {
-        {
-            let state = state
-                .lock()
-                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
-            if state.latest_requested_generation != expected_generation {
-                return Err(
-                    "chart preferences changed after shutdown persistence was claimed".to_string(),
-                );
-            }
-            if let Some(completed) = state.completed.as_ref()
-                && completed.generation == expected_generation
-            {
-                return completed.result.clone().map(|()| expected_generation);
-            }
-            if !state.worker_active && state.latest.is_none() {
-                return Err(
-                    "desktop chart chrome persistence stopped before the latest save".to_string(),
-                );
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err("desktop chart chrome persistence timed out during shutdown".to_string());
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn chart_chrome_generation_is_current(state: &ChartChromeSaveState, generation: u64) -> bool {
-    state.latest_requested_generation == generation
-        && (generation == 0
-            || state.completed.as_ref().is_some_and(|completed| {
-                completed.generation == generation && completed.result.is_ok()
-            }))
-}
-
-/// # Errors
-///
-/// Returns an error when the target file cannot be created or replaced.
-fn save_chart_chrome_preferences_to(
-    path: &Path,
-    preferences: ChartChromePreferences,
-) -> Result<(), String> {
-    let encoded = encode_chart_chrome_preferences(preferences);
-    chart_chrome_container(path)
-        .write(CHART_CHROME_CONTAINER_SCHEMA, encoded.as_bytes())
-        .map_err(|error| format!("desktop chart chrome could not be published: {error}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartChromePreferences, ChartChromeSaveState, ChromeVisibility, DesktopPersistence,
-        DrawingFavorites, ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation,
-        IndicatorParameters, InstrumentSearchCategories, MAXIMUM_CHART_CHROME_FILE_BYTES,
-        SymbolSearchScope, TradingShortcutMode, WindowFrame, chart_chrome_container,
-        encode_chart_chrome_preferences, filter_indicator_specs,
-        load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
-        restore_chart_chrome_preferences, run_chart_chrome_preferences_save_worker_to,
-        save_chart_chrome_preferences_to, wait_for_chart_chrome_generation,
+        ChartChromePreferences, ChromeVisibility, DesktopPersistence, DrawingFavorites,
+        ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
+        InstrumentSearchCategories, SymbolSearchScope, TradingShortcutMode, WindowFrame,
+        chart_chrome_path, filter_indicator_specs, parse_chart_chrome_preferences,
     };
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    fn temporary_chart_chrome_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "aeris-chart-chrome-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_nanos())
-        ))
-    }
-
-    fn remove_chart_chrome_test_files(path: &std::path::Path) {
-        let container = chart_chrome_container(path);
-        let quarantined = (1..=aeris_platform_runtime::MAXIMUM_QUARANTINED_COPIES)
-            .map(|index| container.quarantine_path(index));
-        for file in [path.to_path_buf(), container.backup_path()]
-            .into_iter()
-            .chain(quarantined)
-        {
-            if let Err(error) = std::fs::remove_file(file) {
-                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-            }
-        }
-    }
+    use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
+    use std::path::PathBuf;
 
     #[test]
-    fn two_desktop_persistence_owners_keep_preferences_and_shutdown_receipts_separate() {
-        let first_root = temporary_chart_chrome_path("first-owner");
-        let second_root = temporary_chart_chrome_path("second-owner");
-        let first = DesktopPersistence::new(first_root.clone());
-        let second = DesktopPersistence::new(second_root.clone());
-        let selected = ChartChromePreferences {
-            chart_type: ChartType::Line,
-            ..ChartChromePreferences::default()
-        };
-        assert!(
-            first
-                .request_chart_chrome_preferences_save(selected)
-                .expect("first queued")
-        );
-        assert!(
-            first
-                .chart_chrome_shutdown_wait()
-                .wait(Duration::ZERO)
-                .is_err()
+    fn persistence_paths_stay_under_the_instance_data_root() {
+        let root = PathBuf::from("aeris-root");
+        let persistence = DesktopPersistence::new(root.clone());
+        assert_eq!(
+            persistence.workspace_path(),
+            root.join("workspace-state.pb")
         );
         assert_eq!(
-            second.chart_chrome_shutdown_wait().wait(Duration::ZERO),
-            Ok(0)
+            persistence.chart_chrome_path(),
+            chart_chrome_path(&root),
+            "the owner and the migration fold share one chrome path convention"
         );
-        first
-            .run_chart_chrome_preferences_save_worker()
-            .expect("first durable");
         assert_eq!(
-            first.chart_chrome_shutdown_wait().wait(Duration::ZERO),
-            Ok(1)
+            persistence.chart_chrome_path(),
+            root.join("desktop").join("chart-chrome")
         );
-        assert_eq!(first.load_chart_chrome_preferences(), selected);
-        assert_eq!(
-            second.load_chart_chrome_preferences(),
-            ChartChromePreferences::default()
-        );
-        assert_ne!(first.workspace_path(), second.workspace_path());
-        std::fs::remove_file(first.chart_chrome_path()).expect("first fixture removed");
-        std::fs::remove_dir_all(first_root).expect("first fixture directory removed");
-        // The second composition never wrote any file.
-        assert!(!second_root.exists());
     }
 
     fn starred_trend_line_and_star() -> DrawingFavorites {
@@ -1245,29 +936,8 @@ mod tests {
         assert!(ExchangeCode::new(&"X".repeat(ExchangeCode::MAXIMUM_BYTES + 1)).is_none());
     }
 
-    #[test]
-    fn chart_chrome_preferences_round_trip_through_durable_file() {
-        let defaults = parse_chart_chrome_preferences("");
-        assert!(defaults.indicator_name_labels_visible);
-        assert!(defaults.indicator_value_labels_visible);
-        assert!(
-            !defaults.indicator_price_lines_visible,
-            "indicator price lines follow the Aeris Charts default and start hidden"
-        );
-        assert_eq!(defaults.chart_type, ChartType::Candles);
-        let legacy = parse_chart_chrome_preferences("indicator_labels=0\n");
-        assert!(!legacy.indicator_name_labels_visible);
-        assert!(!legacy.indicator_value_labels_visible);
-        assert!(!legacy.indicator_price_lines_visible);
-        assert_eq!(legacy.chart_type, ChartType::Candles);
-        let mixed = parse_chart_chrome_preferences(
-            "indicator_labels=0\nindicator_name_labels=1\nindicator_value_labels=0\nindicator_price_lines=0\nchart_type=line\n",
-        );
-        assert!(mixed.indicator_name_labels_visible);
-        assert!(!mixed.indicator_value_labels_visible);
-        assert!(!mixed.indicator_price_lines_visible);
-        assert_eq!(mixed.chart_type, ChartType::Line);
-        let hidden = ChartChromePreferences {
+    fn hidden_chrome_preferences() -> ChartChromePreferences {
+        ChartChromePreferences {
             indicator_name_labels_visible: false,
             indicator_value_labels_visible: true,
             indicator_price_lines_visible: false,
@@ -1290,10 +960,38 @@ mod tests {
             trading_shortcuts: TradingShortcutMode::OneClick,
             chart_trade_buttons: ChromeVisibility::Hidden,
             drawing_context_toolbar_origin: Some((640.0, 96.5)),
-        };
+        }
+    }
+
+    #[test]
+    fn chart_chrome_preferences_parse_from_the_legacy_file() {
+        let defaults = parse_chart_chrome_preferences("");
+        assert!(defaults.indicator_name_labels_visible);
+        assert!(defaults.indicator_value_labels_visible);
+        assert!(
+            !defaults.indicator_price_lines_visible,
+            "indicator price lines follow the Aeris Charts default and start hidden"
+        );
+        assert_eq!(defaults.chart_type, ChartType::Candles);
+        let legacy = parse_chart_chrome_preferences("indicator_labels=0\n");
+        assert!(!legacy.indicator_name_labels_visible);
+        assert!(!legacy.indicator_value_labels_visible);
+        assert!(!legacy.indicator_price_lines_visible);
+        assert_eq!(legacy.chart_type, ChartType::Candles);
+        let mixed = parse_chart_chrome_preferences(
+            "indicator_labels=0\nindicator_name_labels=1\nindicator_value_labels=0\nindicator_price_lines=0\nchart_type=line\n",
+        );
+        assert!(mixed.indicator_name_labels_visible);
+        assert!(!mixed.indicator_value_labels_visible);
+        assert!(!mixed.indicator_price_lines_visible);
+        assert_eq!(mixed.chart_type, ChartType::Line);
+        let hidden = hidden_chrome_preferences();
         assert_eq!(
-            encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nsymbol_search_scope=exchange:rithmic:CBOT\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
+            parse_chart_chrome_preferences(
+                "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nsymbol_search_scope=exchange:rithmic:CBOT\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
+            ),
+            hidden,
+            "the legacy key=value file parses to the same preferences"
         );
         assert_eq!(defaults.drawing_context_toolbar_origin, None);
         assert_eq!(
@@ -1326,273 +1024,48 @@ mod tests {
             InstrumentSearchCategories::ALL,
             "excluding every category falls back to all"
         );
-        let path = temporary_chart_chrome_path("round-trip");
-        save_chart_chrome_preferences_to(&path, hidden).expect("temp chrome file writes");
-        let restored = load_chart_chrome_preferences_from(&path);
-        remove_chart_chrome_test_files(&path);
-        assert_eq!(restored, hidden);
+    }
+
+    #[test]
+    fn chart_chrome_preferences_convert_to_and_from_the_workspace_document() {
+        let hidden = hidden_chrome_preferences();
+        let state = hidden.to_workspace_chrome();
+        assert_eq!(
+            state,
+            WorkspaceChromeState {
+                indicator_name_labels_visible: false,
+                indicator_value_labels_visible: true,
+                indicator_price_lines_visible: false,
+                chart_type: "bars".to_string(),
+                symbol_search_futures: true,
+                symbol_search_equities: false,
+                symbol_search_scope: "exchange:rithmic:CBOT".to_string(),
+                window_frame: "frameless".to_string(),
+                drawing_toolbar_visible: false,
+                drawing_favorites: "trend_line,stamp:star".to_string(),
+                drawing_favorites_toolbar_visible: false,
+                drawing_favorites_origin: Some(WorkspaceChromePoint { x: 120.5, y: 80.0 }),
+                trading_shortcuts: "one_click".to_string(),
+                chart_trade_buttons_visible: false,
+                drawing_context_toolbar_origin: Some(WorkspaceChromePoint { x: 640.0, y: 96.5 }),
+            },
+            "the document form keeps the legacy identifiers"
+        );
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&state)),
+            hidden
+        );
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(None),
+            ChartChromePreferences::default()
+        );
         let marked_line = ChartChromePreferences {
             chart_type: ChartType::LineWithMarkers,
             ..hidden
         };
         assert_eq!(
-            parse_chart_chrome_preferences(&encode_chart_chrome_preferences(marked_line)),
+            ChartChromePreferences::from_workspace_chrome(Some(&marked_line.to_workspace_chrome())),
             marked_line
-        );
-    }
-
-    #[test]
-    fn chart_chrome_loader_prefers_current_and_falls_back_to_read_only_backup() {
-        let path = temporary_chart_chrome_path("backup-recovery");
-        let backup = path.with_extension("bak");
-        let committed = ChartChromePreferences {
-            indicator_name_labels_visible: false,
-            indicator_value_labels_visible: true,
-            indicator_price_lines_visible: false,
-            chart_type: ChartType::Bars,
-            symbol_search_categories: InstrumentSearchCategories::ALL,
-            symbol_search_scope: SymbolSearchScope::All,
-            window_frame: WindowFrame::Framed,
-            drawing_toolbar: ChromeVisibility::Shown,
-            drawing_favorites: DrawingFavorites::default(),
-            trading_shortcuts: TradingShortcutMode::Confirm,
-            chart_trade_buttons: ChromeVisibility::Shown,
-            drawing_context_toolbar_origin: None,
-        };
-        save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
-        std::fs::write(&backup, "chart_type=line\n").expect("obsolete backup fixture writes");
-
-        assert_eq!(
-            load_chart_chrome_preferences_from(&path),
-            committed,
-            "the durable destination is authoritative even when an obsolete backup exists"
-        );
-        std::fs::remove_file(&path).expect("current fixture removes");
-        assert_eq!(
-            load_chart_chrome_preferences_from(&path),
-            ChartChromePreferences {
-                chart_type: ChartType::Line,
-                ..ChartChromePreferences::default()
-            },
-            "the loader must fall back to the existing backup"
-        );
-        assert!(
-            backup.is_file(),
-            "loading must not rotate or remove the backup"
-        );
-        remove_chart_chrome_test_files(&path);
-    }
-
-    #[test]
-    fn a_released_chart_chrome_file_loads_and_becomes_the_backup_on_save() {
-        let path = temporary_chart_chrome_path("released");
-        std::fs::write(&path, "chart_type=line\nwindow_frame=frameless\n")
-            .expect("released chrome file writes");
-        let released = load_chart_chrome_preferences_from(&path);
-        assert_eq!(released.chart_type, ChartType::Line);
-        assert_eq!(released.window_frame, WindowFrame::Frameless);
-
-        let next = ChartChromePreferences {
-            chart_type: ChartType::Bars,
-            ..released
-        };
-        save_chart_chrome_preferences_to(&path, next).expect("enveloped chrome saves");
-        assert!(
-            std::fs::read(&path)
-                .expect("saved chrome")
-                .starts_with(&aeris_platform_runtime::DURABLE_CONTAINER_MAGIC)
-        );
-        assert_eq!(
-            std::fs::read_to_string(chart_chrome_container(&path).backup_path())
-                .expect("released file kept as backup"),
-            "chart_type=line\nwindow_frame=frameless\n"
-        );
-        assert_eq!(load_chart_chrome_preferences_from(&path), next);
-        assert_ne!(
-            encode_chart_chrome_preferences(ChartChromePreferences::default()).as_bytes()[0],
-            aeris_platform_runtime::DURABLE_CONTAINER_MAGIC[0],
-            "chrome text starts with an ASCII key, never the container's NUL"
-        );
-        remove_chart_chrome_test_files(&path);
-    }
-
-    #[test]
-    fn a_truncated_chart_chrome_file_restores_the_backup_and_is_quarantined() {
-        let path = temporary_chart_chrome_path("truncated");
-        let first = ChartChromePreferences {
-            chart_type: ChartType::Line,
-            ..ChartChromePreferences::default()
-        };
-        save_chart_chrome_preferences_to(&path, first).expect("first chrome saves");
-        save_chart_chrome_preferences_to(
-            &path,
-            ChartChromePreferences {
-                chart_type: ChartType::Bars,
-                ..first
-            },
-        )
-        .expect("second chrome saves");
-        let saved = std::fs::read(&path).expect("saved chrome");
-        std::fs::write(&path, &saved[..saved.len() - 1]).expect("truncate chrome");
-
-        let (restored, rejected, _) = restore_chart_chrome_preferences(&path);
-        assert_eq!(restored, first);
-        assert_eq!(rejected.len(), 1);
-        assert_eq!(
-            rejected[0].quarantined_as.as_deref(),
-            Some(chart_chrome_container(&path).quarantine_path(1).as_path())
-        );
-        remove_chart_chrome_test_files(&path);
-    }
-
-    #[test]
-    fn an_oversized_chart_chrome_file_loads_defaults_with_a_diagnostic() {
-        let path = temporary_chart_chrome_path("oversized");
-        std::fs::write(&path, vec![b'a'; MAXIMUM_CHART_CHROME_FILE_BYTES + 1])
-            .expect("oversized chrome writes");
-
-        let (restored, rejected, _) = restore_chart_chrome_preferences(&path);
-        assert_eq!(restored, ChartChromePreferences::default());
-        assert_eq!(rejected.len(), 1);
-        assert!(
-            rejected[0].to_string().contains("persistence bound"),
-            "{}",
-            rejected[0]
-        );
-        assert!(
-            chart_chrome_container(&path).quarantine_path(1).is_file(),
-            "the oversized file is kept aside, not deleted"
-        );
-        remove_chart_chrome_test_files(&path);
-    }
-
-    #[test]
-    fn chart_chrome_save_queue_coalesces_to_latest_ui_snapshot() {
-        let path = temporary_chart_chrome_path("coalesced");
-        let first = ChartChromePreferences {
-            indicator_name_labels_visible: false,
-            indicator_value_labels_visible: false,
-            indicator_price_lines_visible: true,
-            chart_type: ChartType::Line,
-            symbol_search_categories: InstrumentSearchCategories::ALL,
-            symbol_search_scope: SymbolSearchScope::All,
-            window_frame: WindowFrame::Framed,
-            drawing_toolbar: ChromeVisibility::Shown,
-            drawing_favorites: DrawingFavorites::default(),
-            trading_shortcuts: TradingShortcutMode::Confirm,
-            chart_trade_buttons: ChromeVisibility::Shown,
-            drawing_context_toolbar_origin: None,
-        };
-        let second = ChartChromePreferences {
-            indicator_name_labels_visible: true,
-            indicator_value_labels_visible: true,
-            indicator_price_lines_visible: false,
-            chart_type: ChartType::Bars,
-            symbol_search_categories: InstrumentSearchCategories::ALL,
-            symbol_search_scope: SymbolSearchScope::All,
-            window_frame: WindowFrame::Framed,
-            drawing_toolbar: ChromeVisibility::Shown,
-            drawing_favorites: DrawingFavorites::default(),
-            trading_shortcuts: TradingShortcutMode::Confirm,
-            chart_trade_buttons: ChromeVisibility::Shown,
-            drawing_context_toolbar_origin: None,
-        };
-        let state = Mutex::new(ChartChromeSaveState::default());
-        let (_, inflight) = {
-            let mut state = state.lock().expect("save state locks");
-            assert!(
-                state.request(first).expect("first request queues"),
-                "the first request starts one worker"
-            );
-            state.take_next().expect("worker claims first request")
-        };
-        let expected_generation = {
-            let mut state = state.lock().expect("save state locks");
-            assert!(
-                !state.request(second).expect("second request queues"),
-                "a newer request coalesces while the single saver is active"
-            );
-            state.latest_requested_generation
-        };
-        assert!(
-            wait_for_chart_chrome_generation(&state, expected_generation, Duration::ZERO).is_err(),
-            "shutdown cannot report durability before the newest queued snapshot completes"
-        );
-        save_chart_chrome_preferences_to(&path, inflight).expect("inflight save succeeds");
-        run_chart_chrome_preferences_save_worker_to(&path, &state)
-            .expect("worker drains the newer coalesced request");
-
-        assert_eq!(load_chart_chrome_preferences_from(&path), second);
-        assert_eq!(
-            wait_for_chart_chrome_generation(&state, expected_generation, Duration::ZERO),
-            Ok(expected_generation)
-        );
-        let state = state.lock().expect("save state locks");
-        assert!(!state.worker_active);
-        assert!(state.latest.is_none());
-        drop(state);
-        remove_chart_chrome_test_files(&path);
-    }
-
-    #[test]
-    fn chart_chrome_shutdown_wait_surfaces_failure_and_newer_requests() {
-        let first = ChartChromePreferences {
-            indicator_name_labels_visible: false,
-            indicator_value_labels_visible: false,
-            indicator_price_lines_visible: true,
-            chart_type: ChartType::Line,
-            symbol_search_categories: InstrumentSearchCategories::ALL,
-            symbol_search_scope: SymbolSearchScope::All,
-            window_frame: WindowFrame::Framed,
-            drawing_toolbar: ChromeVisibility::Shown,
-            drawing_favorites: DrawingFavorites::default(),
-            trading_shortcuts: TradingShortcutMode::Confirm,
-            chart_trade_buttons: ChromeVisibility::Shown,
-            drawing_context_toolbar_origin: None,
-        };
-        let second = ChartChromePreferences {
-            indicator_name_labels_visible: true,
-            indicator_value_labels_visible: true,
-            indicator_price_lines_visible: false,
-            chart_type: ChartType::Bars,
-            symbol_search_categories: InstrumentSearchCategories::ALL,
-            symbol_search_scope: SymbolSearchScope::All,
-            window_frame: WindowFrame::Framed,
-            drawing_toolbar: ChromeVisibility::Shown,
-            drawing_favorites: DrawingFavorites::default(),
-            trading_shortcuts: TradingShortcutMode::Confirm,
-            chart_trade_buttons: ChromeVisibility::Shown,
-            drawing_context_toolbar_origin: None,
-        };
-        let state = Mutex::new(ChartChromeSaveState::default());
-        let failed_generation = {
-            let mut state = state.lock().expect("save state locks");
-            assert!(state.request(first).expect("first request queues"));
-            let generation = state.latest_requested_generation;
-            state.fail_latest("chart storage unavailable".to_string());
-            generation
-        };
-
-        assert_eq!(
-            wait_for_chart_chrome_generation(&state, failed_generation, Duration::ZERO),
-            Err("chart storage unavailable".to_string())
-        );
-
-        let claimed_generation = {
-            let mut state = state.lock().expect("save state locks");
-            assert!(state.request(first).expect("retry request queues"));
-            state.latest_requested_generation
-        };
-        {
-            let mut state = state.lock().expect("save state locks");
-            assert!(
-                !state.request(second).expect("newer request coalesces"),
-                "the existing worker remains the single persistence owner"
-            );
-        }
-        assert_eq!(
-            wait_for_chart_chrome_generation(&state, claimed_generation, Duration::ZERO),
-            Err("chart preferences changed after shutdown persistence was claimed".to_string())
         );
     }
 }

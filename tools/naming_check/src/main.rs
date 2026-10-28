@@ -125,11 +125,6 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "animation timer tokens",
     ),
     (
-        "apps/desktop/src/chart_chrome.rs",
-        7,
-        "chrome persistence receipts",
-    ),
-    (
         "apps/desktop/src/account/mod.rs",
         1,
         "account authorization request",
@@ -445,8 +440,6 @@ fn has_process_global_desktop_persistence(source: &str) -> bool {
     [
         "static CHART_CHROME_FILE_LOCK",
         "static CHART_CHROME_SAVE_STATE",
-        "chart_chrome::chart_chrome_state_path(",
-        "chart_chrome::load_chart_chrome_preferences(",
         "local_state::load_workspace()",
     ]
     .iter()
@@ -3868,7 +3861,7 @@ mod tests {
         }
     }
     #[test]
-    fn workspace_and_chart_chrome_persist_through_the_durable_container() {
+    fn the_workspace_persists_through_the_durable_container() {
         let mut implementations = BTreeSet::new();
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path).expect("source");
@@ -3884,28 +3877,38 @@ mod tests {
             BTreeSet::from(["crates/platform_runtime/src/durable_container.rs".to_string()]),
             "the durable container has exactly one implementation"
         );
-        for relative in [
-            "apps/desktop/src/desktop/local_state.rs",
-            "apps/desktop/src/chart_chrome.rs",
+        let relative = "apps/desktop/src/desktop/local_state.rs";
+        let production = production_prefix(&manifest(relative));
+        assert!(
+            production.contains("DurableContainer::new("),
+            "{relative} must persist through the durable container"
+        );
+        for forbidden in [
+            "write_file_durably",
+            "StagedFile",
+            "replace_file",
+            "fs::read_to_string(",
+            "with_extension(\"bak\")",
+            "push(\".bak\")",
         ] {
-            let production = production_prefix(&manifest(relative));
             assert!(
-                production.contains("DurableContainer::new("),
-                "{relative} must persist through the durable container"
+                !production.contains(forbidden),
+                "{relative} bypasses the durable container through {forbidden}"
             );
-            for forbidden in [
-                "write_file_durably",
-                "StagedFile",
-                "replace_file",
-                "fs::read_to_string(",
-                "with_extension(\"bak\")",
-                "push(\".bak\")",
-            ] {
-                assert!(
-                    !production.contains(forbidden),
-                    "{relative} bypasses the durable container through {forbidden}"
-                );
-            }
+        }
+        // Chart chrome folds into the workspace document at startup; the legacy file is
+        // read-only migration input and nothing may write a second chart-chrome store.
+        let chrome = production_prefix(&manifest("apps/desktop/src/chart_chrome.rs"));
+        for forbidden in [
+            "DurableContainer::new(",
+            "DurableContainer::write",
+            "fs::write",
+            "write_file_durably",
+        ] {
+            assert!(
+                !chrome.contains(forbidden),
+                "chart chrome is folded into the workspace document; the legacy file is never written ({forbidden})"
+            );
         }
     }
 
@@ -4273,6 +4276,9 @@ mod tests {
             "shutdown_wait_surfaces_current_persistence_failure",
             "shutdown_wait_is_captured_without_waiting_on_the_ui_owner",
             "shutdown_wait_rejects_a_newer_layout_request_before_commit",
+            "request.chart_chrome",
+            "a_newer_request_wakes_a_pending_shutdown_wait_through_the_condvar",
+            "chrome_changes_save_through_the_one_workspace_writer",
         ] {
             assert!(
                 persistence.contains(contract),
@@ -4296,12 +4302,10 @@ mod tests {
         let prepare = &workspace_tabs[prepare_start..prepare_end];
         assert!(
             prepare.contains("wait.wait(Duration::from_secs(2))")
-                && prepare.contains("chart_chrome_wait.wait(Duration::from_secs(2))")
                 && prepare.contains("let durable_generations = durability.await")
                 && prepare.contains("persistence.shutdown_generation_is_current(generation)")
-                && prepare.contains("chart_chrome_shutdown_generation_is_current")
                 && prepare.contains("commit_update_restart_after_persistence"),
-            "update restart must await bounded generation-fenced workspace and chart durability receipts before commit"
+            "update restart must await the one writer's bounded generation-fenced durability receipt before commit"
         );
         let commit_start = workspace_tabs
             .find("fn commit_update_restart_after_persistence")
