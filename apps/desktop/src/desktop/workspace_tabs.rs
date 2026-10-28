@@ -181,29 +181,21 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let workspace_persistence = Self::start_workspace_layout_persistence(&init, &lifecycle);
-        let mut workspaces = init.workspaces;
         let market_frame_wake = UiWake::default();
         lifecycle.set_context_publication_wake(market_frame_wake.callback());
-        for workspace in &mut workspaces {
-            workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
-        }
-        let active = init
-            .active_workspace_id
-            .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
-            .unwrap_or(0);
-        Self::wire_restored_surfaces(&workspaces, active, &market_frame_wake, cx);
+        let mut tabs = TabStrip::new(init.workspaces, init.active_workspace_id);
+        Self::wire_restored_surfaces(tabs.as_slice(), tabs.active_index(), &market_frame_wake, cx);
         let (layout_library, layout_drawings) = layout_tabs::restored_layouts(
             init.saved_layouts,
-            &mut workspaces,
+            &mut tabs,
             layout_tabs::now_unix_ms(&lifecycle),
             cx,
         );
-        let persisted_layout = workspace_layout_tabs(&workspaces, cx);
-        let persisted_active_workspace_id = workspaces[active].id;
+        let persisted_layout = workspace_layout_tabs(tabs.as_slice(), cx);
+        let persisted_active_workspace_id = tabs.active().id;
         let trading_store = start_trading_store(&lifecycle, &market_frame_wake, cx);
         Self {
-            workspaces,
-            active,
+            tabs,
             theme: AerisTheme::dark(),
             drawing_tool_menu: DrawingToolMenu::default(),
             drawing_favorites_grab: None,
@@ -227,7 +219,6 @@ impl TerminalApp {
             persisted_layout_library_revision: 0,
             layout_drawings,
             workspace_error: init.workspace_notice,
-            workspace_drag: None,
             watchlist_drag: None,
             watchlist_scroll: ScrollHandle::new(),
             chart_context_menu: None,
@@ -282,7 +273,7 @@ impl TerminalApp {
     }
 
     pub(super) fn active_surface(&self) -> Entity<WorkspaceSurface> {
-        let workspace = &self.workspaces[self.active];
+        let workspace = self.tabs.active();
         workspace.panes[workspace.active_pane].surface.clone()
     }
 
@@ -290,7 +281,7 @@ impl TerminalApp {
         const MAXIMUM_SYNC_SOURCES: usize = 64;
         let mut pending = Vec::new();
         let mut pending_instruments = Vec::new();
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let (group, events, instrument) = pane.surface.update(cx, |surface, _| {
                     (
@@ -313,7 +304,7 @@ impl TerminalApp {
             }
         }
         for (source_workspace, source_pane, group, instrument) in pending_instruments {
-            for workspace in &self.workspaces {
+            for workspace in self.tabs.iter() {
                 for pane in &workspace.panes {
                     if (workspace.id, pane.id) == (source_workspace, source_pane) {
                         continue;
@@ -342,7 +333,7 @@ impl TerminalApp {
             }
             self.linked_sync_revisions
                 .insert(event.source.clone(), event.revision);
-            for workspace in &self.workspaces {
+            for workspace in self.tabs.iter() {
                 for pane in &workspace.panes {
                     if (workspace.id, pane.id) == (source_workspace, source_pane) {
                         continue;
@@ -450,18 +441,19 @@ impl TerminalApp {
         if cx.has_active_drag() {
             return;
         }
-        self.workspace_drag = None;
+        self.tabs.end_drag();
         self.end_watchlist_drag(cx);
     }
 
     pub(super) fn absorb_watchlist_requests(&mut self, cx: &mut Context<Self>) {
         let requests = self
-            .workspaces
+            .tabs
             .iter()
             .flat_map(|workspace| &workspace.panes)
             .filter_map(|pane| {
-                pane.surface
-                    .update(cx, |surface, _| surface.pending_watchlist_instrument.take())
+                pane.surface.update(cx, |surface, _| {
+                    surface.symbol_entry.take_installed_watchlist_instrument()
+                })
             })
             .collect::<Vec<_>>();
         for instrument in requests {
@@ -482,7 +474,7 @@ impl TerminalApp {
             .side_panels()
             .contains(SidePanel::Watchlist);
 
-        let tab_instruments = self.workspaces.iter().filter_map(|workspace| {
+        let tab_instruments = self.tabs.iter().filter_map(|workspace| {
             let surface = workspace.panes[workspace.active_pane].surface.read(cx);
             market_summary_tab_instrument(surface)
         });
@@ -509,7 +501,7 @@ impl TerminalApp {
             }
         }
 
-        let workspace_id = self.workspaces[self.active].id;
+        let workspace_id = self.tabs.active().id;
         let factory = self.workspace_factory.clone();
         for (key, (instrument, foreground)) in desired {
             let resource_class = if foreground {
@@ -827,7 +819,7 @@ impl TerminalApp {
             return false;
         }
         self.chrome_focus.is_focused(window)
-            || self.workspaces[self.active].focus.is_focused(window)
+            || self.tabs.active().focus.is_focused(window)
             || self
                 .active_surface()
                 .read(cx)
@@ -950,7 +942,7 @@ impl TerminalApp {
         resource_class: ConsumerResourceClass,
         cx: &mut Context<Self>,
     ) {
-        if let Some(workspace) = self.workspaces.get(workspace_index) {
+        if let Some(workspace) = self.tabs.get(workspace_index) {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
                     surface.set_market_resource_class(resource_class, surface_cx);
@@ -959,21 +951,15 @@ impl TerminalApp {
         }
     }
 
-    pub(super) fn refresh_workspace_focus_order(&mut self) {
-        for workspace in &mut self.workspaces {
-            workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
-        }
-    }
-
     pub(super) fn select_pane(&mut self, workspace_id: u64, pane_id: u64, cx: &mut Context<Self>) {
         let Some(workspace_index) = self
-            .workspaces
+            .tabs
             .iter()
             .position(|workspace| workspace.id == workspace_id)
         else {
             return;
         };
-        let workspace = &self.workspaces[workspace_index];
+        let workspace = &self.tabs[workspace_index];
         let Some(index) = workspace.panes.iter().position(|pane| pane.id == pane_id) else {
             return;
         };
@@ -997,7 +983,7 @@ impl TerminalApp {
             surface.apply_side_panels(side_panels, surface_cx);
         });
 
-        let workspace = &mut self.workspaces[workspace_index];
+        let workspace = &mut self.tabs[workspace_index];
         workspace.active_pane = index;
         workspace.generation = workspace.generation.saturating_add(1);
         self.persist_workspace_layout_if_changed(cx);
@@ -1012,17 +998,17 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(workspace_index) = self
-            .workspaces
+            .tabs
             .iter()
             .position(|workspace| workspace.id == workspace_id)
         else {
             return false;
         };
-        self.workspaces[workspace_index].swallow_pane_mouse_up = false;
+        self.tabs[workspace_index].swallow_pane_mouse_up = false;
         if !alt_primary {
             return false;
         }
-        let workspace = &self.workspaces[workspace_index];
+        let workspace = &self.tabs[workspace_index];
         if !workspace.panes.iter().any(|pane| pane.id == pane_id) {
             return false;
         }
@@ -1033,7 +1019,7 @@ impl TerminalApp {
         };
 
         self.select_pane(workspace_id, pane_id, cx);
-        let workspace = &mut self.workspaces[workspace_index];
+        let workspace = &mut self.tabs[workspace_index];
         workspace.maximized_pane = maximized_pane;
         workspace.swallow_pane_mouse_up = true;
         cx.notify();
@@ -1041,7 +1027,7 @@ impl TerminalApp {
     }
 
     pub(super) fn take_workspace_pane_mouse_up(&mut self, workspace_id: u64) -> bool {
-        self.workspaces
+        self.tabs
             .iter_mut()
             .find(|workspace| workspace.id == workspace_id)
             .is_some_and(|workspace| std::mem::take(&mut workspace.swallow_pane_mouse_up))
@@ -1049,7 +1035,7 @@ impl TerminalApp {
 
     pub(super) fn absorb_pane_activate_requests(&mut self, cx: &mut Context<Self>) {
         let mut requested = None;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let activate = pane.surface.update(cx, |surface, _| {
                     let pending = surface.pending_pane_activate == PaneActivationRequest::Pending;
@@ -1073,7 +1059,9 @@ impl TerminalApp {
     ) {
         self.drawing_tool_menu.record(tool);
         cx.notify();
-        let panes: Vec<_> = self.workspaces[self.active]
+        let panes: Vec<_> = self
+            .tabs
+            .active()
             .panes
             .iter()
             .map(|pane| pane.surface.clone())
@@ -1087,7 +1075,7 @@ impl TerminalApp {
 
     pub(super) fn absorb_chart_context_menu_requests(&mut self, cx: &mut Context<Self>) {
         let mut requested = None;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let request = pane
                     .surface
@@ -1113,7 +1101,7 @@ impl TerminalApp {
 
     pub(super) fn absorb_settings_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut requested = None;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let request = pane
                     .surface
@@ -1151,7 +1139,7 @@ impl TerminalApp {
 
     pub(super) fn absorb_study_remove_requests(&mut self, cx: &mut Context<Self>) {
         let mut requested = None;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let study_id = pane
                     .surface
@@ -1207,7 +1195,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let Some(workspace) = self
-            .workspaces
+            .tabs
             .iter()
             .find(|workspace| workspace.id == workspace_id)
         else {
@@ -1225,7 +1213,7 @@ impl TerminalApp {
     }
 
     fn chart_settings_surface(&self, menu: &ChartContextMenu) -> Option<Entity<WorkspaceSurface>> {
-        self.workspaces
+        self.tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
@@ -1864,7 +1852,7 @@ impl TerminalApp {
             return;
         };
         let pane_ids = self
-            .workspaces
+            .tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .map(|workspace| {
@@ -1911,7 +1899,7 @@ impl TerminalApp {
     fn frameless_title_bar_pinned(&self) -> bool {
         self.platform_menu_anchor.is_some()
             || self.app_navigation_open()
-            || self.workspace_drag.is_some()
+            || self.tabs.is_dragging()
             || self.window_move_pending
     }
 
@@ -1987,7 +1975,7 @@ impl TerminalApp {
         } else {
             self.frameless_title_bar.reset();
         }
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
                     surface.chart_chrome.window_frame = window_frame;
@@ -2039,7 +2027,7 @@ impl TerminalApp {
         lifetime: notification_center::NoticeLifetime,
         cx: &mut Context<Self>,
     ) {
-        if let Some(host) = toast_host(&self.workspaces[self.active]) {
+        if let Some(host) = toast_host(self.tabs.active()) {
             self.toaster.post_notice(
                 host,
                 notification_center::UserNotice {
@@ -2208,7 +2196,7 @@ impl TerminalApp {
 
     /// Attribution follows any pane holding the provider's session, including recovery.
     fn held_provider_attribution(&self, cx: &App) -> Option<aeris_contracts::ProviderAttribution> {
-        self.workspaces
+        self.tabs
             .iter()
             .flat_map(|workspace| &workspace.panes)
             .find_map(|pane| {
@@ -2454,7 +2442,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(workspace) = self
-            .workspaces
+            .tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             && let Some(pane) = workspace.panes.iter().find(|pane| pane.id == menu.pane_id)
@@ -2464,7 +2452,7 @@ impl TerminalApp {
     }
 
     fn context_menu_chart_objects(&self, menu: &ChartContextMenu, cx: &App) -> (bool, bool) {
-        self.workspaces
+        self.tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
@@ -2485,7 +2473,7 @@ impl TerminalApp {
         left: bool,
         cx: &App,
     ) -> Option<PriceAxisMenuState> {
-        self.workspaces
+        self.tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
@@ -2562,7 +2550,7 @@ impl TerminalApp {
 
     fn broadcast_indicator_chrome(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {
         let (names, values, price_lines) = self
-            .workspaces
+            .tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
@@ -2585,7 +2573,7 @@ impl TerminalApp {
         self.chart_chrome.indicator_name_labels_visible = names;
         self.chart_chrome.indicator_value_labels_visible = values;
         self.chart_chrome.indicator_price_lines_visible = price_lines;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
                     surface.apply_indicator_chrome_preferences(
@@ -2646,7 +2634,7 @@ impl TerminalApp {
     }
 
     fn post_chart_chrome_save_notice(&mut self, cx: &mut Context<Self>) {
-        if let Some(host) = toast_host(&self.workspaces[self.active]) {
+        if let Some(host) = toast_host(self.tabs.active()) {
             self.toaster.post_notice(
                 host,
                 notification_center::UserNotice {
@@ -2679,7 +2667,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let Some(workspace) = self
-            .workspaces
+            .tabs
             .iter_mut()
             .find(|workspace| workspace.id == workspace_id)
         else {
@@ -2708,12 +2696,12 @@ impl TerminalApp {
         if self.closing {
             return;
         }
-        let layout = workspace_layout_tabs(&self.workspaces, cx);
+        let layout = workspace_layout_tabs(self.tabs.as_slice(), cx);
         self.autosave_layouts(&layout);
         let Some(persistence) = self.workspace_persistence.as_ref() else {
             return;
         };
-        let active_workspace_id = self.workspaces[self.active].id;
+        let active_workspace_id = self.tabs.active().id;
         let watchlist = self.watchlist_entries();
         let library_revision = self.layout_library.revision();
         if layout == self.persisted_layout
@@ -2747,28 +2735,22 @@ impl TerminalApp {
     }
 
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
-        if next < self.workspaces.len() {
+        if next < self.tabs.len() {
             self.show_terminal_view(cx);
             self.hide_start_page(cx);
         }
-        let Some((previous, next)) = workspace_switch(self.active, next, self.workspaces.len())
-        else {
+        let Some((previous, next)) = self.tabs.select(next) else {
             return;
         };
         self.set_workspace_resource_class(previous, ConsumerResourceClass::Background, cx);
         self.set_workspace_resource_class(next, ConsumerResourceClass::Foreground, cx);
-        self.active = next;
         self.workspace_error = None;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
     pub(super) fn select_workspace_id(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == tab_id)
-        {
+        if let Some(index) = self.tabs.position(tab_id) {
             self.select_workspace(index, cx);
         }
     }
@@ -2779,11 +2761,11 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if next >= self.workspaces.len() {
+        if next >= self.tabs.len() {
             return;
         }
         self.select_workspace(next, cx);
-        self.workspaces[next].focus.focus(window, cx);
+        self.tabs[next].focus.focus(window, cx);
     }
 
     pub(super) fn select_relative_workspace(
@@ -2793,7 +2775,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(next) = wrapped_workspace_index(current, self.workspaces.len(), direction) {
+        if let Some(next) = self.tabs.wrapped_index(current, direction) {
             self.select_and_focus_workspace(next, window, cx);
         }
     }
@@ -2801,7 +2783,7 @@ impl TerminalApp {
     /// Ctrl+Tab moves between workspaces the way a browser moves between tabs: keyboard focus
     /// lands in the selected workspace, not on its tab, which a frameless window may not show.
     fn cycle_workspace(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(next) = wrapped_workspace_index(self.active, self.workspaces.len(), direction) {
+        if let Some(next) = self.tabs.wrapped_index(self.tabs.active_index(), direction) {
             self.select_workspace(next, cx);
             self.focus_workspace(window, cx);
         }
@@ -2828,14 +2810,10 @@ impl TerminalApp {
     /// Reordering leaves keyboard focus where it was; tab handles are keyed by workspace, so a
     /// focused tab stays focused as it moves.
     fn move_active_workspace(&mut self, direction: isize, cx: &mut Context<Self>) {
-        let Some(destination) = self.active.checked_add_signed(direction) else {
-            return;
-        };
-        if destination >= self.workspaces.len() {
-            return;
+        if self.tabs.move_active(direction) {
+            self.persist_workspace_layout_if_changed(cx);
+            cx.notify();
         }
-        let active_id = self.workspaces[self.active].id;
-        self.reorder_workspace(active_id, destination, cx);
     }
 
     pub(super) fn move_workspace_left(
@@ -2866,39 +2844,8 @@ impl TerminalApp {
             self.close_start_page(window, cx);
             return;
         }
-        let tab_id = self.workspaces[self.active].id;
+        let tab_id = self.tabs.active().id;
         self.close_workspace(tab_id, window, cx);
-    }
-
-    fn reorder_workspace(
-        &mut self,
-        dragged_id: u64,
-        destination_index: usize,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let active_id = self.workspaces[self.active].id;
-        let mut ids = self
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.id)
-            .collect::<Vec<_>>();
-        if !reorder_workspace_ids(&mut ids, dragged_id, destination_index) {
-            return false;
-        }
-        self.workspaces.sort_by_key(|workspace| {
-            ids.iter()
-                .position(|id| *id == workspace.id)
-                .unwrap_or(usize::MAX)
-        });
-        self.active = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == active_id)
-            .unwrap_or(0);
-        self.refresh_workspace_focus_order();
-        self.persist_workspace_layout_if_changed(cx);
-        cx.notify();
-        true
     }
 
     pub(super) fn begin_workspace_drag(
@@ -2908,21 +2855,7 @@ impl TerminalApp {
         tab_width: f32,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == tab_id)
-        {
-            self.workspace_drag = Some(WorkspaceDragState {
-                tab_id,
-                cursor_offset_x: if cursor_offset_x.is_finite() {
-                    cursor_offset_x.clamp(0.0, tab_width)
-                } else {
-                    tab_width / 2.0
-                },
-                pointer_x: None,
-                strip_left: 0.0,
-            });
+        if self.tabs.begin_drag(tab_id, cursor_offset_x, tab_width) {
             cx.notify();
         }
     }
@@ -2935,28 +2868,21 @@ impl TerminalApp {
         tab_widths: &[f32],
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self
-            .workspace_drag
-            .as_mut()
-            .filter(|drag| drag.tab_id == tab_id)
-        else {
-            return;
-        };
-        let cursor_offset_x = drag.cursor_offset_x;
-        drag.pointer_x = Some(pointer_x);
-        drag.strip_left = strip_left;
-        let Some(destination_index) =
-            workspace_drag_destination(pointer_x, strip_left, cursor_offset_x, tab_widths)
-        else {
-            return;
-        };
-        if !self.reorder_workspace(tab_id, destination_index, cx) {
-            cx.notify();
+        match self
+            .tabs
+            .move_drag(tab_id, pointer_x, strip_left, tab_widths)
+        {
+            TabDragMove::Unchanged => {}
+            TabDragMove::Moved => cx.notify(),
+            TabDragMove::Reordered => {
+                self.persist_workspace_layout_if_changed(cx);
+                cx.notify();
+            }
         }
     }
 
     pub(super) fn end_workspace_drag(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.workspace_drag.take().is_some() {
+        if self.tabs.end_drag() {
             self.release_frameless_title_bar(window, cx);
             cx.notify();
         }
@@ -2970,9 +2896,8 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let unsaved = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == tab_id)
+            .tabs
+            .position(tab_id)
             .is_some_and(|index| self.layout_tab_has_unsaved_changes(index, cx));
         if unsaved {
             self.prompt_layout_close(layouts_view::ClosePrompt::Tab(tab_id), window, cx);
@@ -2989,58 +2914,42 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ids = self
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.id)
-            .collect::<Vec<_>>();
-        let active_id = self.workspaces[self.active].id;
-        if ids.len() == 1 && ids[0] == tab_id {
-            self.retire_market_summaries(cx);
-            self.retire_market_screener(cx);
-            self.retire_workspaces(cx);
-            window.remove_window();
-            return;
-        }
-        let Some(next_active_id) = active_workspace_after_close(&ids, active_id, tab_id) else {
-            return;
+        let next_active_id = match self.tabs.close_plan(tab_id) {
+            TabClose::LastTab => {
+                self.retire_market_summaries(cx);
+                self.retire_market_screener(cx);
+                self.retire_workspaces(cx);
+                window.remove_window();
+                return;
+            }
+            TabClose::NotOpen => return,
+            TabClose::Remove { next_active_id } => next_active_id,
         };
         // Publishes the closing tab's last drawing edits while its layout still has a tab.
         self.sync_layout_drawings(cx);
-        let Some(index) = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == tab_id)
-        else {
+        let Some(removed) = self.tabs.remove(tab_id, next_active_id) else {
             return;
         };
-        let removed = self.workspaces.remove(index);
-        let focus_next_tab = removed.focus.is_focused(window);
-        let focus_next_workspace = !focus_next_tab && active_id == tab_id;
-        if self
-            .workspace_drag
-            .is_some_and(|drag| drag.tab_id == tab_id)
-        {
-            self.workspace_drag = None;
+        let focus_next_tab = removed.tab.focus.is_focused(window);
+        let focus_next_workspace = !focus_next_tab && removed.was_active;
+        if removed.drag_cancelled {
             cx.stop_active_drag(window);
         }
-        for pane in removed.panes {
+        for pane in removed.tab.panes {
             pane.surface.update(cx, |workspace, workspace_cx| {
                 workspace.set_market_resource_class(ConsumerResourceClass::Detached, workspace_cx);
                 workspace.retire_market_worker(workspace_cx);
             });
         }
         self.retain_open_layout_drawings();
-        self.active = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == next_active_id)
-            .unwrap_or(0);
-        self.refresh_workspace_focus_order();
-        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Foreground, cx);
+        self.set_workspace_resource_class(
+            self.tabs.active_index(),
+            ConsumerResourceClass::Foreground,
+            cx,
+        );
         self.sync_market_summaries(cx);
         if focus_next_tab {
-            self.workspaces[self.active].focus.focus(window, cx);
+            self.tabs.active().focus.focus(window, cx);
         } else if focus_next_workspace {
             self.focus_workspace(window, cx);
         }
@@ -3051,7 +2960,7 @@ impl TerminalApp {
 
     /// Refuses another workspace tab past the desktop's bound or the plan's limit.
     pub(super) fn check_workspace_capacity(&self) -> Result<(), String> {
-        let open = self.workspaces.len();
+        let open = self.tabs.len();
         if open >= MAXIMUM_OPEN_WORKSPACES {
             return Err(format!(
                 "At most {MAXIMUM_OPEN_WORKSPACES} workspaces can be open"
@@ -3155,10 +3064,12 @@ impl TerminalApp {
         })
         .detach();
         self.show_terminal_view(cx);
-        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
-        self.workspaces.push(workspace);
-        self.refresh_workspace_focus_order();
-        self.active = self.workspaces.len() - 1;
+        self.set_workspace_resource_class(
+            self.tabs.active_index(),
+            ConsumerResourceClass::Background,
+            cx,
+        );
+        self.tabs.push_active(workspace);
         self.workspace_error = None;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
@@ -3185,7 +3096,7 @@ impl TerminalApp {
             cx.notify();
             return;
         };
-        let workspace = &self.workspaces[self.active];
+        let workspace = self.tabs.active();
         if workspace.panes.len() >= CHART_PANE_CAPACITY {
             self.workspace_error = Some(format!(
                 "At most {CHART_PANE_CAPACITY} chart panes fit in one workspace"
@@ -3245,7 +3156,7 @@ impl TerminalApp {
             cx.notify();
         })
         .detach();
-        let workspace = &mut self.workspaces[self.active];
+        let workspace = self.tabs.active_mut();
         workspace.maximized_pane = None;
         workspace.swallow_pane_mouse_up = false;
         let source_pane_id = workspace.panes[workspace.active_pane].id;
@@ -3303,7 +3214,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace = &mut self.workspaces[self.active];
+        let workspace = self.tabs.active_mut();
         if workspace.panes.len() == 1 {
             return;
         }
@@ -3370,7 +3281,7 @@ impl TerminalApp {
         self.theme = *theme;
         cx.update_global::<gpui_base::Theme, _>(|base, _| *base = base_theme(&self.theme));
         window.refresh();
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |workspace, workspace_cx| {
                     workspace.apply_theme(&self.theme, workspace_cx);
@@ -3432,7 +3343,7 @@ impl TerminalApp {
         }
         self.chart_chrome.drawing_toolbar = visibility;
         self.drawing_tool_menu.close();
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
                     surface.chart_chrome.drawing_toolbar = visibility;
@@ -3454,7 +3365,7 @@ impl TerminalApp {
             return;
         }
         self.chart_chrome.chart_trade_buttons = visibility;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
                     surface.set_chart_trade_buttons(visibility, surface_cx);
@@ -3477,7 +3388,7 @@ impl TerminalApp {
     }
 
     fn retire_workspaces<C: gpui::AppContext>(&mut self, cx: &mut C) {
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |workspace, workspace_cx| {
                     workspace.retire_market_worker(workspace_cx);
@@ -3639,7 +3550,7 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if self.workspace_drag.is_some() && event.keystroke.key.as_str() == "escape" {
+        if self.tabs.is_dragging() && event.keystroke.key.as_str() == "escape" {
             cx.stop_active_drag(window);
             self.end_workspace_drag(window, cx);
             cx.stop_propagation();
@@ -3688,7 +3599,7 @@ impl TerminalApp {
         self.window_active = window_active;
         if !window_active {
             self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
-            if self.workspace_drag.is_some() {
+            if self.tabs.is_dragging() {
                 cx.stop_active_drag(window);
                 self.end_workspace_drag(window, cx);
             }
@@ -3764,7 +3675,7 @@ impl TerminalApp {
                     cx.notify();
                 }
                 terminal.poll_market_screener(window, cx);
-                for workspace in &terminal.workspaces {
+                for workspace in terminal.tabs.iter() {
                     for pane in &workspace.panes {
                         let surface = pane.surface.clone();
                         let pending = surface.update(cx, |workspace, workspace_cx| {
@@ -3999,7 +3910,7 @@ impl TerminalApp {
                             error: self.chart_settings_template_error.as_deref(),
                             templates: &self.chart_settings_templates,
                             apply_to_all: self
-                                .workspaces
+                                .tabs
                                 .iter()
                                 .find(|workspace| workspace.id == menu.workspace_id)
                                 .is_some_and(|workspace| workspace.panes.len() > 1),

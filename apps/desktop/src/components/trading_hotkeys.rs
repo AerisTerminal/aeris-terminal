@@ -146,7 +146,7 @@ impl TerminalApp {
         self.chart_chrome.trading_shortcuts = mode;
         // Surfaces save their own copy of the chrome preferences, so each one must carry the
         // new value or its next save would restore the old one.
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
                     surface.chart_chrome.trading_shortcuts = mode;

@@ -641,7 +641,7 @@ impl TerminalApp {
     pub(super) fn apply_trading_request_results(&mut self, cx: &mut Context<Self>) {
         for (id, origin, result) in self.lifecycle.trading_feedback().take_request_results() {
             let pane = origin.as_ref().and_then(|origin| {
-                self.workspaces
+                self.tabs
                     .iter()
                     .flat_map(|workspace| &workspace.panes)
                     .find(|pane| pane.surface.read(cx).trading_pane_token.owns(origin))
@@ -660,7 +660,7 @@ impl TerminalApp {
                     }
                     pane_cx.notify();
                 });
-            } else if let Some(host) = toast_host(&self.workspaces[self.active]) {
+            } else if let Some(host) = toast_host(self.tabs.active()) {
                 self.toaster.post_notice(
                     host,
                     notification_center::UserNotice {
@@ -695,7 +695,7 @@ impl TerminalApp {
                 cx.notify();
             }
         }
-        let Some(host) = toast_host(&self.workspaces[self.active]) else {
+        let Some(host) = toast_host(self.tabs.active()) else {
             return;
         };
         while let Some(result) = self.lifecycle.trading_feedback().take_unscoped_notice() {
@@ -771,7 +771,7 @@ impl TerminalApp {
             self.request_history_page(cx);
         }
         self.post_trading_announcements(&announcements, &snapshot, cx);
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let state = pane.surface.read(cx);
                 let selected = state.trading_pnl.order_entry.selected_account_id.as_ref();

@@ -8,6 +8,7 @@ use super::order_flow_presenter::{
 use super::pane_chrome_state::{PaneChromeState, TimeframeFlyoutChange};
 use super::pane_persistence::PanePersistence;
 use super::studies_controller::{StudiesController, StudySettingsRequest};
+use super::symbol_entry::SymbolEntry;
 use super::*;
 use aeris_observability::diagnostic;
 
@@ -88,7 +89,6 @@ struct WorkspaceSurfaceInitialization {
     startup: TerminalStartupState,
     market_worker: MarketDataWorker,
     lifecycle: DesktopLifecycle,
-    symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
     time_zone_input: Entity<InputState>,
@@ -97,7 +97,7 @@ struct WorkspaceSurfaceInitialization {
     chart_chrome: chart_chrome::ChartChromePreferences,
     persistence: PanePersistence,
     interval: ChartInterval,
-    symbol_browser: SymbolBrowser,
+    symbol_entry: SymbolEntry,
     studies: StudiesController,
     alerts: AlertsController,
     bridge_label: String,
@@ -155,15 +155,9 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         order_quantity: init.order_quantity,
         order_ticket: init.order_ticket,
         chart_trading_visibility: init.chart_trading_visibility,
-        symbol_browser: init.symbol_browser,
+        symbol_entry: init.symbol_entry,
         market_state: WorkspaceMarketState::default(),
-        symbol_selection_target: SymbolSelectionTarget::Chart,
-        pending_symbol_selection_target: None,
-        pending_watchlist_instrument: None,
-        pending_mnemonic_symbol: None,
-        product_opening_target: None,
         series_message: "Select a symbol before choosing a series".to_string(),
-        symbol_input: init.symbol_input,
         indicator_input: init.indicator_input,
         timeframe_input: init.timeframe_input,
         time_zone_input: init.time_zone_input,
@@ -1952,7 +1946,10 @@ impl WorkspaceSurface {
         let MarketWorkerStartup::Loading(ref loading) = startup;
         let interval = loading.interval;
         let restored_viewport = loading.restored_viewport;
-        let symbol_browser = SymbolBrowser::new(chart_chrome.symbol_search_scope);
+        let symbol_entry = SymbolEntry::new(
+            SymbolBrowser::new(chart_chrome.symbol_search_scope),
+            symbol_input,
+        );
         let startup_state = terminal_startup_state(startup);
         let (studies, alerts) =
             restored_workspace_records(restored_chart_state.as_ref(), &market_worker);
@@ -1983,7 +1980,6 @@ impl WorkspaceSurface {
             startup: startup_state,
             market_worker,
             lifecycle,
-            symbol_input,
             indicator_input,
             timeframe_input,
             time_zone_input,
@@ -1992,7 +1988,7 @@ impl WorkspaceSurface {
             chart_chrome,
             persistence: PanePersistence::restore(restored_chart_state, restored_viewport),
             interval,
-            symbol_browser,
+            symbol_entry,
             studies,
             alerts,
             bridge_label,
@@ -2551,15 +2547,14 @@ impl WorkspaceSurface {
             return;
         }
         self.chrome.close_symbol_provider_menu();
-        if self.symbol_browser.set_scope(scope) {
+        if self.symbol_entry.set_scope(scope) {
             self.chart_chrome.symbol_search_scope = scope;
             self.save_chart_chrome_preferences(cx);
-            self.pending_mnemonic_symbol = None;
             self.chrome.set_selection(0);
         }
         // An empty query opens each provider's own listing: its markets, or its
         // products, each of which opens its front month.
-        if let Some(input) = &self.symbol_input {
+        if let Some(input) = self.symbol_entry.input() {
             input.update(cx, |input, input_cx| {
                 input.set_value("", window, input_cx);
             });
@@ -2608,7 +2603,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn instrument_entries(&self, _cx: &App) -> Vec<InstrumentMenuEntry> {
-        self.symbol_browser.menu_entries()
+        self.symbol_entry.browser().menu_entries()
     }
 
     /// Selects an instrument row, or opens a product row's nearest-expiry contract once its
@@ -2625,13 +2620,13 @@ impl WorkspaceSurface {
                 self.select_instrument(*selection, target, cx)
             }
             InstrumentMenuAction::OpenProduct(product) => {
-                let Some(request) = self.symbol_browser.open_product(product) else {
+                let Some(request) = self.symbol_entry.browser_mut().open_product(product) else {
                     return false;
                 };
-                self.product_opening_target = Some(target);
+                self.symbol_entry.begin_product_opening(target);
                 let dispatched = self.dispatch_symbol_search(request, cx);
                 if !dispatched {
-                    self.product_opening_target = None;
+                    self.symbol_entry.cancel_product_opening();
                 }
                 cx.notify();
                 dispatched
@@ -2643,7 +2638,7 @@ impl WorkspaceSurface {
     fn scroll_chrome_selection_into_view(&self, cx: &App) {
         let selection = self.chrome.selection();
         match self.chrome.overlay() {
-            Some(ChromeOverlay::Instrument) if self.symbol_browser.has_results() => {
+            Some(ChromeOverlay::Instrument) if self.symbol_entry.browser().has_results() => {
                 self.scrolls.instrument.scroll_to_item(selection);
             }
             Some(ChromeOverlay::Indicator) => {
@@ -2685,7 +2680,7 @@ impl WorkspaceSurface {
             let Some(descriptor) = super::provider_presentation(selection.provider()) else {
                 return false;
             };
-            let Some(selection) = self.symbol_browser.select(selection) else {
+            let Some(selection) = self.symbol_entry.browser_mut().select(selection) else {
                 return false;
             };
             let provider = selection.provider.id();
@@ -2701,7 +2696,9 @@ impl WorkspaceSurface {
                     interval: self.interval,
                 };
                 let Ok(sequence) = self.market_worker.try_select_catalog(request) else {
-                    self.symbol_browser.reject_selection(selection.generation);
+                    self.symbol_entry
+                        .browser_mut()
+                        .reject_selection(selection.generation);
                     Self::post_symbol_selection_notice(
                         selection.provider,
                         "Market selection could not be scheduled. Try again.",
@@ -2711,7 +2708,7 @@ impl WorkspaceSurface {
                     return false;
                 };
                 self.chart_pane_controller.request(sequence);
-                self.pending_symbol_selection_target = Some(target);
+                self.symbol_entry.selection_scheduled(target);
                 self.market_state.symbol_selection_pending = true;
                 cx.notify();
                 return true;
@@ -2727,7 +2724,9 @@ impl WorkspaceSurface {
                 entitlement_id: descriptor.selection_entitlement_id.to_string(),
             };
             if self.market_worker.try_select_provider(request).is_err() {
-                self.symbol_browser.reject_selection(selection.generation);
+                self.symbol_entry
+                    .browser_mut()
+                    .reject_selection(selection.generation);
                 Self::post_symbol_selection_notice(
                     selection.provider,
                     "Market selection could not be scheduled. Try again.",
@@ -2736,7 +2735,7 @@ impl WorkspaceSurface {
                 cx.notify();
                 return false;
             }
-            self.pending_symbol_selection_target = Some(target);
+            self.symbol_entry.selection_scheduled(target);
             self.market_state.symbol_selection_pending = true;
             cx.notify();
             true
@@ -2778,7 +2777,7 @@ impl WorkspaceSurface {
             return;
         }
         if overlay == ChromeOverlay::Instrument {
-            self.symbol_selection_target = SymbolSelectionTarget::Chart;
+            self.symbol_entry.open_for(SymbolSelectionTarget::Chart);
         }
         if matches!(overlay, ChromeOverlay::Instrument | ChromeOverlay::Accounts) {
             // Both surfaces present the broker connections; the runtime check reads the
@@ -2809,7 +2808,7 @@ impl WorkspaceSurface {
         match overlay {
             ChromeOverlay::Instrument => {
                 self.scrolls.instrument.set_offset(point(px(0.0), px(0.0)));
-                if let Some(input) = &self.symbol_input {
+                if let Some(input) = self.symbol_entry.input() {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
                 self.refresh_instrument_listing(cx);
@@ -2842,11 +2841,9 @@ impl WorkspaceSurface {
         };
         if overlay == ChromeOverlay::Instrument {
             self.chrome.close_symbol_provider_menu();
-            self.symbol_selection_target = instrument_target_after_close(
-                self.symbol_selection_target,
-                self.market_state.symbol_selection_pending,
-            );
-            if let Some(input) = &self.symbol_input {
+            self.symbol_entry
+                .menu_closed(self.market_state.symbol_selection_pending);
+            if let Some(input) = self.symbol_entry.input() {
                 input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
@@ -3141,7 +3138,7 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(input) = self.symbol_input.clone() else {
+        let Some(input) = self.symbol_entry.input().cloned() else {
             return false;
         };
         let query = typed.to_string();
@@ -4876,17 +4873,22 @@ impl WorkspaceSurface {
     }
 
     fn confirm_catalog_selection(&mut self, command_generation: u64) -> bool {
-        usize_generation(command_generation)
-            .is_some_and(|generation| self.symbol_browser.confirm_selection(generation))
+        usize_generation(command_generation).is_some_and(|generation| {
+            self.symbol_entry
+                .browser_mut()
+                .confirm_selection(generation)
+        })
     }
 
     fn consume_catalog_search_authorization(&mut self) {
         if let Some((provider, search_generation)) = self
-            .symbol_browser
+            .symbol_entry
+            .browser()
             .selected()
             .map(|selection| (selection.provider, selection.search_generation))
         {
-            self.symbol_browser
+            self.symbol_entry
+                .browser_mut()
                 .consume_completed_search(provider, search_generation);
         }
     }
@@ -4905,7 +4907,7 @@ impl WorkspaceSurface {
             return;
         }
         Self::clear_symbol_selection_notice(cx);
-        self.pending_symbol_selection_target = None;
+        self.symbol_entry.forget_pending_selection();
         self.consume_catalog_search_authorization();
         self.market_state.symbol_selection_pending = false;
         self.pending_linked_instrument = Some(instrument.clone());
@@ -4921,15 +4923,17 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         let provider = self
-            .symbol_browser
+            .symbol_entry
+            .browser()
             .pending_selection_provider()
             .unwrap_or(self.provider);
         if self.chart_pane_controller.reject(sequence)
-            && usize_generation(browser_generation)
-                .is_some_and(|generation| self.symbol_browser.reject_selection(generation))
+            && usize_generation(browser_generation).is_some_and(|generation| {
+                self.symbol_entry.browser_mut().reject_selection(generation)
+            })
         {
             self.market_state.symbol_selection_pending = false;
-            self.pending_symbol_selection_target = None;
+            self.symbol_entry.forget_pending_selection();
             Self::post_symbol_selection_notice(provider, "Market selection failed. Try again.", cx);
             cx.notify();
         }
@@ -5866,9 +5870,9 @@ impl WorkspaceSurface {
     }
 
     fn refresh_instrument_listing(&mut self, cx: &mut Context<Self>) {
-        let query = self.symbol_input_query(cx);
+        let query = self.symbol_entry.query(cx);
         if !instrument_listing_refresh_needed(
-            &self.symbol_browser,
+            self.symbol_entry.browser(),
             self.market_state.symbol_selection_pending,
             &query,
         ) {
@@ -5876,13 +5880,6 @@ impl WorkspaceSurface {
         }
         // The search path posts its own keyed failure notice.
         self.search_symbol_query(&query, cx);
-    }
-
-    fn symbol_input_query(&self, cx: &App) -> String {
-        self.symbol_input
-            .as_ref()
-            .map(|input| input.read(cx).value().to_string())
-            .unwrap_or_default()
     }
 
     fn post_symbol_search_notice(detail: &'static str, cx: &mut Context<Self>) {
@@ -5929,7 +5926,7 @@ impl WorkspaceSurface {
         if self.market_state.symbol_selection_pending {
             return "Selecting market".into();
         }
-        match self.symbol_browser.status() {
+        match self.symbol_entry.browser().status() {
             SymbolBrowserStatus::Searching => return "Searching provider markets".into(),
             SymbolBrowserStatus::Listed(SymbolListingSummary::Products(count)) => {
                 return format!(
@@ -5946,13 +5943,14 @@ impl WorkspaceSurface {
             SymbolBrowserStatus::NoMatches => return "No markets found".into(),
             SymbolBrowserStatus::Idle => {}
         }
-        if self.symbol_browser.covers(self.provider)
+        if self.symbol_entry.browser().covers(self.provider)
             && self.chart_state == ChartState::Ready
             && let Some(product) = self.product.as_ref()
         {
             return super::provider_ready_message(self.provider, product);
         }
-        self.symbol_browser
+        self.symbol_entry
+            .browser()
             .scoped_provider()
             .and_then(super::provider_presentation)
             .map_or_else(
@@ -5964,7 +5962,7 @@ impl WorkspaceSurface {
     /// Sends the query to every provider in scope at once; an empty query asks each for its
     /// own listing. A provider still answering an older query drops that reply.
     pub(super) fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
-        let Ok(requests) = self.symbol_browser.begin_search(query) else {
+        let Ok(requests) = self.symbol_entry.browser_mut().begin_search(query) else {
             Self::post_symbol_search_notice(
                 "Enter a market query of at most 64 printable bytes.",
                 cx,
@@ -5991,7 +5989,7 @@ impl WorkspaceSurface {
             search_generation: u64::try_from(request.request_id.get()).unwrap_or(u64::MAX),
             provider: request.provider.id().to_string(),
             query: request.query,
-            maximum_results: u32::try_from(self.symbol_browser.maximum_results())
+            maximum_results: u32::try_from(self.symbol_entry.browser().maximum_results())
                 .unwrap_or(u32::MAX),
             categories: self.chart_chrome.symbol_search_categories,
             exchange: request
@@ -6002,7 +6000,7 @@ impl WorkspaceSurface {
             return true;
         }
         // A failed contract search forgets its product, so opening it again retries.
-        self.symbol_browser.reject_search(
+        self.symbol_entry.browser_mut().reject_search(
             request.provider,
             request.request_id,
             SymbolSearchFailure::Failed,
@@ -6018,12 +6016,12 @@ impl WorkspaceSurface {
     /// A provider whose catalog became ready answers the latest query, or starts the first
     /// listing when nothing was searched yet.
     fn search_ready_catalog(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
-        if !self.symbol_browser.searched() {
-            let query = self.symbol_input_query(cx);
+        if !self.symbol_entry.browser().searched() {
+            let query = self.symbol_entry.query(cx);
             self.search_symbol_query(&query, cx);
             return;
         }
-        if let Some(request) = self.symbol_browser.retry_lane(provider) {
+        if let Some(request) = self.symbol_entry.browser_mut().retry_lane(provider) {
             self.dispatch_symbol_search(request, cx);
         }
     }
@@ -6031,13 +6029,10 @@ impl WorkspaceSurface {
     /// Selects an opened product's nearest-expiry contract for the menu that opened it.
     /// Reports whether a selection was scheduled.
     fn select_opened_product(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(opened) = self.symbol_browser.take_opened_product() else {
+        let Some(opened) = self.symbol_entry.browser_mut().take_opened_product() else {
             return false;
         };
-        let target = self
-            .product_opening_target
-            .take()
-            .unwrap_or(SymbolSelectionTarget::Chart);
+        let target = self.symbol_entry.take_product_opening_target();
         match opened {
             OpenedProduct::Contract(selection) => self.select_instrument(selection, target, cx),
             OpenedProduct::NoContracts(product) => {
@@ -6054,13 +6049,13 @@ impl WorkspaceSurface {
     /// Selects a typed symbol's exact market once every provider ahead of the first match
     /// has answered. Reports whether a selection was scheduled.
     fn resolve_pending_mnemonic(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(symbol) = self.pending_mnemonic_symbol.as_deref() else {
+        let Some(exact) = self.symbol_entry.pending_mnemonic_match() else {
             return false;
         };
-        match self.symbol_browser.exact_symbol(symbol) {
+        match exact {
             ExactSymbolMatch::Pending => false,
             ExactSymbolMatch::Missing => {
-                self.pending_mnemonic_symbol = None;
+                self.symbol_entry.clear_mnemonic();
                 Self::post_symbol_search_notice(
                     "No exact market matched the requested symbol.",
                     cx,
@@ -6068,7 +6063,7 @@ impl WorkspaceSurface {
                 false
             }
             ExactSymbolMatch::Found(selection) => {
-                self.pending_mnemonic_symbol = None;
+                self.symbol_entry.clear_mnemonic();
                 if let Some(row) = self
                     .instrument_entries(cx)
                     .iter()
@@ -6082,7 +6077,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn search_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(input) = &self.symbol_input else {
+        let Some(input) = self.symbol_entry.input() else {
             return false;
         };
         let query = input.read(cx).value().to_string();
@@ -6095,7 +6090,7 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(input) = self.symbol_input.clone() else {
+        let Some(input) = self.symbol_entry.input().cloned() else {
             Self::post_symbol_search_notice(
                 "The market search is unavailable. Try again later.",
                 cx,
@@ -6106,11 +6101,11 @@ impl WorkspaceSurface {
         input.update(cx, |input, input_cx| {
             input.set_value(&symbol, window, input_cx);
         });
-        self.pending_mnemonic_symbol = Some(symbol);
+        self.symbol_entry.await_mnemonic(symbol);
         if self.search_symbol_input(cx) {
             true
         } else {
-            self.pending_mnemonic_symbol = None;
+            self.symbol_entry.clear_mnemonic();
             false
         }
     }
@@ -6119,7 +6114,7 @@ impl WorkspaceSurface {
         let entries = self.instrument_entries(cx);
         match symbol_submit_decision(entries.len(), self.chrome.selection()) {
             SymbolSubmitDecision::Select(index) => entries.get(index).is_some_and(|entry| {
-                self.activate_instrument_entry(&entry.action, self.symbol_selection_target, cx)
+                self.activate_instrument_entry(&entry.action, self.symbol_entry.target(), cx)
             }),
             SymbolSubmitDecision::Search => {
                 self.search_symbol_input(cx);
@@ -6133,7 +6128,7 @@ impl WorkspaceSurface {
             self.adopt_verified_terms(instrument);
         }
         let Some(provider) = ProviderId::find(provider_catalog_event_provider(&event))
-            .filter(|provider| self.symbol_browser.covers(*provider))
+            .filter(|provider| self.symbol_entry.browser().covers(*provider))
         else {
             return;
         };
@@ -6145,17 +6140,19 @@ impl WorkspaceSurface {
                 command_generation,
                 instrument,
             } => {
-                if self.pending_symbol_selection_target == Some(SymbolSelectionTarget::Watchlist) {
-                    let Some(_selection) = usize_generation(command_generation)
-                        .and_then(|generation| self.symbol_browser.resolve_selection(generation))
+                if self.symbol_entry.awaits_watchlist_install() {
+                    let Some(_selection) =
+                        usize_generation(command_generation).and_then(|generation| {
+                            self.symbol_entry
+                                .browser_mut()
+                                .resolve_selection(generation)
+                        })
                     else {
                         return;
                     };
-                    self.pending_watchlist_instrument = Some(instrument);
-                    self.pending_symbol_selection_target = None;
-                    if !self.chrome.is_overlay_open(ChromeOverlay::Instrument) {
-                        self.symbol_selection_target = SymbolSelectionTarget::Chart;
-                    }
+                    let menu_open = self.chrome.is_overlay_open(ChromeOverlay::Instrument);
+                    self.symbol_entry
+                        .watchlist_instrument_installed(instrument, menu_open);
                     self.market_state.symbol_selection_pending = false;
                     Self::clear_symbol_selection_notice(cx);
                     cx.notify();
@@ -6195,7 +6192,8 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         let accepted = usize_generation(result.search_generation).is_some_and(|generation| {
-            self.symbol_browser
+            self.symbol_entry
+                .browser_mut()
                 .apply_results(provider, generation, result.instruments)
         });
         if !accepted {
@@ -6209,7 +6207,7 @@ impl WorkspaceSurface {
             return;
         }
         if self.chrome.overlay() == Some(ChromeOverlay::Instrument) {
-            if self.chrome.list_keyboard_active() && !self.symbol_input_query(cx).trim().is_empty()
+            if self.chrome.list_keyboard_active() && !self.symbol_entry.query(cx).trim().is_empty()
             {
                 self.chrome.set_selection(
                     first_selectable_instrument_index(&self.instrument_entries(cx)).unwrap_or(0),
@@ -6231,7 +6229,7 @@ impl WorkspaceSurface {
             return;
         };
         if command == ProviderCatalogCommand::Selection {
-            if !self.symbol_browser.reject_selection(generation) {
+            if !self.symbol_entry.browser_mut().reject_selection(generation) {
                 return;
             }
             diagnostic!(
@@ -6239,10 +6237,8 @@ impl WorkspaceSurface {
                 rejection.provider,
                 rejection.reason
             );
-            self.pending_symbol_selection_target = None;
-            if !self.chrome.is_overlay_open(ChromeOverlay::Instrument) {
-                self.symbol_selection_target = SymbolSelectionTarget::Chart;
-            }
+            let menu_open = self.chrome.is_overlay_open(ChromeOverlay::Instrument);
+            self.symbol_entry.selection_settled(menu_open);
             self.market_state.symbol_selection_pending = false;
             let detail = catalog_rejection_message(rejection.reason, command, provider);
             Self::post_symbol_selection_notice(provider, &detail, cx);
@@ -6255,7 +6251,8 @@ impl WorkspaceSurface {
             _ => SymbolSearchFailure::Failed,
         };
         if !self
-            .symbol_browser
+            .symbol_entry
+            .browser_mut()
             .reject_search(provider, generation, failure)
         {
             return;
@@ -6266,7 +6263,7 @@ impl WorkspaceSurface {
             rejection.reason
         );
         // With several providers in scope a provider that cannot answer lists nothing.
-        if self.symbol_browser.scoped_provider().is_some() {
+        if self.symbol_entry.browser().scoped_provider().is_some() {
             Self::post_symbol_search_notice(
                 "The market search could not complete. Try again later.",
                 cx,
@@ -6278,7 +6275,7 @@ impl WorkspaceSurface {
     /// Whether a market is selected. The header enables the market panels on this and
     /// `toggle_side_panel` opens them on it, so the two cannot drift apart.
     pub(super) fn has_market_selection(&self) -> bool {
-        self.symbol_browser.selected().is_some() || self.product.is_some()
+        self.symbol_entry.browser().selected().is_some() || self.product.is_some()
     }
 
     pub(super) fn toggle_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
@@ -6571,7 +6568,7 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         self.open_chrome_overlay_at(ChromeOverlay::Instrument, trigger_position, window, cx);
-        self.symbol_selection_target = SymbolSelectionTarget::Watchlist;
+        self.symbol_entry.open_for(SymbolSelectionTarget::Watchlist);
     }
 
     pub(super) fn toggle_order_book_column_menu(&mut self, cx: &mut Context<Self>) {

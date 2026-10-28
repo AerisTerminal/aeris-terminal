@@ -2714,7 +2714,7 @@ fn pane_harness_catalog_request_fences_old_series_before_catalog_reply(cx: &mut 
     harness.publish_snapshot(12, cx);
     let provider = harness.pane.update(cx, |pane, _| {
         let search = chart_provider_search(pane, "ETH");
-        assert!(pane.symbol_browser.apply_results(
+        assert!(pane.symbol_entry.browser_mut().apply_results(
             search.provider,
             search.request_id,
             vec![ProviderInstrumentSummary {
@@ -3979,8 +3979,9 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
         let input = harness
             .pane
             .read(cx)
-            .symbol_input
-            .clone()
+            .symbol_entry
+            .input()
+            .cloned()
             .expect("symbol input");
         input.update(cx, |input, cx| input.set_value(credential, window, cx));
         harness.pane.update(cx, |pane, cx| {
@@ -4024,7 +4025,8 @@ fn pane_harness_full_symbol_search_queue_reports_once_and_a_retry_clears(cx: &mu
             commands.try_recv().is_err(),
             "a failed search is not resent behind the trader's back"
         );
-        pane.symbol_browser
+        pane.symbol_entry
+            .browser_mut()
             .set_scope(SymbolSearchScope::Provider(pane.provider.id()));
         assert!(pane.search_symbol_input(cx), "retrying sends the search");
     });
@@ -4085,8 +4087,8 @@ fn pane_harness_rithmic_product_opens_its_front_month_from_the_empty_query_listi
             harness
                 .pane
                 .read(cx)
-                .symbol_input
-                .as_ref()
+                .symbol_entry
+                .input()
                 .map(|input| input.read(cx).value().to_string())
         })
     };
@@ -4179,10 +4181,12 @@ fn nq_contract(symbol: &str, exchange: &str, expiration: &str) -> ProviderInstru
 
 /// Scopes the pane's symbol search to its chart provider and starts one search there.
 fn chart_provider_search(pane: &mut WorkspaceSurface, query: &str) -> SymbolSearchRequest {
-    pane.symbol_browser
+    pane.symbol_entry
+        .browser_mut()
         .set_scope(SymbolSearchScope::Provider(pane.provider.id()));
     let mut requests = pane
-        .symbol_browser
+        .symbol_entry
+        .browser_mut()
         .begin_search(query)
         .expect("valid query");
     assert_eq!(requests.len(), 1, "a provider scope searches one provider");
@@ -4245,7 +4249,9 @@ fn pane_harness_all_providers_search_shows_each_answer_as_it_arrives(cx: &mut Te
     cx.update(|window, cx| {
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(
-                pane.symbol_browser.exchanges(ProviderId("hyperliquid")),
+                pane.symbol_entry
+                    .browser()
+                    .exchanges(ProviderId("hyperliquid")),
                 [exchange],
                 "the exchange is learned from the provider's results"
             );
@@ -4259,7 +4265,7 @@ fn pane_harness_all_providers_search_shows_each_answer_as_it_arrives(cx: &mut Te
             );
             assert_eq!(
                 pane.chart_chrome.symbol_search_scope,
-                pane.symbol_browser.scope()
+                pane.symbol_entry.browser().scope()
             );
         });
     });
@@ -4370,7 +4376,7 @@ fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
         .expect("fixture product");
     let provider = harness.pane.update(cx, |pane, _| {
         let request = chart_provider_search(pane, "BTC");
-        assert!(pane.symbol_browser.apply_results(
+        assert!(pane.symbol_entry.browser_mut().apply_results(
             request.provider,
             request.request_id,
             vec![ProviderInstrumentSummary {

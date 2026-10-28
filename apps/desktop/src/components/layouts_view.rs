@@ -208,7 +208,11 @@ impl TerminalApp {
         let search = page.search.clone();
         search.update(cx, |search, search_cx| search.focus(window, search_cx));
         if newly_shown {
-            self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
+            self.set_workspace_resource_class(
+                self.tabs.active_index(),
+                ConsumerResourceClass::Background,
+                cx,
+            );
         }
         self.workspace_error = None;
         cx.notify();
@@ -226,7 +230,11 @@ impl TerminalApp {
         };
         page.shown = false;
         self.layouts_ui.card_menu = None;
-        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Foreground, cx);
+        self.set_workspace_resource_class(
+            self.tabs.active_index(),
+            ConsumerResourceClass::Foreground,
+            cx,
+        );
         cx.notify();
     }
 
@@ -237,7 +245,11 @@ impl TerminalApp {
         };
         self.layouts_ui.card_menu = None;
         if page.shown {
-            self.set_workspace_resource_class(self.active, ConsumerResourceClass::Foreground, cx);
+            self.set_workspace_resource_class(
+                self.tabs.active_index(),
+                ConsumerResourceClass::Foreground,
+                cx,
+            );
             self.focus_workspace(window, cx);
         }
         cx.notify();
@@ -329,9 +341,7 @@ impl TerminalApp {
                 .layout_library
                 .get(layout_id)
                 .map(|layout| layout.name.clone()),
-            LayoutNamePurpose::Copy => {
-                Some(self.copy_layout_name(&self.workspaces[self.active].label))
-            }
+            LayoutNamePurpose::Copy => Some(self.copy_layout_name(&self.tabs.active().label)),
             LayoutNamePurpose::Create => {
                 Some(self.layout_library.unique_name(UNTITLED_LAYOUT_NAME))
             }
@@ -419,10 +429,10 @@ impl TerminalApp {
     /// Asks to confirm deleting a layout, or says why it cannot be deleted now.
     pub(super) fn request_layout_delete(&mut self, layout_id: u64, cx: &mut Context<Self>) {
         self.layouts_ui.card_menu = None;
-        match self
-            .layout_library
-            .check_delete(layout_id, &layout_tabs::open_layout_ids(&self.workspaces))
-        {
+        match self.layout_library.check_delete(
+            layout_id,
+            &layout_tabs::open_layout_ids(self.tabs.as_slice()),
+        ) {
             Ok(_) => {
                 self.workspace_error = None;
                 self.layouts_ui.delete_confirmation = Some(layout_id);
@@ -486,12 +496,12 @@ impl TerminalApp {
         };
         let indices = match prompt {
             ClosePrompt::Tab(tab_id) => self
-                .workspaces
+                .tabs
                 .iter()
                 .position(|workspace| workspace.id == tab_id)
                 .into_iter()
                 .collect::<Vec<_>>(),
-            ClosePrompt::Window => (0..self.workspaces.len()).collect(),
+            ClosePrompt::Window => (0..self.tabs.len()).collect(),
         };
         if save {
             for index in indices {
@@ -540,7 +550,7 @@ impl TerminalApp {
 
     /// Whether each open tab, in order, differs from its layout's saved version.
     pub(super) fn layout_unsaved_flags(&self, cx: &App) -> Vec<bool> {
-        (0..self.workspaces.len())
+        (0..self.tabs.len())
             .map(|index| self.layout_tab_has_unsaved_changes(index, cx))
             .collect()
     }
@@ -692,7 +702,7 @@ impl TerminalApp {
     /// The layout button of the chart header and, while open, its menu.
     pub(super) fn layout_menu_button(&self, terminal: &Entity<Self>, unsaved: bool) -> AnyElement {
         let theme = self.theme;
-        let workspace = &self.workspaces[self.active];
+        let workspace = self.tabs.active();
         let open = self.layouts_ui.layout_menu_open;
         let toggle = terminal.clone();
         let dismiss = terminal.clone();
@@ -746,7 +756,7 @@ impl TerminalApp {
 
     fn layout_menu(&self, terminal: &Entity<Self>, unsaved: bool) -> MenuPanel {
         let theme = self.theme;
-        let active_layout = self.workspaces[self.active].saved_layout_id;
+        let active_layout = self.tabs.active().saved_layout_id;
         let autosave = self
             .layout_library
             .get(active_layout)
@@ -793,7 +803,7 @@ impl TerminalApp {
             "layout_menu_rename",
             "Rename\u{2026}",
             |terminal, window, cx| {
-                let layout_id = terminal.workspaces[terminal.active].saved_layout_id;
+                let layout_id = terminal.tabs.active().saved_layout_id;
                 terminal.open_layout_name_dialog(LayoutNamePurpose::Rename(layout_id), window, cx);
             },
         ))
@@ -912,7 +922,7 @@ impl TerminalApp {
         let theme = self.theme;
         let names = match prompt {
             ClosePrompt::Tab(tab_id) => self
-                .workspaces
+                .tabs
                 .iter()
                 .find(|workspace| workspace.id == tab_id)
                 .map(|workspace| vec![workspace.label.clone()])

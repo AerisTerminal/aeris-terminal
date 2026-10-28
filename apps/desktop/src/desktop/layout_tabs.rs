@@ -18,13 +18,13 @@ pub(super) fn now_unix_ms(lifecycle: &DesktopLifecycle) -> i64 {
 /// A tab showing no layout of the library is given a new one.
 pub(super) fn restored_layouts(
     saved: Vec<WorkspaceSavedLayoutState>,
-    workspaces: &mut [WorkspaceTab],
+    tabs: &mut TabStrip,
     now_unix_ms: i64,
     cx: &App,
 ) -> (LayoutLibrary, BTreeMap<u64, LayoutDrawings>) {
     let mut library = LayoutLibrary::new(saved);
     let mut drawings = BTreeMap::new();
-    for workspace in workspaces {
+    for workspace in tabs.iter_mut() {
         let snapshot = normalized_layout_tab(&workspace_tab_state(workspace, cx));
         if library.get(workspace.saved_layout_id).is_none() {
             let name = library.unique_name(layout_library::UNTITLED_LAYOUT_NAME);
@@ -132,7 +132,7 @@ impl TerminalApp {
         let mut changed = false;
         for (layout_id, drawings) in &mut self.layout_drawings {
             let panes = self
-                .workspaces
+                .tabs
                 .iter()
                 .filter(|workspace| workspace.saved_layout_id == *layout_id)
                 .flat_map(|workspace| workspace.panes.iter().map(|pane| &pane.surface));
@@ -146,17 +146,17 @@ impl TerminalApp {
     /// Drops the working drawing sets of layouts no tab shows any more.
     pub(super) fn retain_open_layout_drawings(&mut self) {
         self.layout_drawings.retain(|layout_id, _| {
-            self.workspaces
+            self.tabs
                 .iter()
                 .any(|workspace| workspace.saved_layout_id == *layout_id)
         });
     }
 
     /// Saves every tab whose layout has autosave on. `tabs` is the state of
-    /// `self.workspaces`, in order.
+    /// `self.tabs`, in order.
     pub(super) fn autosave_layouts(&mut self, tabs: &[WorkspaceTabState]) {
         let now_unix_ms = self.now_unix_ms();
-        for (workspace, state) in self.workspaces.iter_mut().zip(tabs) {
+        for (workspace, state) in self.tabs.iter_mut().zip(tabs) {
             if let Err(error) = autosave_tab(
                 &mut self.layout_library,
                 self.layout_drawings.get_mut(&workspace.saved_layout_id),
@@ -172,7 +172,7 @@ impl TerminalApp {
     /// Whether the tab at `index` differs from its layout's saved version. A layout with
     /// autosave on is saved with every change, so it never reports unsaved changes.
     pub(super) fn layout_tab_has_unsaved_changes(&self, index: usize, cx: &App) -> bool {
-        self.workspaces.get(index).is_some_and(|workspace| {
+        self.tabs.get(index).is_some_and(|workspace| {
             !self
                 .layout_library
                 .get(workspace.saved_layout_id)
@@ -225,7 +225,7 @@ impl TerminalApp {
             CommandId::ToggleLayoutAutosave => {
                 let autosave = self
                     .layout_library
-                    .get(self.workspaces[self.active].saved_layout_id)
+                    .get(self.tabs.active().saved_layout_id)
                     .is_some_and(|layout| layout.autosave);
                 self.set_active_layout_autosave(!autosave, cx)
             }
@@ -250,7 +250,7 @@ impl TerminalApp {
     /// Returns an error when the layout no longer exists or its drawings do not fit the
     /// library's storage bound.
     pub(super) fn save_active_layout(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        self.save_layout_tab(self.active, cx)
+        self.save_layout_tab(self.tabs.active_index(), cx)
     }
 
     /// Saves the tab at `index` as its layout's saved version.
@@ -265,7 +265,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.sync_layout_drawings(cx);
-        let Some(workspace) = self.workspaces.get(index) else {
+        let Some(workspace) = self.tabs.get(index) else {
             return Ok(());
         };
         if !differs_from_saved(
@@ -291,7 +291,7 @@ impl TerminalApp {
         if let Some(drawings) = self.layout_drawings.get_mut(&layout_id) {
             drawings.mark_saved();
         }
-        self.workspaces[index].autosaved_snapshot = Some(snapshot);
+        self.tabs[index].autosaved_snapshot = Some(snapshot);
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
         Ok(())
@@ -307,10 +307,10 @@ impl TerminalApp {
         autosave: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let layout_id = self.workspaces[self.active].saved_layout_id;
+        let layout_id = self.tabs.active().saved_layout_id;
         self.layout_library.set_autosave(layout_id, autosave)?;
         if autosave {
-            self.workspaces[self.active].autosaved_snapshot = None;
+            self.tabs.active_mut().autosaved_snapshot = None;
         }
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
@@ -335,7 +335,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
         self.sync_layout_drawings(cx);
-        let workspace = &self.workspaces[self.active];
+        let workspace = self.tabs.active();
         let original = workspace.saved_layout_id;
         let snapshot = normalized_layout_tab(&workspace_tab_state(workspace, cx));
         let entries = self
@@ -356,7 +356,7 @@ impl TerminalApp {
                 )
             },
         );
-        let workspace = &mut self.workspaces[self.active];
+        let workspace = self.tabs.active_mut();
         workspace.saved_layout_id = copy;
         workspace.label = label;
         workspace.autosaved_snapshot = Some(snapshot);
@@ -412,7 +412,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let name = self.layout_library.rename(layout_id, name)?;
-        for workspace in &mut self.workspaces {
+        for workspace in self.tabs.iter_mut() {
             if workspace.saved_layout_id == layout_id {
                 workspace.label.clone_from(&name);
             }
@@ -433,7 +433,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.layout_library
-            .delete(layout_id, &open_layout_ids(&self.workspaces))?;
+            .delete(layout_id, &open_layout_ids(self.tabs.as_slice()))?;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
         Ok(())
@@ -443,7 +443,7 @@ impl TerminalApp {
     pub(super) fn unsaved_layout_names(&self, cx: &App) -> Vec<String> {
         let mut layouts = Vec::new();
         let mut names = Vec::new();
-        for (index, workspace) in self.workspaces.iter().enumerate() {
+        for (index, workspace) in self.tabs.iter().enumerate() {
             if !layouts.contains(&workspace.saved_layout_id)
                 && self.layout_tab_has_unsaved_changes(index, cx)
             {
@@ -469,7 +469,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let open = open_layout_ids(&self.workspaces);
+        let open = open_layout_ids(self.tabs.as_slice());
         let layout_id = self
             .layout_library
             .recently_used(MAXIMUM_SAVED_LAYOUTS)
@@ -573,10 +573,12 @@ impl TerminalApp {
             .entry(layout_id)
             .or_insert_with(|| LayoutDrawings::from_saved(&saved_drawings));
         self.show_terminal_view(cx);
-        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
-        self.workspaces.push(workspace);
-        self.refresh_workspace_focus_order();
-        self.active = self.workspaces.len() - 1;
+        self.set_workspace_resource_class(
+            self.tabs.active_index(),
+            ConsumerResourceClass::Background,
+            cx,
+        );
+        self.tabs.push_active(workspace);
         self.layout_library
             .touch_opened(layout_id, self.now_unix_ms())?;
         self.workspace_error = None;

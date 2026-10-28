@@ -745,7 +745,7 @@ impl TerminalApp {
     /// current favorites before any of them writes the shared file.
     fn commit_drawing_favorites(&mut self, cx: &mut Context<Self>) {
         let favorites = self.chart_chrome.drawing_favorites;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
                     surface.chart_chrome.drawing_favorites = favorites;

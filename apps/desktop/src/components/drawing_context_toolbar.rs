@@ -532,7 +532,7 @@ impl TerminalApp {
             return;
         }
         let origin = self.chart_chrome.drawing_context_toolbar_origin;
-        for workspace in &self.workspaces {
+        for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
                     surface.chart_chrome.drawing_context_toolbar_origin = origin;

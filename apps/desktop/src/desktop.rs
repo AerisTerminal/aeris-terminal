@@ -102,8 +102,13 @@ mod study_packages;
 mod study_settings_dialog;
 #[path = "symbol_browser.rs"]
 mod symbol_browser;
+#[path = "desktop/symbol_entry.rs"]
+mod symbol_entry;
 #[path = "components/symbol_menu.rs"]
 mod symbol_menu;
+#[path = "desktop/tab_strip.rs"]
+mod tab_strip;
+use tab_strip::{TabClose, TabDragMove, TabStrip, WorkspaceDragState};
 #[path = "components/terminal_chrome.rs"]
 mod terminal_chrome;
 #[path = "components/terminal_view.rs"]
@@ -595,8 +600,6 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
 const CHART_SYNC_EVENTS_PER_SURFACE: usize = 32;
 const WORKSPACE_TAB_MAX_WIDTH: f32 = 360.0;
-const WORKSPACE_TAB_GAP: f32 = 2.0;
-const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const WORKSPACE_TAB_HORIZONTAL_PADDING: f32 = 12.0;
 const WORKSPACE_TAB_CONTENT_GAP: f32 = 4.0;
 const WORKSPACE_TAB_CLOSE_GAP: f32 = 8.0;
@@ -933,16 +936,9 @@ struct WorkspaceSurface {
     order_quantity: order_quantity::OrderQuantityControls,
     order_ticket: order_ticket::OrderTicketControls,
     chart_trading_visibility: ChartTradingVisibilitySettings,
-    symbol_browser: SymbolBrowser,
+    symbol_entry: symbol_entry::SymbolEntry,
     market_state: WorkspaceMarketState,
-    symbol_selection_target: SymbolSelectionTarget,
-    pending_symbol_selection_target: Option<SymbolSelectionTarget>,
-    pending_watchlist_instrument: Option<InstallProviderInstrument>,
-    pending_mnemonic_symbol: Option<String>,
-    /// The menu target of the product whose front month is opening.
-    product_opening_target: Option<SymbolSelectionTarget>,
     series_message: String,
-    symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
     time_zone_input: Entity<InputState>,
@@ -3585,7 +3581,7 @@ fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
             |product| product.display_symbol.clone(),
         );
     }
-    instrument_selector_label(app.symbol_browser.selected().map(|selection| {
+    instrument_selector_label(app.symbol_entry.browser().selected().map(|selection| {
         (
             selection.instrument.symbol.as_str(),
             selection.instrument.exchange.as_str(),
@@ -4328,7 +4324,7 @@ fn subscribe_symbol_input(
                             return;
                         }
                         if app.submit_symbol_input(app_cx)
-                            && symbol_menu_closes_after_selection(app.symbol_selection_target)
+                            && symbol_menu_closes_after_selection(app.symbol_entry.target())
                         {
                             app.close_chrome_overlay(window, app_cx);
                         }
@@ -4340,8 +4336,8 @@ fn subscribe_symbol_input(
                             return;
                         }
                         let typed = app
-                            .symbol_input
-                            .as_ref()
+                            .symbol_entry
+                            .input()
                             .is_some_and(|input| !input.read(cx).value().trim().is_empty());
                         app.chrome.set_list_keyboard(typed);
                         let selection = if typed {
@@ -4792,14 +4788,6 @@ struct WorkspaceTab {
     focus: FocusHandle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct WorkspaceDragState {
-    tab_id: u64,
-    cursor_offset_x: f32,
-    pointer_x: Option<f32>,
-    strip_left: f32,
-}
-
 /// The color a newly set watchlist flag starts with, as the hex value the flag stores.
 fn default_watchlist_flag_color(theme: &AerisTheme) -> String {
     theme.colors.swatch_default.css_hex()
@@ -5160,8 +5148,7 @@ struct ChartFullscreen {
 /// two chart-menu options rather than growing a separate menu stack.
 #[allow(clippy::struct_excessive_bools)]
 struct TerminalApp {
-    workspaces: Vec<WorkspaceTab>,
-    active: usize,
+    tabs: TabStrip,
     theme: AerisTheme,
     drawing_tool_menu: DrawingToolMenu,
     /// Pointer offset from the favorites toolbar origin while its grip is dragged.
@@ -5187,7 +5174,6 @@ struct TerminalApp {
     /// The working drawing set of every saved layout an open tab shows, shared by those tabs.
     layout_drawings: BTreeMap<u64, LayoutDrawings>,
     workspace_error: Option<String>,
-    workspace_drag: Option<WorkspaceDragState>,
     watchlist_drag: Option<WatchlistDragState>,
     watchlist_scroll: ScrollHandle,
     chart_context_menu: Option<ChartContextMenu>,
@@ -5236,29 +5222,6 @@ struct TerminalApp {
     closing: bool,
     /// The start page, layout menu and layout dialogs.
     layouts_ui: layouts_view::LayoutsUi,
-}
-
-fn workspace_switch(active: usize, next: usize, workspace_count: usize) -> Option<(usize, usize)> {
-    (next != active && next < workspace_count).then_some((active, next))
-}
-
-fn wrapped_workspace_index(
-    current: usize,
-    workspace_count: usize,
-    direction: isize,
-) -> Option<usize> {
-    if workspace_count == 0 || current >= workspace_count {
-        return None;
-    }
-    match direction.cmp(&0) {
-        std::cmp::Ordering::Less => Some(if current == 0 {
-            workspace_count - 1
-        } else {
-            current - 1
-        }),
-        std::cmp::Ordering::Equal => Some(current),
-        std::cmp::Ordering::Greater => Some((current + 1) % workspace_count),
-    }
 }
 
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
@@ -5405,66 +5368,6 @@ const fn durable_workspace_viewport(
     }
 }
 
-fn reorder_workspace_ids(ids: &mut Vec<u64>, dragged_id: u64, destination_index: usize) -> bool {
-    let Some(from) = ids.iter().position(|id| *id == dragged_id) else {
-        return false;
-    };
-    if from == destination_index {
-        return false;
-    }
-    let dragged = ids.remove(from);
-    let insertion_index = destination_index.min(ids.len());
-    ids.insert(insertion_index, dragged);
-    insertion_index != from
-}
-
-fn workspace_drag_destination(
-    pointer_x: f32,
-    strip_left: f32,
-    cursor_offset_x: f32,
-    tab_widths: &[f32],
-) -> Option<usize> {
-    let last = tab_widths.len().checked_sub(1)?;
-    let dragged_left = pointer_x - cursor_offset_x - strip_left - WORKSPACE_TAB_STRIP_PADDING_LEFT;
-    if !dragged_left.is_finite() {
-        return None;
-    }
-    let mut destination = 0;
-    let mut boundary = f32::midpoint(tab_widths[0], WORKSPACE_TAB_GAP);
-    while destination < last && dragged_left >= boundary {
-        destination += 1;
-        boundary +=
-            f32::midpoint(tab_widths[destination - 1], tab_widths[destination]) + WORKSPACE_TAB_GAP;
-    }
-    Some(destination)
-}
-
-fn workspace_drag_translation(
-    drag: Option<WorkspaceDragState>,
-    tab_id: u64,
-    index: usize,
-    tab_widths: &[f32],
-) -> Option<f32> {
-    let drag = drag.filter(|drag| drag.tab_id == tab_id)?;
-    let pointer_x = drag.pointer_x?;
-    let dragged_width = *tab_widths.get(index)?;
-    let index_offset = tab_widths
-        .get(..index)?
-        .iter()
-        .fold(0.0, |offset, width| offset + width + WORKSPACE_TAB_GAP);
-    let occupied_width = tab_widths
-        .iter()
-        .copied()
-        .reduce(|total, width| total + WORKSPACE_TAB_GAP + width)?;
-    let requested_left =
-        pointer_x - drag.cursor_offset_x - drag.strip_left - WORKSPACE_TAB_STRIP_PADDING_LEFT;
-    if !requested_left.is_finite() || !occupied_width.is_finite() {
-        return None;
-    }
-    let bounded_left = requested_left.clamp(0.0, (occupied_width - dragged_width).max(0.0));
-    Some(bounded_left - index_offset)
-}
-
 fn watchlist_drag_destination(
     pointer_y: f32,
     body_top: f32,
@@ -5498,19 +5401,6 @@ fn watchlist_drag_translation(
     let index = index.to_f32()?;
     let slot_top = drag.body_top + drag.scroll_offset_y + index * WATCHLIST_ROW_HEIGHT;
     Some(pointer_y - drag.cursor_offset_y - slot_top)
-}
-
-fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) -> Option<u64> {
-    if ids.len() <= 1 || !ids.contains(&closing_id) {
-        return None;
-    }
-    if active_id != closing_id {
-        return Some(active_id);
-    }
-    let closing = ids.iter().position(|id| *id == closing_id)?;
-    ids.get(closing + 1)
-        .or_else(|| closing.checked_sub(1).and_then(|index| ids.get(index)))
-        .copied()
 }
 
 mod workspace_tabs;

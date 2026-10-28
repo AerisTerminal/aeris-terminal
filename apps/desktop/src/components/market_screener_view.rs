@@ -588,7 +588,7 @@ impl TerminalApp {
     /// Starts the screen consumer if needed, requests fresh statistics and keeps them
     /// refreshing while the page stays visible.
     pub(super) fn activate_market_screener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace_id = self.workspaces[self.active].id;
+        let workspace_id = self.tabs.active().id;
         self.pages.screener.ensure_worker(
             self.workspace_factory.as_ref(),
             workspace_id,

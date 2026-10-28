@@ -10,9 +10,8 @@ use super::{
     ProviderCatalogEvent, ProviderConnectionPresentation, ProviderId, SidePanel,
     SidePanelVisibility, SymbolBrowser, SymbolInputAction, SymbolSearchFailure, SymbolSearchScope,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
-    TIMEFRAME_MENU_WIDTH, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
-    WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
-    WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
+    TIMEFRAME_MENU_WIDTH, TimeframeMenuGroup, WatchlistDragState, WindowCommand,
+    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceMaximizeTransition,
     bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
     catalog_rejection_message, chart_position_id, chart_price_fixed_point,
     chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
@@ -24,15 +23,13 @@ use super::{
     fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, project_provider_catalog_event,
-    publication_chart_state, reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
+    publication_chart_state, reconciled_bridge_state, series_selector_label,
     stabilized_connection_state, symbol_input_action, symbol_submit_decision,
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
     timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
     watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
-    window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-    workspace_maximize_transition, workspace_split_ratio, workspace_switch,
-    wrapped_workspace_index,
+    window_move_gesture_transition, workspace_maximize_transition, workspace_split_ratio,
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -484,7 +481,7 @@ mod timeframe_input {
             let symbol = surface
                 .chrome
                 .is_overlay_open(ChromeOverlay::Instrument)
-                .then(|| surface.symbol_input.clone())
+                .then(|| surface.symbol_entry.input().cloned())
                 .flatten();
             let practice_name = surface
                 .trading_pnl
@@ -1054,7 +1051,14 @@ mod timeframe_input {
             });
         });
         cx.simulate_keystrokes("e t h");
-        let input = cx.read(|cx| surface.read(cx).symbol_input.clone().expect("symbol input"));
+        let input = cx.read(|cx| {
+            surface
+                .read(cx)
+                .symbol_entry
+                .input()
+                .cloned()
+                .expect("symbol input")
+        });
         cx.read(|cx| assert_eq!(input.read(cx).value(), "eth"));
 
         // Select-all is cmd-a on macOS, where ctrl-a moves to the line start.
@@ -2623,7 +2627,7 @@ mod timeframe_input {
         cx: &mut VisualTestContext,
     ) -> WorkspaceTabState {
         update_terminal(terminal, cx, |terminal, _, _| {
-            let layout_id = terminal.workspaces[index].saved_layout_id;
+            let layout_id = terminal.tabs[index].saved_layout_id;
             let library = &mut terminal.layout_library;
             library
                 .set_autosave(layout_id, false)
@@ -2650,7 +2654,7 @@ mod timeframe_input {
         cx.read(|cx| {
             terminal
                 .read(cx)
-                .workspaces
+                .tabs
                 .iter()
                 .map(|workspace| (workspace.saved_layout_id, workspace.label.clone()))
                 .collect()
@@ -2666,8 +2670,7 @@ mod timeframe_input {
                 (layouts.start_page_open(), layouts.start_page_shown())
             })
         };
-        let tab_count =
-            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).workspaces.len());
+        let tab_count = |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).tabs.len());
         cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-t");
@@ -2677,7 +2680,7 @@ mod timeframe_input {
         assert_eq!(tab_count(cx), 1, "the placeholder is not a workspace");
         assert!(!cx.update(|window, cx| terminal.read(cx).workspace_keyboard_focused(window, cx)));
 
-        let first = cx.read(|cx| terminal.read(cx).workspaces[0].id);
+        let first = cx.read(|cx| terminal.read(cx).tabs[0].id);
         update_terminal(&terminal, cx, |terminal, _, cx| {
             terminal.select_workspace_id(first, cx);
         });
@@ -2698,9 +2701,9 @@ mod timeframe_input {
         cx.read(|cx| {
             let terminal = terminal.read(cx);
             assert_eq!(terminal.workspace_error, None);
-            assert_eq!(terminal.workspaces.len(), 2);
-            assert_eq!(terminal.active, 1);
-            let created = &terminal.workspaces[1];
+            assert_eq!(terminal.tabs.len(), 2);
+            assert_eq!(terminal.tabs.active_index(), 1);
+            let created = &terminal.tabs[1];
             assert!(
                 created
                     .label
@@ -2743,7 +2746,7 @@ mod timeframe_input {
             let terminal = terminal.read(cx);
             assert_eq!(terminal.workspace_error, None);
             assert!(!terminal.layouts_ui.start_page_open());
-            assert_eq!(terminal.active, 2);
+            assert_eq!(terminal.tabs.active_index(), 2);
         });
         assert_eq!(
             tab_layouts(&terminal, cx),
@@ -2951,7 +2954,7 @@ mod timeframe_input {
         cx.read(|cx| {
             let terminal = terminal.read(cx);
             assert_eq!(terminal.workspace_error.as_ref(), Some(&full));
-            assert_eq!(terminal.workspaces.len(), 1, "no tab opens");
+            assert_eq!(terminal.tabs.len(), 1, "no tab opens");
             assert!(terminal.layouts_ui.start_page_shown());
         });
 
@@ -2965,7 +2968,7 @@ mod timeframe_input {
                 terminal.layouts_ui.name_dialog(),
                 Some((LayoutNamePurpose::Create, Some(full.as_str())))
             );
-            assert_eq!(terminal.workspaces.len(), 1);
+            assert_eq!(terminal.tabs.len(), 1);
             assert_eq!(
                 terminal.layout_library.states().len(),
                 layout_library::MAXIMUM_SAVED_LAYOUTS
@@ -3025,7 +3028,7 @@ mod timeframe_input {
         let open_tab = |name: &str, cx: &mut VisualTestContext| {
             update_terminal(&terminal, cx, |terminal, window, cx| {
                 terminal.add_workspace(name, window, cx).expect("a new tab");
-                let workspace = &terminal.workspaces[terminal.active];
+                let workspace = terminal.tabs.active();
                 (workspace.id, workspace.saved_layout_id)
             })
         };
@@ -3430,18 +3433,6 @@ fn window_close_retirement_is_claimed_exactly_once() {
 }
 
 #[test]
-fn workspace_tabs_switch_one_surface_and_preserve_stable_labels() {
-    assert_eq!(workspace_switch(0, 1, 2), Some((0, 1)));
-    assert_eq!(workspace_switch(1, 1, 2), None);
-    assert_eq!(workspace_switch(0, 2, 2), None);
-    assert_eq!(wrapped_workspace_index(0, 3, -1), Some(2));
-    assert_eq!(wrapped_workspace_index(2, 3, 1), Some(0));
-    assert_eq!(wrapped_workspace_index(1, 3, -1), Some(0));
-    assert_eq!(wrapped_workspace_index(1, 3, 1), Some(2));
-    assert_eq!(wrapped_workspace_index(0, 0, 1), None);
-}
-
-#[test]
 fn chart_splitting_is_bounded_only_by_the_pane_capacity() {
     assert_eq!(super::CHART_PANE_CAPACITY, 64);
 
@@ -3455,33 +3446,6 @@ fn chart_splitting_is_bounded_only_by_the_pane_capacity() {
         );
     }
     assert_eq!(workspace.layout().leaf_ids().len(), 8);
-}
-
-#[test]
-fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
-    let mut ids = vec![1, 2, 3];
-    assert!(reorder_workspace_ids(&mut ids, 1, 2));
-    assert_eq!(ids, vec![2, 3, 1]);
-    assert!(reorder_workspace_ids(&mut ids, 1, 0));
-    assert_eq!(ids, vec![1, 2, 3]);
-    assert!(reorder_workspace_ids(&mut ids, 1, 1));
-    assert_eq!(ids, vec![2, 1, 3]);
-    assert!(reorder_workspace_ids(&mut ids, 1, 0));
-    assert_eq!(ids, vec![1, 2, 3]);
-    assert!(reorder_workspace_ids(&mut ids, 3, 0));
-    assert_eq!(ids, vec![3, 1, 2]);
-    let trailing_index = ids.len();
-    assert!(reorder_workspace_ids(&mut ids, 3, trailing_index));
-    assert_eq!(ids, vec![1, 2, 3]);
-    let trailing_index = ids.len();
-    assert!(!reorder_workspace_ids(&mut ids, 3, trailing_index));
-    assert!(!reorder_workspace_ids(&mut ids, 2, 1));
-    assert!(!reorder_workspace_ids(&mut ids, 99, 0));
-
-    assert_eq!(active_workspace_after_close(&ids, 2, 1), Some(2));
-    assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
-    assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
-    assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
 }
 
 fn saved_workspace_boot_fixture() -> WorkspaceState {
@@ -3645,81 +3609,6 @@ fn workspace_viewport_persistence_ignores_automatic_live_scrolling() {
     assert_eq!(
         durable_workspace_viewport(restored, true, false, current),
         current
-    );
-}
-
-#[test]
-fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
-    let strip_left = 100.0;
-    let widths = [120.0, 176.0, 96.0];
-    let cursor_offset = widths[0] / 2.0;
-    let first_center = strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + cursor_offset;
-    let second_center = first_center + widths[0] + WORKSPACE_TAB_GAP;
-    let third_center = second_center + widths[1] + WORKSPACE_TAB_GAP;
-
-    assert_eq!(
-        workspace_drag_destination(first_center, strip_left, cursor_offset, &widths),
-        Some(0)
-    );
-    assert_eq!(
-        workspace_drag_destination(second_center, strip_left, cursor_offset, &widths),
-        Some(1)
-    );
-    assert_eq!(
-        workspace_drag_destination(third_center, strip_left, cursor_offset, &widths),
-        Some(2)
-    );
-    assert_eq!(
-        workspace_drag_destination(strip_left - 500.0, strip_left, cursor_offset, &widths),
-        Some(0)
-    );
-    assert_eq!(
-        workspace_drag_destination(third_center + 500.0, strip_left, cursor_offset, &widths),
-        Some(2)
-    );
-    assert_eq!(
-        workspace_drag_destination(first_center, strip_left, cursor_offset, &[]),
-        None
-    );
-    assert_eq!(
-        workspace_drag_destination(f32::NAN, strip_left, cursor_offset, &widths),
-        None
-    );
-
-    let drag = WorkspaceDragState {
-        tab_id: 7,
-        cursor_offset_x: cursor_offset,
-        pointer_x: Some(second_center + 10.0),
-        strip_left,
-    };
-    assert_eq!(
-        workspace_drag_translation(Some(drag), 7, 1, &widths),
-        Some(10.0)
-    );
-    assert_eq!(workspace_drag_translation(Some(drag), 8, 1, &widths), None);
-    assert_eq!(
-        workspace_drag_translation(
-            Some(WorkspaceDragState {
-                pointer_x: Some(strip_left - 500.0),
-                ..drag
-            }),
-            7,
-            1,
-            &widths
-        ),
-        Some(-(widths[0] + WORKSPACE_TAB_GAP))
-    );
-    assert_eq!(
-        workspace_drag_translation(
-            Some(WorkspaceDragState {
-                pointer_x: Some(third_center + 500.0),
-                ..drag
-            }),
-            7,
-            1,
-            &widths
-        ),
-        Some(widths[2] + WORKSPACE_TAB_GAP)
     );
 }
 

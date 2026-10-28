@@ -231,7 +231,12 @@ only on the guarded GUI checks on their lines.
     `too_many_lines` allow.
   - Left: GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
 - [ ] M7.5 `TerminalApp` split into app controllers
-  - Left: `TabStrip`, `SymbolEntry`, one `OverlayStack` and `ChartMenus`.
+  - Landed: `desktop/tab_strip.rs` owns the open tabs in order, the selected tab and the tab
+    drag behind private fields; selecting, reordering, adding and closing keep the selection on
+    the same tab and report what changed, and `TerminalApp` drops from 68 to 66 fields.
+    `desktop/symbol_entry.rs` owns each pane's search field, catalog browser, menu target and
+    the pending typed-symbol, product-opening and watchlist-install state behind private fields.
+  - Left: one `OverlayStack` and `ChartMenus`.
   - Bring `TerminalApp` to 15 fields or fewer and remove `struct_excessive_bools`.
   - Turn `#[path]` modules into directories, keeping the `LayoutLibrary` rules.
   - GUI check of tabs, search and menus. Part of UI-07.

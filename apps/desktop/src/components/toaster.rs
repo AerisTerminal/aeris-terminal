@@ -1531,7 +1531,7 @@ impl TerminalApp {
         snapshot: &aeris_trading_runtime::WorkingSet,
         cx: &mut Context<Self>,
     ) {
-        let host = toast_host(&self.workspaces[self.active]);
+        let host = toast_host(self.tabs.active());
         if self.toaster.post_trading_announcements(
             announcements,
             snapshot,
@@ -1546,13 +1546,13 @@ impl TerminalApp {
     /// Shows every pane's triggered alerts. An alert from a chart in another workspace tab lands
     /// on the visible workspace so it is not missed.
     fn announce_price_alerts(&mut self, now: Instant, cx: &mut Context<Self>) {
-        let visible_host = toast_host(&self.workspaces[self.active]);
-        for (index, workspace) in self.workspaces.iter().enumerate() {
+        let visible_host = toast_host(self.tabs.active());
+        for (index, workspace) in self.tabs.iter().enumerate() {
             for pane in &workspace.panes {
                 let announcements = pane
                     .surface
                     .update(cx, |surface, _| surface.take_price_alert_announcements());
-                let host = if index == self.active {
+                let host = if index == self.tabs.active_index() {
                     Some(ToastStack::of(&pane.surface))
                 } else {
                     visible_host
@@ -1572,13 +1572,13 @@ impl TerminalApp {
     pub(super) fn update_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         let panes: BTreeSet<ToastStack> = self
-            .workspaces
+            .tabs
             .iter()
             .flat_map(|workspace| &workspace.panes)
             .map(|pane| ToastStack::of(&pane.surface))
             .collect();
         self.toaster.retain_stacks(|stack| panes.contains(&stack));
-        for pane in &self.workspaces[self.active].panes {
+        for pane in &self.tabs.active().panes {
             let notice = pane_chart_notice(pane.surface.read(cx), cx);
             self.toaster
                 .show_chart_status(ToastStack::of(&pane.surface), notice, now);

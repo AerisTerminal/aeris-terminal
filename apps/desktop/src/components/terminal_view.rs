@@ -16,7 +16,7 @@ fn active_header_state(
         series_label: series_selector_label(workspace.selected_interval()),
         chart_type: workspace.chart_type(cx),
         instruments: workspace.instrument_entries(cx),
-        symbol_input: workspace.symbol_input.clone(),
+        symbol_input: workspace.symbol_entry.input().cloned(),
         indicator_input: workspace.indicator_input.clone(),
         time_zone_id: workspace.chart_time_zone_id().to_string(),
         time_zone_clock: workspace.chart_time_zone_clock(),
@@ -43,7 +43,8 @@ fn active_header_state(
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(
-            workspace.symbol_input.is_some() || workspace.symbol_browser.has_results(),
+            workspace.symbol_entry.input().is_some()
+                || workspace.symbol_entry.browser().has_results(),
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
@@ -420,17 +421,17 @@ impl TerminalApp {
         workspace_title_bar(
             terminal,
             &WorkspaceTabBarState {
-                workspaces: &self.workspaces,
+                workspaces: self.tabs.as_slice(),
                 unsaved: &unsaved,
                 start_page: self
                     .layouts_ui
                     .start_page_open()
                     .then(|| self.layouts_ui.start_page_shown()),
                 market_summaries: &self.market_summaries,
-                active: self.active,
+                active: self.tabs.active_index(),
                 enabled: self.workspace_factory.is_some(),
                 error: self.workspace_error.as_deref(),
-                workspace_drag: self.workspace_drag,
+                workspace_drag: self.tabs.drag(),
                 app_view: self.pages.view,
                 account: self.lifecycle.account(),
                 theme: self.theme,
@@ -526,7 +527,7 @@ impl TerminalApp {
             WorkspaceMarketArea {
                 terminal,
                 trading_store: &self.trading_store,
-                workspace: &self.workspaces[self.active],
+                workspace: self.tabs.active(),
                 active_surface: active,
                 expanded_drawing_toolbar: self.chart_chrome.drawing_toolbar.shown().then_some(
                     DrawingSidebar {
@@ -555,7 +556,7 @@ impl TerminalApp {
             .is_some_and(|chart| chart.read(cx).has_market_data());
         let layout_menu = self.layout_menu_button(
             terminal,
-            self.layout_tab_has_unsaved_changes(self.active, cx),
+            self.layout_tab_has_unsaved_changes(self.tabs.active_index(), cx),
         );
         terminal_header(
             surface,
@@ -699,7 +700,7 @@ impl TerminalApp {
             return self.rendered_start_page_view(terminal, start_page, window, cx);
         }
         let terminal = terminal.clone();
-        let pane_count = self.workspaces[self.active].panes.len();
+        let pane_count = self.tabs.active().panes.len();
         let active = self.active_surface();
         let workspace = active.read(cx);
         let chart_has_market_data = workspace
@@ -744,7 +745,7 @@ impl TerminalApp {
         if self.chart_fullscreen.is_some() {
             // Every chart in the workspace layout fills the screen; a pane maximized with
             // Alt+click stays the only one shown, exactly as in the docked workspace.
-            let workspace = &self.workspaces[self.active];
+            let workspace = self.tabs.active();
             let charts = workspace_pane_grid(&terminal, workspace, &self.toaster, &self.theme, cx);
             return self
                 .page_root()
@@ -986,7 +987,7 @@ fn handle_workspace_tab_key(
         "right" => terminal.select_relative_workspace(index, 1, window, cx),
         "home" => terminal.select_and_focus_workspace(0, window, cx),
         "end" => {
-            let last = terminal.workspaces.len().saturating_sub(1);
+            let last = terminal.tabs.len().saturating_sub(1);
             terminal.select_and_focus_workspace(last, window, cx);
         }
         "enter" | "space" => terminal.select_workspace_id(tab_id, cx),
@@ -1282,15 +1283,9 @@ pub(super) fn workspace_tab_strip(
                     workspace_count: workspaces.len(),
                     drag_enabled: enabled && close_drag_enabled,
                     drag_translation: close_drag_enabled
-                        .then(|| {
-                            workspace_drag_translation(
-                                state.workspace_drag,
-                                workspace.id,
-                                index,
-                                &tab_widths,
-                            )
-                        })
-                        .flatten(),
+                        .then_some(state.workspace_drag)
+                        .flatten()
+                        .and_then(|drag| drag.translation(workspace.id, index, &tab_widths)),
                     theme,
                 },
                 visual,

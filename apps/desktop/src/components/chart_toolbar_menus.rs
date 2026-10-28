@@ -235,26 +235,31 @@ pub(super) fn chrome_overlay_content(
                 label: terminal_instrument_label(app_state),
                 message: app_state.symbol_selector_status(),
                 instruments: app_state.instrument_entries(cx),
-                input: app_state.symbol_input.clone(),
+                input: app_state.symbol_entry.input().cloned(),
                 availability: InstrumentSelectorAvailability {
                     selection_pending: app_state.market_state.symbol_selection_pending,
                     enabled: true,
                 },
                 provider: app_state.provider,
-                scope: app_state.symbol_browser.scope(),
+                scope: app_state.symbol_entry.browser().scope(),
                 menu: InstrumentSelectorMenu {
                     keyboard_selection: app_state.chrome.selection(),
                     keyboard_active: app_state.chrome.list_keyboard_active(),
                 },
                 scroll: app_state.scrolls.instrument.clone(),
-                target: app_state.symbol_selection_target,
+                target: app_state.symbol_entry.target(),
                 connect_provider: app_state
-                    .symbol_browser
+                    .symbol_entry
+                    .browser()
                     .scoped_provider()
                     .filter(|provider| connections.data.disconnected(*provider)),
                 provider_menu_open: app_state.chrome.symbol_provider_menu_open(),
                 flyout_provider: app_state.chrome.symbol_scope_flyout_provider(),
-                learned_exchanges: app_state.symbol_browser.learned_exchanges().to_vec(),
+                learned_exchanges: app_state
+                    .symbol_entry
+                    .browser()
+                    .learned_exchanges()
+                    .to_vec(),
                 search_categories: app_state.chart_chrome.symbol_search_categories,
             },
             theme,
