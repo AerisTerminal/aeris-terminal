@@ -458,7 +458,7 @@ fn pane_harness_chart_buy_intent_fills_through_owner_and_projects_position(
         );
     });
     owner
-        .shutdown(Duration::from_secs(2))
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
         .expect("owner stopped");
     std::fs::remove_dir_all(root).expect("remove test root");
 }
@@ -700,7 +700,7 @@ fn pane_harness_protective_drag_owner_stale_revision_posts_one_notice_and_restor
         assert!(chart.rendered_viewport_size().0 >= 500.0);
     });
     owner
-        .shutdown(Duration::from_secs(2))
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
         .expect("owner stopped");
     std::fs::remove_dir_all(root).expect("remove test root");
 }
@@ -800,7 +800,7 @@ fn pane_harness_open_session_owner_cancels_resting_orders_and_rejects_missing_qu
         );
     });
     owner
-        .shutdown(Duration::from_secs(2))
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
         .expect("owner stopped");
     std::fs::remove_dir_all(root).expect("remove test root");
 }

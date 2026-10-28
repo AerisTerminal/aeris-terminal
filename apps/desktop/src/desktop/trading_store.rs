@@ -649,7 +649,9 @@ mod tests {
             .expect("empty history page");
         assert_eq!(service.history_read_count(), 1);
         store.stop().expect("bridge").join().expect("bridge joined");
-        service.shutdown(Duration::from_secs(2)).expect("shutdown");
+        service
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+            .expect("shutdown");
         std::fs::remove_dir_all(root).expect("remove test-owned root");
     }
 
@@ -1220,7 +1222,7 @@ mod tests {
             "one owner publication"
         );
         service
-            .shutdown(Duration::from_secs(2))
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
             .expect("owner shutdown");
         std::fs::remove_dir_all(root).expect("remove test-owned root");
     }
@@ -1279,7 +1281,7 @@ mod tests {
             "the runtime fill is visible on the chart"
         );
         service
-            .shutdown(Duration::from_secs(2))
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
             .expect("owner shutdown");
         std::fs::remove_dir_all(root).expect("remove test root");
     }
@@ -1365,7 +1367,7 @@ mod tests {
                 .any(|lock| lock.account_id == other_account)
         );
         service
-            .shutdown(Duration::from_secs(2))
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
             .expect("owner shutdown");
         std::fs::remove_dir_all(root).expect("remove test root");
     }
@@ -1673,7 +1675,7 @@ mod tests {
         );
         assert!(store.drain().is_none());
         service
-            .shutdown(Duration::from_secs(2))
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
             .expect("owner shutdown");
         std::fs::remove_dir_all(root).expect("remove test-owned root");
     }

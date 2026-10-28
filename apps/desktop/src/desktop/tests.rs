@@ -5590,7 +5590,7 @@ impl ChartOrderFixture {
 
     fn finish(self) {
         self.service
-            .shutdown(std::time::Duration::from_secs(2))
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
             .expect("shutdown");
         if let Err(error) = std::fs::remove_dir_all(&self.directory) {
             eprintln!("Could not remove chart order fixture directory: {error}");
