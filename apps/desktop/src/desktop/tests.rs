@@ -10,14 +10,14 @@ use super::{
     ProviderCatalogEvent, ProviderConnectionPresentation, ProviderId, SidePanel,
     SidePanelVisibility, SymbolBrowser, SymbolInputAction, SymbolSearchFailure, SymbolSearchScope,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
-    TIMEFRAME_MENU_WIDTH, TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup,
-    WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand,
-    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-    WorkspaceMaximizeTransition, active_workspace_after_close, bounded_status_detail,
-    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
-    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_menu_extent,
-    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    TIMEFRAME_MENU_WIDTH, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
+    WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
+    WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
+    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    catalog_rejection_message, chart_position_id, chart_price_fixed_point,
+    chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
+    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
+    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, counted, current_instrument_menu_index,
     desktop_key_bindings, durable_workspace_viewport, first_selectable_instrument_index,
@@ -4735,18 +4735,6 @@ fn order_entry_is_its_own_market_panel_that_keeps_the_book_demanded() {
     tape_and_watchlist.set(SidePanel::TimeSales, true);
     tape_and_watchlist.set(SidePanel::Watchlist, true);
     assert!(!tape_and_watchlist.needs_order_book());
-}
-
-#[test]
-fn time_sales_filter_reset_restores_every_default_atomically() {
-    let mut filter = TimeSalesFilter {
-        side: TimeSalesSideFilter::Sell,
-        minimum_quantity: 100.0,
-        price_range_ticks: Some(50),
-    };
-    assert!(filter.reset());
-    assert_eq!(filter, TimeSalesFilter::default());
-    assert!(!filter.reset(), "resetting defaults is an idempotent no-op");
 }
 
 #[test]

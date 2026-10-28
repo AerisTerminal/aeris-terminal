@@ -216,8 +216,10 @@ record it on this line.
     the 8-entry announcement ring; the surface only relays accepted lists to the market worker.
     `desktop/studies_controller.rs` owns the active, pending and deferred runtime studies, their
     reinitializations, removals, queued settings and retry pacing behind private fields.
-  - Left: `OrderFlowPresenter`, `PaneChromeState` and `PanePersistence`,
-    each with private fields.
+    `desktop/order_flow_presenter.rs` owns the accepted trade tape and its ordering, the sweep
+    highlights, the Time & Sales filter and rows, the chart trade projection and the order-book
+    demand the market worker accepted behind private fields.
+  - Left: `PaneChromeState` and `PanePersistence`, each with private fields.
   - Remove the `too_many_lines` allow.
   - GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
 - [ ] M7.5 `TerminalApp` split into app controllers

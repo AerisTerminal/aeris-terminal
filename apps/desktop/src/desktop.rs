@@ -72,6 +72,8 @@ mod order_book_panel;
 mod order_entry_panel;
 #[path = "components/order_flow_dialog.rs"]
 mod order_flow_dialog;
+#[path = "desktop/order_flow_presenter.rs"]
+mod order_flow_presenter;
 #[path = "components/order_quantity.rs"]
 mod order_quantity;
 #[path = "components/order_ticket.rs"]
@@ -897,9 +899,7 @@ struct ObservedChart {
 struct WorkspaceSurface {
     chart: Option<Entity<AerisChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
-    trade_tape: Option<aeris_market_runtime::MarketTradeTapeSnapshot>,
-    trade_sweeps: Arc<[OrderFlowSweep]>,
-    time_sales: TimeSalesState,
+    order_flow: order_flow_presenter::OrderFlowPresenter,
     context_panel: context_panel_controller::ContextPanelController,
     chart_link_group: u8,
     chart_link_flags: u8,
@@ -981,8 +981,6 @@ struct WorkspaceSurface {
     restored_chart_state: Option<WorkspaceChartState>,
     chart_persistence_dirty: bool,
     last_chart_user_state_revision: u64,
-    /// The order-book detail the market worker last accepted for this pane.
-    order_book_demand: OrderBookDetail,
     alerts: alerts_controller::AlertsController,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
@@ -1012,67 +1010,6 @@ struct TradingPaneState {
     )>,
     account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum TimeSalesSideFilter {
-    #[default]
-    All,
-    Buy,
-    Sell,
-}
-
-impl TimeSalesSideFilter {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::All => "All sides",
-            Self::Buy => "Buys",
-            Self::Sell => "Sells",
-        }
-    }
-
-    const fn next(self) -> Self {
-        match self {
-            Self::All => Self::Buy,
-            Self::Buy => Self::Sell,
-            Self::Sell => Self::All,
-        }
-    }
-}
-
-/// The Time & Sales filter and the rows it last projected from the trade tape.
-#[derive(Default)]
-struct TimeSalesState {
-    filter: TimeSalesFilter,
-    rows: time_sales_panel::TimeSalesRowsCache,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct TimeSalesFilter {
-    side: TimeSalesSideFilter,
-    minimum_quantity: f64,
-    price_range_ticks: Option<u32>,
-}
-
-impl Default for TimeSalesFilter {
-    fn default() -> Self {
-        Self {
-            side: TimeSalesSideFilter::All,
-            minimum_quantity: 0.0,
-            price_range_ticks: None,
-        }
-    }
-}
-
-impl TimeSalesFilter {
-    fn reset(&mut self) -> bool {
-        let default = Self::default();
-        if *self == default {
-            return false;
-        }
-        *self = default;
-        true
-    }
 }
 
 #[cfg(test)]

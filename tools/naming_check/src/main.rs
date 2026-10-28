@@ -95,9 +95,9 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "copy feedback token",
     ),
     (
-        "apps/desktop/src/desktop/workspace_surface.rs",
+        "apps/desktop/src/desktop/order_flow_presenter.rs",
         4,
-        "accepted tape ordering and study rewrites",
+        "accepted tape ordering and tape prefix rewrites",
     ),
     (
         "apps/desktop/src/desktop/workspace_persistence.rs",

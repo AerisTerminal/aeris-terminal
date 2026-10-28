@@ -14,7 +14,7 @@ pub(super) struct TimeSalesRowsCache(RefCell<Option<TimeSalesRows>>);
 struct TimeSalesRows {
     trades: Arc<[aeris_market_runtime::RetainedMarketTrade]>,
     quantity_scale: u8,
-    filter: super::TimeSalesFilter,
+    filter: super::order_flow_presenter::TimeSalesFilter,
     range: Option<(i128, i128)>,
     indices: Vec<usize>,
 }
@@ -25,7 +25,7 @@ impl TimeSalesRowsCache {
         snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
         product: Option<&InstallProviderInstrument>,
         book: Option<&aeris_market_data::OrderBookFrame>,
-        filter: super::TimeSalesFilter,
+        filter: super::order_flow_presenter::TimeSalesFilter,
     ) -> Vec<usize> {
         // The book mid only matters while the price-range filter is active.
         let range = filter.price_range_ticks.and(
@@ -67,7 +67,7 @@ pub(super) struct TimeSalesPanelState<'a> {
     pub(super) product: Option<&'a InstallProviderInstrument>,
     /// Current book, whose mid anchors the price-range filter.
     pub(super) book: Option<&'a aeris_market_data::OrderBookFrame>,
-    pub(super) filter: super::TimeSalesFilter,
+    pub(super) filter: super::order_flow_presenter::TimeSalesFilter,
     pub(super) scroll: &'a ScrollHandle,
     /// The provider's name when it publishes no trade prints, so the panel says so
     /// instead of waiting on an empty tape.
@@ -165,7 +165,7 @@ fn trade_tape_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> State
 
 fn time_sales_filters(
     app: &Entity<WorkspaceSurface>,
-    filter: super::TimeSalesFilter,
+    filter: super::order_flow_presenter::TimeSalesFilter,
     theme: &AerisTheme,
 ) -> Div {
     let side_filter_app = app.clone();
@@ -241,7 +241,7 @@ fn time_sales_rows(
 /// `range` is the doubled book mid and the price increment while the range filter applies.
 fn filtered_time_sales_rows(
     snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
-    filter: super::TimeSalesFilter,
+    filter: super::order_flow_presenter::TimeSalesFilter,
     range: Option<(i128, i128)>,
 ) -> Vec<usize> {
     const MAXIMUM_VISIBLE_TRADES: usize = 96;
@@ -252,11 +252,11 @@ fn filtered_time_sales_rows(
         .enumerate()
         .rev()
         .filter(|(_, retained)| match filter.side {
-            super::TimeSalesSideFilter::All => true,
-            super::TimeSalesSideFilter::Buy => {
+            super::order_flow_presenter::TimeSalesSideFilter::All => true,
+            super::order_flow_presenter::TimeSalesSideFilter::Buy => {
                 retained.trade.aggressor == aeris_market_data::AggressorSide::Buy
             }
-            super::TimeSalesSideFilter::Sell => {
+            super::order_flow_presenter::TimeSalesSideFilter::Sell => {
                 retained.trade.aggressor == aeris_market_data::AggressorSide::Sell
             }
         })
@@ -445,10 +445,10 @@ mod tests {
         // A late covering history trade (ordinal 3) is older than the live trades.
         let snapshot = tape(vec![trade(1, 10, 1), trade(2, 20, 5), trade(3, 5, 5)]);
         let cache = TimeSalesRowsCache::default();
-        let filter = super::super::TimeSalesFilter::default();
+        let filter = super::super::order_flow_presenter::TimeSalesFilter::default();
         assert_eq!(cache.rows(&snapshot, None, None, filter), vec![1, 0, 2]);
 
-        let large = super::super::TimeSalesFilter {
+        let large = super::super::order_flow_presenter::TimeSalesFilter {
             minimum_quantity: 2.0,
             ..filter
         };

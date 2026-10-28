@@ -457,12 +457,12 @@ pub(super) fn workspace_market_area(
             },
             time_sales: TimeSalesPanelState {
                 app: active_surface.clone(),
-                tape: surface.trade_tape.as_ref(),
-                rows_cache: &surface.time_sales.rows,
-                sweeps: &surface.trade_sweeps,
+                tape: surface.order_flow.tape(),
+                rows_cache: surface.order_flow.time_sales_rows(),
+                sweeps: surface.order_flow.sweeps(),
                 product: surface.product.as_ref(),
                 book: order_book_frame.as_ref(),
-                filter: surface.time_sales.filter,
+                filter: surface.order_flow.time_sales_filter(),
                 scroll: &surface.scrolls.time_sales,
                 trades_unavailable_from: (!super::provider_trades_available(surface.provider))
                     .then(|| surface.provider.display()),

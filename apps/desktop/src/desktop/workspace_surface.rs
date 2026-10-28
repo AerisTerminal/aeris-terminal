@@ -2,6 +2,9 @@
 
 use super::alerts_controller::AlertsController;
 use super::context_panel_controller::ContextPanelController;
+use super::order_flow_presenter::{
+    ChartTradeProjection, OrderBookDemandChange, OrderFlowPresenter,
+};
 use super::studies_controller::{StudiesController, StudySettingsRequest};
 use super::*;
 use aeris_observability::diagnostic;
@@ -127,9 +130,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
     WorkspaceSurface {
         chart: init.startup.chart,
         order_book: init.order_book,
-        trade_tape: None,
-        trade_sweeps: Arc::from([]),
-        time_sales: TimeSalesState::default(),
+        order_flow: OrderFlowPresenter::default(),
         context_panel: init.context_panel,
         chart_link_group: init.chart_link_group,
         chart_link_flags: init.chart_link_flags,
@@ -208,7 +209,6 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         restored_chart_state: init.restored_chart_state,
         chart_persistence_dirty: false,
         last_chart_user_state_revision: 0,
-        order_book_demand: OrderBookDetail::Hidden,
         alerts: init.alerts,
         #[cfg(feature = "diagnostics")]
         foreground_interactions: ForegroundInteractionDiagnostics::default(),
@@ -270,60 +270,6 @@ fn order_flow_aggregation(interval: ChartInterval) -> OrderFlowAggregation {
                 .saturating_mul(1_000_000),
         ),
     }
-}
-
-fn scaled_market_value(value: i64, scale: u8) -> Option<f64> {
-    let divisor = 10_f64.powi(i32::from(scale));
-    let converted = num_traits::ToPrimitive::to_f64(&value)? / divisor;
-    converted.is_finite().then_some(converted)
-}
-
-/// The first retained trade a chart update still needs. Keeping one trade the chart
-/// already applied preserves the window's continuity evidence, and the trailing
-/// `tail_window` trades are always projected for the sweep classifier.
-fn order_flow_projection_start(
-    trades: &[aeris_market_runtime::RetainedMarketTrade],
-    resume_ordinal: Option<u64>,
-    tail_window: usize,
-) -> usize {
-    let Some(applied) = resume_ordinal else {
-        return 0;
-    };
-    let next = trades.partition_point(|trade| trade.ingestion_ordinal <= applied);
-    next.saturating_sub(1)
-        .min(trades.len().saturating_sub(tail_window))
-}
-
-fn chart_order_flow_trades(
-    snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
-    start: usize,
-) -> Option<Vec<OrderFlowTrade>> {
-    snapshot
-        .trades
-        .get(start..)?
-        .iter()
-        .map(|retained| {
-            let trade = retained.trade.as_ref();
-            let timestamp_nanos = trade
-                .metadata
-                .timestamps
-                .exchange_unix_nanos
-                .or(trade.metadata.timestamps.provider_unix_nanos)
-                .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
-            Some(OrderFlowTrade {
-                ingestion_ordinal: retained.ingestion_ordinal,
-                timestamp_micros: timestamp_nanos.div_euclid(1_000),
-                price: scaled_market_value(trade.price, snapshot.price_scale)?,
-                volume: scaled_market_value(trade.quantity, snapshot.quantity_scale)?,
-                aggressor: match trade.aggressor {
-                    aeris_market_data::AggressorSide::Buy => ChartAggressorSide::Buy,
-                    aeris_market_data::AggressorSide::Sell => ChartAggressorSide::Sell,
-                    aeris_market_data::AggressorSide::Unknown => ChartAggressorSide::Unknown,
-                },
-                session_id: retained.trading_day.and_then(|day| u64::try_from(day).ok()),
-            })
-        })
-        .collect()
 }
 
 /// Keeps the charts of every pane showing one saved layout on the layout's drawing set: every
@@ -3474,7 +3420,7 @@ impl WorkspaceSurface {
         self.sync_order_book_demand(cx);
         // Interval switches keep the instrument's tape; project it into the new chart now
         // instead of leaving the footprint empty until the next tape revision.
-        if let Some(tape) = self.trade_tape.clone() {
+        if let Some(tape) = self.order_flow.tape().cloned() {
             self.apply_trade_tape_to_chart(&tape, cx);
         }
         self.apply_order_book_to_chart(cx);
@@ -4249,16 +4195,9 @@ impl WorkspaceSurface {
                 && snapshot.instrument_id == product.instrument_id
                 && snapshot.entitlement_id == product.entitlement_id
         });
-        if is_current
-            && self.trade_tape.as_ref().is_none_or(|current| {
-                current.generation != snapshot.generation
-                    || (snapshot.provider_generation >= current.provider_generation
-                        && (current.provider_generation != snapshot.provider_generation
-                            || snapshot.revision >= current.revision))
-            })
-        {
+        if is_current && self.order_flow.supersedes(&snapshot) {
             self.apply_trade_tape_to_chart(&snapshot, cx);
-            self.trade_tape = Some(snapshot);
+            self.order_flow.adopt_tape(snapshot);
             cx.notify();
         }
     }
@@ -5222,9 +5161,7 @@ impl WorkspaceSurface {
                     order_book.clear(order_book_cx);
                 });
                 self.clear_chart_order_book_depth(cx);
-                self.trade_tape = None;
-                self.trade_sweeps = Arc::from([]);
-                self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
+                self.order_flow.clear_instrument();
             }
         }
         self.restored_viewport = None;
@@ -5264,9 +5201,7 @@ impl WorkspaceSurface {
             order_book.clear(order_book_cx);
         });
         self.clear_chart_order_book_depth(cx);
-        self.trade_tape = None;
-        self.trade_sweeps = Arc::from([]);
-        self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
+        self.order_flow.clear_instrument();
         let restored = product.and_then(|product| {
             self.market_worker
                 .try_select_instrument(product, interval)
@@ -5749,7 +5684,7 @@ impl WorkspaceSurface {
                 Self::clear_indicator_failure("order_flow", cx);
                 self.retained_chart_presentation.rejected_saved.order_flow = false;
                 self.chart_persistence_dirty = true;
-                if let Some(snapshot) = self.trade_tape.clone() {
+                if let Some(snapshot) = self.order_flow.tape().cloned() {
                     self.apply_trade_tape_to_chart(&snapshot, cx);
                 }
                 self.sync_order_book_demand(cx);
@@ -5771,31 +5706,22 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn cycle_time_sales_side_filter(&mut self, cx: &mut Context<Self>) {
-        self.time_sales.filter.side = self.time_sales.filter.side.next();
+        self.order_flow.cycle_time_sales_side();
         cx.notify();
     }
 
     pub(super) fn cycle_time_sales_size_filter(&mut self, cx: &mut Context<Self>) {
-        self.time_sales.filter.minimum_quantity = match self.time_sales.filter.minimum_quantity {
-            value if value < 1.0 => 1.0,
-            value if value < 10.0 => 10.0,
-            value if value < 100.0 => 100.0,
-            _ => 0.0,
-        };
+        self.order_flow.cycle_time_sales_size();
         cx.notify();
     }
 
     pub(super) fn cycle_time_sales_price_filter(&mut self, cx: &mut Context<Self>) {
-        self.time_sales.filter.price_range_ticks = match self.time_sales.filter.price_range_ticks {
-            None => Some(10),
-            Some(10) => Some(50),
-            Some(_) => None,
-        };
+        self.order_flow.cycle_time_sales_price_range();
         cx.notify();
     }
 
     pub(super) fn reset_time_sales_filter(&mut self, cx: &mut Context<Self>) {
-        if self.time_sales.filter.reset() {
+        if self.order_flow.reset_time_sales_filter() {
             cx.notify();
         }
     }
@@ -5949,7 +5875,6 @@ impl WorkspaceSurface {
         snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
         cx: &mut Context<Self>,
     ) {
-        const SWEEP_CLASSIFICATION_WINDOW: usize = 512;
         // Retain the replacement's tape, but do not even invalidate the old
         // chart's resume cursor when its prefix was rewritten. Installation of
         // the covering snapshot projects the retained tape into the new chart.
@@ -5971,10 +5896,7 @@ impl WorkspaceSurface {
             .filter(|tick| tick.is_finite() && *tick > 0.0);
         let identity = product.instrument_id.clone();
         let aggregation = order_flow_aggregation(self.interval);
-        let rewritten = self
-            .trade_tape
-            .as_ref()
-            .is_some_and(|prior| prior.rewrite_generation != snapshot.rewrite_generation);
+        let rewritten = self.order_flow.rewrites(snapshot);
         let resume_ordinal = chart.update(cx, |chart, _| {
             if rewritten {
                 chart.invalidate_order_flow_prefix();
@@ -5988,23 +5910,14 @@ impl WorkspaceSurface {
                 )
             })
         });
-        let start = if tick_size.is_some() {
-            order_flow_projection_start(
-                &snapshot.trades,
-                resume_ordinal,
-                SWEEP_CLASSIFICATION_WINDOW,
-            )
+        let projection = if tick_size.is_some() {
+            ChartTradeProjection::Footprint { resume_ordinal }
         } else {
-            snapshot
-                .trades
-                .len()
-                .saturating_sub(SWEEP_CLASSIFICATION_WINDOW)
+            ChartTradeProjection::SweepsOnly
         };
-        let Some(trades) = chart_order_flow_trades(snapshot, start) else {
+        let Some(trades) = self.order_flow.project_chart_trades(snapshot, projection) else {
             return;
         };
-        let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
-        self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
         let Some(tick_size) = tick_size else {
             chart.update(cx, |chart, chart_cx| {
                 chart.clear_order_flow_trades();
@@ -6061,7 +5974,7 @@ impl WorkspaceSurface {
                 chart_cx.notify();
             });
         }
-        if let Some(snapshot) = self.trade_tape.clone() {
+        if let Some(snapshot) = self.order_flow.tape().cloned() {
             self.apply_trade_tape_to_chart(&snapshot, cx);
         }
         self.save_chart_chrome_preferences(cx);
@@ -6594,10 +6507,10 @@ impl WorkspaceSurface {
     /// it. A request the worker could not take is sent again on the next change.
     pub(super) fn sync_order_book_demand(&mut self, cx: &mut Context<Self>) {
         let demand = self.order_book_detail(cx);
-        if demand == self.order_book_demand {
+        let Some(change) = self.order_flow.order_book_demand_change(demand) else {
             return;
-        }
-        if self.order_book_demand == OrderBookDetail::Hidden {
+        };
+        if change == OrderBookDemandChange::Opening {
             self.order_book
                 .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
         }
@@ -6621,7 +6534,7 @@ impl WorkspaceSurface {
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             }));
         } else {
-            self.order_book_demand = demand;
+            self.order_flow.record_order_book_demand(demand);
             cx.emit(PaneNoticeEvent::Clear(key));
         }
     }
