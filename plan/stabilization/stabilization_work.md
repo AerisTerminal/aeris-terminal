@@ -744,8 +744,9 @@ still wait on the GUI checks and the remaining work on their lines.
     `diagnostics` feature and the Rithmic adapter's `live-gates` feature, which `rithmic_test_smoke`
     now requires (`live_market_gates.yml` passes it). naming_check
     `live_market_gate_stays_out_of_production_builds` keeps the gate and the allowed enablers.
+  - Landed: `.gitignore` drops `/financial-charts/`, `/.reference/`, `__pycache__/` and
+    `local-data/` (nothing produces them), and naming_check stops skipping the last two.
   - Left: trim the `gpui_base` LSP editor, then lint and pin it.
-  - Prune `.gitignore`.
   - GUI text-input check. Closes PL-10, PL-12 and PL-19.
 - [ ] M8.12 Structural naming_check and final docs
   - Left: structural checks with a recursive markdown inventory, with text pins replaced by

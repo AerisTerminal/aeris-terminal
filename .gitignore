@@ -1,10 +1,6 @@
 /target/
 /third_party/gpui_base/target/
 /third_party/gpui_base/Cargo.lock
-/financial-charts/
 /.cache/
-/.reference/
 /rithmic_proto_kit/
-local-data/
 /.cursor/
-__pycache__/

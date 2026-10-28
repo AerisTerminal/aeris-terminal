@@ -18,9 +18,7 @@ fn read_source(path: impl AsRef<Path>) -> io::Result<String> {
 /// icon and font assets shipped under their upstream names, and gitignored runtime data.
 const SKIPPED_DIRECTORIES: &[&str] = &[
     ".git",
-    "__pycache__",
     "assets",
-    "local-data",
     "node_modules",
     "target",
     "third_party",
