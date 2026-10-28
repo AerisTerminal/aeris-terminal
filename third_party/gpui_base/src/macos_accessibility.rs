@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "forwarding AppKit hit tests installs an Objective-C method through the runtime FFI"
+)]
+
 use std::{ffi::CString, ptr::null_mut};
 
 use gpui::Window;

@@ -297,15 +297,16 @@ mod tests {
         }
     }
 
-    fn harness(
-        cx: &mut TestAppContext,
-        disabled: bool,
-    ) -> (
-        &mut VisualTestContext,
+    /// The window context and the button click, parent click and keyboard
+    /// event counters.
+    type Harness<'a> = (
+        &'a mut VisualTestContext,
         Rc<Cell<usize>>,
         Rc<Cell<usize>>,
         Rc<Cell<usize>>,
-    ) {
+    );
+
+    fn harness(cx: &mut TestAppContext, disabled: bool) -> Harness<'_> {
         let button_clicks = Rc::new(Cell::new(0));
         let parent_clicks = Rc::new(Cell::new(0));
         let keyboard_events = Rc::new(Cell::new(0));

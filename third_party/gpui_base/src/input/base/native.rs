@@ -1,4 +1,8 @@
 #[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "the text content type bridge adds Objective-C methods to the GPUI view through the runtime FFI"
+)]
 mod macos {
     use std::{cell::RefCell, collections::HashMap, mem, ptr, sync::Once};
 

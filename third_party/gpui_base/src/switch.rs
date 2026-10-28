@@ -533,17 +533,17 @@ mod tests {
         }
     }
 
-    fn harness(
-        cx: &mut TestAppContext,
-        checked: bool,
-        disabled: bool,
-    ) -> (
-        &mut VisualTestContext,
+    /// The window context and the toggle count, keyboard event count, last
+    /// toggled value and parent click count.
+    type Harness<'a> = (
+        &'a mut VisualTestContext,
         Rc<Cell<usize>>,
         Rc<Cell<usize>>,
         Rc<Cell<bool>>,
         Rc<Cell<usize>>,
-    ) {
+    );
+
+    fn harness(cx: &mut TestAppContext, checked: bool, disabled: bool) -> Harness<'_> {
         let toggles = Rc::new(Cell::new(0));
         let keyboard_events = Rc::new(Cell::new(0));
         let last_value = Rc::new(Cell::new(checked));

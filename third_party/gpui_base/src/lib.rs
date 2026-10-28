@@ -12,8 +12,6 @@
 
 pub mod actions;
 pub mod animation;
-#[doc(hidden)]
-pub mod async_util;
 mod auto_scroll;
 mod button;
 pub mod component_traits;
@@ -24,7 +22,6 @@ mod global_state;
 pub mod input;
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_accessibility;
-mod measure;
 mod scrollbar;
 mod state_style;
 mod styled;
@@ -42,16 +39,13 @@ pub use event::{InteractiveElementExt, OngoingScrollExt};
 pub use geometry::*;
 pub use global_state::GlobalState;
 pub use input::{
-    Editor, Input, InputBase, InputStyles, NumberInputEvent, NumberStep, StepAction, Textarea,
+    Input, InputBase, InputStyles, NumberInputEvent, NumberStep, StepAction, Textarea,
 };
 #[cfg(all(target_os = "macos", not(test)))]
 #[doc(hidden)]
 pub use macos_accessibility::install_window_hit_test_forwarder;
-pub use measure::{Measure, measure, measure_if};
 pub use scrollbar::{Scrollbar, ScrollbarHandle, ScrollbarMode, ScrollbarMotion, ScrollbarStyles};
 pub use state_style::StateStyle;
-#[cfg(any(feature = "inspector", debug_assertions))]
-pub use styled::styled_ext_reflection_methods;
 pub use styled::{RoleOverride, StyledExt, box_shadow, h_flex, v_flex};
 pub use switch::{
     Switch, SwitchStyles, SwitchThumb, SwitchThumbStyles, SwitchTrack, SwitchTrackStyles,

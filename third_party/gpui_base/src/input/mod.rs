@@ -1,4 +1,4 @@
-//! Text input: the shared editing engine and the three states built on it.
+//! Text input: the shared editing engine and the two states built on it.
 //!
 //! Nothing here should be `pub` unless it is reachable from outside the crate.
 //! A `pub` on an item behind a private module says something the module path
@@ -17,11 +17,14 @@ pub enum StepAction {
     Increment,
 }
 
+/// Computes the step from the current value and the stepping direction.
+type StepFn = Rc<dyn Fn(f64, StepAction, &mut App) -> f64>;
+
 /// Strategy used by numeric editors when stepping their value.
 #[derive(Clone)]
 pub enum NumberStep {
     Fixed(f64),
-    ByValue(Rc<dyn Fn(f64, StepAction, &mut gpui::App) -> f64>),
+    ByValue(StepFn),
 }
 
 impl NumberStep {
@@ -55,26 +58,18 @@ pub(crate) mod blink_cursor;
 mod change;
 #[path = "base/cursor.rs"]
 mod cursor;
-#[path = "editor/decorations.rs"]
-mod decorations;
-#[path = "editor/diagnostics.rs"]
-mod diagnostics;
-#[path = "editor/display_map/mod.rs"]
+#[path = "base/display_map/mod.rs"]
 mod display_map;
-mod editor;
+#[path = "base/editor_style.rs"]
+mod editor_style;
 #[path = "base/element.rs"]
 mod element;
-#[path = "editor/highlighting.rs"]
-mod highlighting;
-#[path = "editor/indent.rs"]
+#[path = "base/indent.rs"]
 mod indent;
-mod input;
 #[path = "base/kind.rs"]
 mod kind;
 #[path = "base/layout.rs"]
 mod layout;
-#[path = "editor/lsp/mod.rs"]
-mod lsp;
 #[path = "base/mask_pattern.rs"]
 mod mask_pattern;
 #[path = "base/mode.rs"]
@@ -85,10 +80,9 @@ mod movement;
 mod native;
 #[path = "base/rope_ext.rs"]
 mod rope_ext;
-#[path = "editor/search.rs"]
-mod search;
 #[path = "base/selection.rs"]
 mod selection;
+mod single_line;
 #[path = "base/state.rs"]
 mod state;
 mod textarea;
@@ -101,37 +95,19 @@ pub(crate) fn init(cx: &mut App) {
 
 pub use base::{InputBase, InputContextMenuCapabilities, InputStyles};
 pub use cursor::Selection;
-pub use decorations::{TextDecoration, TextDecorationCollection};
-pub use diagnostics::{
-    Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,
-    DiagnosticSummary, DiagnosticTag, RelatedInformation,
-};
-pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange, WrappingIndent};
-pub use editor::{Editor, EditorState};
-pub use highlighting::{
-    DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,
-    InputHighlighterFactory, SharedHighlightStyleResolver,
-};
+pub(crate) use display_map::DisplayMap;
+pub use display_map::WrappingIndent;
+pub use editor_style::InputEditorStyle;
 pub use indent::TabSize;
-pub use input::{Input, InputState};
+pub use single_line::{Input, InputState};
 impl EventEmitter<NumberInputEvent> for InputState {}
-pub use kind::{
-    EditorExtras, EditorMode, InputExtras, InputMode, InputModeKind, MultiLineMode, TextareaMode,
-};
-pub use lsp::{
-    CodeActionItem, CodeActionMenuState, CodeActionProvider, CompletionMenuOptions,
-    CompletionMenuState, CompletionProvider, DefinitionProvider, DocumentColorProvider,
-    DocumentRangeSemanticTokensProvider, HoverPopoverState, HoverProvider, InputOverlayKind, Lsp,
-    ShowDocumentHandler,
-};
-pub use lsp_types::Position;
+pub use kind::{InputMode, InputModeKind, MultiLineMode, TextareaMode};
 pub use mask_pattern::MaskPattern;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use native::set_text_content_type;
 pub use native::{NativeMenu, NativeMenuItem};
-pub use rope_ext::{InputEdit, Point, RopeExt, RopeLines};
+pub use rope_ext::{Point, RopeExt, RopeLines};
 pub use ropey::Rope;
-pub use search::{SearchMatcher, SearchSession};
 pub use state::*;
 pub use textarea::{Textarea, TextareaState};

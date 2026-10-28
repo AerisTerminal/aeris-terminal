@@ -217,7 +217,10 @@ violations and missing verification explicitly, and never describe them as satis
 - `unsafe` is isolated to target-specific FFI under `crates/platform_sys/src/windows/` and
   `crates/platform_sys/src/macos/`, whose blocks require documented, single-operation safety
   justifications. Every other crate inherits the workspace `unsafe_code = "forbid"`; only
-  `platform_sys` may lower it in its manifest. `platform_runtime` keeps the safe event streams
+  `platform_sys` may lower it in its manifest. The one exception is the pinned GPUI component
+  base `third_party/gpui_base` (a workspace member with its own `unsafe_code = "deny"` and
+  `clippy::all` lints), whose macOS Objective-C bridges `src/macos_accessibility.rs` and
+  `src/input/base/native.rs` alone allow it. `platform_runtime` keeps the safe event streams
   over the `platform_sys` power, network and session-shutdown registrations.
 - `platform_sys` is a leaf crate. Only `platform_runtime`, `trading_runtime`, and `observability`
   may depend on it directly.
@@ -753,7 +756,6 @@ new copy under `target/`, and GPUI debug builds have grown it past 70 GB in a fe
 - Before building a new desktop binary (`cargo build` or `cargo run`, debug or release), run
   `cargo clean` so the old `target/` is removed completely and only the new build remains.
 - Before each verification batch, check the size of `target/`; above 25 GB, run `cargo clean` first.
-  Clean `third_party/gpui_base/target` the same way when it exists.
 - Never run `cargo clean` while another Cargo process is building in this workspace.
 - Delete each validation root under `%LOCALAPPDATA%\Temp\aeris_validation\` once its run is finished
   and its evidence is recorded; do not leave per-attempt roots behind.

@@ -7189,18 +7189,65 @@ jobs:
                 "gpui_base retained pruned module {removed}"
             );
         }
-        let manifest = manifest("third_party/gpui_base/Cargo.toml");
+        let input_module = manifest("third_party/gpui_base/src/input/mod.rs");
+        for (path, text) in [
+            ("third_party/gpui_base/src/lib.rs", &source),
+            ("third_party/gpui_base/src/input/mod.rs", &input_module),
+        ] {
+            for removed in ["lsp", "EditorState"] {
+                assert!(
+                    !text.contains(removed),
+                    "{path} retained the code-editor surface {removed}"
+                );
+            }
+        }
+        let manifest_text = manifest("third_party/gpui_base/Cargo.toml");
         for removed in [
             "chrono =",
             "futures =",
             "markdown =",
             "html5ever =",
             "syntect =",
+            "lsp-types",
         ] {
             assert!(
-                !manifest.contains(removed),
+                !manifest_text.contains(removed),
                 "gpui_base retained unused dependency {removed}"
             );
         }
+        let workspace = manifest("Cargo.toml");
+        let members = workspace
+            .split_once("members = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(members, _)| members)
+            .expect("the workspace manifest lists its members");
+        assert!(
+            members.contains("\"third_party/gpui_base\""),
+            "gpui_base must be a workspace member so it builds against the workspace lockfile"
+        );
+        assert!(
+            manifest_text.contains("unsafe_code = \"deny\""),
+            "gpui_base must deny unsafe code outside its Objective-C bridges"
+        );
+        let unsafe_allowed: BTreeSet<String> =
+            production_sources_under("third_party/gpui_base/src")
+                .iter()
+                .filter(|path| {
+                    fs::read_to_string(path)
+                        .unwrap_or_else(|error| {
+                            panic!("failed to read {}: {error}", path.display())
+                        })
+                        .contains("unsafe_code,")
+                })
+                .map(|path| relative_string(path))
+                .collect();
+        assert_eq!(
+            unsafe_allowed,
+            BTreeSet::from([
+                "third_party/gpui_base/src/input/base/native.rs".to_string(),
+                "third_party/gpui_base/src/macos_accessibility.rs".to_string(),
+            ]),
+            "only the macOS Objective-C bridges in gpui_base may allow unsafe code"
+        );
     }
 }

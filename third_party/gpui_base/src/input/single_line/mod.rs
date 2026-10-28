@@ -5,8 +5,8 @@ use super::{InputBaseState, InputMode};
 /// State for a single-line text input.
 ///
 /// This is the shared editing engine in its single-line kind. Multi-line
-/// layout, auto-grow, and code-editor configuration do not exist on this type —
-/// those methods live on [`super::TextareaState`] and [`super::EditorState`].
+/// layout and auto-grow do not exist on this type — those methods live on
+/// [`super::TextareaState`].
 pub type InputState = InputBaseState<InputMode>;
 
 /// An unstyled single-line text input.

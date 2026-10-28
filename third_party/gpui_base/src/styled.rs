@@ -71,10 +71,6 @@ macro_rules! font_weight {
     };
 }
 
-#[cfg_attr(
-    any(feature = "inspector", debug_assertions),
-    gpui_macros::derive_inspector_reflection
-)]
 pub trait StyledExt: Styled + Sized {
     fn refine_style(mut self, style: &StyleRefinement) -> Self {
         self.style().refine(style);
@@ -203,12 +199,6 @@ pub trait StyledExt: Styled + Sized {
 }
 
 impl<E: Styled> StyledExt for E {}
-
-#[cfg(any(feature = "inspector", debug_assertions))]
-pub fn styled_ext_reflection_methods<T: Styled + 'static>()
--> Vec<gpui::inspector_reflection::FunctionReflection<T>> {
-    styled_ext_reflection::methods::<T>()
-}
 
 fn hsl(hue: f32, saturation: f32, lightness: f32) -> Hsla {
     hsla(hue / 360., saturation / 100., lightness / 100., 1.)

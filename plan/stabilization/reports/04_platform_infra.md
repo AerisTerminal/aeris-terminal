@@ -281,6 +281,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: A full component library was vendored to obtain a text input.
 - Fix: Trim the vendor to the used modules (or replace with a small input component in `terminal_ui`), add it to the workspace with lints, and pin dependencies through the workspace.
 - Verification: `cargo tree -i lsp-types` empty; `gpui_base` appears in `cargo metadata` workspace members.
+- Status (2026-10-28, M8.11): fixed in code. The editor and LSP code are deleted (about 15k lines remain), `lsp-types` is gone, and `gpui-base` is a workspace member with pinned dependencies, denied unsafe outside its two macOS bridges and `clippy::all`. The GUI text-input check is still open.
 
 ### PL-13 `study_sdk` depends on `market_runtime`
 

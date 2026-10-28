@@ -26,8 +26,8 @@ members = [
     "tools/naming_check",
     "tools/aeris_probes",
     "tools/release_packager",
+    "third_party/gpui_base",
 ]
-exclude = ["third_party/gpui_base"]
 resolver = "3"
 
 [workspace.package]
@@ -79,6 +79,17 @@ rpassword = "=7.5.4"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 gpui-base = { path = "third_party/gpui_base" }
+# The pinned GPUI component base (`third_party/gpui_base`) dependencies, at their resolved versions.
+objc2 = "=0.6.4"
+objc2-app-kit = { version = "=0.3.2", features = ["NSView", "NSWindow"] }
+objc2-foundation = { version = "=0.3.2", features = ["NSGeometry", "NSString"] }
+raw-window-handle = "=0.6.2"
+regex = "=1.13.1"
+ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
+schemars = "=1.2.2"
+smallvec = "=1.16.2"
+sum-tree = { version = "=0.2.0", package = "zed-sum-tree" }
+unicode-segmentation = "=1.13.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", default-features = false, features = ["font-kit", "wayland", "x11"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }

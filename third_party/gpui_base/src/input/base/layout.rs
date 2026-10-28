@@ -21,7 +21,6 @@ pub(super) struct LastLayout {
     pub(super) line_height: Pixels,
     pub(super) wrap_width: Option<Pixels>,
     pub(super) wrapping_indent: WrappingIndent,
-    pub(super) line_number_width: Pixels,
     pub(super) cursor_bounds: Option<Bounds<Pixels>>,
     pub(super) text_align: TextAlign,
     pub(super) content_width: Pixels,

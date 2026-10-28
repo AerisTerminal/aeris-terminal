@@ -14,9 +14,7 @@ use gpui::{
 /// ```
 /// use gpui_base::input::InputContextMenuCapabilities;
 ///
-/// let capabilities = InputContextMenuCapabilities::new()
-///     .code_editor(true)
-///     .selection(true);
+/// let capabilities = InputContextMenuCapabilities::new().selection(true);
 ///
 /// assert!(capabilities.is_editable());
 /// assert!(capabilities.has_selection());
@@ -25,11 +23,8 @@ use gpui::{
 pub struct InputContextMenuCapabilities {
     disabled: bool,
     readonly: bool,
-    code_editor: bool,
     selection: bool,
     masked: bool,
-    go_to_definition: bool,
-    code_actions: bool,
 }
 
 impl InputContextMenuCapabilities {
@@ -47,11 +42,6 @@ impl InputContextMenuCapabilities {
         self
     }
 
-    pub fn code_editor(mut self, code_editor: bool) -> Self {
-        self.code_editor = code_editor;
-        self
-    }
-
     /// Set whether the input has a non-empty selection.
     pub fn selection(mut self, selection: bool) -> Self {
         self.selection = selection;
@@ -61,16 +51,6 @@ impl InputContextMenuCapabilities {
     /// Set whether the input renders its value masked.
     pub fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
-        self
-    }
-
-    pub fn go_to_definition(mut self, go_to_definition: bool) -> Self {
-        self.go_to_definition = go_to_definition;
-        self
-    }
-
-    pub fn code_actions(mut self, code_actions: bool) -> Self {
-        self.code_actions = code_actions;
         self
     }
 
@@ -84,14 +64,10 @@ impl InputContextMenuCapabilities {
 
     /// Returns true if the user is allowed to change the text.
     ///
-    /// The items that write to the input (Cut, Paste, Code Actions) belong to
-    /// this, the reading ones (Copy, Go to Definition) do not.
+    /// The items that write to the input (Cut, Paste) belong to this, the
+    /// reading one (Copy) does not.
     pub fn is_editable(&self) -> bool {
         !self.disabled && !self.readonly
-    }
-
-    pub fn is_code_editor(&self) -> bool {
-        self.code_editor
     }
 
     pub fn has_selection(&self) -> bool {
@@ -108,14 +84,6 @@ impl InputContextMenuCapabilities {
     /// are both unavailable while the value is hidden.
     pub fn is_copyable(&self) -> bool {
         self.selection && !self.masked
-    }
-
-    pub fn has_definition(&self) -> bool {
-        self.go_to_definition
-    }
-
-    pub fn has_code_actions(&self) -> bool {
-        self.code_actions
     }
 }
 

@@ -16,38 +16,29 @@ upstream-revision = "c0946e6acdc9e2f984f317ef7f998ee2c79f1a87"
 [lib]
 doctest = false
 
-[features]
-inspector = ["gpui_macros/inspector", "gpui/inspector"]
-
 [dependencies]
-anyhow = "1"
-aho-corasick = "1.1.3"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.2.2" }
-gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.1.0" }
-instant = { version = "0.1", features = ["wasm-bindgen"] }
-lsp-types = { version = "0.97.0", features = ["proposed"] }
-ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
-regex = "1"
-schemars = "1"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1"
-smallvec = "1"
-sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
-tracing = "0.1.41"
-unicode-segmentation = "1.12.0"
-
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-smol = "2"
-
-[target.'cfg(target_family = "wasm")'.dependencies]
-async-channel = "2.3.1"
+gpui.workspace = true
+ropey.workspace = true
+regex.workspace = true
+schemars.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+sum-tree.workspace = true
+unicode-segmentation.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-raw-window-handle = "0.6.2"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString"] }
+raw-window-handle.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.2.2", features = ["test-support"] }
-indoc = "2"
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints.rust]
+# The macOS accessibility hit-test forwarder and the native text-input bridge
+# are Objective-C FFI; each of those two modules lowers this lint itself.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"

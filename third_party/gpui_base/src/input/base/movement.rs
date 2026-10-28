@@ -71,8 +71,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.scroll_to(offset, direction, cx);
         self.pause_blink_cursor(cx);
         self.update_preferred_column();
-        M::hide_context_menu(self, cx);
-        M::clear_inline_completion(self, cx);
         cx.notify()
     }
 
@@ -101,24 +99,11 @@ impl<M: InputModeKind> InputBaseState<M> {
             .display_map
             .offset_to_wrap_display_point_with_affinity(offset, self.cursor_line_end_affinity);
 
-        // Convert wrap row → display row (skips folded rows), move, then convert back
-        let current_display_row = self
-            .display_map
-            .wrap_row_to_display_row(display_point.row)
-            .unwrap_or_else(|| {
-                self.display_map
-                    .nearest_visible_display_row(display_point.row)
-            });
         let max_display_row = self.display_map.display_row_count().saturating_sub(1);
-        let target_display_row = current_display_row
+        display_point.row = display_point
+            .row
             .saturating_add_signed(move_lines)
             .min(max_display_row);
-        let target_wrap_row = self
-            .display_map
-            .display_row_to_wrap_row(target_display_row)
-            .unwrap_or(display_point.row);
-
-        display_point.row = target_wrap_row;
         display_point.column = 0;
         let mut new_offset = self.display_map.wrap_display_point_to_offset(display_point);
 
@@ -127,13 +112,13 @@ impl<M: InputModeKind> InputBaseState<M> {
             // Get display point again to update local_row.
             let mut next_display_point = self.display_map.offset_to_wrap_display_point(new_offset);
             next_display_point.column = 0;
-            let next_point = self
+            let next_line = self
                 .display_map
-                .wrap_display_point_to_point(next_display_point);
-            let line_start_offset = self.text.line_start_offset(next_point.row);
+                .display_row_to_buffer_line(next_display_point.row);
+            let line_start_offset = self.text.line_start_offset(next_line);
 
             // If in visible range, prefer to use position to get column.
-            if let Some(line) = last_layout.line(next_point.row) {
+            if let Some(line) = last_layout.line(next_line) {
                 if let Some((x, line_end_affinity)) = line.closest_index_for_position(
                     Point {
                         x: preferred_x,
@@ -148,7 +133,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                 }
             } else {
                 // Not in visible range, use column directly.
-                let max_line_len = self.text.slice_line(next_point.row).len();
+                let max_line_len = self.text.slice_line(next_line).len();
                 new_offset = line_start_offset + column.min(max_line_len);
             }
         }
@@ -183,11 +168,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
     }
 
-    pub(super) fn up(&mut self, action: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
-        if M::handle_context_menu_action(self, Box::new(action.clone()), window, cx) {
-            return;
-        }
-
+    pub(super) fn up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
@@ -203,11 +184,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.move_vertical(-1, window, cx);
     }
 
-    pub(super) fn down(&mut self, action: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
-        if M::handle_context_menu_action(self, Box::new(action.clone()), window, cx) {
-            return;
-        }
-
+    pub(super) fn down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }

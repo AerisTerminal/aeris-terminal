@@ -138,10 +138,8 @@ impl RenderOnce for Input {
             state.set_editor_style(InputEditorStyle {
                 foreground: color,
                 muted_foreground: muted_text_color,
-                border: border_color,
                 selection: color.opacity(0.22),
                 caret: color,
-                ..InputEditorStyle::default()
             });
         });
 
@@ -207,10 +205,8 @@ impl RenderOnce for TextArea {
             state.set_editor_style(InputEditorStyle {
                 foreground: color,
                 muted_foreground: gpui_color(self.theme.colors.text_secondary),
-                border,
                 selection: color.opacity(0.22),
                 caret: color,
-                ..InputEditorStyle::default()
             });
         });
         div()

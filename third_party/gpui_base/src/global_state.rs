@@ -7,7 +7,9 @@ use gpui::{App, Global, OwnedMenu};
 /// Handed out by [`GlobalState::register_deferred_popover`]; drop it to close
 /// the context again. The registry only ever weighs the token's liveness, so
 /// there is nothing inside to read.
-pub struct DeferredPopover(#[allow(dead_code)] Rc<()>);
+pub struct DeferredPopover {
+    _token: Rc<()>,
+}
 
 /// Application-wide state shared by Base behaviors.
 pub struct GlobalState {
@@ -100,7 +102,7 @@ impl GlobalState {
             .deferred_popovers
             .retain(|popover| popover.strong_count() > 0);
         state.deferred_popovers.push(Rc::downgrade(&token));
-        DeferredPopover(token)
+        DeferredPopover { _token: token }
     }
 }
 

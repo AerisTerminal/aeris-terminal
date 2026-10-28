@@ -1,6 +1,4 @@
 /target/
-/third_party/gpui_base/target/
-/third_party/gpui_base/Cargo.lock
 /.cache/
 /rithmic_proto_kit/
 /.cursor/

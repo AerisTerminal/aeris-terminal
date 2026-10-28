@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use sum_tree::{Bias, Dimensions, SumTree};
 
 use crate::input::{
-    Point as TreeSitterPoint, RopeExt,
+    RopeExt,
     layout::{LastLayout, WhitespaceIndicators},
 };
 
@@ -153,7 +153,6 @@ pub(crate) struct TextWrapper {
     _initialized: bool,
 }
 
-#[allow(unused)]
 impl TextWrapper {
     pub(crate) fn new(font: Font, font_size: Pixels, wrap_width: Option<Pixels>) -> Self {
         Self {
@@ -165,17 +164,6 @@ impl TextWrapper {
             lines: SumTree::new(&()),
             _initialized: false,
         }
-    }
-
-    #[inline]
-    pub(crate) fn set_default_text(&mut self, text: &Rope) {
-        self.text = text.clone();
-    }
-
-    /// Get reference to the rope text.
-    #[inline]
-    pub(crate) fn text(&self) -> &Rope {
-        &self.text
     }
 
     /// Get the total number of lines including wrapped lines.
@@ -204,27 +192,12 @@ impl TextWrapper {
         cursor.item()
     }
 
-    /// Iterate buffer lines in order.
-    #[inline]
-    pub(crate) fn iter_lines(&self) -> impl Iterator<Item = &LineItem> {
-        self.lines.iter()
-    }
-
     /// First wrap row of buffer line `row`. Returns the total wrap row count if `row` is
     /// out of range.
     pub(crate) fn buffer_line_to_first_wrap_row(&self, row: usize) -> usize {
         let mut cursor = self.lines.cursor::<Dimensions<BufferRows, WrapRows>>(&());
         cursor.seek(&BufferRows(row), Bias::Right);
         cursor.start().1.0
-    }
-
-    /// Wrap row range of buffer line `row`.
-    pub(crate) fn buffer_line_to_wrap_row_range(&self, row: usize) -> Range<usize> {
-        let mut cursor = self.lines.cursor::<Dimensions<BufferRows, WrapRows>>(&());
-        cursor.seek(&BufferRows(row), Bias::Right);
-        let start = cursor.start().1.0;
-        let len = cursor.item().map(|l| l.lines_len()).unwrap_or(0);
-        start..start + len
     }
 
     /// Buffer line containing wrap row `wrap_row`, clamped to the last line.
@@ -406,7 +379,7 @@ impl TextWrapper {
     ///
     /// If the `text` is the same as the current text, do nothing.
     fn update_all(&mut self, text: &Rope, cx: &mut App) {
-        self.update(text, &(0..text.len()), &text, cx);
+        self.update(text, &(0..text.len()), text, cx);
     }
 
     /// Return display point (with soft wrap) from the given byte offset in the text.
@@ -456,7 +429,7 @@ impl TextWrapper {
         // Otherwise return the eof of the line.
         let last_range = line.wrapped_lines.last().unwrap_or(&(0..0));
         let ix = line.lines_len().saturating_sub(1);
-        return WrapDisplayPoint::new(wrapped_row + ix, ix, last_range.len());
+        WrapDisplayPoint::new(wrapped_row + ix, ix, last_range.len())
     }
 
     /// Return byte offset in the text from the given display point (with soft wrap).
@@ -480,16 +453,6 @@ impl TextWrapper {
             // If not found, return the end of the line.
             line_start + line.len()
         }
-    }
-
-    pub(crate) fn display_point_to_point(&self, point: WrapDisplayPoint) -> TreeSitterPoint {
-        let offset = self.display_point_to_offset(point);
-        self.text.offset_to_point(offset)
-    }
-
-    pub(crate) fn point_to_display_point(&self, point: TreeSitterPoint) -> WrapDisplayPoint {
-        let offset = self.text.point_to_offset(point);
-        self.offset_to_display_point(offset)
     }
 }
 
@@ -533,9 +496,6 @@ pub(crate) struct LineLayout {
     pub(crate) whitespace_indicators: Option<WhitespaceIndicators>,
     /// Whitespace indicators: (line_index, x_position, is_tab)
     pub(crate) whitespace_chars: Vec<(usize, Pixels, bool)>,
-    /// Whether any run of this line carries a background color, so [`Self::paint_background`]
-    /// can skip the glyph walk for the common case of a line without highlights.
-    has_background: bool,
 }
 
 impl LineLayout {
@@ -547,14 +507,7 @@ impl LineLayout {
             wrap_indent: px(0.),
             whitespace_chars: Vec::new(),
             whitespace_indicators: None,
-            has_background: false,
         }
-    }
-
-    /// Record whether any run of this line carries a background color.
-    pub(crate) fn with_background(mut self, has_background: bool) -> Self {
-        self.has_background = has_background;
-        self
     }
 
     /// Set the left offset reserved for continuation wrapped lines.
@@ -761,37 +714,6 @@ impl LineLayout {
         size(width, self.wrapped_lines.len() * line_height)
     }
 
-    /// Paint only the glyph background quads of this line.
-    ///
-    /// gpui's [`ShapedLine::paint`] does not draw backgrounds, so every line painted with
-    /// [`Self::paint`] needs this called first, with the same origin and align width.
-    pub(crate) fn paint_background(
-        &self,
-        pos: Point<Pixels>,
-        line_height: Pixels,
-        text_align: TextAlign,
-        align_width: Option<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        // Painting a background walks every glyph and pushes a scene layer, so skip the
-        // whole pass for lines that have no background color to paint.
-        if !self.has_background {
-            return;
-        }
-
-        for (ix, line) in self.wrapped_lines.iter().enumerate() {
-            _ = line.paint_background(
-                pos + point(self.line_indent(ix), ix * line_height),
-                line_height,
-                text_align,
-                align_width,
-                window,
-                cx,
-            );
-        }
-    }
-
     pub(crate) fn paint(
         &self,
         pos: Point<Pixels>,
@@ -862,7 +784,7 @@ mod tests {
         fn assert_wrapper_lines(text: &Rope, wrapper: &TextWrapper, expected_lines: &[&[&str]]) {
             let mut actual_lines = vec![];
             let mut offset = 0;
-            for line in wrapper.iter_lines() {
+            for line in wrapper.lines.iter() {
                 actual_lines.push(
                     line.wrapped_lines
                         .iter()
@@ -1022,7 +944,9 @@ mod tests {
         wrapper._update(&text, &range, &Rope::from(new_text), &mut fake_wrap_line);
         assert_eq!(text.to_string(), "");
         assert_eq!(wrapper.lines_count(), 1);
-        assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), [0..0]);
+        let wrapped_lines = &wrapper.line(0).unwrap().wrapped_lines;
+        assert_eq!(wrapped_lines.len(), 1);
+        assert_eq!(wrapped_lines[0], 0..0);
 
         // Test update_all
         let range = 0..text.len();
@@ -1088,7 +1012,14 @@ mod tests {
         wrapper._update(&text, &range, &Rope::from(""), &mut |_, _| vec![]);
         assert_eq!(wrapper.lines_count(), 1);
         assert_eq!(wrapper.len(), 1);
-        assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), [0..0]);
+        let wrapped_lines = &wrapper.line(0).unwrap().wrapped_lines;
+        assert_eq!(wrapped_lines.len(), 1);
+        assert_eq!(wrapped_lines[0], 0..0);
+    }
+
+    fn wrap_row_range(wrapper: &TextWrapper, row: usize) -> Range<usize> {
+        let start = wrapper.buffer_line_to_first_wrap_row(row);
+        start..start + wrapper.line(row).map_or(0, LineItem::lines_len)
     }
 
     #[test]
@@ -1124,10 +1055,10 @@ mod tests {
         assert_eq!(wrapper.buffer_line_to_first_wrap_row(2), 3);
         assert_eq!(wrapper.buffer_line_to_first_wrap_row(3), 4);
 
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(0), 0..1);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(1), 1..3);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(2), 3..4);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(3), 4..4);
+        assert_eq!(wrap_row_range(&wrapper, 0), 0..1);
+        assert_eq!(wrap_row_range(&wrapper, 1), 1..3);
+        assert_eq!(wrap_row_range(&wrapper, 2), 3..4);
+        assert_eq!(wrap_row_range(&wrapper, 3), 4..4);
 
         assert_eq!(wrapper.wrap_row_to_buffer_line(0), 0);
         assert_eq!(wrapper.wrap_row_to_buffer_line(1), 1);
@@ -1152,9 +1083,9 @@ mod tests {
         };
 
         wrapper._update(&text, &(0..text.len()), &text, &mut fake_wrap_line);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(0), 0..1);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(1), 1..3);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(2), 3..4);
+        assert_eq!(wrap_row_range(&wrapper, 0), 0..1);
+        assert_eq!(wrap_row_range(&wrapper, 1), 1..3);
+        assert_eq!(wrap_row_range(&wrapper, 2), 3..4);
 
         let range = text.line_start_offset(1)..text.line_end_offset(1);
         let new_text = "dd\neeee";
@@ -1163,10 +1094,10 @@ mod tests {
 
         assert_eq!(wrapper.lines_count(), 4);
         assert_eq!(wrapper.len(), 5);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(0), 0..1);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(1), 1..2);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(2), 2..4);
-        assert_eq!(wrapper.buffer_line_to_wrap_row_range(3), 4..5);
+        assert_eq!(wrap_row_range(&wrapper, 0), 0..1);
+        assert_eq!(wrap_row_range(&wrapper, 1), 1..2);
+        assert_eq!(wrap_row_range(&wrapper, 2), 2..4);
+        assert_eq!(wrap_row_range(&wrapper, 3), 4..5);
         assert_eq!(wrapper.wrap_row_to_buffer_line(0), 0);
         assert_eq!(wrapper.wrap_row_to_buffer_line(1), 1);
         assert_eq!(wrapper.wrap_row_to_buffer_line(2), 2);
@@ -1198,7 +1129,6 @@ mod tests {
             line_height,
             wrap_width: None,
             wrapping_indent: WrappingIndent::default(),
-            line_number_width: px(0.),
             cursor_bounds: None,
             text_align: TextAlign::Left,
             content_width: px(0.),
@@ -1498,7 +1428,6 @@ mod tests {
             line_height: px(20.0),
             wrap_width: Some(px(10.)),
             wrapping_indent: WrappingIndent::Same,
-            line_number_width: px(0.),
             cursor_bounds: None,
             text_align: TextAlign::Left,
             content_width: px(0.),

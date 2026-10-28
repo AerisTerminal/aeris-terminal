@@ -747,8 +747,16 @@ still wait on the GUI checks and the remaining work on their lines.
     `live_market_gate_stays_out_of_production_builds` keeps the gate and the allowed enablers.
   - Landed: `.gitignore` drops `/financial-charts/`, `/.reference/`, `__pycache__/` and
     `local-data/` (nothing produces them), and naming_check stops skipping the last two.
-  - Left: trim the `gpui_base` LSP editor, then lint and pin it.
-  - GUI text-input check. Closes PL-10, PL-12 and PL-19.
+  - Landed: `gpui_base` keeps only the input, textarea, button, switch, theme and `init`. The code
+    editor (LSP, diagnostics, folding, search, decorations), the components binary, `measure`,
+    `async_util` and the wasm paths are deleted (24,388 to 15,051 lines), so `lsp-types`,
+    `fluent-uri` and `instant` leave the lockfile. It is a workspace member with its dependencies
+    pinned in `[workspace.dependencies]`, `unsafe_code = "deny"` (allowed only in its two macOS
+    Objective-C bridges) and `clippy::all`; its `.gitignore` lines are gone. naming_check
+    `gpui_base_retains_only_the_desktop_behavior_surface` checks the trim, the membership and the
+    unsafe allowlist.
+  - Left: GUI text-input check (symbol search, order ticket) on Windows and macOS.
+    Not run. Closes PL-10, PL-12 and PL-19.
 - [ ] M8.12 Structural naming_check and final docs
   - Left: structural checks with a recursive markdown inventory, with text pins replaced by
     behavior tests.
@@ -807,7 +815,7 @@ they are prefixed M- here because those numbers collide with the table above.
 | M-D6 | M7.10 | Sweeps are classified once per publication in `market_runtime` over the last 512 trades. |
 | M-D8 | M7.1 website | Mirror only shared platform tokens; commit in the website only when its worktree is clean, run its lint, typecheck and build, and do not push without the maintainer. |
 | M-D9 | macOS | `platform_sys` can be checked for `aarch64-apple-darwin`; other macOS-only checks are maintainer or hosted-CI only. |
-| M-D10 | Repo hygiene | `plan/longterm_plan/*.md` is allowlisted, not deleted; the README keeps the name `Readme`; `gpui_base` stays outside the workspace; the Linux `sha2` duplicate is accepted; `resvg` is aligned only if chart export still works. |
+| M-D10 | Repo hygiene | `plan/longterm_plan/*.md` is allowlisted, not deleted; the README keeps the name `Readme`; `gpui_base` stays outside the workspace (superseded in M8.11: it is a linted member); the Linux `sha2` duplicate is accepted; `resvg` is aligned only if chart export still works. |
 | M-D11 | AC-02 | The Windows credential blob cap is 2,560 bytes, sized against realistic Cognito tokens; tests never touch the native vault. |
 | M-D15 | M6.10 baselines | The `trading_projection_baseline_*` assertions and expected outputs stay identical. |
 | M-D16 | CI | CI gates are never weakened (no serial, quiet, skip or retry workarounds). |

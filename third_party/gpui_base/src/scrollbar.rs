@@ -1,6 +1,10 @@
-use std::{cell::Cell, ops::Deref, panic::Location, rc::Rc};
-
-use instant::{Duration, Instant};
+use std::{
+    cell::Cell,
+    ops::Deref,
+    panic::Location,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     AxisExt,
@@ -538,10 +542,8 @@ impl ScrollbarStateInner {
     fn with_hovered_on_thumb(&self, axis: Option<Axis>) -> Self {
         let mut state = *self;
         state.hovered_on_thumb = axis;
-        if self.is_scrollbar_visible() {
-            if axis.is_some() {
-                state.last_scroll_time = Some(Instant::now());
-            }
+        if self.is_scrollbar_visible() && axis.is_some() {
+            state.last_scroll_time = Some(Instant::now());
         }
         state
     }
@@ -1157,12 +1159,16 @@ impl Element for Scrollbar {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.position = Position::Absolute;
-        style.flex_grow = 1.0;
-        style.flex_shrink = 1.0;
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        let style = Style {
+            position: Position::Absolute,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            size: Size {
+                width: relative(1.).into(),
+                height: relative(1.).into(),
+            },
+            ..Style::default()
+        };
 
         (window.request_layout(style, None, cx), ())
     }
@@ -1234,22 +1240,23 @@ impl Element for Scrollbar {
             window.request_animation_frame();
         }
 
-        if !is_hovered && !is_dragging {
-            if let Some(last_time) = inner.last_scroll_time {
-                let elapsed = now.saturating_duration_since(last_time);
-                if elapsed < motion.idle() && !inner.idle_timer_scheduled {
-                    inner.idle_timer_scheduled = true;
-                    let state = state.clone();
-                    let current_view = window.current_view();
-                    let next_delay = motion.idle() - elapsed;
-                    window
-                        .spawn(cx, async move |cx| {
-                            cx.background_executor().timer(next_delay).await;
-                            state.set(state.get().with_idle_timer_scheduled(false));
-                            cx.update(|_, cx| cx.notify(current_view)).ok();
-                        })
-                        .detach();
-                }
+        if !is_hovered
+            && !is_dragging
+            && let Some(last_time) = inner.last_scroll_time
+        {
+            let elapsed = now.saturating_duration_since(last_time);
+            if elapsed < motion.idle() && !inner.idle_timer_scheduled {
+                inner.idle_timer_scheduled = true;
+                let state = state.clone();
+                let current_view = window.current_view();
+                let next_delay = motion.idle() - elapsed;
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.background_executor().timer(next_delay).await;
+                        state.set(state.get().with_idle_timer_scheduled(false));
+                        cx.update(|_, cx| cx.notify(current_view)).ok();
+                    })
+                    .detach();
             }
         }
         state.set(inner);
@@ -1329,15 +1336,11 @@ impl Element for Scrollbar {
             let (thumb_bg, bar_bg, bar_border, mut thumb_width, inset, radius, min_length) =
                 if state.get().dragged_axis == Some(axis) {
                     self.style_for_active(cx)
-                } else if (is_hover_to_show || mode == ScrollbarMode::Scrolling)
+                } else if (is_hover_to_show
+                    || mode == ScrollbarMode::Scrolling
+                    || is_always_to_show)
                     && (is_hovered_on_bar || is_hovered_on_thumb)
                 {
-                    if is_hovered_on_thumb {
-                        self.style_for_hovered_thumb(cx)
-                    } else {
-                        self.style_for_hovered_bar(cx)
-                    }
-                } else if is_always_to_show && (is_hovered_on_bar || is_hovered_on_thumb) {
                     if is_hovered_on_thumb {
                         self.style_for_hovered_thumb(cx)
                     } else {
@@ -1488,21 +1491,7 @@ impl Element for Scrollbar {
                             bounds: painted_bounds,
                             corner_radii: (0.).into(),
                             background: gpui::transparent_black().into(),
-                            border_widths: if is_vertical {
-                                Edges {
-                                    top: px(0.),
-                                    right: px(0.),
-                                    bottom: px(0.),
-                                    left: px(0.),
-                                }
-                            } else {
-                                Edges {
-                                    top: px(0.),
-                                    right: px(0.),
-                                    bottom: px(0.),
-                                    left: px(0.),
-                                }
-                            },
+                            border_widths: Edges::default(),
                             border_color: painted_border,
                             border_style: BorderStyle::default(),
                         });
@@ -1517,14 +1506,15 @@ impl Element for Scrollbar {
                         let scroll_handle = self.scroll_handle.clone();
 
                         move |event: &ScrollWheelEvent, phase, _, cx| {
-                            if phase.bubble() && hitbox_bounds.contains(&event.position) {
-                                if scroll_handle.offset() != state.get().last_scroll_offset {
-                                    state.set(state.get().with_last_scroll(
-                                        scroll_handle.offset(),
-                                        Some(Instant::now()),
-                                    ));
-                                    cx.notify(view_id);
-                                }
+                            if phase.bubble()
+                                && hitbox_bounds.contains(&event.position)
+                                && scroll_handle.offset() != state.get().last_scroll_offset
+                            {
+                                state.set(state.get().with_last_scroll(
+                                    scroll_handle.offset(),
+                                    Some(Instant::now()),
+                                ));
+                                cx.notify(view_id);
                             }
                         }
                     });

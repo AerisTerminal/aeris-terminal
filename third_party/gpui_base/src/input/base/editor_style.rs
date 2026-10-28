@@ -1,87 +1,14 @@
-use std::{ops::Range, rc::Rc, sync::Arc};
+use gpui::Hsla;
 
-use gpui::{AnyElement, Context, HighlightStyle, Hsla, SharedString, Window};
-use ropey::Rope;
-
-use super::{EditorState, FoldRange, InputEdit};
 use crate::SemanticThemeTokens;
 
-/// Resolves semantic highlight names into renderable GPUI styles.
-///
-/// Base deliberately knows nothing about a concrete syntax theme. UI crates and
-/// applications can provide any resolver, independently of their parser.
-pub trait HighlightStyleResolver: Send + Sync {
-    fn style(&self, name: &str) -> Option<HighlightStyle>;
-}
-
-#[derive(Default)]
-struct NoHighlightStyles;
-
-impl HighlightStyleResolver for NoHighlightStyles {
-    fn style(&self, _: &str) -> Option<HighlightStyle> {
-        None
-    }
-}
-
-/// Parser-independent syntax highlighting seam consumed by the Base editor.
-///
-/// Implementations own parsing, incremental state, and language-specific
-/// behavior. Base only asks for styled ranges and fold candidates.
-pub trait InputHighlighter {
-    fn language(&self) -> SharedString;
-
-    fn update(
-        &mut self,
-        edit: Option<InputEdit>,
-        text: &Rope,
-        folding: bool,
-        window: &mut Window,
-        cx: &mut Context<EditorState>,
-    );
-
-    /// Return ordered, non-overlapping style runs that fully cover `range`.
-    /// Use [`HighlightStyle::default`] for text without a semantic style.
-    fn styles(
-        &self,
-        range: &Range<usize>,
-        resolver: &dyn HighlightStyleResolver,
-    ) -> Vec<(Range<usize>, HighlightStyle)>;
-
-    fn fold_ranges(&self, text: &Rope) -> Vec<FoldRange>;
-
-    fn fold_ranges_for_edit(&self, range: Range<usize>, text: &Rope) -> Vec<FoldRange> {
-        let _ = range;
-        self.fold_ranges(text)
-    }
-}
-
-pub type InputHighlighterFactory = Rc<dyn Fn(&str) -> Option<Box<dyn InputHighlighter>>>;
-pub type SharedHighlightStyleResolver = Arc<dyn HighlightStyleResolver>;
-pub type FoldIconRenderer = Rc<dyn Fn(usize, bool) -> AnyElement>;
-
-#[derive(Clone, Copy, Default)]
-pub struct DiagnosticColors {
-    pub error: Hsla,
-    pub warning: Hsla,
-    pub info: Hsla,
-    pub hint: Hsla,
-}
-
-/// Application-owned colors and highlight resolver consumed by editor painting.
-#[derive(Clone)]
+/// Application-owned colors consumed by input painting.
+#[derive(Clone, Default)]
 pub struct InputEditorStyle {
     pub foreground: Hsla,
     pub muted_foreground: Hsla,
-    pub background: Hsla,
-    pub border: Hsla,
     pub selection: Hsla,
     pub caret: Hsla,
-    pub diagnostics: DiagnosticColors,
-    pub highlight_styles: SharedHighlightStyleResolver,
-    pub editor_invisible: Option<Hsla>,
-    pub editor_active_line: Option<Hsla>,
-    pub editor_gutter_background: Option<Hsla>,
-    pub fold_icon_renderer: Option<FoldIconRenderer>,
 }
 
 impl InputEditorStyle {
@@ -93,9 +20,8 @@ impl InputEditorStyle {
     /// means for ink, which is what makes it usable as "unset" here.
     ///
     /// This is resolution, not assignment: whatever a consumer did project is
-    /// kept exactly. `crates/ui` projects the whole style on every render and
-    /// never reaches this; a consumer that projects once at construction gets
-    /// the palette that is current now rather than the one that happened to be
+    /// kept exactly, so a consumer that projects once at construction gets the
+    /// palette that is current now rather than the one that happened to be
     /// installed when the state was built.
     pub fn resolved(&self, tokens: &SemanticThemeTokens) -> Self {
         let colors = &tokens.colors;
@@ -113,30 +39,8 @@ impl InputEditorStyle {
         Self {
             foreground,
             muted_foreground: or(self.muted_foreground, colors.muted_foreground),
-            background: or(self.background, colors.surface),
-            border: or(self.border, colors.border),
             selection,
             caret: or(self.caret, foreground),
-            ..self.clone()
-        }
-    }
-}
-
-impl Default for InputEditorStyle {
-    fn default() -> Self {
-        Self {
-            foreground: Hsla::default(),
-            muted_foreground: Hsla::default(),
-            background: Hsla::default(),
-            border: Hsla::default(),
-            selection: Hsla::default(),
-            caret: Hsla::default(),
-            diagnostics: DiagnosticColors::default(),
-            highlight_styles: Arc::new(NoHighlightStyles),
-            editor_invisible: None,
-            editor_active_line: None,
-            editor_gutter_background: None,
-            fold_icon_renderer: None,
         }
     }
 }
@@ -152,8 +56,6 @@ mod tests {
         let mut tokens = SemanticThemeTokens::default();
         tokens.colors.foreground = hsla(0., 0., 0.98, 1.0);
         tokens.colors.muted_foreground = hsla(0., 0., 0.64, 1.0);
-        tokens.colors.surface = hsla(0., 0., 0.04, 1.0);
-        tokens.colors.border = hsla(0., 0., 0.15, 1.0);
         tokens.colors.accent = hsla(0.6, 0.5, 0.5, 1.0);
         tokens
     }
@@ -166,8 +68,6 @@ mod tests {
         assert_eq!(resolved.foreground, tokens.colors.foreground);
         assert_eq!(resolved.caret, tokens.colors.foreground);
         assert_eq!(resolved.muted_foreground, tokens.colors.muted_foreground);
-        assert_eq!(resolved.background, tokens.colors.surface);
-        assert_eq!(resolved.border, tokens.colors.border);
         // The point of the change: every one of these was transparent, so an
         // input nothing projected onto painted its text in nothing at all.
         for colour in [
@@ -199,7 +99,7 @@ mod tests {
         assert_eq!(resolved.foreground, chosen);
         assert_eq!(resolved.caret, chosen);
         // And what was not projected still comes from the palette.
-        assert_eq!(resolved.border, dark().colors.border);
+        assert_eq!(resolved.muted_foreground, dark().colors.muted_foreground);
     }
 
     #[test]

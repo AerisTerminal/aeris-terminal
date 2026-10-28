@@ -3,7 +3,7 @@ use std::ops::Range;
 use ropey::{LineType, Rope, RopeSlice};
 use sum_tree::Bias;
 
-/// Parser-independent byte/row/column position used for incremental edits.
+/// A row and byte column within a rope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Point {
     pub row: usize,
@@ -15,19 +15,6 @@ impl Point {
         Self { row, column }
     }
 }
-
-/// Parser-independent description of an incremental text replacement.
-#[derive(Debug, Clone, Copy)]
-pub struct InputEdit {
-    pub start_byte: usize,
-    pub old_end_byte: usize,
-    pub new_end_byte: usize,
-    pub start_position: Point,
-    pub old_end_position: Point,
-    pub new_end_position: Point,
-}
-
-use lsp_types::Position;
 
 /// An iterator over the lines of a `Rope`.
 pub struct RopeLines<'a> {
@@ -187,16 +174,6 @@ pub trait RopeExt {
     /// - If the offset is out of bounds, return None.
     fn char_at(&self, offset: usize) -> Option<char>;
 
-    /// Get the byte offset from the given line, column [`Position`] (0-based).
-    ///
-    /// The column is in characters.
-    fn position_to_offset(&self, line_col: &Position) -> usize;
-
-    /// Get the line, column [`Position`] (0-based) from the given byte offset.
-    ///
-    /// The column is in characters.
-    fn offset_to_position(&self, offset: usize) -> Position;
-
     /// Get point (row, column) from the given byte offset.
     ///
     /// The column is in bytes.
@@ -299,7 +276,7 @@ impl RopeExt for Rope {
     }
 
     fn iter_lines(&self) -> RopeLines<'_> {
-        RopeLines::new(&self)
+        RopeLines::new(self)
     }
 
     fn line_len(&self, row: usize) -> usize {
@@ -325,21 +302,6 @@ impl RopeExt for Rope {
 
         let line_start = self.line_to_byte_idx(point.row, LineType::LF);
         line_start + point.column
-    }
-
-    fn position_to_offset(&self, pos: &Position) -> usize {
-        let line = self.slice_line(pos.line as usize);
-        // Clamp out-of-range columns, then use Ropey's index to avoid rescanning long lines.
-        self.line_start_offset(pos.line as usize)
-            + line.char_to_byte_idx((pos.character as usize).min(line.len_chars()))
-    }
-
-    fn offset_to_position(&self, offset: usize) -> Position {
-        let point = self.offset_to_point(offset);
-        let line = self.slice_line(point.row);
-        let offset = line.utf16_to_byte_idx(line.byte_to_utf16_idx(point.column));
-        let character = line.slice(..offset).chars().count();
-        Position::new(point.row as u32, character as u32)
     }
 
     fn line_end_offset(&self, row: usize) -> usize {
@@ -453,7 +415,7 @@ mod tests {
     use ropey::Rope;
     use sum_tree::Bias;
 
-    use crate::input::{Position, RopeExt};
+    use crate::input::RopeExt;
 
     #[test]
     fn test_slice_line() {
@@ -535,33 +497,6 @@ mod tests {
 
         assert_eq!(rope.line_start_offset(4), 39);
         assert_eq!(rope.line_end_offset(4), 39);
-    }
-
-    #[test]
-    fn test_line_column() {
-        let rope = Rope::from("a 中文🎉 test\nRope");
-        assert_eq!(rope.position_to_offset(&Position::new(0, 3)), "a 中".len());
-        assert_eq!(
-            rope.position_to_offset(&Position::new(0, 5)),
-            "a 中文🎉".len()
-        );
-        assert_eq!(
-            rope.position_to_offset(&Position::new(1, 1)),
-            "a 中文🎉 test\nR".len()
-        );
-        assert_eq!(
-            rope.position_to_offset(&Position::new(0, u32::MAX)),
-            "a 中文🎉 test".len()
-        );
-
-        assert_eq!(
-            rope.offset_to_position("a 中文🎉 test\nR".len()),
-            Position::new(1, 1)
-        );
-        assert_eq!(
-            rope.offset_to_position("a 中文🎉".len()),
-            Position::new(0, 5)
-        );
     }
 
     #[test]
