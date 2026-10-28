@@ -1822,7 +1822,7 @@ fn verify_installed_executable_authenticode(
     verify_installed_executable_authenticode_with(
         path,
         expected,
-        embedded_authenticode_thumbprint()?,
+        embedded_authenticode_thumbprint(),
         run_windows_authenticode_check,
     )
 }
@@ -1846,23 +1846,17 @@ where
         return Ok(());
     }
     let Some(thumbprint) = expected_thumbprint else {
-        // Development/test builds may intentionally omit production signing.
-        // Once packaging embeds the expected signer, every installed .exe
-        // inventory audit below fails closed on any trust/signature mismatch.
+        // Only a development build lacks the signer: build.rs refuses a
+        // Windows release configuration without it, so every release build's
+        // installed .exe audit fails closed on any trust/signature mismatch.
         return Ok(());
     };
     verify_windows_authenticode_with(path, thumbprint, verify)
 }
 
 #[cfg(target_os = "windows")]
-fn embedded_authenticode_thumbprint() -> Result<Option<&'static str>, LifecycleError> {
-    let Some(thumbprint) = option_env!("AERIS_AUTHENTICODE_CERT_SHA1") else {
-        return Ok(None);
-    };
-    if !valid_authenticode_thumbprint(thumbprint) {
-        return Err(LifecycleError::VerificationFailed);
-    }
-    Ok(Some(thumbprint))
+fn embedded_authenticode_thumbprint() -> Option<&'static str> {
+    crate::release_config().map(|config| config.authenticode_thumbprint)
 }
 
 /// Verifies one Windows executable against the production publisher signer and
@@ -1877,7 +1871,7 @@ fn embedded_authenticode_thumbprint() -> Result<Option<&'static str>, LifecycleE
 #[cfg(target_os = "windows")]
 pub fn verify_windows_publisher_signature(path: &Path) -> Result<(), LifecycleError> {
     let thumbprint =
-        embedded_authenticode_thumbprint()?.ok_or(LifecycleError::VerificationFailed)?;
+        embedded_authenticode_thumbprint().ok_or(LifecycleError::VerificationFailed)?;
     verify_windows_authenticode_with(path, thumbprint, run_windows_authenticode_check)
 }
 

@@ -2701,6 +2701,59 @@ mod tests {
         }
     }
 
+    /// Packaging variables of one release configuration; every one must stay
+    /// out of GitHub Actions and be read only by the release build script.
+    const RELEASE_CONFIG_VARIABLES: [&str; 6] = [
+        "AERIS_RELEASE_VERIFYING_KEY",
+        "AERIS_RELEASE_BASE_URL",
+        "AERIS_BOOTSTRAP_MIN_GENERATION",
+        "AERIS_RELEASE_IDENTITY",
+        "AERIS_INSTALL_GENERATION",
+        "AERIS_AUTHENTICODE_CERT_SHA1",
+    ];
+
+    #[test]
+    fn release_configuration_is_read_only_by_the_release_build_script() {
+        // build.rs validates the complete set and generates the one static
+        // that release_config.rs includes; a direct read elsewhere would let a
+        // partially configured release build compile.
+        let readers = [
+            "crates/release_lifecycle/build.rs",
+            "crates/release_lifecycle/release_config_rules.rs",
+        ];
+        for path in production_rust_sources() {
+            let relative = relative_string(&path);
+            if readers.contains(&relative.as_str()) {
+                continue;
+            }
+            let contents = fs::read_to_string(&path).expect("source");
+            for name in RELEASE_CONFIG_VARIABLES {
+                for read in [
+                    format!("env!(\"{name}\")"),
+                    format!("var(\"{name}\")"),
+                    format!("var_os(\"{name}\")"),
+                ] {
+                    assert!(
+                        !contents.contains(&read),
+                        "{relative} reads {name}; use aeris_release_lifecycle::release_config"
+                    );
+                }
+            }
+        }
+        let rules = manifest("crates/release_lifecycle/release_config_rules.rs");
+        for name in RELEASE_CONFIG_VARIABLES {
+            assert!(
+                rules.contains(&format!("\"{name}\",")),
+                "release_config_rules.rs must validate {name}"
+            );
+        }
+        assert!(
+            manifest("crates/release_lifecycle/src/release_config.rs")
+                .contains("include!(concat!(env!(\"OUT_DIR\"), \"/release_config.rs\"));"),
+            "release_config.rs must embed only the build-validated configuration"
+        );
+    }
+
     #[test]
     fn raw_file_mutation_rule_accepts_and_rejects_fixtures() {
         assert!(raw_file_mutation_is_allowed(
@@ -5286,12 +5339,9 @@ jobs:
                 "the push/pull_request gate must not run the retired step {retired_step}"
             );
         }
-        for production_release_contract in [
-            "release-pair",
-            "AERIS_RELEASE_IDENTITY",
-            "AERIS_INSTALL_GENERATION",
-            "AERIS_RELEASE_VERIFYING_KEY",
-        ] {
+        for production_release_contract in
+            std::iter::once("release-pair").chain(RELEASE_CONFIG_VARIABLES)
+        {
             assert!(
                 !workflow.contains(production_release_contract),
                 "production release publication must stay out of GitHub Actions: found {production_release_contract}"
@@ -5392,12 +5442,12 @@ jobs:
             "action-gh-release",
             "notarytool",
             "release-pair",
-            "AERIS_RELEASE_IDENTITY",
-            "AERIS_INSTALL_GENERATION",
-            "AERIS_RELEASE_VERIFYING_KEY",
             "continue-on-error",
             "git config --global",
-        ] {
+        ]
+        .into_iter()
+        .chain(RELEASE_CONFIG_VARIABLES)
+        {
             assert!(
                 !workflow.contains(forbidden),
                 "the macOS preview build must stay an unpublished artifact, found {forbidden}"
@@ -5488,12 +5538,12 @@ jobs:
             "action-gh-release",
             "signtool",
             "release-pair",
-            "AERIS_RELEASE_IDENTITY",
-            "AERIS_INSTALL_GENERATION",
-            "AERIS_RELEASE_VERIFYING_KEY",
             "continue-on-error",
             "git config --global",
-        ] {
+        ]
+        .into_iter()
+        .chain(RELEASE_CONFIG_VARIABLES)
+        {
             assert!(
                 !workflow.contains(forbidden),
                 "the Windows preview build must stay an unpublished artifact, found {forbidden}"

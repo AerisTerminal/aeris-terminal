@@ -10,16 +10,19 @@ pub struct ReleaseIdentity {
 /// Returns the release identity compiled into the current binary.
 ///
 /// Development builds use the workspace version and generation zero. Release
-/// packaging sets both compile-time variables for every binary in one bundle.
+/// builds use the identity and generation of their embedded release
+/// configuration, which packaging sets for every binary in one bundle.
 #[must_use]
 pub fn current_release_identity() -> ReleaseIdentity {
-    ReleaseIdentity {
-        release_identity: option_env!("AERIS_RELEASE_IDENTITY")
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .to_string(),
-        install_generation: option_env!("AERIS_INSTALL_GENERATION")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0),
+    match crate::release_config() {
+        Some(config) => ReleaseIdentity {
+            release_identity: config.release_identity.to_string(),
+            install_generation: config.install_generation,
+        },
+        None => ReleaseIdentity {
+            release_identity: env!("CARGO_PKG_VERSION").to_string(),
+            install_generation: 0,
+        },
     }
 }
 

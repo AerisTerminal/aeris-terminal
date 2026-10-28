@@ -223,6 +223,13 @@ violations and missing verification explicitly, and never describe them as satis
   sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the
   install root; later launcher starts and the uninstaller delete it by that exact name, never
   through a generated batch file.
+- The release packaging variables (`AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,
+  `AERIS_BOOTSTRAP_MIN_GENERATION`, `AERIS_RELEASE_IDENTITY`, `AERIS_INSTALL_GENERATION` and, for
+  Windows targets only, `AERIS_AUTHENTICODE_CERT_SHA1`) are read only by
+  `crates/release_lifecycle/build.rs`, which validates them with `release_config_rules.rs` and
+  generates the static behind `release_lifecycle::release_config()`. None set is a development
+  build; any set requires the complete valid set, or the build fails. Code reads the
+  configuration through `release_config()`, never `option_env!`, and no workflow may set them.
 - Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
   derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
   non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.

@@ -26,6 +26,7 @@ ureq.workspace = true
 aeris_release_lifecycle = { path = ".", features = ["producer"] }
 
 [build-dependencies]
+base64.workspace = true
 embed-resource.workspace = true
 
 [lints]

@@ -23,10 +23,10 @@ use aeris_platform_runtime::{
 use aeris_release_lifecycle::{
     ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
     MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer,
-    ReleaseFile, ReleaseInstaller, ReleasePolicy, ReleaseUninstaller, SignedBlockPlan,
-    SignedReleaseManifest, VaultEntry, current_release_identity, decode_and_verify_block_plan,
-    native_install_root, native_installation_inventory, rollout_eligible, verify_release_file,
-    verify_release_manifest,
+    ReleaseConfig, ReleaseFile, ReleaseInstaller, ReleasePolicy, ReleaseUninstaller,
+    SignedBlockPlan, SignedReleaseManifest, VaultEntry, current_release_identity,
+    decode_and_verify_block_plan, native_install_root, native_installation_inventory,
+    release_config, rollout_eligible, verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -1214,15 +1214,13 @@ fn spawn_active_launcher_promotion(installer: &ReleaseInstaller) -> Result<(), S
         .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())
 }
 
+fn embedded_release_config() -> Result<&'static ReleaseConfig, String> {
+    release_config()
+        .ok_or_else(|| "release configuration was not embedded by packaging".to_string())
+}
+
 fn bootstrap_minimum_generation() -> Result<u64, String> {
-    let encoded = option_env!("AERIS_BOOTSTRAP_MIN_GENERATION").ok_or_else(|| {
-        "bootstrap minimum release generation was not embedded by packaging".to_string()
-    })?;
-    encoded
-        .parse::<u64>()
-        .ok()
-        .filter(|generation| *generation > 0)
-        .ok_or_else(|| "embedded bootstrap minimum release generation is invalid".to_string())
+    embedded_release_config().map(|config| config.bootstrap_minimum_generation)
 }
 
 fn release_http_agent(timeout: Duration) -> ureq::Agent {
@@ -1237,12 +1235,7 @@ fn release_http_agent(timeout: Duration) -> ureq::Agent {
 }
 
 fn embedded_release_base_url() -> Result<&'static str, String> {
-    let url = option_env!("AERIS_RELEASE_BASE_URL")
-        .ok_or_else(|| "release base URL was not embedded by packaging".to_string())?;
-    if !valid_https_url(url) || url.ends_with('/') || url.contains('?') {
-        return Err("embedded release base URL is invalid".to_string());
-    }
-    Ok(url)
+    embedded_release_config().map(|config| config.base_url)
 }
 
 fn valid_https_url(url: &str) -> bool {
@@ -1965,15 +1958,7 @@ fn uninstall_from_root(root: &Path) -> Result<(), String> {
 }
 
 fn embedded_verifying_key() -> Result<VerifyingKey, String> {
-    let encoded = option_env!("AERIS_RELEASE_VERIFYING_KEY")
-        .ok_or_else(|| "release verification key was not embedded by packaging".to_string())?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| "embedded release verification key is invalid".to_string())?;
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| "embedded release verification key is invalid".to_string())?;
-    VerifyingKey::from_bytes(&bytes)
+    VerifyingKey::from_bytes(&embedded_release_config()?.verifying_key)
         .map_err(|_| "embedded release verification key is invalid".to_string())
 }
 

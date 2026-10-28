@@ -3,6 +3,7 @@
 //! stable `aeris_launcher` binary.
 
 mod lifecycle;
+mod release_config;
 mod release_delivery;
 mod release_identity;
 mod rollout;
@@ -21,6 +22,7 @@ pub use lifecycle::{
     native_installation_inventory, verify_release_file, verify_release_manifest,
     verify_release_manifest_signature,
 };
+pub use release_config::{ReleaseConfig, release_config};
 #[cfg(any(test, feature = "producer"))]
 pub use release_delivery::sign_block_plan;
 pub use release_delivery::{

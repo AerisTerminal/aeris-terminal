@@ -511,8 +511,19 @@ still wait on the GUI checks and the remaining work on their lines.
     exclusion, relocation naming, the sweep keeping unknown files; macOS `platform_sys` clippy
     passes for `aarch64-apple-darwin`. naming_check rejects a returning batch deleter and a
     sysinfo dependency in `release_lifecycle`.
+  - Landed (LC-20): `release_lifecycle/build.rs` alone reads the six packaging variables and
+    validates them with `release_config_rules.rs`: none set is a development build, any set
+    requires all (the Authenticode thumbprint only on Windows targets, and it is rejected
+    elsewhere), with a 32-byte base64url key, an https base URL without trailing slash, query
+    or fragment, positive generations and a 16-128 character release identity; anything else
+    fails the build naming the variable. It generates the one static behind
+    `release_config()`, which the launcher (key, base URL, bootstrap generation), the release
+    identity and the Authenticode audit read; the five `option_env!` sites are gone. Tests: the
+    rules (development build, exact complete config, each missing variable, each invalid value,
+    the Windows-only thumbprint); a complete release-configured build passed the release_config
+    tests and a build missing the thumbprint failed with that message. naming_check rejects
+    any other read of the variables and keeps them all out of every workflow.
   - Left:
-    - LC-20: build-validated release config.
     - LC-07: `WinVerifyTrust` with a thumbprint.
     - Check: a development desktop start spawns no launcher child (process list); not run here.
 - [ ] M8.3 Remaining FFI moves to `platform_sys`
