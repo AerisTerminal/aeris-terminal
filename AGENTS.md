@@ -321,8 +321,17 @@ violations and missing verification explicitly, and never describe them as satis
   reduction of the position's prior signed quantity and keep unknown P&L.
   Old P&L tables and per-fill columns remain unread until their deferred removal migration.
   Store-open preflight scratch cleanup may remove only exact preflight directories containing
-  solely the expected database copy and SQLite sidecars; preserve unknown contents and report
-  cleanup failures through observability.
+  solely the expected database copy and SQLite sidecars, and exact readiness directories
+  containing solely that copy, its migration backups and its preflight scratch; preserve
+  unknown contents and report cleanup failures through observability.
+- Candidate readiness (`aeris_desktop --desktop-readiness`) starts the trading owner only on a
+  `trading_runtime::ReadinessDatabaseCopy`: the database file and its sidecars are copied
+  beside it under the instance lock without opening the original through SQLite (even a
+  read-only connection creates WAL sidecars), so the user's `trading.sqlite3` keeps its bytes
+  and `user_version` and a fresh install never creates it. The desktop writes, and the launcher
+  accepts, the one `aeris_release_lifecycle::ReadinessReport` (schema 6, durable write);
+  `provider_count` counts registered market providers, needs no sign-in or network, and must
+  be positive. `tools/naming_check` checks the copy and the shared type.
 - Simulated quote-only marks update unrealized P&L in owner memory without cloning all trading
   state or writing SQLite. Retention runs only from the owner timer at startup and hourly; each
   run writes position and ledger checkpoints in the same transaction before pruning fills or

@@ -3934,44 +3934,9 @@ fn run_desktop_readiness_command(
                 account_service.restore_readiness()
             })?;
         }
-        let market = aeris_market_runtime::MarketService::start()?;
-        let trading = start_trading_service().map_err(|error| error.to_string())?;
-        let context = start_context_service()?;
-        let status = market.status()?;
-        if status.providers.is_empty() {
-            return Err("candidate market service did not reach readiness".to_string());
-        }
-        let release = aeris_release_lifecycle::current_release_identity();
-        let trading_status = trading.status()?;
-        if trading_status.schema_version == 0 {
-            return Err("candidate trading service did not reach readiness".to_string());
-        }
-        let (validation_mode, log_path, vault_namespace) = readiness_data_root_fields()?;
-        let report = LifecycleReadinessReport {
-            schema_version: 6,
-            release_identity: release.release_identity,
-            install_generation: release.install_generation,
-            desktop_process_id: std::process::id(),
-            workspace_revision: workspace.workspace_revision,
-            provider_count: status.providers.len(),
-            workspace_restored: true,
-            validation_mode,
-            instance_lock: ReadinessFlag(true),
-            log_path,
-            vault_namespace,
-            services: LifecycleServiceReadiness {
-                market: ServiceReady(true),
-                account: ServiceReady(true),
-                trading: ServiceReady(true),
-                context: ServiceReady(true),
-            },
-        };
-        context.shutdown(std::time::Duration::from_secs(2))?;
-        market.shutdown(std::time::Duration::from_secs(2))?;
-        trading.shutdown(std::time::Duration::from_secs(2))?;
-        let mut encoded = serde_json::to_vec(&report)
+        let encoded = run_candidate_services(workspace.workspace_revision)?
+            .encode()
             .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
-        encoded.push(b'\n');
         aeris_platform_runtime::fs::write_file_durably(std::path::Path::new(&report_path), &encoded)
             .map_err(|_| "candidate readiness report could not be written".to_string())
     })();
@@ -3988,7 +3953,64 @@ fn run_desktop_readiness_command(
     }
 }
 
-fn readiness_data_root_fields() -> Result<(ReadinessFlag, String, &'static str), String> {
+/// Starts the candidate's market, trading and context owners and reports what they reached.
+fn run_candidate_services(
+    workspace_revision: u64,
+) -> Result<aeris_release_lifecycle::ReadinessReport, String> {
+    let market = aeris_market_runtime::MarketService::start()?;
+    // The candidate migrates a private copy, so a failed or rolled-back update leaves
+    // the user's trading database openable by the release it came from.
+    let trading_copy = aeris_trading_runtime::ReadinessDatabaseCopy::create(
+        &trading_database_path().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let trading = start_trading_service(trading_copy.database_path().to_path_buf())
+        .map_err(|error| error.to_string())?;
+    let report = (|| {
+        let context = start_context_service()?;
+        let status = market.status()?;
+        if status.providers.is_empty() {
+            return Err("candidate market service did not reach readiness".to_string());
+        }
+        let release = aeris_release_lifecycle::current_release_identity();
+        let trading_status = trading.status()?;
+        if trading_status.schema_version == 0 {
+            return Err("candidate trading service did not reach readiness".to_string());
+        }
+        let (validation_mode, log_path, vault_namespace) = readiness_data_root_fields()?;
+        let report = aeris_release_lifecycle::ReadinessReport {
+            schema_version: aeris_release_lifecycle::READINESS_REPORT_SCHEMA_VERSION,
+            release_identity: release.release_identity,
+            install_generation: release.install_generation,
+            desktop_process_id: std::process::id(),
+            workspace_revision,
+            provider_count: status.providers.len(),
+            workspace_restored: true,
+            validation_mode,
+            instance_lock: true,
+            log_path,
+            vault_namespace: vault_namespace.to_string(),
+            services: aeris_release_lifecycle::ServiceReadiness {
+                market: aeris_release_lifecycle::ServiceStarted(true),
+                account: aeris_release_lifecycle::ServiceStarted(true),
+                trading: aeris_release_lifecycle::ServiceStarted(true),
+                context: aeris_release_lifecycle::ServiceStarted(true),
+            },
+        };
+        context.shutdown(std::time::Duration::from_secs(2))?;
+        market.shutdown(std::time::Duration::from_secs(2))?;
+        Ok(report)
+    })();
+    // The trading owner closes the copy before it is removed, on every path.
+    let trading_stopped = trading.shutdown(std::time::Duration::from_secs(2));
+    drop(trading);
+    let report = report?;
+    trading_stopped?;
+    drop(trading_copy);
+    Ok(report)
+}
+
+fn readiness_data_root_fields() -> Result<(bool, String, &'static str), String> {
     let root = aeris_platform_runtime::active_data_root()
         .map_err(|_| "candidate data root policy is unavailable".to_string())?;
     let log_path = root
@@ -3998,60 +4020,30 @@ fn readiness_data_root_fields() -> Result<(ReadinessFlag, String, &'static str),
         .to_string_lossy()
         .into_owned();
     Ok((
-        ReadinessFlag(root.is_validation()),
+        root.is_validation(),
         log_path,
         if root.is_validation() {
-            "validation"
+            aeris_release_lifecycle::VALIDATION_VAULT_NAMESPACE
         } else {
-            "production"
+            aeris_release_lifecycle::PRODUCTION_VAULT_NAMESPACE
         },
     ))
 }
 
-#[derive(serde::Serialize)]
-// Wire mirror of the launcher readiness JSON: this validates the direct
-// in-process desktop runtime before a release is activated.
-struct LifecycleReadinessReport {
-    schema_version: u32,
-    release_identity: String,
-    install_generation: u64,
-    desktop_process_id: u32,
-    workspace_revision: u64,
-    provider_count: usize,
-    workspace_restored: bool,
-    validation_mode: ReadinessFlag,
-    instance_lock: ReadinessFlag,
-    log_path: String,
-    vault_namespace: &'static str,
-    services: LifecycleServiceReadiness,
-}
-
-#[derive(serde::Serialize)]
-struct LifecycleServiceReadiness {
-    market: ServiceReady,
-    account: ServiceReady,
-    trading: ServiceReady,
-    context: ServiceReady,
-}
-
-#[derive(serde::Serialize)]
-#[serde(transparent)]
-struct ServiceReady(bool);
-
-#[derive(serde::Serialize)]
-#[serde(transparent)]
-struct ReadinessFlag(bool);
-
-fn start_trading_service()
--> Result<aeris_trading_runtime::TradingService, aeris_trading_runtime::StoreError> {
-    let database_path = aeris_platform_runtime::native_data_root()
+fn trading_database_path() -> Result<std::path::PathBuf, aeris_trading_runtime::StoreError> {
+    Ok(aeris_platform_runtime::native_data_root()
         .map_err(|error| {
             aeris_trading_runtime::StoreError::Other(format!(
                 "trading data root is unavailable: {error}"
             ))
         })?
         .join("trading")
-        .join("trading.sqlite3");
+        .join("trading.sqlite3"))
+}
+
+fn start_trading_service(
+    database_path: std::path::PathBuf,
+) -> Result<aeris_trading_runtime::TradingService, aeris_trading_runtime::StoreError> {
     aeris_trading_runtime::TradingService::start(aeris_trading_runtime::TradingServiceConfig {
         database_path,
         retention: aeris_trading_runtime::TradingRetention::default(),
@@ -5512,7 +5504,7 @@ pub(super) fn run(
     if let Some(Some(Err(error))) = launcher_promotion {
         diagnostic!("Aeris launcher promotion deferred: {error}");
     }
-    let trading = match start_trading_service() {
+    let trading = match trading_database_path().and_then(start_trading_service) {
         Ok(trading) => trading,
         Err(aeris_trading_runtime::StoreError::Corrupt {
             path,

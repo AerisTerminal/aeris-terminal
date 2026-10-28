@@ -6,6 +6,7 @@ mod migrate_groups;
 mod migrate_ledger;
 mod orders;
 mod quotes;
+mod readiness_copy;
 mod retention;
 mod risk;
 mod schema;
@@ -17,6 +18,7 @@ use export::write_atomic;
 #[cfg(test)]
 use orders::decode_contract;
 pub(crate) use orders::order_history_page;
+pub use readiness_copy::ReadinessDatabaseCopy;
 pub use schema::SCHEMA_VERSION;
 #[cfg(test)]
 pub(crate) fn encode_contract_for_test(
@@ -36,7 +38,7 @@ use {
         insert_order_row, parse_side, release_bracket_levels, update_next_sequence,
     },
     risk::{upsert_discipline_state, upsert_risk_rule_state},
-    schema::sweep_stale_preflight_directories,
+    schema::sweep_stale_scratch_directories,
 };
 
 /// A read-only connection for the paged history reader. It carries no write capability: any
@@ -138,11 +140,7 @@ fn newest_backup(database_path: &Path) -> Option<PathBuf> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("trading-v") && name.ends_with(".sqlite3"))
-        })
+        .filter(|path| path.file_name().is_some_and(schema::is_migration_backup))
         .collect::<Vec<_>>();
     candidates.sort_by_key(|path| backup_unix(path).unwrap_or(0));
     candidates.pop()
@@ -385,7 +383,7 @@ impl TradingStore {
     pub(super) fn open(path: &Path, retention: TradingRetention) -> Result<Self, StoreError> {
         let existed = path != Path::new(":memory:") && path.exists();
         if path != Path::new(":memory:") {
-            sweep_stale_preflight_directories(path);
+            sweep_stale_scratch_directories(path);
         }
         if existed {
             preflight_existing_database(path)?;

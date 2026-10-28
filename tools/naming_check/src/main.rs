@@ -4707,7 +4707,7 @@ mod tests {
             .find("fn run_desktop_readiness_command")
             .expect("candidate readiness path");
         let readiness_end = desktop[readiness_start..]
-            .find("struct LifecycleReadinessReport")
+            .find("fn readiness_data_root_fields")
             .map(|offset| readiness_start + offset)
             .expect("candidate readiness path boundary");
         let readiness = &desktop[readiness_start..readiness_end];
@@ -4728,6 +4728,23 @@ mod tests {
             readiness.contains("retain_account_refresh_quiesce_for_exit(")
                 && readiness.contains("account_service.begin_refresh_quiesce()"),
             "every candidate-readiness exit after account creation must drain refresh-token rotation"
+        );
+        let copy = readiness
+            .find("ReadinessDatabaseCopy::create(")
+            .expect("candidate readiness must copy the trading database");
+        let trading = readiness
+            .find("start_trading_service(trading_copy.database_path().to_path_buf())")
+            .expect("candidate readiness must start trading on its copy");
+        assert!(
+            copy < trading && readiness.matches("start_trading_service(").count() == 1,
+            "candidate readiness must never open or migrate the user's trading database"
+        );
+        let launcher = manifest("crates/release_lifecycle/src/bin/aeris_launcher.rs");
+        assert!(
+            readiness.contains("aeris_release_lifecycle::ReadinessReport {")
+                && !desktop.contains("ReadinessReport {\n    schema_version")
+                && !launcher.contains("ReadinessReport {\n    schema_version"),
+            "the desktop and launcher share release_lifecycle's one readiness report type"
         );
 
         let session = manifest("crates/platform_sys/src/session.rs");
@@ -4799,7 +4816,7 @@ mod tests {
             "--prepare-update",
             "--update-and-restart",
             "--desktop-readiness",
-            "DesktopReadinessReport",
+            "let readiness: ReadinessReport = read_bounded_json(&report)?;",
             "owned_process_is_running(&self.install_root)",
         ] {
             assert!(

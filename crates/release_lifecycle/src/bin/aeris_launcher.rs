@@ -22,11 +22,12 @@ use aeris_platform_runtime::{
 };
 use aeris_release_lifecycle::{
     ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
-    MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer,
-    ReleaseConfig, ReleaseFile, ReleaseInstaller, ReleasePolicy, ReleaseUninstaller,
-    SignedBlockPlan, SignedReleaseManifest, VaultEntry, current_release_identity,
-    decode_and_verify_block_plan, native_install_root, native_installation_inventory,
-    release_config, rollout_eligible, verify_release_file, verify_release_manifest,
+    MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReadinessReport,
+    ReleaseChannelPointer, ReleaseConfig, ReleaseFile, ReleaseInstaller, ReleasePolicy,
+    ReleaseUninstaller, SignedBlockPlan, SignedReleaseManifest, VaultEntry,
+    current_release_identity, decode_and_verify_block_plan, native_install_root,
+    native_installation_inventory, release_config, rollout_eligible, verify_release_file,
+    verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -2171,40 +2172,6 @@ struct NativeHooks {
     install_root: PathBuf,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DesktopReadinessReport {
-    schema_version: u32,
-    release_identity: String,
-    install_generation: u64,
-    desktop_process_id: u32,
-    workspace_revision: u64,
-    provider_count: usize,
-    workspace_restored: bool,
-    validation_mode: ReadinessFlag,
-    instance_lock: ReadinessFlag,
-    log_path: String,
-    vault_namespace: String,
-    services: DesktopServiceReadiness,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DesktopServiceReadiness {
-    market: ServiceReady,
-    account: ServiceReady,
-    trading: ServiceReady,
-    context: ServiceReady,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(transparent)]
-struct ServiceReady(bool);
-
-#[derive(serde::Deserialize)]
-#[serde(transparent)]
-struct ReadinessFlag(bool);
-
 impl NativeHooks {
     fn desktop(&self, release: &ActiveRelease) -> PathBuf {
         self.install_root
@@ -2274,26 +2241,12 @@ impl LifecycleHooks for NativeHooks {
                 .spawn()
                 .map_err(redacted)?;
             Self::wait_for_child(child)?;
-            let readiness: DesktopReadinessReport = read_bounded_json(&report)?;
-            if readiness.schema_version != 6
-                || readiness.release_identity != candidate.release_identity
-                || readiness.install_generation != candidate.install_generation
-                || readiness.desktop_process_id == 0
-                || readiness.provider_count == 0
-                || !readiness.workspace_restored
-                || readiness.validation_mode.0
-                || !readiness.instance_lock.0
-                || readiness.log_path.is_empty()
-                || readiness.vault_namespace != "production"
-                || !readiness.services.market.0
-                || !readiness.services.account.0
-                || !readiness.services.trading.0
-                || !readiness.services.context.0
-            {
-                return Err("candidate desktop readiness report is invalid".to_string());
-            }
-            let _ = readiness.workspace_revision;
-            Ok(())
+            let readiness: ReadinessReport = read_bounded_json(&report)?;
+            readiness
+                .accept_candidate(&candidate.release_identity, candidate.install_generation)
+                .map_err(|rejection| {
+                    format!("candidate desktop readiness report is invalid: {rejection}")
+                })
         })();
         let cleanup = Self::remove_readiness_report(&report);
         if cleanup.is_ok() {

@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-57 of 90 items are fully done (2026-10-28).
+58 of 90 items are fully done (2026-10-28).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -41,7 +41,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 3 / 12 | 9 |
+| M8 lifecycle and trim | 4 / 12 | 8 |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -587,10 +587,25 @@ still wait on the GUI checks and the remaining work on their lines.
     state lock across restore, refresh, rejection, login and sign-out, a cancel-during-commit
     test, profile and refresh-token bound tests. AC-04 and AC-08 were closed by the Cognito
     sign-in work.
-- [ ] M8.5 Shared readiness report
-  - Left: one `ReadinessReport` for the desktop and the launcher.
-  - Readiness runs on a `VACUUM INTO` copy, so the real `trading.sqlite3` is unchanged.
-  - Decide the `provider_count > 0` rule. Closes LC-11 and part of LC-05.
+- [x] M8.5 Shared readiness report
+  - LC-11: `aeris_release_lifecycle::ReadinessReport` (schema 6, unchanged wire shape) is the one
+    type the desktop writes and the launcher reads; `accept_candidate` holds the launcher's checks
+    and names the failed one (`ReadinessRejection`). The report is written with
+    `write_file_durably`. Contract tests: encode/decode round trip, the exact schema-6 JSON,
+    unknown and missing fields rejected, one case per rejection.
+  - LC-05 (readiness part): readiness starts the trading owner only on a
+    `trading_runtime::ReadinessDatabaseCopy` beside the database, under the instance lock. It is a
+    file copy, not `VACUUM INTO` (D21). The scratch is removed after the owner stops, and store
+    open sweeps leftovers with the same exact-contents rule as preflight scratch. Tests: a v20
+    database keeps its bytes and `user_version` while its copy migrates to head, WAL frames are
+    copied without changing the database or sidecars, a fresh install never creates the
+    database, and stale copies are swept while foreign contents stay.
+  - `provider_count > 0` stays (D20). naming_check requires the copy and the shared type.
+  - Checked: `aeris_desktop --validation-root <dir> --desktop-readiness <report>` exited 0 in
+    about 1 s on a sanitized v18 database. Its SHA-256 and `user_version` 18 were the same
+    before and after, and the trading folder held only `trading.sqlite3`. On a fresh root it
+    exited 0 and created no database. The launcher-driven readiness of an installed candidate is
+    covered by M8.7's end-to-end harness.
 - [ ] M8.6 Release wire protocol v1 and Axiusflow residue
   - Left:
     - LC-03: a domain-separated raw-bytes signature with `deny_unknown_fields`.
@@ -662,6 +677,8 @@ Original decisions (2026-10-13). They override the research design documents.
 | D17 | Validation | GUI checks run on an isolated data root while no other Aeris desktop runs. Public Hyperliquid data may be used live; live Rithmic is excluded. |
 | D18 | Checks | Focused checks per change; the full gate once per milestone (section 1). Replaces the per-commit full gate (2026-10-28). |
 | D19 | Order | M6, then M7, then M8; one commit per item or coherent part of an item. |
+| D20 | Readiness providers | (2026-10-28) Readiness keeps `provider_count > 0`. It counts providers registered with the market runtime, which needs no sign-in, login or network, so a fresh install passes; zero means a broken build. |
+| D21 | Readiness copy | (2026-10-28) The readiness copy is a file copy of the database and its sidecars, not `VACUUM INTO`: a read-only SQLite connection to a WAL database creates `-wal` and `-shm` beside it. The instance lock keeps the copied files consistent. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in

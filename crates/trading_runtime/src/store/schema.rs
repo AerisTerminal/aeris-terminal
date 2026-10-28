@@ -590,37 +590,16 @@ pub(crate) fn preflight_existing_database(path: &Path) -> Result<(), StoreError>
     let file_name = path
         .file_name()
         .ok_or_else(|| corrupt_error(path, "database path has no file name"))?;
-    let scratch = parent.join(format!(
-        ".{}.preflight-{}-{}",
-        file_name.to_string_lossy(),
-        std::process::id(),
-        crate::clock::system_unix_nanos()
-    ));
+    let scratch = scratch_directory(parent, file_name, PREFLIGHT_SCRATCH);
     fs::create_dir(&scratch).map_err(|error| {
         corrupt_error(
             path,
             format!("quick_check scratch directory could not be created: {error}"),
         )
     })?;
-    let copy = scratch.join(file_name);
-    let checked = (|| {
-        fs::copy(path, &copy).map_err(|error| {
-            corrupt_error(path, format!("quick_check database copy failed: {error}"))
-        })?;
-        for suffix in ["-wal", "-shm"] {
-            let source = PathBuf::from(format!("{}{suffix}", path.display()));
-            if source.is_file() {
-                fs::copy(
-                    &source,
-                    scratch.join(format!("{}{suffix}", file_name.to_string_lossy())),
-                )
-                .map_err(|error| {
-                    corrupt_error(path, format!("quick_check sidecar copy failed: {error}"))
-                })?;
-            }
-        }
-        preflight_database_copy(path, &copy)
-    })();
+    let checked = copy_database_files(path, &scratch)
+        .map_err(|error| corrupt_error(path, format!("quick_check {error}")))
+        .and_then(|copy| preflight_database_copy(path, &copy));
     if let Err(error) = remove_preflight_scratch(&scratch, file_name) {
         aeris_observability::diagnostic!(
             "trading quick_check scratch cleanup failed for {}: {error}",
@@ -630,10 +609,81 @@ pub(crate) fn preflight_existing_database(path: &Path) -> Result<(), StoreError>
     checked
 }
 
-/// Only directories with the exact preflight name and expected SQLite copy files
-/// are eligible. A foreign file or link is left untouched rather than recursively
-/// deleting data that does not belong to this temporary copy.
-pub(super) fn sweep_stale_preflight_directories(database: &Path) {
+/// Copies the database file and its SQLite sidecars into `scratch` and returns the copy's
+/// path. The original is never opened through SQLite: even a read-only connection to a
+/// WAL database creates `-wal` and `-shm` files beside it.
+pub(super) fn copy_database_files(database: &Path, scratch: &Path) -> Result<PathBuf, String> {
+    let file_name = database
+        .file_name()
+        .ok_or_else(|| "database path has no file name".to_string())?;
+    let copy = scratch.join(file_name);
+    fs::copy(database, &copy).map_err(|error| format!("database copy failed: {error}"))?;
+    for suffix in ["-wal", "-shm"] {
+        let source = PathBuf::from(format!("{}{suffix}", database.display()));
+        if source.is_file() {
+            fs::copy(
+                &source,
+                scratch.join(format!("{}{suffix}", file_name.to_string_lossy())),
+            )
+            .map_err(|error| format!("sidecar copy failed: {error}"))?;
+        }
+    }
+    Ok(copy)
+}
+
+pub(super) const PREFLIGHT_SCRATCH: &str = "preflight";
+pub(super) const READINESS_SCRATCH: &str = "readiness";
+
+/// A per-process scratch directory beside the database, named
+/// `.<database>.<kind>-<pid>-<unix nanos>`.
+pub(super) fn scratch_directory(
+    parent: &Path,
+    database_name: &std::ffi::OsStr,
+    kind: &str,
+) -> PathBuf {
+    parent.join(format!(
+        "{}{}-{}",
+        scratch_prefix(database_name, kind),
+        std::process::id(),
+        crate::clock::system_unix_nanos()
+    ))
+}
+
+pub(super) fn scratch_prefix(database_name: &std::ffi::OsStr, kind: &str) -> String {
+    format!(".{}.{kind}-", database_name.to_string_lossy())
+}
+
+/// Whether `name` is exactly a scratch directory name for `prefix`: the prefix followed by
+/// a decimal process ID and timestamp.
+pub(super) fn is_owned_scratch_name(name: &std::ffi::OsStr, prefix: &str) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix(prefix))
+        .and_then(|suffix| suffix.split_once('-'))
+        .is_some_and(|(pid, nanos)| {
+            [pid, nanos].iter().all(|part| {
+                !part.is_empty() && part.len() <= 20 && part.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+}
+
+/// The database copy and the SQLite sidecars a scratch directory may hold.
+pub(super) fn sqlite_copy_names(database_name: &std::ffi::OsStr) -> [std::ffi::OsString; 3] {
+    [
+        database_name.to_os_string(),
+        format!("{}-wal", database_name.to_string_lossy()).into(),
+        format!("{}-shm", database_name.to_string_lossy()).into(),
+    ]
+}
+
+pub(super) fn is_migration_backup(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with("trading-v") && name.ends_with(".sqlite3"))
+}
+
+/// Only directories with an exact preflight or readiness scratch name and the expected
+/// SQLite copy files are eligible. A foreign file or link is left untouched rather than
+/// recursively deleting data that does not belong to this temporary copy.
+pub(super) fn sweep_stale_scratch_directories(database: &Path) {
     const MAX_SWEEP: usize = 32;
     let Some(parent) = database.parent() else {
         return;
@@ -652,7 +702,8 @@ pub(super) fn sweep_stale_preflight_directories(database: &Path) {
             return;
         }
     };
-    let prefix = format!(".{}.preflight-", file_name.to_string_lossy());
+    let preflight = scratch_prefix(file_name, PREFLIGHT_SCRATCH);
+    let readiness = scratch_prefix(file_name, READINESS_SCRATCH);
     let mut candidates = 0;
     for entry in entries {
         let entry = match entry {
@@ -663,27 +714,24 @@ pub(super) fn sweep_stale_preflight_directories(database: &Path) {
             }
         };
         let name = entry.file_name();
-        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
-            continue;
-        };
-        let Some((pid, nanos)) = suffix.split_once('-') else {
-            continue;
-        };
-        if ![pid, nanos].iter().all(|part| {
-            !part.is_empty() && part.len() <= 20 && part.bytes().all(|b| b.is_ascii_digit())
-        }) {
-            continue;
-        }
+        let remove: fn(&Path, &std::ffi::OsStr) -> std::io::Result<()> =
+            if is_owned_scratch_name(&name, &preflight) {
+                remove_preflight_scratch
+            } else if is_owned_scratch_name(&name, &readiness) {
+                super::readiness_copy::remove_readiness_scratch
+            } else {
+                continue;
+            };
         if candidates == MAX_SWEEP {
             aeris_observability::diagnostic!(
-                "trading preflight scratch sweep deferred beyond {MAX_SWEEP} directories"
+                "trading scratch sweep deferred beyond {MAX_SWEEP} directories"
             );
             break;
         }
         candidates += 1;
-        if let Err(error) = remove_preflight_scratch(&entry.path(), file_name) {
+        if let Err(error) = remove(&entry.path(), file_name) {
             aeris_observability::diagnostic!(
-                "trading preflight scratch cleanup failed for {}: {error}",
+                "trading scratch cleanup failed for {}: {error}",
                 entry.path().display()
             );
         }
@@ -700,11 +748,7 @@ pub(super) fn remove_preflight_scratch(
             "preflight scratch is not a plain directory",
         ));
     }
-    let expected = [
-        database_name.to_os_string(),
-        format!("{}-wal", database_name.to_string_lossy()).into(),
-        format!("{}-shm", database_name.to_string_lossy()).into(),
-    ];
+    let expected = sqlite_copy_names(database_name);
     let mut files = Vec::new();
     for entry in fs::read_dir(scratch)? {
         let entry = entry?;
@@ -789,11 +833,7 @@ pub(super) fn retain_newest_backups(directory: &Path, retention: usize) -> Resul
         .map_err(|error| format!("trading backup directory could not be read: {error}"))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("trading-v") && name.ends_with(".sqlite3"))
-        })
+        .filter(|path| path.file_name().is_some_and(is_migration_backup))
         .collect::<Vec<_>>();
     backups.sort_by_key(|path| backup_unix(path).unwrap_or(0));
     let remove_count = backups.len().saturating_sub(retention);

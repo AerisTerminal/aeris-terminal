@@ -1,8 +1,9 @@
 //! Signed release lifecycle: install, update, rollback and uninstall mechanics,
-//! release delivery plans, rollout policy, the compiled release identity and the
-//! stable `aeris_launcher` binary.
+//! release delivery plans, rollout policy, the compiled release identity, the candidate
+//! readiness report and the stable `aeris_launcher` binary.
 
 mod lifecycle;
+mod readiness;
 mod release_config;
 mod release_delivery;
 mod release_identity;
@@ -21,6 +22,10 @@ pub use lifecycle::{
     SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
     native_installation_inventory, verify_release_file, verify_release_manifest,
     verify_release_manifest_signature,
+};
+pub use readiness::{
+    PRODUCTION_VAULT_NAMESPACE, READINESS_REPORT_SCHEMA_VERSION, ReadinessRejection,
+    ReadinessReport, ServiceReadiness, ServiceStarted, VALIDATION_VAULT_NAMESPACE,
 };
 pub use release_config::{ReleaseConfig, release_config};
 #[cfg(any(test, feature = "producer"))]

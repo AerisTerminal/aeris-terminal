@@ -56,7 +56,7 @@ pub use crate::risk::{
 pub use crate::round_trip::{TradeLeg, TradeRoundTrip};
 use crate::service::Command;
 use crate::store::{OrderStep, StoredState, TradingStore};
-pub use crate::store::{SCHEMA_VERSION, StoreError};
+pub use crate::store::{ReadinessDatabaseCopy, SCHEMA_VERSION, StoreError};
 pub use crate::strategy::{
     BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,
     MAXIMUM_BRACKET_TARGETS, MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES, ProtectionRole,
