@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-53 of 90 items are fully done (2026-10-28).
+54 of 90 items are fully done (2026-10-28).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -40,13 +40,13 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M4 trading core | 9 / 10 | 1 (GUI check) |
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
-| M7 desktop structure | 0 / 12 | 12 |
+| M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
 | M8 lifecycle and trim | 0 / 12 | 12 |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
-can close several items together. The M6 full gate and CI closeout are recorded; M7 and M8 follow in
-order.
+can close several items together. The M6 and M7 full gates and CI closeouts are recorded; M8
+follows.
 
 ## 3. Work items
 
@@ -395,7 +395,7 @@ only on the guarded GUI checks on their lines.
   - Left: GUI check of the hollow style (screenshot comparison before/after). The wasm binding
     and web demo keep the transparent-body color path; exposing `CandleBody` there is a possible
     follow-up, not required by Terminal.
-- [ ] M7.10 Sweep classification and incremental tape in `market_runtime`
+- [x] M7.10 Sweep classification and incremental tape in `market_runtime` (012d2c5c)
   - Landed: the classifier moved to `market_service/trade_sweeps.rs` unchanged (512-trade
     trailing window, 90th-percentile size, 100 ms grouping, moved tests included) and runs once
     per ingested trade plus on every retention eviction and session reset, so
@@ -406,9 +406,8 @@ only on the guarded GUI checks on their lines.
     queue overflows into one covering `Reset`, and a new selection generation, provider session,
     prefix rewrite or eviction gap restarts the stream with a `Reset`. Tests: Append/Reset
     sequencing across rewrite and selection-generation changes, overflow-replay reconstructs the
-    exact tape, sweep classification over the retained trailing window.
-  - Left: none; M7.11 made `TradeTapeUpdate` the only tape publication and removed the legacy
-    full snapshot.
+    exact tape, sweep classification over the retained trailing window. M7.11 made
+    `TradeTapeUpdate` the only tape publication and removed the legacy full snapshot.
 - [ ] M7.11 Desktop consumes runtime sweeps and incremental tape
   - Landed: `OrderFlowPresenter` applies the runtime's fenced `TradeTapeUpdate` stream into a
     ring bounded at the runtime's `MAXIMUM_RECENT_LADDER_TRADES` (65,536): a `Reset` installs
@@ -456,6 +455,10 @@ only on the guarded GUI checks on their lines.
     `interval_switch_keeps_order_flow_off_the_superseded_chart`).
   - Left: tape events are not yet part of the seeded interleavings mix; GUI checks none.
     Closes UI-15.
+
+M7 closeout: the full gate (fmt, workspace clippy, workspace tests, naming_check) passed locally on
+24dc339a, and CI run 40677305725 passed on 24dc339a, which contains all M7 code. The open M7 items
+still wait on the GUI checks and the remaining work on their lines.
 
 ### M8 lifecycle and trim
 
