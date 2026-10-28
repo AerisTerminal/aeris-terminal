@@ -14,6 +14,8 @@ pub(super) struct PanePersistence {
     /// The restored time range, kept for saves until the pane switches selection.
     restored_viewport: Option<Viewport>,
     reported_viewport: Option<Viewport>,
+    /// The viewport a save stores for this pane, as last observed.
+    durable_viewport: Option<Viewport>,
     chart_user_state_revision: u64,
     dirty: bool,
 }
@@ -27,6 +29,7 @@ impl PanePersistence {
             saved_chart,
             restored_viewport,
             reported_viewport: None,
+            durable_viewport: restored_viewport,
             chart_user_state_revision: 0,
             dirty: false,
         }
@@ -76,6 +79,16 @@ impl PanePersistence {
             return false;
         }
         self.chart_user_state_revision = revision;
+        self.dirty = true;
+        true
+    }
+
+    /// Records the viewport a save would store; a change marks the pane dirty and is returned.
+    pub(super) fn observe_durable_viewport(&mut self, viewport: Option<Viewport>) -> bool {
+        if self.durable_viewport == viewport {
+            return false;
+        }
+        self.durable_viewport = viewport;
         self.dirty = true;
         true
     }
@@ -158,6 +171,18 @@ mod tests {
         }));
         assert_eq!(reports, 2);
         assert!(persistence.report_viewport((1, 3), |viewport| viewport == (1, 3)));
+    }
+
+    #[test]
+    fn only_a_changed_durable_viewport_marks_the_pane_dirty() {
+        let mut persistence = PanePersistence::restore(None, Some((10, 20)));
+        assert!(!persistence.observe_durable_viewport(Some((10, 20))));
+        assert!(!persistence.is_dirty());
+        assert!(persistence.observe_durable_viewport(None));
+        assert!(persistence.take_dirty());
+        assert!(!persistence.observe_durable_viewport(None));
+        assert!(persistence.observe_durable_viewport(Some((30, 40))));
+        assert!(persistence.take_dirty());
     }
 
     #[test]

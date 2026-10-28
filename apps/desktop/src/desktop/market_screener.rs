@@ -555,7 +555,7 @@ impl MarketScreener {
         &mut self,
         factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
         workspace_id: u64,
-        wake: &UiWake,
+        dirty: &Arc<DirtySet>,
     ) {
         if self.worker.is_some() {
             return;
@@ -570,7 +570,7 @@ impl MarketScreener {
         };
         match factory.create_market_screen_worker(workspace_id, provider.id) {
             Ok(worker) => {
-                worker.set_message_wake(wake.callback());
+                worker.set_message_wake(dirty.source_wake(AppSource::Screener));
                 self.worker = Some(worker);
                 self.message = None;
             }

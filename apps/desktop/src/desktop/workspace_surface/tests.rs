@@ -1633,6 +1633,16 @@ mod instrument_drawings {
         &mut VisualTestContext,
     ) {
         let (commands, requests) = mpsc::sync_channel(8);
+        let (surface, cx) = open_surface_with_commands(cx, product, restored, commands);
+        (surface, requests, cx)
+    }
+
+    fn open_surface_with_commands(
+        cx: &mut TestAppContext,
+        product: InstallProviderInstrument,
+        restored: Option<WorkspaceChartState>,
+        commands: mpsc::SyncSender<MarketWorkerCommand>,
+    ) -> (Entity<WorkspaceSurface>, &mut VisualTestContext) {
         let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
         let (_, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
@@ -1664,7 +1674,7 @@ mod instrument_drawings {
             ))
         });
         let surface = cx.read(|cx| view.read(cx).0.clone());
-        (surface, requests, cx)
+        (surface, cx)
     }
 
     /// Installs the covering snapshot of `product`, as a completed symbol switch does.
@@ -2096,5 +2106,79 @@ mod instrument_drawings {
         share(std::slice::from_ref(&original), &mut layout, cx);
         assert_eq!(drawing_count(&original, cx), 1, "BTC's drawings remain");
         assert_eq!(layout_instruments(&layout), ["BTC", "HYPE"]);
+    }
+
+    fn queued_registrations(requests: &mpsc::Receiver<MarketWorkerCommand>) -> usize {
+        requests
+            .try_iter()
+            .filter(|command| matches!(command, MarketWorkerCommand::RegisterStudy(_)))
+            .count()
+    }
+
+    fn study_retry_armed(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> bool {
+        cx.read(|cx| {
+            let retry = &surface.read(cx).study_retry;
+            retry.deadline.is_some() || retry.task.is_some()
+        })
+    }
+
+    #[gpui::test]
+    fn a_deferred_study_registration_retries_without_another_market_message(
+        cx: &mut TestAppContext,
+    ) {
+        let restored = WorkspaceChartState {
+            studies: vec![legacy_runtime_study(1, ChartIndicator::Sma, true).expect("SMA study")],
+            ..WorkspaceChartState::default()
+        };
+        let (commands, requests) = mpsc::sync_channel(8);
+        let filler = commands.clone();
+        let (surface, cx) =
+            open_surface_with_commands(cx, instrument("A"), Some(restored), commands);
+        requests.try_iter().for_each(drop);
+        while filler.try_send(MarketWorkerCommand::Shutdown).is_ok() {}
+
+        show(&surface, "A", cx);
+        assert_eq!(
+            cx.read(|cx| surface.read(cx).studies.deferred().len()),
+            1,
+            "a full command lane defers the restored study"
+        );
+        assert!(study_retry_armed(&surface, cx));
+
+        requests.try_iter().for_each(drop);
+        let before_deadline = STUDY_RETRY_DELAY
+            .checked_sub(Duration::from_millis(1))
+            .expect("the retry delay exceeds one millisecond");
+        cx.executor().advance_clock(before_deadline);
+        cx.run_until_parked();
+        assert_eq!(
+            queued_registrations(&requests),
+            0,
+            "the retry waits for its deadline"
+        );
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(
+            queued_registrations(&requests),
+            1,
+            "the armed timer retries the registration"
+        );
+        cx.read(|cx| {
+            let studies = &surface.read(cx).studies;
+            assert!(studies.has_pending());
+            assert_eq!(studies.deferred(), [] as [PendingRuntimeStudyState; 0]);
+        });
+        assert!(
+            !study_retry_armed(&surface, cx),
+            "nothing is armed once the retry was queued"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_without_deferred_studies_arms_no_study_retry(cx: &mut TestAppContext) {
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
+        show(&surface, "A", cx);
+        assert!(!study_retry_armed(&surface, cx));
     }
 }

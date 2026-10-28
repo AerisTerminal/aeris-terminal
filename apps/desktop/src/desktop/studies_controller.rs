@@ -263,6 +263,25 @@ impl StudiesController {
         self.registration_retry = None;
     }
 
+    /// The earliest retry deadline still ahead of `now`: a deferred registration or a held-back
+    /// automatic reinitialization. A passed deadline no longer holds anything back.
+    pub(super) fn next_retry_at(&self, now: Instant) -> Option<Instant> {
+        let registration = self
+            .registration_retry
+            .as_ref()
+            .filter(|_| self.next_deferred_index().is_some())
+            .map(|(_, retry_at)| *retry_at);
+        registration
+            .into_iter()
+            .chain(
+                self.reinitialization_retries
+                    .values()
+                    .map(|(_, retry_at)| *retry_at),
+            )
+            .filter(|retry_at| *retry_at > now)
+            .min()
+    }
+
     /// Queues the removal of every cancelled study not already being removed. Returns whether
     /// every one was queued.
     pub(super) fn dispatch_automatic_removals(
@@ -667,6 +686,37 @@ mod tests {
             studies.defer_registration(Some(failed), now),
             "a success forgets the earlier failure"
         );
+    }
+
+    #[test]
+    fn the_next_retry_is_the_earliest_deadline_still_holding_work_back() {
+        let now = Instant::now();
+        let later = now + STUDY_RETRY_DELAY;
+        let mut studies = StudiesController::default();
+        assert_eq!(studies.next_retry_at(now), None);
+
+        studies.defer_registration(Some(series("failed")), now);
+        assert_eq!(
+            studies.next_retry_at(now),
+            None,
+            "a registration retry with nothing deferred holds nothing back"
+        );
+
+        studies.push_deferred(pending(1, false));
+        assert_eq!(studies.next_retry_at(now), Some(later));
+        let earlier = now
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("an instant before now");
+        studies.defer_reinitialization(study_id(2), series("current"), earlier);
+        let reinitialization_at = earlier + STUDY_RETRY_DELAY;
+        assert_eq!(studies.next_retry_at(now), Some(reinitialization_at));
+        assert_eq!(
+            studies.next_retry_at(later),
+            None,
+            "deadlines already reached need no timer"
+        );
+        studies.registration_succeeded();
+        assert_eq!(studies.next_retry_at(now), Some(reinitialization_at));
     }
 
     #[test]

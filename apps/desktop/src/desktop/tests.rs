@@ -1440,8 +1440,19 @@ mod timeframe_input {
         factory: Option<engine_market_worker::WorkspaceMarketFactory>,
         product: InstallProviderInstrument,
     ) -> (Entity<TerminalApp>, &mut VisualTestContext) {
-        let (commands, _requests) = mpsc::sync_channel(64);
         let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
+        terminal_harness_with_messages(cx, lifecycle, factory, product, messages)
+    }
+
+    /// A terminal whose one pane drains `messages`.
+    fn terminal_harness_with_messages(
+        cx: &mut TestAppContext,
+        lifecycle: DesktopLifecycle,
+        factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+        product: InstallProviderInstrument,
+        messages: aeris_desktop::market_worker::MarketProjectionReceiver,
+    ) -> (Entity<TerminalApp>, &mut VisualTestContext) {
+        let (commands, _requests) = mpsc::sync_channel(64);
         let (_, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
             commands,
@@ -1474,6 +1485,91 @@ mod timeframe_input {
         let terminal = cx.read(|cx| view.read(cx).0.clone());
         cx.run_until_parked();
         (terminal, cx)
+    }
+
+    fn frames_idle(terminal: &Entity<TerminalApp>, cx: &VisualTestContext) -> bool {
+        cx.read(|cx| terminal.read(cx).frames.is_idle())
+    }
+
+    /// Runs frames until the terminal's scheduler has nothing marked and no frame requested,
+    /// returning how many ran. Toast motion requests its own frames, which also run here.
+    fn run_requested_frames(terminal: &Entity<TerminalApp>, cx: &mut VisualTestContext) -> usize {
+        for frames in 0..16 {
+            cx.run_until_parked();
+            if frames_idle(terminal, cx) {
+                return frames;
+            }
+            cx.update(Window::simulate_next_frame);
+        }
+        panic!("the terminal kept requesting frames");
+    }
+
+    #[gpui::test]
+    fn an_idle_terminal_requests_no_frame_after_setup(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        run_requested_frames(&terminal, cx);
+        cx.update(|window, cx| {
+            terminal.update(cx, |_, cx| cx.notify());
+            window.refresh();
+        });
+        cx.run_until_parked();
+        assert!(
+            frames_idle(&terminal, cx),
+            "rendering an idle terminal marks nothing and requests no frame"
+        );
+        cx.run_until_parked();
+        assert!(frames_idle(&terminal, cx));
+    }
+
+    #[gpui::test]
+    fn an_over_budget_pane_drains_on_the_next_frame(cx: &mut TestAppContext) {
+        let product = local_state::fixture_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        let (publications, messages) =
+            market_projection_channel(NonZeroUsize::new(128).expect("nonzero capacity"));
+        let (terminal, cx) = terminal_harness_with_messages(
+            cx,
+            DesktopLifecycle::new_for_test(),
+            None,
+            product,
+            messages,
+        );
+        run_requested_frames(&terminal, cx);
+        let remainder = 6;
+        for _ in 0..MARKET_MESSAGES_PER_FRAME + remainder {
+            publications
+                .send(PaneProjectionEvent::LocalCommandOutcome(
+                    aeris_desktop::market_worker::LocalCommandOutcome::DefaultUnavailable {
+                        generation: u64::MAX,
+                    },
+                ))
+                .expect("the pane mailbox has room");
+        }
+        cx.run_until_parked();
+        assert!(
+            !frames_idle(&terminal, cx),
+            "the pane's mark requests a frame"
+        );
+        cx.update(Window::simulate_next_frame);
+        assert_eq!(
+            publications.occupancy().0,
+            remainder,
+            "one frame drains one budget"
+        );
+        cx.run_until_parked();
+        assert!(
+            !frames_idle(&terminal, cx),
+            "the remainder marks the pane again"
+        );
+        cx.update(Window::simulate_next_frame);
+        assert_eq!(publications.occupancy().0, 0);
+        assert_eq!(
+            run_requested_frames(&terminal, cx),
+            0,
+            "a drained pane requests no further frame"
+        );
     }
 
     #[gpui::test]

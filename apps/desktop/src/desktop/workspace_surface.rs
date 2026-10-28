@@ -111,6 +111,15 @@ struct WorkspaceSurfaceInitialization {
     theme: AerisTheme,
 }
 
+/// The one timer a pane keeps armed for its earliest study retry deadline. Replacing the task
+/// cancels the previous timer, and a timer that still completes retries nothing unless its
+/// deadline is the one currently armed.
+#[derive(Default)]
+pub(super) struct StudyRetryTimer {
+    deadline: Option<Instant>,
+    task: Option<Task<()>>,
+}
+
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
     let trading_pane_token = init.lifecycle.trading_feedback().pane();
     let descriptor = init
@@ -146,6 +155,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         bridge_label: init.bridge_label,
         market_worker: init.market_worker,
         lifecycle: init.lifecycle,
+        #[cfg(feature = "diagnostics")]
         pending_ui_diagnostics: None,
         connection_state: init.startup.connection_state,
         market_session_status: None,
@@ -162,6 +172,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         timeframe_input: init.timeframe_input,
         time_zone_input: init.time_zone_input,
         studies: init.studies,
+        study_retry: StudyRetryTimer::default(),
         indicator_settings_dialog: None,
         chrome_focus: init.chrome_focus,
         provider: init.startup.provider,
@@ -3379,12 +3390,15 @@ impl WorkspaceSurface {
                 return;
             }
         };
-        if let Some(diagnostics) = ui_diagnostics
-            && let Some(replaced) = self.pending_ui_diagnostics.replace(diagnostics)
-        {
+        if let Some(diagnostics) = ui_diagnostics {
+            #[cfg(feature = "diagnostics")]
+            self.hold_ui_diagnostics(diagnostics);
+            // Builds without the feature measure no frames, so the diagnostics are
+            // released unmeasured.
+            #[cfg(not(feature = "diagnostics"))]
             self.market_worker
                 .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
-                    generation: replaced.generation(),
+                    generation: diagnostics.generation(),
                 });
         }
         // A publication says bars arrived, not that they are current. The engine
@@ -3486,6 +3500,23 @@ impl WorkspaceSurface {
             },
             cx,
         );
+    }
+
+    /// Holds a publication's diagnostics until the frame that presents it; a newer
+    /// publication coalesces the held one.
+    #[cfg(feature = "diagnostics")]
+    fn hold_ui_diagnostics(&mut self, diagnostics: PendingUiDiagnostics) {
+        if let Some(replaced) = self.pending_ui_diagnostics.replace(diagnostics) {
+            self.market_worker
+                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
+                    generation: replaced.generation(),
+                });
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub(super) const fn take_ui_diagnostics(&mut self) -> Option<PendingUiDiagnostics> {
+        self.pending_ui_diagnostics.take()
     }
 
     fn reject_incremental_publication(
@@ -4270,7 +4301,7 @@ impl WorkspaceSurface {
             return;
         };
         let series = self.current_runtime_series().ok();
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         if !self.studies.registration_due(series.as_ref(), now) {
             return;
         }
@@ -4337,6 +4368,43 @@ impl WorkspaceSurface {
     }
 
     fn synchronize_runtime_studies(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_runtime_study_work(cx);
+        self.arm_study_retry(cx);
+    }
+
+    /// Arms the pane's one study retry timer for the earliest deadline still holding a
+    /// registration or reinitialization back, so the retry runs even when no market message
+    /// arrives. Nothing is armed while no retry waits.
+    fn arm_study_retry(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let deadline = self.studies.next_retry_at(now);
+        if deadline == self.study_retry.deadline {
+            return;
+        }
+        self.study_retry.deadline = deadline;
+        self.study_retry.task = deadline.map(|deadline| {
+            let delay = deadline.saturating_duration_since(now);
+            cx.spawn(async move |surface, cx| {
+                cx.background_executor().timer(delay).await;
+                if let Err(error) = surface.update(cx, |surface, surface_cx| {
+                    surface.retry_due_studies(deadline, surface_cx);
+                }) && surface.upgrade().is_some()
+                {
+                    diagnostic!("Live pane could not run its study retry: {error}");
+                }
+            })
+        });
+    }
+
+    fn retry_due_studies(&mut self, deadline: Instant, cx: &mut Context<Self>) {
+        if self.study_retry.deadline != Some(deadline) {
+            return;
+        }
+        self.study_retry = StudyRetryTimer::default();
+        self.synchronize_runtime_studies(cx);
+    }
+
+    fn dispatch_runtime_study_work(&mut self, cx: &mut Context<Self>) {
         if !self.retry_automatic_study_removals() {
             return;
         }
@@ -4344,7 +4412,7 @@ impl WorkspaceSurface {
         let Ok(series) = self.current_runtime_series() else {
             return;
         };
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         let stale = self
             .studies
             .stale_studies(&series, now, runtime_study_uses_current_chart);
@@ -4451,7 +4519,8 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         self.studies
-            .reject_reinitialization(study_id, Instant::now());
+            .reject_reinitialization(study_id, cx.background_executor().now());
+        self.arm_study_retry(cx);
         if let Some(dialog) = self.study_settings_dialog_mut()
             && dialog.study_id == study_id
         {
@@ -5008,6 +5077,7 @@ impl WorkspaceSurface {
         self.retain_chart_presentation(cx);
         if let Some(target) = self.chart_pane_controller.take_pending_target() {
             self.interval = target.interval;
+            self.persistence.mark_dirty();
             if let Some(product) = target.product {
                 // Selections only come from providers the menu lists.
                 if let Some(provider) = ProviderId::find(&product.provider)
@@ -5064,6 +5134,7 @@ impl WorkspaceSurface {
         self.pending_descriptor = None;
         self.pending_provider_display_name = None;
         self.interval = interval;
+        self.persistence.mark_dirty();
         self.chart_pane_controller.clear();
         self.order_book.update(cx, |order_book, order_book_cx| {
             order_book.clear(order_book_cx);
@@ -5112,7 +5183,26 @@ impl WorkspaceSurface {
         }
         self.dispatch_recovery(cx);
         self.synchronize_runtime_studies(cx);
+        self.reconcile_bridge_presentation(cx);
+        if applied > 0 {
+            if chart_was_missing && self.chart.is_some() {
+                cx.notify();
+            } else if chart_update_received && let Some(chart) = &self.chart {
+                chart.update(cx, |_, chart_cx| chart_cx.notify());
+            }
+        }
+        applied + usize::from(disconnected) + usize::from(context_changed)
+    }
 
+    /// Follows a chart change the pane's mailbox does not announce: a recovery the chart's
+    /// data bridge found while applying queued data is dispatched, and the bridge state is
+    /// shown, without waiting for the pane's next message.
+    pub(super) fn follow_chart_bridge(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_recovery(cx);
+        self.reconcile_bridge_presentation(cx);
+    }
+
+    fn reconcile_bridge_presentation(&mut self, cx: &mut Context<Self>) {
         let status = self.chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
             |chart| {
@@ -5138,14 +5228,6 @@ impl WorkspaceSurface {
                 }
             });
         }
-        if applied > 0 {
-            if chart_was_missing && self.chart.is_some() {
-                cx.notify();
-            } else if chart_update_received && let Some(chart) = &self.chart {
-                chart.update(cx, |_, chart_cx| chart_cx.notify());
-            }
-        }
-        applied + usize::from(disconnected) + usize::from(context_changed)
     }
 
     fn apply_connection_state(&mut self, state: FeedConnectionState, cx: &mut Context<Self>) {

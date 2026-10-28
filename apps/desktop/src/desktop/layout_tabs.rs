@@ -139,7 +139,7 @@ impl TerminalApp {
             changed |= workspace_surface::sync_layout_drawings(&panes, drawings, cx);
         }
         if changed {
-            self.persist_workspace_layout_if_changed(cx);
+            self.record_layout_change(cx);
         }
     }
 
@@ -301,7 +301,7 @@ impl TerminalApp {
             drawings.mark_saved();
         }
         self.tabs[index].autosaved_snapshot = Some(snapshot);
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(())
     }
@@ -321,7 +321,7 @@ impl TerminalApp {
         if autosave {
             self.tabs.active_mut().autosaved_snapshot = None;
         }
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(())
     }
@@ -378,7 +378,7 @@ impl TerminalApp {
         }
         self.saved.layout_drawings_mut().insert(copy, drawings);
         self.retain_open_layout_drawings();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(copy)
     }
@@ -409,7 +409,7 @@ impl TerminalApp {
             .saved
             .layouts_mut()
             .copy(layout_id, &name, &tab, drawings, now_unix_ms)?;
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(copy)
     }
@@ -431,7 +431,7 @@ impl TerminalApp {
                 workspace.label.clone_from(&name);
             }
         }
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(())
     }
@@ -449,7 +449,7 @@ impl TerminalApp {
         self.saved
             .layouts_mut()
             .delete(layout_id, &open_layout_ids(self.tabs.as_slice()))?;
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(())
     }
@@ -576,12 +576,7 @@ impl TerminalApp {
         let mut workspace = workspace.ok_or_else(|| format!("Layout \"{name}\" could not open"))?;
         workspace.autosaved_snapshot = Some(normalized_layout_tab(&tab));
         workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
-        Self::wire_restored_surfaces(
-            std::slice::from_ref(&workspace),
-            0,
-            self.frames.market(),
-            cx,
-        );
+        Self::wire_restored_surfaces(std::slice::from_ref(&workspace), 0, self.frames.dirty(), cx);
         for pane in &workspace.panes {
             pane.surface.update(cx, |surface, surface_cx| {
                 surface.apply_theme(&self.theme, surface_cx);
@@ -603,7 +598,7 @@ impl TerminalApp {
             .layouts_mut()
             .touch_opened(layout_id, now_unix_ms)?;
         self.notices.clear_workspace_error();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(())
     }

@@ -450,7 +450,7 @@ impl TerminalApp {
                 "You can save up to {MAXIMUM_DRAWING_TEMPLATES} drawing templates."
             ));
         }
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         Ok(())
     }
 
@@ -483,7 +483,7 @@ impl TerminalApp {
 
     fn remove_drawing_template(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.saved.remove_drawing_template(index) {
-            self.persist_workspace_layout_if_changed(cx);
+            self.record_layout_change(cx);
             cx.notify();
         }
     }

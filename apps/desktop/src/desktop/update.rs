@@ -20,6 +20,9 @@ use std::{
 
 use serde::Deserialize;
 
+/// How often a window with an update client polls it for check, preparation and restart
+/// progress; the client itself paces its periodic checks.
+pub(super) const MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const PREPARE_TIMEOUT: Duration = Duration::from_mins(30);
 const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_mins(30);

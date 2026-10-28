@@ -404,7 +404,6 @@ impl TerminalApp {
 
     fn prepare_terminal_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_market_wake_listener(window, cx);
-        self.schedule_market_frame(window, cx);
         self.reconcile_active_drags(cx);
         self.track_window_activation(window, cx);
         self.track_fullscreen_hint(window, cx);

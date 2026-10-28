@@ -105,6 +105,7 @@ impl WorkspaceLayoutPersistence {
         workspace_revision: u64,
         layout_generation: u64,
         persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
+        completion_wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
         let latest = Arc::new(Mutex::new(None));
         let (wake_tx, wake_rx) = mpsc::sync_channel(1);
@@ -124,6 +125,7 @@ impl WorkspaceLayoutPersistence {
                     &worker_result,
                     &worker_durability,
                     &worker_persistence,
+                    completion_wake.as_ref(),
                 );
             })
             .map_err(|_| "workspace layout client could not start".to_string())?;
@@ -275,6 +277,7 @@ fn run_workspace_layout_persistence(
     result: &Mutex<Option<WorkspaceLayoutCompletion>>,
     durability: &Mutex<Option<WorkspaceLayoutDurability>>,
     persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
+    completion_wake: &(dyn Fn() + Send + Sync),
 ) {
     while wake.recv().is_ok() {
         while wake.recv_timeout(Duration::from_millis(100)).is_ok() {}
@@ -326,6 +329,7 @@ fn run_workspace_layout_persistence(
             request_generation,
             result: completed,
         });
+        completion_wake();
     }
 }
 
@@ -542,6 +546,31 @@ mod tests {
 
         state.request(8, vec![]).expect("newer request");
         assert!(!state.shutdown_generation_is_current(generation));
+    }
+
+    #[test]
+    fn a_request_while_the_writer_wake_is_full_is_coalesced_not_refused() {
+        let (state, receiver) = persistence();
+        state.request(1, vec![]).expect("first request");
+        state
+            .request(2, vec![])
+            .expect("a full wake slot coalesces the newer layout");
+        assert!(receiver.try_recv().is_ok());
+        assert!(
+            receiver.try_recv().is_err(),
+            "one wake hands the writer the newest layout"
+        );
+        assert_eq!(
+            state
+                .latest
+                .lock()
+                .expect("latest")
+                .as_ref()
+                .map(|request| request.active_workspace_id),
+            Some(2)
+        );
+        assert!(state.pending.get());
+        assert_eq!(state.error(), None);
     }
 
     #[test]

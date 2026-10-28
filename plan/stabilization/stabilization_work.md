@@ -261,9 +261,34 @@ only on the guarded GUI checks on their lines.
     and `desktop_modules_follow_the_directory_tree` rejects a new `#[path]`.
   - Left: GUI check of tabs, search and menus. Part of UI-07.
 - [ ] M7.6 Dirty-source `FrameScheduler`
-  - Left: `DirtySet` and `FrameScheduler`, with layout persistence by revision.
-  - Delete the 100 ms timer and put diagnostics behind the feature flag.
-  - Record idle CPU for 1, 4 and 16 panes. Closes UI-16.
+  - Landed: `desktop/frame_scheduler.rs` replaces `frame_wakes.rs`. Its `DirtySet` holds one
+    bit per `AppSource` (summaries, screener, trading, notices, persistence receipts, account,
+    updater) and the marked panes, keyed by surface entity, and wakes the one listener that
+    requests a frame; `FramePollGate` is kept as its one-frame dedupe because the diagnostic
+    endurance loop measures frames through the same gate. Each pane mailbox, the summary and
+    screener workers, the trading subscription, the trading request feedback, the workspace
+    writer (a new completion wake), the account change wake and the context feed (all panes)
+    mark their own source, and the frame drains only what was marked with the existing
+    budgets; the pane queue re-wakes on a remainder, so an over-budget pane drains on the next
+    frame. Render and window activation no longer schedule a poll, and a pane returning to
+    the foreground is marked. The 100 ms timer is deleted; a 500 ms updater maintenance
+    interval runs only in a window with an update client. Layout persistence follows a
+    revision: mutations call `record_layout_change`, the per-frame structural compare is
+    gone, a busy writer coalesces rather than refuses, a refused save (writer exited or
+    generation exhausted, neither recoverable in-process) stays due, and selection adoption,
+    failed-switch restore and durable
+    viewport changes now mark the pane dirty themselves. UI diagnostics are held and reported
+    only with the `diagnostics` feature, only for panes the frame drained. The chart observer
+    dispatches recoveries its data bridge finds without waiting for the pane's next message.
+    A deferred study registration or reinitialization arms one timer per pane for its
+    earliest retry deadline (study times come from the GPUI executor clock), so the retry runs
+    without another market message; nothing is armed while no retry waits. GPUI tests cover an
+    idle terminal requesting no frame after setup, an over-budget pane draining on the next
+    frame, a deferred registration retrying on its timer alone and an idle pane arming no
+    study retry.
+  - Left: an automatic study removal refused by a full command lane needs its own retry
+    deadline on the pane's study timer.
+  - Record idle CPU for 1, 4 and 16 panes, before and after. Closes UI-16.
 - [ ] M7.7 Versioned, checksummed workspace container
   - Left: an envelope (magic, version, schema, length, sha256) on the durable writer, used for the
     workspace and chart-chrome files.

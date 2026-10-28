@@ -592,7 +592,7 @@ impl TerminalApp {
         self.pages.screener.ensure_worker(
             self.services.market_factory(),
             workspace_id,
-            self.frames.market(),
+            self.frames.dirty(),
         );
         self.ensure_market_screener_search(window, cx);
         self.pages.screener.refresh_now();

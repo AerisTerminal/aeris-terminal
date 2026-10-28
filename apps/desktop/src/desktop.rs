@@ -29,8 +29,8 @@ mod drawing_settings_dialog;
 mod drawing_toolbar;
 mod engine_market_worker;
 mod frame_poll_gate;
-mod frame_wakes;
-use frame_wakes::FrameWakes;
+mod frame_scheduler;
+use frame_scheduler::{AppSource, DirtySet, FrameScheduler};
 mod frameless_title_bar;
 mod fullscreen_hint;
 mod indicator_menu;
@@ -399,20 +399,28 @@ struct UiWake {
     state: Arc<UiWakeState>,
 }
 
+impl UiWakeState {
+    fn wake(&self) {
+        self.pending.store(true, Ordering::Release);
+        let waker = self
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
 impl UiWake {
+    fn wake(&self) {
+        self.state.wake();
+    }
+
     fn callback(&self) -> Arc<dyn Fn() + Send + Sync> {
         let state = Arc::clone(&self.state);
-        Arc::new(move || {
-            state.pending.store(true, Ordering::Release);
-            let waker = state
-                .waker
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(waker) = waker {
-                waker.wake();
-            }
-        })
+        Arc::new(move || state.wake())
     }
 
     fn notified(&self) -> UiWakeNotified {
@@ -885,6 +893,9 @@ struct WorkspaceSurface {
     bridge_label: String,
     market_worker: MarketDataWorker,
     lifecycle: DesktopLifecycle,
+    /// The newest publication awaiting its presented-frame timestamp; UI diagnostics are
+    /// measured only in builds with the `diagnostics` feature.
+    #[cfg(feature = "diagnostics")]
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     market_session_status: Option<aeris_contracts::MarketSessionStatus>,
@@ -901,6 +912,7 @@ struct WorkspaceSurface {
     timeframe_input: Entity<InputState>,
     time_zone_input: Entity<InputState>,
     studies: studies_controller::StudiesController,
+    study_retry: workspace_surface::StudyRetryTimer,
     indicator_settings_dialog: Option<IndicatorSettingsDialog>,
     chrome_focus: FocusHandle,
     provider: ProviderId,
@@ -2760,6 +2772,19 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             if had_alert_request || had_sync_events {
                 cx.notify();
             }
+            let durable_viewport = {
+                let chart = chart.read(cx);
+                durable_workspace_viewport(
+                    app.persistence.restored_viewport(),
+                    chart.has_market_data(),
+                    chart.is_at_latest(),
+                    chart.visible_time_range_unix_nanos(),
+                )
+            };
+            if app.persistence.observe_durable_viewport(durable_viewport) {
+                cx.notify();
+            }
+            app.follow_chart_bridge(cx);
             if chart.read(cx).has_market_data() {
                 app.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
                 app.retained_chart_presentation.price_precision =
@@ -5071,7 +5096,7 @@ enum WorkspaceShellKind {
 struct TerminalApp {
     tabs: TabStrip,
     theme: AerisTheme,
-    frames: FrameWakes,
+    frames: FrameScheduler,
     window: WindowState,
     lifecycle: DesktopLifecycle,
     services: AppServices,

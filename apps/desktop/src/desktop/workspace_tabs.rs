@@ -22,7 +22,7 @@ fn start_market_summary(
     workspace_id: u64,
     instrument: InstallProviderInstrument,
     resource_class: ConsumerResourceClass,
-    wake: &UiWake,
+    dirty: &Arc<DirtySet>,
 ) -> MarketSummaryEntry {
     let worker = factory.and_then(|factory| {
         match factory.create_summary_worker(
@@ -32,7 +32,7 @@ fn start_market_summary(
             resource_class,
         ) {
             Ok(worker) => {
-                worker.set_message_wake(wake.callback());
+                worker.set_message_wake(dirty.source_wake(AppSource::Summaries));
                 Some(worker)
             }
             Err(error) => {
@@ -89,12 +89,12 @@ pub(super) fn market_summary_requirements<'a>(
 }
 
 impl TerminalApp {
-    /// Gives every restored pane the shared market wake and its resource class, and persists
-    /// the layout when a pane's chart state changes.
+    /// Gives every restored pane its frame wake and resource class, and persists the layout
+    /// when a pane's chart state changes.
     pub(super) fn wire_restored_surfaces(
         workspaces: &[WorkspaceTab],
         active: usize,
-        market_frame_wake: &UiWake,
+        dirty: &Arc<DirtySet>,
         cx: &mut Context<Self>,
     ) {
         for (index, workspace) in workspaces.iter().enumerate() {
@@ -105,19 +105,29 @@ impl TerminalApp {
             };
             for pane in &workspace.panes {
                 Self::wire_pane_notices(&pane.surface, cx);
+                Self::wire_pane_market_wake(&pane.surface, dirty, cx);
                 pane.surface.update(cx, |surface, surface_cx| {
-                    surface.set_market_message_wake(market_frame_wake.callback());
                     surface.set_market_resource_class(resource_class, surface_cx);
                 });
                 cx.observe(&pane.surface, |app, surface, cx| {
                     if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
-                        app.persist_workspace_layout_if_changed(cx);
+                        app.record_layout_change(cx);
                     }
                     cx.notify();
                 })
                 .detach();
             }
         }
+    }
+
+    /// Points a pane's market mailbox at that pane's own frame mark.
+    fn wire_pane_market_wake(
+        surface: &Entity<WorkspaceSurface>,
+        dirty: &Arc<DirtySet>,
+        cx: &mut Context<Self>,
+    ) {
+        let wake = dirty.pane_wake(surface.entity_id().as_u64());
+        surface.update(cx, |surface, _| surface.set_market_message_wake(wake));
     }
 
     fn wire_pane_notices(surface: &Entity<WorkspaceSurface>, cx: &mut Context<Self>) {
@@ -150,6 +160,7 @@ impl TerminalApp {
     fn start_workspace_layout_persistence(
         init: &TerminalShellInit,
         lifecycle: &DesktopLifecycle,
+        dirty: &Arc<DirtySet>,
     ) -> Option<WorkspaceLayoutPersistence> {
         (init.workspace_shell == WorkspaceShellKind::Tabs)
             .then(|| {
@@ -157,6 +168,7 @@ impl TerminalApp {
                     init.workspace_revision,
                     init.layout_generation,
                     lifecycle.persistence(),
+                    dirty.source_wake(AppSource::PersistenceReceipts),
                 )
             })
             .transpose()
@@ -172,11 +184,13 @@ impl TerminalApp {
         command_palette_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let workspace_persistence = Self::start_workspace_layout_persistence(&init, &lifecycle);
-        let frames = FrameWakes::default();
-        lifecycle.set_context_publication_wake(frames.market().callback());
+        let frames = FrameScheduler::default();
+        let workspace_persistence =
+            Self::start_workspace_layout_persistence(&init, &lifecycle, frames.dirty());
+        // Context snapshots are shared by every pane's context panel.
+        lifecycle.set_context_publication_wake(frames.dirty().all_panes_wake());
         let mut tabs = TabStrip::new(init.workspaces, init.active_workspace_id);
-        Self::wire_restored_surfaces(tabs.as_slice(), tabs.active_index(), frames.market(), cx);
+        Self::wire_restored_surfaces(tabs.as_slice(), tabs.active_index(), frames.dirty(), cx);
         let (layout_library, layout_drawings) = layout_tabs::restored_layouts(
             init.saved_layouts,
             &mut tabs,
@@ -188,7 +202,7 @@ impl TerminalApp {
             active_workspace_id: tabs.active().id,
             watchlist: init.watchlist_entries.clone(),
         };
-        let trading_store = start_trading_store(&lifecycle, frames.market(), cx);
+        let trading_store = start_trading_store(&lifecycle, frames.dirty(), cx);
         Self {
             tabs,
             theme: AerisTheme::dark(),
@@ -444,7 +458,7 @@ impl TerminalApp {
                     workspace_id,
                     instrument,
                     resource_class,
-                    self.frames.market(),
+                    self.frames.dirty(),
                 ),
             );
         }
@@ -460,7 +474,7 @@ impl TerminalApp {
         }
         self.sync_market_summaries(cx);
         self.saved.mark_unsaved(UnsavedEdit::Watchlist);
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -473,7 +487,7 @@ impl TerminalApp {
         if self.market_watch.remove(provider, instrument_id) {
             self.sync_market_summaries(cx);
             self.saved.mark_unsaved(UnsavedEdit::Watchlist);
-            self.persist_workspace_layout_if_changed(cx);
+            self.record_layout_change(cx);
             cx.notify();
         }
     }
@@ -521,7 +535,7 @@ impl TerminalApp {
         if !self.market_watch.end_drag() {
             return;
         }
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -610,7 +624,7 @@ impl TerminalApp {
 
     fn save_watchlist_flags(&mut self, cx: &mut Context<Self>) {
         self.saved.mark_unsaved(UnsavedEdit::Watchlist);
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -761,6 +775,13 @@ impl TerminalApp {
                 pane.surface.update(cx, |surface, surface_cx| {
                     surface.set_market_resource_class(resource_class, surface_cx);
                 });
+                // A background pane is not drained, so whatever it queued meanwhile is
+                // drained once it returns to the foreground.
+                if resource_class == ConsumerResourceClass::Foreground {
+                    self.frames
+                        .dirty()
+                        .mark_pane(pane.surface.entity_id().as_u64());
+                }
             }
         }
     }
@@ -800,7 +821,7 @@ impl TerminalApp {
         let workspace = &mut self.tabs[workspace_index];
         workspace.active_pane = index;
         workspace.generation = workspace.generation.saturating_add(1);
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -1529,7 +1550,7 @@ impl TerminalApp {
             return;
         };
         if self.saved.remove_chart_settings_template(index) {
-            self.persist_workspace_layout_if_changed(cx);
+            self.record_layout_change(cx);
         }
         cx.notify();
     }
@@ -1585,7 +1606,7 @@ impl TerminalApp {
             return;
         }
         self.chart_menus.show_template_menu();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -1876,7 +1897,7 @@ impl TerminalApp {
         if self.services.update_restart_pending() || self.window.is_closing() {
             return;
         }
-        self.persist_workspace_layout_if_changed(cx);
+        self.persist_due_layout(cx);
         let workspace_wait = self
             .saved
             .writer()
@@ -2409,11 +2430,24 @@ impl TerminalApp {
             return;
         }
         workspace.generation = workspace.generation.saturating_add(1);
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
-    pub(super) fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
+    /// Records a change to the persisted workspace and hands it to the writer.
+    pub(super) fn record_layout_change(&mut self, cx: &App) {
+        self.frames.layout_changed();
+        self.persist_due_layout(cx);
+    }
+
+    /// Hands the workspace to the writer when a layout revision is not yet accepted. A busy
+    /// writer coalesces the request rather than refusing it; the writer refuses only once its
+    /// thread has exited or its layout generation is exhausted, neither of which recovers in
+    /// this process, so a refused revision stays due without a retry timer.
+    pub(super) fn persist_due_layout(&mut self, cx: &App) {
+        let Some(revision) = self.frames.layout_save_due() else {
+            return;
+        };
         if self.window.is_closing() {
             return;
         }
@@ -2426,7 +2460,9 @@ impl TerminalApp {
         };
         match self.saved.save_if_changed(snapshot) {
             WorkspaceSave::Failed(error) => self.notices.show_workspace_error(error),
-            WorkspaceSave::Unavailable | WorkspaceSave::Unchanged | WorkspaceSave::Requested => {}
+            WorkspaceSave::Unavailable | WorkspaceSave::Unchanged | WorkspaceSave::Requested => {
+                self.frames.layout_saved(revision);
+            }
         }
     }
 
@@ -2441,7 +2477,7 @@ impl TerminalApp {
         self.set_workspace_resource_class(previous, ConsumerResourceClass::Background, cx);
         self.set_workspace_resource_class(next, ConsumerResourceClass::Foreground, cx);
         self.notices.clear_workspace_error();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -2507,7 +2543,7 @@ impl TerminalApp {
     /// focused tab stays focused as it moves.
     fn move_active_workspace(&mut self, direction: isize, cx: &mut Context<Self>) {
         if self.tabs.move_active(direction) {
-            self.persist_workspace_layout_if_changed(cx);
+            self.record_layout_change(cx);
             cx.notify();
         }
     }
@@ -2571,7 +2607,7 @@ impl TerminalApp {
             TabDragMove::Unchanged => {}
             TabDragMove::Moved => cx.notify(),
             TabDragMove::Reordered => {
-                self.persist_workspace_layout_if_changed(cx);
+                self.record_layout_change(cx);
                 cx.notify();
             }
         }
@@ -2650,7 +2686,7 @@ impl TerminalApp {
             self.focus_workspace(window, cx);
         }
         self.notices.clear_workspace_error();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -2725,9 +2761,9 @@ impl TerminalApp {
             cx,
         );
         Self::wire_pane_notices(&surface, cx);
+        Self::wire_pane_market_wake(&surface, self.frames.dirty(), cx);
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
-            workspace.set_market_message_wake(self.frames.market().callback());
         });
         let mut workspace = WorkspaceTab {
             id: workspace_id,
@@ -2755,7 +2791,7 @@ impl TerminalApp {
         }
         cx.observe(&surface, |app, surface, cx| {
             if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
-                app.persist_workspace_layout_if_changed(cx);
+                app.record_layout_change(cx);
             }
             cx.notify();
         })
@@ -2768,7 +2804,7 @@ impl TerminalApp {
         );
         self.tabs.push_active(workspace);
         self.notices.clear_workspace_error();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
         Ok(())
     }
@@ -2841,17 +2877,17 @@ impl TerminalApp {
             cx,
         );
         Self::wire_pane_notices(&surface, cx);
+        Self::wire_pane_market_wake(&surface, self.frames.dirty(), cx);
         surface.update(cx, |surface, surface_cx| {
             surface.apply_theme(&self.theme, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Foreground, surface_cx);
-            surface.set_market_message_wake(self.frames.market().callback());
             surface.select_drawing_tool(drawing_tool, surface_cx);
             surface.chrome.set_side_panel_size(side_panel_size);
             surface.apply_side_panels(side_panels, surface_cx);
         });
         cx.observe(&surface, |app, surface, cx| {
             if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
-                app.persist_workspace_layout_if_changed(cx);
+                app.record_layout_change(cx);
             }
             cx.notify();
         })
@@ -2886,7 +2922,7 @@ impl TerminalApp {
         workspace.active_pane = insertion_index;
         workspace.generation = workspace.generation.saturating_add(1);
         self.notices.clear_workspace_error();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -2964,7 +3000,7 @@ impl TerminalApp {
             });
         self.focus_workspace(window, cx);
         self.notices.clear_workspace_error();
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
@@ -3114,7 +3150,7 @@ impl TerminalApp {
             return false;
         }
         self.sync_layout_drawings(cx);
-        self.persist_workspace_layout_if_changed(cx);
+        self.record_layout_change(cx);
         self.window.begin_closing();
         if let Some(persistence) = self.saved.writer() {
             self.lifecycle
@@ -3302,20 +3338,19 @@ impl TerminalApp {
                 self.end_workspace_drag(window, cx);
             }
         }
-        if let ActivityChange::Activated { refresh_profile } = change {
-            if refresh_profile
-                && let Some(account) = self.lifecycle.account()
-                && account.request_profile_refresh_if_active().is_err()
-            {
-                diagnostic!("Aeris profile refresh degraded");
-                self.post_workspace_notice(
-                    "profile_refresh",
-                    "Account profile refresh unavailable",
-                    notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
-                    cx,
-                );
-            }
-            self.schedule_market_frame(window, cx);
+        if let ActivityChange::Activated {
+            refresh_profile: true,
+        } = change
+            && let Some(account) = self.lifecycle.account()
+            && account.request_profile_refresh_if_active().is_err()
+        {
+            diagnostic!("Aeris profile refresh degraded");
+            self.post_workspace_notice(
+                "profile_refresh",
+                "Account profile refresh unavailable",
+                notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                cx,
+            );
         }
     }
 
@@ -3329,83 +3364,140 @@ impl TerminalApp {
         }
     }
 
-    /// Schedules the single presentation boundary for live market state.
+    /// Requests the one frame that drains the marked sources.
     ///
-    /// `on_next_frame` follows the window's compositor cadence, so the bounded
-    /// mailbox is drained at the active display's refresh rate without a second
-    /// fixed-frequency timer in an individual chart or order-book surface.
-    pub(super) fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.frames.try_schedule_frame() {
+    /// `on_next_frame` follows the window's compositor cadence, so marked work is
+    /// drained at the active display's refresh rate without a fixed-frequency timer
+    /// in the terminal or an individual chart or order-book surface.
+    fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.frames.try_request_frame() {
             return;
         }
         let terminal = cx.entity();
         window.on_next_frame(move |window, cx| {
-            let diagnostics = terminal.update(cx, |terminal, cx| {
-                terminal.frames.frame_ran();
-                if !terminal.window.is_closing()
-                    && terminal
-                        .saved
-                        .writer()
-                        .is_some_and(WorkspaceLayoutPersistence::poll)
-                {
-                    let error = terminal
-                        .saved
-                        .writer()
-                        .and_then(WorkspaceLayoutPersistence::error);
-                    terminal.notices.set_workspace_error(error);
-                    cx.notify();
-                }
-                let authenticated = terminal
-                    .lifecycle
-                    .account()
-                    .is_none_or(aeris_desktop::account::DesktopAccount::authenticated);
-                let mut diagnostics = Vec::new();
-                let mut summaries_changed = false;
-                if authenticated {
-                    for entry in terminal.market_watch.summaries_mut().values_mut() {
-                        summaries_changed |= entry.poll();
-                    }
-                }
-                if summaries_changed {
-                    cx.notify();
-                }
-                terminal.poll_market_screener(window, cx);
-                for workspace in terminal.tabs.iter() {
-                    for pane in &workspace.panes {
-                        let surface = pane.surface.clone();
-                        let pending = surface.update(cx, |workspace, workspace_cx| {
-                            if authenticated && workspace.should_poll_market() {
-                                workspace.poll_market_worker(workspace_cx);
-                            }
-                            workspace.pending_ui_diagnostics.take()
-                        });
-                        if let Some(pending) = pending {
-                            diagnostics.push((surface, pending));
-                        }
-                    }
-                }
-                terminal.persist_workspace_layout_if_changed(cx);
-                diagnostics
-            });
-            if !diagnostics.is_empty() {
-                window.on_next_frame(move |_, cx| {
-                    for (workspace, mut diagnostics) in diagnostics {
-                        diagnostics.mark_frame_submit();
-                        workspace.update(cx, |workspace, _| {
-                            workspace
-                                .market_worker
-                                .send_ui_diagnostics(diagnostics.into_presented());
-                        });
-                    }
-                });
-            }
+            terminal.update(cx, |terminal, cx| terminal.run_frame(window, cx));
         });
     }
+
+    /// Drains only the sources and panes marked since the last frame, each within its
+    /// own budget. A source with work left after its budget marks itself again, which
+    /// requests the next frame.
+    fn run_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let work = self.frames.begin_frame();
+        if work.contains(AppSource::PersistenceReceipts)
+            && !self.window.is_closing()
+            && self
+                .saved
+                .writer()
+                .is_some_and(WorkspaceLayoutPersistence::poll)
+        {
+            let error = self
+                .saved
+                .writer()
+                .and_then(WorkspaceLayoutPersistence::error);
+            self.notices.set_workspace_error(error);
+            cx.notify();
+        }
+        if work.contains(AppSource::Updater) {
+            self.maintain_updater(window, cx);
+        }
+        if work.contains(AppSource::Trading) && self.services.trading_store().read(cx).has_pending()
+        {
+            self.apply_trading_publication(cx);
+            cx.notify();
+        }
+        if work.contains(AppSource::Notices)
+            && self.lifecycle.trading_feedback().has_request_results()
+        {
+            self.apply_trading_request_results(cx);
+        }
+        // Authentication gates every market drain, so an account change also drains
+        // whatever the gate held back, even when a suspended provider sends nothing.
+        let account_changed = work.contains(AppSource::Account);
+        if account_changed {
+            cx.notify();
+        }
+        let authenticated = self
+            .lifecycle
+            .account()
+            .is_none_or(aeris_desktop::account::DesktopAccount::authenticated);
+        if authenticated && (account_changed || work.contains(AppSource::Summaries)) {
+            let mut summaries_changed = false;
+            for entry in self.market_watch.summaries_mut().values_mut() {
+                summaries_changed |= entry.poll();
+            }
+            if summaries_changed {
+                cx.notify();
+            }
+        }
+        if work.contains(AppSource::Screener) {
+            self.poll_market_screener(window, cx);
+        }
+        #[cfg(feature = "diagnostics")]
+        let mut presented = Vec::new();
+        for workspace in self.tabs.iter() {
+            for pane in &workspace.panes {
+                if !account_changed && !work.includes_pane(pane.surface.entity_id().as_u64()) {
+                    continue;
+                }
+                pane.surface.update(cx, |surface, surface_cx| {
+                    if authenticated && surface.should_poll_market() {
+                        surface.poll_market_worker(surface_cx);
+                    }
+                });
+                #[cfg(feature = "diagnostics")]
+                if let Some(diagnostics) = pane
+                    .surface
+                    .update(cx, |surface, _| surface.take_ui_diagnostics())
+                {
+                    presented.push((pane.surface.clone(), diagnostics));
+                }
+            }
+        }
+        #[cfg(feature = "diagnostics")]
+        present_ui_diagnostics(presented, window);
+        self.persist_due_layout(cx);
+    }
+
+    fn maintain_updater(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(updater) = self.services.updater_mut() else {
+            return;
+        };
+        let update = updater.poll();
+        if update.changed {
+            cx.notify();
+        }
+        if update.restart_prepared {
+            self.prepare_update_restart_after_workspace_persistence(window, cx);
+        }
+    }
+}
+
+/// Reports each drained publication as presented on the frame after the one that
+/// applied it.
+#[cfg(feature = "diagnostics")]
+fn present_ui_diagnostics(
+    presented: Vec<(Entity<WorkspaceSurface>, PendingUiDiagnostics)>,
+    window: &Window,
+) {
+    if presented.is_empty() {
+        return;
+    }
+    window.on_next_frame(move |_, cx| {
+        for (surface, mut diagnostics) in presented {
+            diagnostics.mark_frame_submit();
+            surface.update(cx, |surface, _| {
+                surface
+                    .market_worker
+                    .send_ui_diagnostics(diagnostics.into_presented());
+            });
+        }
+    });
 }
 
 fn start_trading_store(
     lifecycle: &DesktopLifecycle,
-    wake: &UiWake,
+    dirty: &Arc<DirtySet>,
     cx: &mut Context<TerminalApp>,
 ) -> Entity<trading_store::TradingStore> {
     let store = cx.new(|_| trading_store::TradingStore::default());
@@ -3418,7 +3510,7 @@ fn start_trading_store(
         return store;
     }
     let service = lifecycle.trading().clone();
-    let wake = wake.callback();
+    let wake = dirty.source_wake(AppSource::Trading);
     let bridge_store = store.clone();
     let subscription = cx
         .background_executor()
@@ -3438,6 +3530,8 @@ fn start_trading_store(
 }
 
 impl TerminalApp {
+    /// Starts the one listener that turns marks into frames. Producers wired before it
+    /// started are covered by the first frame, which drains everything.
     pub(super) fn start_market_wake_listener(
         &mut self,
         window: &mut Window,
@@ -3446,98 +3540,58 @@ impl TerminalApp {
         if !self.frames.claim_listener_start() {
             return;
         }
-        self.start_account_wake_listener(window, cx);
-        cx.spawn_in(window, async move |terminal, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                if terminal
-                    .update_in(cx, |terminal, window, terminal_cx| {
-                        let restart_prepared =
-                            if let Some(updater) = terminal.services.updater_mut() {
-                                let update = updater.poll();
-                                if update.changed {
-                                    terminal_cx.notify();
-                                }
-                                update.restart_prepared
-                            } else {
-                                false
-                            };
-                        if restart_prepared {
-                            terminal.prepare_update_restart_after_workspace_persistence(
-                                window,
-                                terminal_cx,
-                            );
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-        let wake = self.frames.market().clone();
         self.lifecycle
             .trading_feedback()
-            .set_request_wake(wake.callback());
+            .set_request_wake(self.frames.dirty().source_wake(AppSource::Notices));
+        let account_registration = self.register_account_wake();
+        self.start_updater_maintenance(cx);
+        let dirty = Arc::clone(self.frames.dirty());
         cx.spawn_in(window, async move |terminal, cx| {
             loop {
-                wake.notified().await;
+                dirty.notified().await;
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
-                        if terminal
-                            .services
-                            .trading_store()
-                            .read(terminal_cx)
-                            .has_pending()
-                        {
-                            terminal.apply_trading_publication(terminal_cx);
-                            terminal_cx.notify();
-                        }
-                        if terminal.lifecycle.trading_feedback().has_request_results() {
-                            terminal.apply_trading_request_results(terminal_cx);
-                        }
-                        terminal.schedule_market_frame(window, terminal_cx);
+                        terminal.request_frame(window, terminal_cx);
                     })
                     .is_err()
                 {
                     break;
                 }
             }
+            drop(account_registration);
         })
         .detach();
     }
 
-    /// Re-renders when the account presentation changes. Authentication
-    /// must progress even when a suspended provider has no events to wake
-    /// this window, so a change also schedules a frame that drains retained
-    /// market data.
-    fn start_account_wake_listener(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(account) = self.lifecycle.account() else {
-            return;
-        };
-        let wake = UiWake::default();
-        let registration = wake.callback();
+    /// Marks the account source on every presentation change. The account holds its change
+    /// wakes weakly, so the returned registration must live as long as the listener.
+    fn register_account_wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let account = self.lifecycle.account()?;
+        let registration = self.frames.dirty().source_wake(AppSource::Account);
         if let Err(error) = account.register_change_wake(&registration) {
             diagnostic!("Aeris account change wake unavailable: {error}");
+            return None;
+        }
+        Some(registration)
+    }
+
+    /// Only a window with an update client (never a development build) has update work,
+    /// so only then does a maintenance interval mark the updater.
+    fn start_updater_maintenance(&self, cx: &mut Context<Self>) {
+        if self.services.updater().is_none() {
             return;
         }
-        cx.spawn_in(window, async move |terminal, cx| {
+        let dirty = Arc::clone(self.frames.dirty());
+        cx.spawn(async move |terminal, cx| {
             loop {
-                wake.notified().await;
-                if terminal
-                    .update_in(cx, |terminal, window, terminal_cx| {
-                        terminal.schedule_market_frame(window, terminal_cx);
-                        terminal_cx.notify();
-                    })
-                    .is_err()
-                {
+                cx.background_executor()
+                    .timer(update::MAINTENANCE_INTERVAL)
+                    .await;
+                if terminal.upgrade().is_none() {
                     break;
                 }
+                dirty.mark(AppSource::Updater);
             }
-            drop(registration);
         })
         .detach();
     }

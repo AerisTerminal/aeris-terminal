@@ -1,7 +1,9 @@
-/// Coalesces market-poll frame requests so at most one is in flight.
+/// Coalesces frame requests so at most one is in flight.
 ///
-/// The gate exists to keep a burst of provider wakes from queueing a frame
-/// callback each; it deliberately does **not** consider window focus. Polling
+/// The gate exists to keep a burst of producer wakes from queueing a frame
+/// callback each. It is the dedupe primitive of the window's `FrameScheduler`
+/// and of the diagnostic endurance loop, which measures frames through the
+/// same gate. It deliberately does **not** consider window focus. Polling
 /// used to stop entirely while the window was unfocused, which froze the price
 /// and the bar countdown for as long as the trader looked at another window,
 /// then replayed the backlog in a rush when focus came back. GPUI already
@@ -23,5 +25,10 @@ impl FramePollGate {
 
     pub(crate) const fn complete(&mut self) {
         self.scheduled = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_scheduled(&self) -> bool {
+        self.scheduled
     }
 }
