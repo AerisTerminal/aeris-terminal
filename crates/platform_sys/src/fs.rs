@@ -168,27 +168,49 @@ fn temporary_name(file_name: &std::ffi::OsStr, process_id: u32, sequence: u64) -
     name
 }
 
-/// Returns the destination file name encoded by an exact staged-file temporary name.
+/// The parts of an exact temporary name emitted by [`StagedFile`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StagedTemporaryName<'a> {
+    /// The destination file name the temporary was staged for.
+    pub destination: &'a str,
+    /// The process that created the temporary.
+    pub process_id: u32,
+    /// The creating process's staging sequence number.
+    pub sequence: u64,
+}
+
+/// Parses an exact staged-file temporary name.
 ///
 /// Names not emitted by [`StagedFile`] are rejected. Staged names containing a
 /// non-Unicode destination cannot be inspected through this portable API.
 #[must_use]
-pub fn staged_temporary_destination_name(file_name: &std::ffi::OsStr) -> Option<&str> {
+pub fn parse_staged_temporary_name(file_name: &std::ffi::OsStr) -> Option<StagedTemporaryName<'_>> {
     let name = file_name.to_str()?;
     let body = name.strip_prefix('.')?.strip_suffix(".tmp")?;
     let (destination, identity) = body.rsplit_once('.')?;
     if destination.is_empty() {
         return None;
     }
-    let (process_id, sequence) = identity.split_once('-')?;
-    if process_id.is_empty()
-        || sequence.is_empty()
-        || process_id.parse::<u32>().ok()?.to_string() != process_id
-        || sequence.parse::<u64>().ok()?.to_string() != sequence
-    {
+    let (process_id_text, sequence_text) = identity.split_once('-')?;
+    let process_id = process_id_text.parse::<u32>().ok()?;
+    let sequence = sequence_text.parse::<u64>().ok()?;
+    if process_id.to_string() != process_id_text || sequence.to_string() != sequence_text {
         return None;
     }
-    Some(destination)
+    Some(StagedTemporaryName {
+        destination,
+        process_id,
+        sequence,
+    })
+}
+
+/// Returns the destination file name encoded by an exact staged-file temporary name.
+///
+/// Names not emitted by [`StagedFile`] are rejected. Staged names containing a
+/// non-Unicode destination cannot be inspected through this portable API.
+#[must_use]
+pub fn staged_temporary_destination_name(file_name: &std::ffi::OsStr) -> Option<&str> {
+    parse_staged_temporary_name(file_name).map(|name| name.destination)
 }
 
 #[cfg(target_os = "windows")]
@@ -282,6 +304,30 @@ mod tests {
         assert!(root.join(".state.invalid.tmp").exists());
         assert!(root.join(".state.8-5.tmp").is_dir());
         fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn staged_temporary_names_parse_only_exact_writer_names() {
+        assert_eq!(
+            parse_staged_temporary_name(std::ffi::OsStr::new(".state.pb.7-4.tmp")),
+            Some(StagedTemporaryName {
+                destination: "state.pb",
+                process_id: 7,
+                sequence: 4,
+            })
+        );
+        for rejected in [
+            ".state.07-4.tmp",
+            ".state.7-+4.tmp",
+            "state.7-4.tmp",
+            "..7-4.tmp",
+        ] {
+            assert_eq!(
+                parse_staged_temporary_name(std::ffi::OsStr::new(rejected)),
+                None,
+                "{rejected}"
+            );
+        }
     }
 
     #[test]

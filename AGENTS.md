@@ -210,6 +210,17 @@ violations and missing verification explicitly, and never describe them as satis
   parent directory on Unix. Production code must use this writer instead of raw `fs::write` or
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
+- The workspace (`workspace-state.pb`) and chart-chrome files persist only through
+  `platform_runtime::DurableContainer`, the one container implementation, built on
+  `StagedFile`: `magic | envelope_version | schema_version | len | sha256 | payload` with a
+  12 MB payload bound. A write first copies a valid current file to `<name>.bak`; loads try
+  the primary, then at most four exact staged temporaries newer than the backup (from a
+  bounded 1,024-entry directory scan), then the backup. A recovering load moves an unusable
+  primary to `<name>.corrupt-1`, keeping the newest three; the readiness gate inspects
+  read-only. The magic starts with NUL, which no released payload (protobuf, `key=value`
+  text) can, so a file without it opens unchanged as a legacy payload and is enveloped on the
+  next save. `workspace_and_chart_chrome_persist_through_the_durable_container` rejects a
+  second container or a direct writer, `.bak` or `read_to_string` path in those files.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
   `schema.rs` retains the V1–V30 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills

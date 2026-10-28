@@ -2,9 +2,11 @@ use aeris_chart_integration::{
     ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
 };
 use aeris_contracts::InstrumentSearchCategories;
-use aeris_platform_runtime::fs::write_file_durably;
+use aeris_observability::diagnostic;
+use aeris_platform_runtime::{
+    DurableCandidate, DurableContainer, DurableFormat, DurableRejection, DurableSource,
+};
 use std::{
-    fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
@@ -826,13 +828,61 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
     )
 }
 
-fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
-    fs::read_to_string(path)
-        .or_else(|_| fs::read_to_string(path.with_extension("bak")))
-        .ok()
-        .as_deref()
+/// The same bound as the workspace file.
+const MAXIMUM_CHART_CHROME_FILE_BYTES: usize = 12 * 1_048_576;
+/// The durable-container schema of the chart chrome payload, UTF-8 `key=value` lines.
+const CHART_CHROME_CONTAINER_SCHEMA: u32 = 1;
+
+fn chart_chrome_container(path: &Path) -> DurableContainer {
+    DurableContainer::new(path.to_path_buf(), MAXIMUM_CHART_CHROME_FILE_BYTES)
+}
+
+/// Both the enveloped schema-1 payload and a released version's bare file are the same
+/// `key=value` text.
+fn decode_chart_chrome_candidate(
+    candidate: DurableCandidate<'_>,
+) -> Result<ChartChromePreferences, String> {
+    match candidate.format {
+        DurableFormat::Legacy
+        | DurableFormat::Envelope {
+            schema_version: CHART_CHROME_CONTAINER_SCHEMA,
+        } => {}
+        DurableFormat::Envelope { schema_version } => {
+            return Err(format!(
+                "chart chrome schema version {schema_version} is unsupported"
+            ));
+        }
+    }
+    std::str::from_utf8(candidate.payload)
         .map(parse_chart_chrome_preferences)
-        .unwrap_or_default()
+        .map_err(|error| error.to_string())
+}
+
+fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
+    restore_chart_chrome_preferences(path).0
+}
+
+/// Restores the saved preferences, or the defaults when no file is usable, and reports
+/// every rejected file through observability.
+fn restore_chart_chrome_preferences(
+    path: &Path,
+) -> (ChartChromePreferences, Vec<DurableRejection>) {
+    let load = chart_chrome_container(path).load(decode_chart_chrome_candidate);
+    for rejection in &load.rejected {
+        diagnostic!("Aeris chart preferences file rejected: {rejection}");
+    }
+    let preferences = if let Some((preferences, source)) = load.restored {
+        if source != DurableSource::Primary {
+            diagnostic!("Aeris chart preferences restored from {source:?}");
+        }
+        preferences
+    } else {
+        if !load.rejected.is_empty() {
+            diagnostic!("Aeris chart preferences use defaults: no saved file was usable");
+        }
+        ChartChromePreferences::default()
+    };
+    (preferences, load.rejected)
 }
 
 fn run_chart_chrome_preferences_save_worker_to(
@@ -919,13 +969,10 @@ fn save_chart_chrome_preferences_to(
     path: &Path,
     preferences: ChartChromePreferences,
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|_| "desktop chart chrome directory could not be created".to_string())?;
-    }
     let encoded = encode_chart_chrome_preferences(preferences);
-    write_file_durably(path, encoded.as_bytes())
-        .map_err(|_| "desktop chart chrome could not be published".to_string())
+    chart_chrome_container(path)
+        .write(CHART_CHROME_CONTAINER_SCHEMA, encoded.as_bytes())
+        .map_err(|error| format!("desktop chart chrome could not be published: {error}"))
 }
 
 #[cfg(test)]
@@ -933,11 +980,12 @@ mod tests {
     use super::{
         ChartChromePreferences, ChartChromeSaveState, ChromeVisibility, DesktopPersistence,
         DrawingFavorites, ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation,
-        IndicatorParameters, InstrumentSearchCategories, SymbolSearchScope, TradingShortcutMode,
-        WindowFrame, encode_chart_chrome_preferences, filter_indicator_specs,
+        IndicatorParameters, InstrumentSearchCategories, MAXIMUM_CHART_CHROME_FILE_BYTES,
+        SymbolSearchScope, TradingShortcutMode, WindowFrame, chart_chrome_container,
+        encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
-        run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
-        wait_for_chart_chrome_generation,
+        restore_chart_chrome_preferences, run_chart_chrome_preferences_save_worker_to,
+        save_chart_chrome_preferences_to, wait_for_chart_chrome_generation,
     };
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use std::sync::Mutex;
@@ -954,7 +1002,13 @@ mod tests {
     }
 
     fn remove_chart_chrome_test_files(path: &std::path::Path) {
-        for file in [path.to_path_buf(), path.with_extension("bak")] {
+        let container = chart_chrome_container(path);
+        let quarantined = (1..=aeris_platform_runtime::MAXIMUM_QUARANTINED_COPIES)
+            .map(|index| container.quarantine_path(index));
+        for file in [path.to_path_buf(), container.backup_path()]
+            .into_iter()
+            .chain(quarantined)
+        {
             if let Err(error) = std::fs::remove_file(file) {
                 assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
             }
@@ -1242,9 +1296,7 @@ mod tests {
         );
         let path = temporary_chart_chrome_path("round-trip");
         save_chart_chrome_preferences_to(&path, hidden).expect("temp chrome file writes");
-        let restored = parse_chart_chrome_preferences(
-            &std::fs::read_to_string(&path).expect("temp chrome file reads"),
-        );
+        let restored = load_chart_chrome_preferences_from(&path);
         remove_chart_chrome_test_files(&path);
         assert_eq!(restored, hidden);
         let marked_line = ChartChromePreferences {
@@ -1295,6 +1347,89 @@ mod tests {
         assert!(
             backup.is_file(),
             "loading must not rotate or remove the backup"
+        );
+        remove_chart_chrome_test_files(&path);
+    }
+
+    #[test]
+    fn a_released_chart_chrome_file_loads_and_becomes_the_backup_on_save() {
+        let path = temporary_chart_chrome_path("released");
+        std::fs::write(&path, "chart_type=line\nwindow_frame=frameless\n")
+            .expect("released chrome file writes");
+        let released = load_chart_chrome_preferences_from(&path);
+        assert_eq!(released.chart_type, ChartType::Line);
+        assert_eq!(released.window_frame, WindowFrame::Frameless);
+
+        let next = ChartChromePreferences {
+            chart_type: ChartType::Bars,
+            ..released
+        };
+        save_chart_chrome_preferences_to(&path, next).expect("enveloped chrome saves");
+        assert!(
+            std::fs::read(&path)
+                .expect("saved chrome")
+                .starts_with(&aeris_platform_runtime::DURABLE_CONTAINER_MAGIC)
+        );
+        assert_eq!(
+            std::fs::read_to_string(chart_chrome_container(&path).backup_path())
+                .expect("released file kept as backup"),
+            "chart_type=line\nwindow_frame=frameless\n"
+        );
+        assert_eq!(load_chart_chrome_preferences_from(&path), next);
+        assert_ne!(
+            encode_chart_chrome_preferences(ChartChromePreferences::default()).as_bytes()[0],
+            aeris_platform_runtime::DURABLE_CONTAINER_MAGIC[0],
+            "chrome text starts with an ASCII key, never the container's NUL"
+        );
+        remove_chart_chrome_test_files(&path);
+    }
+
+    #[test]
+    fn a_truncated_chart_chrome_file_restores_the_backup_and_is_quarantined() {
+        let path = temporary_chart_chrome_path("truncated");
+        let first = ChartChromePreferences {
+            chart_type: ChartType::Line,
+            ..ChartChromePreferences::default()
+        };
+        save_chart_chrome_preferences_to(&path, first).expect("first chrome saves");
+        save_chart_chrome_preferences_to(
+            &path,
+            ChartChromePreferences {
+                chart_type: ChartType::Bars,
+                ..first
+            },
+        )
+        .expect("second chrome saves");
+        let saved = std::fs::read(&path).expect("saved chrome");
+        std::fs::write(&path, &saved[..saved.len() - 1]).expect("truncate chrome");
+
+        let (restored, rejected) = restore_chart_chrome_preferences(&path);
+        assert_eq!(restored, first);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(
+            rejected[0].quarantined_as.as_deref(),
+            Some(chart_chrome_container(&path).quarantine_path(1).as_path())
+        );
+        remove_chart_chrome_test_files(&path);
+    }
+
+    #[test]
+    fn an_oversized_chart_chrome_file_loads_defaults_with_a_diagnostic() {
+        let path = temporary_chart_chrome_path("oversized");
+        std::fs::write(&path, vec![b'a'; MAXIMUM_CHART_CHROME_FILE_BYTES + 1])
+            .expect("oversized chrome writes");
+
+        let (restored, rejected) = restore_chart_chrome_preferences(&path);
+        assert_eq!(restored, ChartChromePreferences::default());
+        assert_eq!(rejected.len(), 1);
+        assert!(
+            rejected[0].to_string().contains("persistence bound"),
+            "{}",
+            rejected[0]
+        );
+        assert!(
+            chart_chrome_container(&path).quarantine_path(1).is_file(),
+            "the oversized file is kept aside, not deleted"
         );
         remove_chart_chrome_test_files(&path);
     }

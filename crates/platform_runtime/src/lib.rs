@@ -8,6 +8,7 @@ mod credential_vault;
 pub mod data_root;
 mod display_timing;
 mod dns;
+mod durable_container;
 mod http_client;
 mod io_cancellation;
 mod lifecycle;
@@ -38,6 +39,10 @@ pub use display_timing::{
 #[cfg(target_os = "windows")]
 pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
 pub use dns::resolve_addresses;
+pub use durable_container::{
+    DURABLE_CONTAINER_MAGIC, DURABLE_CONTAINER_VERSION, DurableCandidate, DurableContainer,
+    DurableFormat, DurableLoad, DurableRejection, DurableSource, MAXIMUM_QUARANTINED_COPIES,
+};
 pub use http_client::CancellableHttpClient;
 pub use io_cancellation::cancel_tcp_stream_io;
 #[cfg(target_os = "windows")]

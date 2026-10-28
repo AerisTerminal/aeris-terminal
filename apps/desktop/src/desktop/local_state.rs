@@ -1,7 +1,9 @@
 use aeris_observability::diagnostic;
-use aeris_platform_runtime::fs::write_file_durably;
+use aeris_platform_runtime::{
+    DurableCandidate, DurableContainer, DurableFormat, DurableLoad, DurableSource,
+};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
@@ -19,6 +21,8 @@ const WORKSPACE_FILE: &str = "workspace-state.pb";
 const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
 const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
 const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
+/// The durable-container schema of the workspace payload, a bare `WorkspaceState` message.
+const WORKSPACE_CONTAINER_SCHEMA: u32 = 1;
 const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATES: usize = 32;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES: usize = 64;
@@ -64,24 +68,34 @@ pub(super) fn load_workspace_with_origin(path: &Path) -> (WorkspaceState, bool) 
 /// does not migrate or rewrite legacy persistence. A candidate must prove it
 /// can read the user's current state before it can pass activation health.
 pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState, String> {
-    if let Some(workspace) = load_recoverable_workspace_from_path(path)? {
+    let load = workspace_container(path).inspect(decode_workspace_candidate);
+    report_workspace_rejections(&load);
+    if let Some((workspace, _)) = load.restored {
         return Ok(workspace);
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if legacy.is_file() {
         load_legacy_workspace_from_path(&legacy)
-    } else {
+    } else if load.rejected.is_empty() {
         Ok(default_workspace())
+    } else {
+        Err(workspace_rejection_summary(&load))
     }
 }
 
 fn load_workspace_result(path: &Path) -> Result<(WorkspaceState, bool), String> {
-    if let Some(workspace) = load_recoverable_workspace_from_path(path)? {
+    let load = workspace_container(path).load(decode_workspace_candidate);
+    report_workspace_rejections(&load);
+    if let Some((workspace, _)) = load.restored {
         return Ok((workspace, true));
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if !legacy.is_file() {
-        return Ok((default_workspace(), false));
+        return if load.rejected.is_empty() {
+            Ok((default_workspace(), false))
+        } else {
+            Err(workspace_rejection_summary(&load))
+        };
     }
     let workspace = load_legacy_workspace_from_path(&legacy)?;
     match save_workspace_to_path(&workspace, path) {
@@ -109,35 +123,46 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| error.to_string())
 }
 
-fn load_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
-    let bytes = read_bounded(path)?;
-    if bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
-        return Err("workspace file exceeds the local persistence bound".to_string());
+fn workspace_container(path: &Path) -> DurableContainer {
+    DurableContainer::new(path.to_path_buf(), MAXIMUM_WORKSPACE_FILE_BYTES)
+}
+
+/// Both the enveloped schema-1 payload and a released version's bare file are one encoded
+/// `WorkspaceState` message.
+fn decode_workspace_candidate(candidate: DurableCandidate<'_>) -> Result<WorkspaceState, String> {
+    match candidate.format {
+        DurableFormat::Legacy
+        | DurableFormat::Envelope {
+            schema_version: WORKSPACE_CONTAINER_SCHEMA,
+        } => {}
+        DurableFormat::Envelope { schema_version } => {
+            return Err(format!(
+                "workspace schema version {schema_version} is unsupported"
+            ));
+        }
     }
-    WorkspaceState::decode(bytes.as_slice())
+    WorkspaceState::decode(candidate.payload)
         .map(restored_workspace)
         .map_err(|error| error.to_string())
 }
 
-fn load_recoverable_workspace_from_path(path: &Path) -> Result<Option<WorkspaceState>, String> {
-    let backup = backup_path(path);
-    if path.is_file() {
-        return match load_workspace_from_path(path) {
-            Ok(workspace) => Ok(Some(workspace)),
-            Err(_) if backup.is_file() => load_workspace_from_path(&backup).map(Some),
-            Err(primary_error) => Err(primary_error),
-        };
+fn report_workspace_rejections(load: &DurableLoad<WorkspaceState>) {
+    for rejection in &load.rejected {
+        diagnostic!("Aeris workspace file rejected: {rejection}");
     }
-    backup
-        .is_file()
-        .then(|| load_workspace_from_path(&backup))
-        .transpose()
+    if let Some((_, source)) = &load.restored
+        && *source != DurableSource::Primary
+    {
+        diagnostic!("Aeris workspace restored from {source:?}");
+    }
 }
 
-fn backup_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".bak");
-    PathBuf::from(name)
+fn workspace_rejection_summary(load: &DurableLoad<WorkspaceState>) -> String {
+    load.rejected
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
@@ -174,21 +199,23 @@ pub(super) fn save_workspace(workspace: &WorkspaceState, path: &Path) -> Result<
 
 fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(), String> {
     let workspace = sanitize_workspace(workspace.clone());
-    let parent = path
-        .parent()
-        .ok_or_else(|| "workspace directory is unavailable".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let bytes = workspace.encode_to_vec();
     if bytes.is_empty() || bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
         return Err("workspace file exceeds the local persistence bound".to_string());
     }
-    write_file_durably(path, &bytes).map_err(|error| error.to_string())
+    workspace_container(path)
+        .write(WORKSPACE_CONTAINER_SCHEMA, &bytes)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 pub(super) fn load_workspace_fixture(path: &Path) -> Result<WorkspaceState, String> {
-    load_recoverable_workspace_from_path(path)?
-        .ok_or_else(|| "workspace fixture is unavailable".to_string())
+    let load = workspace_container(path).inspect(decode_workspace_candidate);
+    match load.restored {
+        Some((workspace, _)) => Ok(workspace),
+        None if load.rejected.is_empty() => Err("workspace fixture is unavailable".to_string()),
+        None => Err(workspace_rejection_summary(&load)),
+    }
 }
 
 #[cfg(test)]
@@ -734,6 +761,7 @@ mod tests {
         WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceVolumeSettingsState,
         workspace_study_setting_state,
     };
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMPORARY_WORKSPACE: AtomicU64 = AtomicU64::new(0);
@@ -749,6 +777,10 @@ mod tests {
             NEXT_TEMPORARY_WORKSPACE.fetch_add(1, Ordering::Relaxed)
         );
         std::env::temp_dir().join(unique).join(WORKSPACE_FILE)
+    }
+
+    fn load_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
+        load_workspace_fixture(path)
     }
 
     #[test]
@@ -1548,43 +1580,110 @@ mod tests {
     }
 
     #[test]
-    fn workspace_loader_prefers_the_committed_destination_and_falls_back_to_backup() {
+    fn released_workspace_files_load_and_a_corrupt_primary_falls_back_to_backup() {
         let path = temporary_workspace_path();
         let current = workspace_with_revision(12);
         write_workspace_artifact(&path, &current);
-        let backup = backup_path(&path);
+        let backup = workspace_container(&path).backup_path();
         let previous = workspace_with_revision(11);
         write_workspace_artifact(&backup, &previous);
         write_workspace_artifact(&path.with_extension("pb.tmp"), &workspace_with_revision(13));
 
+        let (restored, from_file) = load_workspace_with_origin(&path);
+        assert!(from_file);
         assert_eq!(
-            load_recoverable_workspace_from_path(&path)
-                .expect("workspace recovery succeeds")
-                .expect("workspace is present"),
-            current
+            restored, current,
+            "a released version's bare workspace file is the primary"
         );
 
         std::fs::write(&path, b"corrupt current").expect("corrupt current writes");
         assert_eq!(
-            load_recoverable_workspace_from_path(&path)
-                .expect("backup recovery succeeds")
-                .expect("backup is present"),
-            previous,
-            "a corrupt destination falls back to the read-only backup"
+            load_workspace_with_origin(&path),
+            (previous.clone(), true),
+            "a corrupt destination falls back to the released version's backup"
         );
         assert!(
             backup.is_file(),
             "loading must not rotate or remove the backup"
         );
-        std::fs::remove_file(&path).expect("current workspace removes");
+        assert!(!path.exists(), "the corrupt primary is moved aside");
         assert_eq!(
-            load_recoverable_workspace_from_path(&path)
-                .expect("missing-primary recovery succeeds")
-                .expect("backup is present"),
-            previous
+            std::fs::read(workspace_container(&path).quarantine_path(1))
+                .expect("quarantined primary"),
+            b"corrupt current"
+        );
+        assert_eq!(load_workspace_with_origin(&path), (previous, true));
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn a_truncated_workspace_restores_the_backup_and_is_quarantined() {
+        let path = temporary_workspace_path();
+        save_workspace(&workspace_with_revision(41), &path).expect("first workspace saves");
+        save_workspace(&workspace_with_revision(42), &path).expect("second workspace saves");
+        let saved = std::fs::read(&path).expect("enveloped workspace");
+        assert!(saved.starts_with(&aeris_platform_runtime::DURABLE_CONTAINER_MAGIC));
+        std::fs::write(&path, &saved[..saved.len() / 2]).expect("truncate workspace");
+
+        let (restored, from_file) = load_workspace_with_origin(&path);
+        assert!(from_file);
+        assert_eq!(
+            restored.workspace_revision, 41,
+            "the last-good backup is restored"
+        );
+        assert_eq!(
+            std::fs::read(workspace_container(&path).quarantine_path(1))
+                .expect("quarantined primary"),
+            &saved[..saved.len() / 2]
+        );
+        assert_eq!(
+            load_workspace_for_readiness(&path)
+                .expect("readiness reads the backup")
+                .workspace_revision,
+            41
         );
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn a_workspace_staged_by_a_crashed_write_is_restored() {
+        let source = temporary_workspace_path();
+        save_workspace(&workspace_with_revision(51), &source).expect("staged image saves");
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("workspace directory");
+        let staged = parent.join(format!(".{WORKSPACE_FILE}.4000000000-7.tmp"));
+        std::fs::copy(&source, &staged).expect("crash leaves a staged workspace");
+
+        assert_eq!(load_workspace(&path).workspace_revision, 51);
+        save_workspace(&workspace_with_revision(52), &path).expect("next workspace saves");
+        assert!(
+            !staged.exists(),
+            "the next save removes the abandoned stage"
+        );
+        assert_eq!(load_workspace(&path).workspace_revision, 52);
+        for root in [source.parent(), Some(parent)].into_iter().flatten() {
+            std::fs::remove_dir_all(root).expect("temporary workspace cleanup");
+        }
+    }
+
+    #[test]
+    fn released_workspace_payloads_never_start_with_the_container_magic() {
+        for workspace in [
+            default_workspace(),
+            fixture_workspace(),
+            workspace_with_revision(9),
+        ] {
+            let encoded = sanitize_workspace(workspace).encode_to_vec();
+            assert_ne!(
+                encoded.first(),
+                Some(&aeris_platform_runtime::DURABLE_CONTAINER_MAGIC[0]),
+                "protobuf field number 0 is invalid, so a workspace message never starts with NUL"
+            );
+        }
+        assert!(WorkspaceState::decode(&[0_u8, 1][..]).is_err());
     }
 
     #[test]
@@ -1597,9 +1696,7 @@ mod tests {
 
         assert!(path.is_file());
         assert_eq!(
-            load_recoverable_workspace_from_path(&path)
-                .expect("published workspace reloads")
-                .expect("workspace is present"),
+            load_workspace_from_path(&path).expect("published workspace reloads"),
             second
         );
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))

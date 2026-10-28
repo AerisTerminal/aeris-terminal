@@ -3862,6 +3862,48 @@ mod tests {
         }
     }
     #[test]
+    fn workspace_and_chart_chrome_persist_through_the_durable_container() {
+        let mut implementations = BTreeSet::new();
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path).expect("source");
+            let production = production_prefix(&contents);
+            if production.contains("pub struct DurableContainer")
+                || production.contains("pub const DURABLE_CONTAINER_MAGIC")
+            {
+                implementations.insert(relative_string(&path));
+            }
+        }
+        assert_eq!(
+            implementations,
+            BTreeSet::from(["crates/platform_runtime/src/durable_container.rs".to_string()]),
+            "the durable container has exactly one implementation"
+        );
+        for relative in [
+            "apps/desktop/src/desktop/local_state.rs",
+            "apps/desktop/src/chart_chrome.rs",
+        ] {
+            let production = production_prefix(&manifest(relative));
+            assert!(
+                production.contains("DurableContainer::new("),
+                "{relative} must persist through the durable container"
+            );
+            for forbidden in [
+                "write_file_durably",
+                "StagedFile",
+                "replace_file",
+                "fs::read_to_string(",
+                "with_extension(\"bak\")",
+                "push(\".bak\")",
+            ] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{relative} bypasses the durable container through {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn provider_adapters_exclude_storage_and_ui_from_production_dependencies() {
         for relative in [
             "crates/adapters/rithmic_protocol/Cargo.toml",

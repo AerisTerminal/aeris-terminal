@@ -290,11 +290,35 @@ only on the guarded GUI checks on their lines.
     study retry.
   - Left: record idle CPU for 1, 4 and 16 panes, before and after. Closes UI-16.
 - [ ] M7.7 Versioned, checksummed workspace container
-  - Left: an envelope (magic, version, schema, length, sha256) on the durable writer, used for the
-    workspace and chart-chrome files.
-  - A last-good backup and staged-temp recovery, plus quarantine that keeps the newest 3.
-  - A 12 MB cap.
-  - GUI: a truncated file restores from the backup.
+  - Landed: `platform_runtime::DurableContainer` (`durable_container.rs`) is the one container,
+    built on `platform_sys`'s `StagedFile` rather than a second `DurableFile` writer. Its
+    envelope is `magic | envelope_version u16 | schema_version u32 | len u64 | sha256 | payload`
+    (little-endian) with a 12 MB payload bound. A write refuses an oversized payload, skips an
+    unchanged file, copies a valid current primary (enveloped or released-version bare) to
+    `<name>.bak` and commits the new envelope; a corrupt primary never replaces the backup.
+    After a commit it removes staged temporaries of the file and its backup that another
+    process left. Loads hand each verified payload to the caller's decoder, trying the
+    primary, then up to four exact `StagedFile` temporaries newer than the backup (newest
+    first, from a scan of at most 1,024 directory entries), then the backup. A recovering
+    load moves an unusable primary (bad magic, header, length, checksum, bound or decoder
+    rejection; not an I/O error) to `<name>.corrupt-1`, rotating to keep the newest three;
+    `inspect` changes nothing. The magic `\0AERISDC` starts with NUL, which no released
+    payload can: a protobuf `WorkspaceState` cannot start with field number 0 and chart chrome
+    is ASCII-keyed text. Any NUL-led file must carry the full magic; any other non-empty file
+    opens unchanged as a legacy payload and is enveloped on the next save, and the
+    released-version `.bak` names are kept. Workspace and chart-chrome I/O (schema 1, payloads
+    unchanged) use it; the readiness gate inspects read-only and the legacy `.frame` migration
+    also runs when no container candidate was usable. Rejections and non-primary restores are
+    reported through observability. `platform_sys::fs` gains `parse_staged_temporary_name`.
+    Tests cover the round trip, a released file becoming the first backup, a truncated
+    primary restoring the backup and being quarantined (container, workspace and chrome), a
+    crash-left staged temporary being used and later cleaned up, three-copy quarantine,
+    checksum and partial-magic rejection, an oversized chrome file loading defaults with a
+    diagnostic, and that released payloads never start with the magic. The naming_check rule
+    `workspace_and_chart_chrome_persist_through_the_durable_container` is new.
+  - Left: GUI check with a truncated workspace file in a validation folder (the layout is
+    restored from the backup); not run here. An envelope schema newer than 1 is rejected
+    and quarantined like corruption until M7.8 adds `NewerVersion` read-only handling.
 - [ ] M7.8 Writer-owned workspace document and migration chain
   - Left: the writer thread owns `WorkspaceDocument` and folds in chart chrome, deleting
     `ChartChromeShutdownWait`.
