@@ -51,7 +51,7 @@ use aeris_design_system::{
 use aeris_observability::diagnostic;
 use gpui::{
     AnyView, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba,
     ScrollWheelEvent, SharedString, Task, Window, canvas, div, prelude::*, px,
 };
 use num_traits::ToPrimitive;
@@ -1547,7 +1547,7 @@ impl AerisChartView {
         &self,
         order_id: &str,
         price: f64,
-    ) -> Option<Point<Pixels>> {
+    ) -> Option<gpui::Point<Pixels>> {
         let y = self.engine.series_price_to_coordinate(0, price)?;
         let x = (32..(self.engine.pane_w.to_i32()? - 32))
             .step_by(8)
