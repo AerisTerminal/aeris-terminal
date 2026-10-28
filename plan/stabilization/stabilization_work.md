@@ -634,7 +634,7 @@ still wait on the GUI checks and the remaining work on their lines.
     checks the choice and rejects Axiusflow in the script. The script compiles with Inno Setup 6.7.
   - Left: the manual install and uninstall on a Windows VM (F17), checking the prompt and that
     data is kept by default and removed only when ticked. Not run; maintainer-only.
-- [ ] M8.7 Release packager and end-to-end lifecycle harness
+- [x] M8.7 Release packager and end-to-end lifecycle harness
   - Landed: LC-21. The launcher is library code (`aeris_release_lifecycle::launcher`,
     `run_launcher`) behind a thin `aeris_launcher` binary. It reads the origin only through
     `ReleaseSource` (channel, signed objects, byte ranges, artifact bodies);
@@ -652,9 +652,9 @@ still wait on the GUI checks and the remaining work on their lines.
     recovery. The installed programs are copies of the `aeris_lifecycle_fixture` binary; copying
     the test executable itself was quarantined by Windows Defender as `Bearfoos.A!ml`. Passed
     three local runs on Windows. Probation, hang and schema-gated rollback join it in M8.8 (D23).
-  - Left: the test passing on the windows-latest CI run. The run for 43262b0a stopped at the
-    format check; 48be77c1 fixes the format.
-- [ ] M8.8 Rollback safety
+  - Verified: the test passed on the windows-latest CI run for d69cd264 (run 40716432998,
+    83 s).
+- [x] M8.8 Rollback safety
   - Landed: LC-05. The packager writes `max_store_schema` (the payload's `SCHEMA_VERSION`) into
     the rollback-compatibility data. Before a crash rollback the launcher reads the live trading
     store's `user_version` from the SQLite header (`store_schema`); a write-ahead log holding
@@ -689,7 +689,8 @@ still wait on the GUI checks and the remaining work on their lines.
     workspace) and the launcher's 60 s commit wait (D26). A desktop test spawns a fake helper that
     spends 25 s verifying before READY and the restart proceeds. The real verification time on an
     installed app is not measured.
-  - Left: a green windows-latest CI run of `lifecycle_e2e` with these cases.
+  - Verified: `lifecycle_e2e` with the crash, hang and orphaned-entry cases passed on the
+    windows-latest CI run for d69cd264 (run 40716432998).
 - [x] M8.9 Dependency direction and `contracts`
   - Landed: G5. `EmbeddedReplaySource` and the demo chart constructor compile only for tests or
     the new `test-support` features of `application` and `chart_integration`; only
