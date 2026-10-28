@@ -298,6 +298,22 @@
   --border-popover-highlight: #ffffff1a;
 }
 
+/* Color choices — the color picker swatches, the default a new color starts with, and the
+   session-plan chart level. A user's choice is stored as its value, so these are declared once
+   here and dark mode and every preset inherit them unchanged. */
+:root {
+  --swatch-gray: #6b7280;
+  --swatch-blue: #335cff;
+  --swatch-orange: #ff7a45;
+  --swatch-red: #fb3748;
+  --swatch-green: #18b66a;
+  --swatch-amber: #f5a623;
+  --swatch-violet: #7c4dff;
+  --swatch-sky: #45b8f2;
+  --swatch-default: var(--swatch-blue);
+  --session-plan-level: #f5a623;
+}
+
 /* Theme presets — each preset overrides every color token for light and, with .dark, dark mode. */
 
 [data-theme="high-contrast"] {

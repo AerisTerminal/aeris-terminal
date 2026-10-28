@@ -66,7 +66,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// How often the surface wakes itself so the candle countdown keeps moving.
 const CHART_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
 const MAXIMUM_SESSION_PLAN_LEVELS: usize = 32;
-const SESSION_PLAN_LEVEL_COLOR: Color = Color::rgb(245, 166, 35);
 
 #[cfg(test)]
 fn aeris_charts_grid_color(theme: ChartTheme) -> String {
@@ -2857,12 +2856,13 @@ impl AerisChartView {
         let Some(series_id) = self.primary_series_id_on_scale(0, PriceScaleTarget::Right) else {
             return;
         };
+        let color = export::chart_color(self.platform.colors.session_plan_level);
         for (price, label) in &self.session_plan_levels {
             let title = format!("PLAN · {label}");
             let id = self.engine.create_price_line(
                 series_id,
                 *price,
-                SESSION_PLAN_LEVEL_COLOR,
+                color,
                 1,
                 LineStyle::Dashed,
                 &title,

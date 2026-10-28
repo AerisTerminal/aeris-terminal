@@ -680,7 +680,7 @@ impl TerminalApp {
             return;
         };
         if entry.flag.take().is_none() {
-            entry.flag = Some(DEFAULT_WATCHLIST_FLAG_COLOR.to_string());
+            entry.flag = Some(default_watchlist_flag_color(&self.theme));
             self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
             return;
         }
@@ -716,7 +716,7 @@ impl TerminalApp {
         };
         entry
             .flag
-            .get_or_insert_with(|| DEFAULT_WATCHLIST_FLAG_COLOR.to_string());
+            .get_or_insert_with(|| default_watchlist_flag_color(&self.theme));
         self.show_watchlist_flag_picker(provider, instrument_id, window, cx);
     }
 
@@ -732,7 +732,7 @@ impl TerminalApp {
             .iter()
             .find(|entry| entry.is(provider, instrument_id))
             .and_then(|entry| entry.flag.clone())
-            .unwrap_or_else(|| DEFAULT_WATCHLIST_FLAG_COLOR.to_string());
+            .unwrap_or_else(|| default_watchlist_flag_color(&self.theme));
         let input = cx.new(|input_cx| InputState::new(window, input_cx));
         input.update(cx, |input, input_cx| {
             input.set_value(current, window, input_cx);

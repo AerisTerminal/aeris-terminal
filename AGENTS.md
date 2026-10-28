@@ -515,10 +515,19 @@ design-system build rejects it in any other block, and presets resolve it to the
 (`surface-secondary`, `border-secondary`, transparent). They are platform-only: `crates/ui/chart_integration` projects a non-default
 preset onto Aeris Charts through its existing appearance and options APIs, and Aeris Charts never
 receives a preset identity and keeps its own default theme.
+The color choices (`--swatch-*` picker swatches, `--swatch-default` and `--session-plan-level`) are
+Aeris-owned, not Theme System palette entries. A user's choice is stored as its value, so they are
+declared once in their own `:root` block and the build rejects them in `.dark` and every preset.
+`colors_come_from_tokens` in `tools/naming_check` rejects quoted CSS hex values and all-numeric
+`rgb`/`rgba`/`hsl`/`hsla`/`from_rgb8`/`from_rgba8` constructors in production `apps/desktop`,
+`chart_integration` and `terminal_ui` source; files compiled only through a `#[cfg(test)]` module
+declaration are outside the scan. Its only counted exceptions are the color picker's spectrum stops
+and the legacy series fallbacks that layout restore recognizes.
 
 `CSS.md` holds the exact theme CSS from the Theme System and the rules for using it. Read it before
 any UI work and always follow it: every color, radius and border width comes from a token, never a
-hardcoded value or an ad-hoc alpha tint. Keep `CSS.md`, `platform.css` and the Theme System identical.
+hardcoded value or an ad-hoc alpha tint. Keep `CSS.md`, `platform.css` and the Theme System identical;
+the Aeris-owned color choices live only in `CSS.md`, `platform.css` and the website mirror.
 
 ## Verification
 

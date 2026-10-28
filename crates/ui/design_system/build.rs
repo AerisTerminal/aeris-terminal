@@ -4,7 +4,8 @@ mod token_compiler;
 use std::{env, fmt::Write as _, fs, path::PathBuf};
 use token_compiler::{
     AERIS_ONLY_FALLBACKS, Declarations, cascade, parse_aeris_only_blocks, parse_color,
-    parse_preset_blocks, parse_theme_blocks, preset_ids, resolve, source,
+    parse_preset_blocks, parse_theme_blocks, preset_ids, reject_mode_invariant_tokens, resolve,
+    source,
 };
 
 #[macro_use]
@@ -60,6 +61,7 @@ fn compile_tokens() -> Result<(), String> {
     let dark = cascade(&root, &dark_overrides);
     reject_aeris_only_tokens(&root, ":root")?;
     reject_aeris_only_tokens(&dark_overrides, ".dark")?;
+    reject_mode_invariant_tokens(&dark_overrides, ".dark")?;
     let (aeris_light_only, aeris_dark_only) = parse_aeris_only_blocks(&css)?;
     let aeris_light = cascade(&root, &aeris_light_only);
     let aeris_dark = cascade(&dark, &aeris_dark_only);
@@ -172,6 +174,8 @@ fn compile_presets(
             let (light_overrides, dark_overrides) = parse_preset_blocks(css, &id)?;
             reject_aeris_only_tokens(&light_overrides, &id)?;
             reject_aeris_only_tokens(&dark_overrides, &id)?;
+            reject_mode_invariant_tokens(&light_overrides, &id)?;
+            reject_mode_invariant_tokens(&dark_overrides, &id)?;
             let light = with_aeris_only_fallbacks(cascade(root, &light_overrides));
             let dark = with_aeris_only_fallbacks(cascade(
                 &cascade(dark, &light_overrides),

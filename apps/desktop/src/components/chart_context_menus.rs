@@ -2698,19 +2698,7 @@ fn settings_select_row(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>)
 }
 
 pub(super) fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
-    let Some(hex) = value.strip_prefix('#') else {
-        return gpui_color(fallback);
-    };
-    let parsed = match hex.len() {
-        6 => u32::from_str_radix(hex, 16)
-            .ok()
-            .map(|rgb| gpui::rgba((rgb << 8) | 0xFF).into()),
-        8 => u32::from_str_radix(hex, 16)
-            .ok()
-            .map(|rgba| gpui::rgba(rgba).into()),
-        _ => None,
-    };
-    parsed.unwrap_or_else(|| gpui_color(fallback))
+    parse_hex_hsla(value).unwrap_or_else(|| gpui_color(fallback))
 }
 
 #[cfg(test)]

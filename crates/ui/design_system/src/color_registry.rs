@@ -105,6 +105,19 @@ macro_rules! platform_color_registry {
             buy_bubble => "buy-bubble",
             /// Big-trade bubble fill on charts; outline the bubble with `bearish`.
             sell_bubble => "sell-bubble",
+            /// Color picker swatches. Color choices are the same in every mode and preset.
+            swatch_gray => "swatch-gray",
+            swatch_blue => "swatch-blue",
+            swatch_orange => "swatch-orange",
+            swatch_red => "swatch-red",
+            swatch_green => "swatch-green",
+            swatch_amber => "swatch-amber",
+            swatch_violet => "swatch-violet",
+            swatch_sky => "swatch-sky",
+            /// The color a new user color choice (such as a watchlist flag) starts with.
+            swatch_default => "swatch-default",
+            /// The session-plan price level drawn on charts.
+            session_plan_level => "session-plan-level",
         }
     };
 }

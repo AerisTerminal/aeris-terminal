@@ -20,6 +20,37 @@ pub(crate) const AERIS_ONLY_FALLBACKS: [(&str, &str); 3] = [
     ("border-popover-highlight", "transparent"),
 ];
 
+/// Color choices declared once in a `:root` block. A user's choice is stored as its value, so
+/// dark mode and every preset inherit them and no other block may redeclare them.
+pub(crate) const MODE_INVARIANT_COLORS: [&str; 10] = [
+    "swatch-gray",
+    "swatch-blue",
+    "swatch-orange",
+    "swatch-red",
+    "swatch-green",
+    "swatch-amber",
+    "swatch-violet",
+    "swatch-sky",
+    "swatch-default",
+    "session-plan-level",
+];
+
+/// Color choices are declared once in `:root`; a mode or preset block must not restate them.
+pub(crate) fn reject_mode_invariant_tokens(
+    declarations: &Declarations,
+    block: &str,
+) -> Result<(), String> {
+    match MODE_INVARIANT_COLORS
+        .iter()
+        .find(|name| declarations.contains_key(**name))
+    {
+        Some(name) => Err(format!(
+            "--{name} is a color choice and must be declared only in :root, not {block}"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The light and dark blocks that apply only while no `data-theme` preset is set.
 pub(crate) fn parse_aeris_only_blocks(css: &str) -> Result<(Declarations, Declarations), String> {
     let css = strip_comments(css)?;
@@ -339,6 +370,22 @@ mod tests {
             parse_aeris_only_blocks(":root:not([data-theme]) { --surface-popover: #fff; }")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn color_choices_are_rejected_outside_root() {
+        let css = ":root { --a: #fff; --swatch-blue: #335cff; } .dark { --a: #000; } \
+            [data-theme=\"x\"] { --a: #111; } [data-theme=\"x\"].dark { --swatch-blue: #000; }";
+        let (root, dark) = parse_theme_blocks(css).unwrap();
+        assert!(root.contains_key("swatch-blue"));
+        assert!(reject_mode_invariant_tokens(&dark, ".dark").is_ok());
+        let (light, preset_dark) = parse_preset_blocks(css, "x").unwrap();
+        assert!(reject_mode_invariant_tokens(&light, "x").is_ok());
+        assert!(reject_mode_invariant_tokens(&preset_dark, "x").is_err());
+        let (_, dark) =
+            parse_theme_blocks(":root { --a: #fff; } .dark { --session-plan-level: #000; }")
+                .unwrap();
+        assert!(reject_mode_invariant_tokens(&dark, ".dark").is_err());
     }
 
     #[test]

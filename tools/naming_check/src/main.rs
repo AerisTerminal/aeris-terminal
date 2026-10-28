@@ -160,7 +160,7 @@ fn desktop_fence_comparison_count(source: &str) -> usize {
 fn desktop_market_fence_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut observed = std::collections::BTreeMap::new();
     collect_desktop_fence_sources(root, &root.join("apps/desktop/src"), &mut observed)?;
-    Ok(desktop_fence_allowlist_violations(
+    Ok(counted_allowlist_violations(
         DESKTOP_MARKET_FENCE_ALLOWLIST,
         &observed,
     ))
@@ -169,10 +169,11 @@ fn desktop_market_fence_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
 fn desktop_source_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut violations = desktop_provider_violations(root)?;
     violations.extend(desktop_market_fence_violations(root)?);
+    violations.extend(color_token_violations(root)?);
     Ok(violations)
 }
 
-fn desktop_fence_allowlist_violations(
+fn counted_allowlist_violations(
     exceptions: &[(&str, usize, &str)],
     observed: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<PathBuf> {
@@ -513,6 +514,222 @@ const REVIEWED_SAFE_DEBUG_TYPES: &[(&str, &str)] = &[
         "its secret-bearing fields are SecretToken values with explicit redacting Debug",
     ),
 ];
+
+/// UI source trees whose colors must come from `aeris_design_system` tokens.
+const COLOR_TOKEN_SOURCE_ROOTS: &[&str] = &[
+    "apps/desktop/src",
+    "crates/ui/chart_integration/src",
+    "crates/ui/terminal_ui/src",
+];
+
+/// Production UI files that still construct literal colors, each with its exact count and why.
+/// A new literal, or a vanished one, requires an explicit review.
+const COLOR_LITERAL_ALLOWLIST: &[(&str, usize, &str)] = &[
+    (
+        "apps/desktop/src/native_ui/color_picker.rs",
+        9,
+        "the picker's hue spectrum and transparent gradient stops, which span every color",
+    ),
+    (
+        "apps/desktop/src/desktop/workspace_surface.rs",
+        3,
+        "Aeris Charts fallbacks that layouts written before color provenance pinned; restore \
+         recognizes them, they are never painted",
+    ),
+];
+
+/// Literal colors in production code: quoted CSS hex values (`"#RRGGBB"`) and color
+/// constructors whose arguments are all numeric literals (`rgb(`, `rgba(`, `hsl(`, `hsla(`,
+/// `from_rgb8(`, `from_rgba8(`).
+fn color_literal_count(source: &str) -> usize {
+    production_source_prefix(source)
+        .lines()
+        .map(|line| {
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            quoted_hex_color_count(code) + literal_color_constructor_count(code)
+        })
+        .sum()
+}
+
+fn quoted_hex_color_count(code: &str) -> usize {
+    code.match_indices("\"#")
+        .filter(|(index, _)| {
+            let digits = code[index + 2..]
+                .bytes()
+                .take_while(u8::is_ascii_hexdigit)
+                .count();
+            matches!(digits, 3 | 4 | 6 | 8) && code[index + 2 + digits..].starts_with('"')
+        })
+        .count()
+}
+
+fn literal_color_constructor_count(code: &str) -> usize {
+    [
+        "rgb(",
+        "rgba(",
+        "hsl(",
+        "hsla(",
+        "from_rgb8(",
+        "from_rgba8(",
+    ]
+    .iter()
+    .map(|constructor| {
+        code.match_indices(constructor)
+            .filter(|(index, _)| {
+                let preceded_by_name = code[..*index].chars().next_back().is_some_and(|previous| {
+                    previous.is_ascii_alphanumeric() || previous == '_' || previous == '"'
+                });
+                let arguments = &code[index + constructor.len()..];
+                !preceded_by_name
+                    && arguments
+                        .find(')')
+                        .is_some_and(|end| numeric_arguments(&arguments[..end]))
+            })
+            .count()
+    })
+    .sum()
+}
+
+/// Every operand is a numeric literal, such as `245, 166, 35` or `1.0 / 6.0, 1.0, 0.5, 1.0`.
+fn numeric_arguments(arguments: &str) -> bool {
+    let mut operands = arguments
+        .split(|character: char| character.is_whitespace() || ",+-*/".contains(character))
+        .filter(|operand| !operand.is_empty())
+        .peekable();
+    operands.peek().is_some()
+        && operands.all(|operand| operand.starts_with(|character: char| character.is_ascii_digit()))
+}
+
+fn color_token_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut sources = Vec::new();
+    for directory in COLOR_TOKEN_SOURCE_ROOTS {
+        collect_rust_sources(&root.join(directory), &mut sources)?;
+    }
+    let test_only = test_only_module_files(&sources)?;
+    let mut observed = std::collections::BTreeMap::new();
+    for path in sources {
+        if test_only.contains(&path) {
+            continue;
+        }
+        let count = color_literal_count(&read_source(&path)?);
+        if count > 0 {
+            let relative = relative_to(root, &path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            observed.insert(relative, count);
+        }
+    }
+    Ok(counted_allowlist_violations(
+        COLOR_LITERAL_ALLOWLIST,
+        &observed,
+    ))
+}
+
+fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, sources)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            sources.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Files that are compiled only for tests: out-of-line modules declared under `#[cfg(test)]`,
+/// and every module those files declare in turn.
+fn test_only_module_files(sources: &[PathBuf]) -> io::Result<BTreeSet<PathBuf>> {
+    let mut test_only = BTreeSet::new();
+    let mut pending = Vec::new();
+    for path in sources {
+        for declaration in out_of_line_modules(&read_source(path)?) {
+            if declaration.test_only {
+                pending.push(declaration.resolve(path));
+            }
+        }
+    }
+    while let Some(path) = pending.pop() {
+        if !path.is_file() || !test_only.insert(path.clone()) {
+            continue;
+        }
+        for declaration in out_of_line_modules(&read_source(&path)?) {
+            pending.push(declaration.resolve(&path));
+        }
+    }
+    Ok(test_only)
+}
+
+/// One `mod name;` declaration with the attributes on the lines directly above it.
+struct ModuleDeclaration {
+    name: String,
+    path_attribute: Option<String>,
+    test_only: bool,
+}
+
+impl ModuleDeclaration {
+    /// The file Rust loads for this declaration made in `parent`.
+    fn resolve(&self, parent: &Path) -> PathBuf {
+        let directory = parent.parent().unwrap_or(Path::new(""));
+        if let Some(path) = &self.path_attribute {
+            return directory.join(path);
+        }
+        let owns_directory = parent
+            .file_name()
+            .is_some_and(|name| name == "mod.rs" || name == "lib.rs" || name == "main.rs");
+        let base = if owns_directory {
+            directory.to_path_buf()
+        } else {
+            directory.join(parent.file_stem().unwrap_or_default())
+        };
+        let file = base.join(format!("{}.rs", self.name));
+        if file.is_file() {
+            file
+        } else {
+            base.join(&self.name).join("mod.rs")
+        }
+    }
+}
+
+fn out_of_line_modules(source: &str) -> Vec<ModuleDeclaration> {
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    let mut declarations = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let declaration = line
+            .strip_prefix("pub(crate) ")
+            .or_else(|| line.strip_prefix("pub(super) "))
+            .or_else(|| line.strip_prefix("pub "))
+            .unwrap_or(line);
+        let Some(name) = declaration
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+            .filter(|name| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        else {
+            continue;
+        };
+        let attributes = lines[..index]
+            .iter()
+            .rev()
+            .take_while(|previous| previous.starts_with("#["));
+        let mut test_only = false;
+        let mut path_attribute = None;
+        for attribute in attributes {
+            test_only |= *attribute == "#[cfg(test)]";
+            if let Some(path) = attribute
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+            {
+                path_attribute = Some(path.to_string());
+            }
+        }
+        declarations.push(ModuleDeclaration {
+            name: name.to_string(),
+            path_attribute,
+            test_only,
+        });
+    }
+    declarations
+}
 
 fn main() -> ExitCode {
     let root = match env::current_dir() {
@@ -1633,6 +1850,114 @@ mod tests {
     }
 
     #[test]
+    fn color_literal_rule_counts_production_literals() {
+        assert_eq!(
+            super::color_literal_count(
+                "const PLAN: Color = Color::rgb(245, 166, 35);\n\
+                 const FLAG: &str = \"#335CFF\";\n\
+                 fn swatches() -> [&str; 2] { [\"#0af\", \"#335CFF80\"] }\n\
+                 fn stop() -> Hsla { hsla(1.0 / 6.0, 1.0, 0.5, 1.0) }\n\
+                 fn packed() -> Rgba { gpui::rgba(0x335CFFFF) }\n\
+                 fn token() -> ThemeColor { ThemeColor::from_rgba8(0, 0, 0, 255) }\n"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn color_literal_rule_accepts_tokens_conversions_and_test_code() {
+        assert_eq!(
+            super::color_literal_count(
+                "fn plan(theme: &AerisTheme) -> Color { chart_color(theme.colors.session_plan_level) }\n\
+                 fn legend(color: Color) -> Rgba { rgba(color.0) }\n\
+                 fn hue(selected: Hsva) -> Hsla { hsla(selected.hue, 1.0, 0.5, 1.0) }\n\
+                 fn parse(rgb: u32) -> Rgba { gpui::rgba((rgb << 8) | 0xFF) }\n\
+                 fn paints() -> [&str; 2] { [\"#\", \"rgb(\"] }\n\
+                 fn label() -> &str { \"#tag\" } // \"#335CFF\"\n\
+                 #[cfg(test)]\nmod tests { const FIXTURE: &str = \"#112233\"; }\n"
+            ),
+            0
+        );
+        assert_eq!(
+            super::color_literal_count(
+                "#[cfg(test)]\nmod tests { }\nconst AFTER: &str = \"#112233\";\n"
+            ),
+            1,
+            "production after a test module is scanned"
+        );
+    }
+
+    #[test]
+    fn color_literal_rule_rejects_new_and_stale_exceptions() {
+        let allowed = [("apps/desktop/src/native_ui/color_picker.rs", 9, "spectrum")];
+        let mut observed = std::collections::BTreeMap::new();
+        observed.insert("apps/desktop/src/native_ui/color_picker.rs".to_string(), 9);
+        assert_eq!(
+            super::counted_allowlist_violations(&allowed, &observed),
+            Vec::<PathBuf>::new()
+        );
+        observed.insert("apps/desktop/src/desktop.rs".to_string(), 1);
+        assert_eq!(
+            super::counted_allowlist_violations(&allowed, &observed),
+            [PathBuf::from("apps/desktop/src/desktop.rs")]
+        );
+        observed.clear();
+        assert_eq!(
+            super::counted_allowlist_violations(&allowed, &observed),
+            [PathBuf::from("apps/desktop/src/native_ui/color_picker.rs")]
+        );
+    }
+
+    #[test]
+    fn test_only_module_files_follow_gated_declarations() {
+        let mut sources = Vec::new();
+        for directory in super::COLOR_TOKEN_SOURCE_ROOTS {
+            super::collect_rust_sources(&repository_root().join(directory), &mut sources)
+                .expect("UI sources are readable");
+        }
+        let test_only: BTreeSet<String> = super::test_only_module_files(&sources)
+            .expect("UI sources are readable")
+            .iter()
+            .map(|path| relative_string(path))
+            .collect();
+        for expected in [
+            "apps/desktop/src/desktop/tests.rs",
+            "apps/desktop/src/desktop/workspace_surface_tests.rs",
+            "apps/desktop/src/desktop/test_support/pane_harness.rs",
+            "crates/ui/chart_integration/src/view/tests.rs",
+        ] {
+            assert!(test_only.contains(expected), "{expected} is not test-only");
+        }
+        for production in [
+            "apps/desktop/src/desktop.rs",
+            "apps/desktop/src/desktop/workspace_surface.rs",
+            "crates/ui/chart_integration/src/view.rs",
+        ] {
+            assert!(
+                !test_only.contains(production),
+                "{production} is production"
+            );
+        }
+    }
+
+    /// Colors in the desktop and chart UI come from `aeris_design_system` tokens; only the
+    /// reviewed, counted exceptions construct a literal color.
+    #[test]
+    fn colors_come_from_tokens() {
+        for (path, _, reason) in super::COLOR_LITERAL_ALLOWLIST {
+            assert!(
+                !reason.trim().is_empty(),
+                "{path} needs an exception reason"
+            );
+        }
+        let violations = super::color_token_violations(repository_root()).expect("scan UI sources");
+        assert!(
+            violations.is_empty(),
+            "UI files with literal colors or stale color exceptions: {violations:?}"
+        );
+    }
+
+    #[test]
     fn desktop_market_fences_stay_in_accept() {
         assert!(
             super::desktop_market_fence_violations(repository_root())
@@ -1667,7 +1992,7 @@ mod tests {
         )];
         let observed = std::collections::BTreeMap::new();
         assert_eq!(
-            super::desktop_fence_allowlist_violations(&allowed, &observed),
+            super::counted_allowlist_violations(&allowed, &observed),
             [PathBuf::from("apps/desktop/src/update.rs")],
             "removed comparisons make their exception stale"
         );
@@ -1676,11 +2001,11 @@ mod tests {
             ("apps/desktop/src/new_market_fence.rs".to_string(), 1),
         ]);
         assert_eq!(
-            super::desktop_fence_allowlist_violations(&allowed, &observed),
+            super::counted_allowlist_violations(&allowed, &observed),
             [PathBuf::from("apps/desktop/src/new_market_fence.rs")]
         );
         assert_eq!(
-            super::desktop_fence_allowlist_violations(
+            super::counted_allowlist_violations(
                 &allowed,
                 &std::collections::BTreeMap::from([("apps/desktop/src/update.rs".to_string(), 1)]),
             ),

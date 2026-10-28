@@ -1,6 +1,6 @@
 use std::{rc::Rc, sync::Arc};
 
-use aeris_design_system::{AerisTheme, RadiusToken};
+use aeris_design_system::{AerisTheme, RadiusToken, ThemeColor, ThemeColors};
 use gpui::{
     App, Bounds, CursorStyle, DispatchPhase, ElementId, Entity, EntityId, HitboxBehavior, Hsla,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
@@ -30,9 +30,20 @@ const SLIDER_HEIGHT: f32 = 10.0;
 /// the field and Set stay the same height inside a rem-scaled panel.
 const HEX_ROW_HEIGHT: f32 = ButtonSize::Default.logical_height();
 const SWATCH_SIZE: f32 = 20.0;
-const RECOMMENDED_COLORS: [&str; 8] = [
-    "#6B7280", "#335CFF", "#FF7A45", "#FB3748", "#18B66A", "#F5A623", "#7C4DFF", "#45B8F2",
-];
+
+/// The swatches offered under the picker, in display order.
+const fn recommended_colors_of(colors: &ThemeColors) -> [ThemeColor; 8] {
+    [
+        colors.swatch_gray,
+        colors.swatch_blue,
+        colors.swatch_orange,
+        colors.swatch_red,
+        colors.swatch_green,
+        colors.swatch_amber,
+        colors.swatch_violet,
+        colors.swatch_sky,
+    ]
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Hsva {
@@ -221,7 +232,8 @@ impl RenderOnce for ColorPicker {
                 typing.watched = Some((input_id, subscription));
             }
         });
-        let normalized = normalize_hex_color(&self.current).unwrap_or_else(|| "#335CFF".into());
+        let default = colors.swatch_default;
+        let normalized = normalize_hex_color(&self.current).unwrap_or_else(|| default.css_hex());
         // The last picked color is exact while it is still the current value; a hex value alone
         // loses the hue of greys and rounds the handles to 8-bit steps.
         let selected = pointer
@@ -229,11 +241,13 @@ impl RenderOnce for ColorPicker {
             .picked
             .filter(|picked| same_hex_color(&hsva_hex(*picked), &normalized))
             .or_else(|| parse_hex_color(&normalized))
-            .unwrap_or(Hsva {
-                hue: 0.63,
-                saturation: 0.8,
-                value: 1.0,
-                alpha: 1.0,
+            .unwrap_or_else(|| {
+                rgb_hsva(
+                    default.red(),
+                    default.green(),
+                    default.blue(),
+                    default.alpha(),
+                )
             });
         let picking = Picking {
             base: selected,
@@ -546,12 +560,12 @@ fn hex_input_row(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
 
 fn recommended_colors(current: &str, picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
     let mut row = div().flex().items_center().justify_between();
-    for (index, value) in RECOMMENDED_COLORS.into_iter().enumerate() {
-        let selected = same_hex_color(current, value);
-        let fill = parse_hex_hsla(value).unwrap_or_else(|| gpui_color(theme.colors.text_muted));
+    for (index, color) in recommended_colors_of(&theme.colors).into_iter().enumerate() {
+        let value = color.css_hex();
+        let selected = same_hex_color(current, &value);
+        let fill = parse_hex_hsla(&value).unwrap_or_else(|| gpui_color(theme.colors.text_muted));
         let input = picking.input.clone();
         let handler = picking.handler.clone();
-        let value = value.to_string();
         row = row.child(
             div()
                 .id(("native_color_recommended", index))
@@ -629,6 +643,10 @@ fn parse_hex_color(value: &str) -> Option<Hsva> {
     } else {
         1.0
     };
+    Some(rgb_hsva(r, g, b, alpha))
+}
+
+fn rgb_hsva(r: f32, g: f32, b: f32, alpha: f32) -> Hsva {
     let maximum = r.max(g).max(b);
     let minimum = r.min(g).min(b);
     let delta = maximum - minimum;
@@ -641,7 +659,7 @@ fn parse_hex_color(value: &str) -> Option<Hsva> {
     } else {
         ((r - g) / delta + 4.0) / 6.0
     };
-    Some(Hsva {
+    Hsva {
         hue,
         saturation: if maximum <= f32::EPSILON {
             0.0
@@ -650,14 +668,15 @@ fn parse_hex_color(value: &str) -> Option<Hsva> {
         },
         value: maximum,
         alpha,
-    })
+    }
 }
 
 fn selected_color(color: Hsva) -> Hsla {
     Hsla::from(hsva_rgba(color))
 }
 
-fn parse_hex_hsla(value: &str) -> Option<Hsla> {
+/// The exact color a CSS hex value (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`) names.
+pub(crate) fn parse_hex_hsla(value: &str) -> Option<Hsla> {
     parse_hex_color(value).map(selected_color)
 }
 

@@ -238,7 +238,7 @@ use indicator_menu::{
 use native_ui::{
     button::{Button, ButtonSize, ButtonVariant, close_button},
     checkbox::CheckboxRow,
-    color_picker::{ColorPicker, normalize_hex_color, transparency_backdrop},
+    color_picker::{ColorPicker, normalize_hex_color, parse_hex_hsla, transparency_backdrop},
     dialog::{
         ConfirmationDialog, ConfirmationTone, Dialog, DialogAlign, DialogMove, DialogSize,
         FLOATING_PANEL_MOVE_CURSOR,
@@ -5314,8 +5314,10 @@ struct WorkspaceDragState {
     strip_left: f32,
 }
 
-/// The color a newly set watchlist flag starts with.
-const DEFAULT_WATCHLIST_FLAG_COLOR: &str = "#335CFF";
+/// The color a newly set watchlist flag starts with, as the hex value the flag stores.
+fn default_watchlist_flag_color(theme: &AerisTheme) -> String {
+    theme.colors.swatch_default.css_hex()
+}
 
 /// One watchlist row as the desktop owns it: the instrument and the user's flag.
 #[derive(Clone, Debug, PartialEq)]

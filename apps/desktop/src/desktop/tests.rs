@@ -1520,7 +1520,7 @@ mod timeframe_input {
             let terminal = terminal.read(cx);
             assert_eq!(
                 terminal.watchlist[0].flag.as_deref(),
-                Some(DEFAULT_WATCHLIST_FLAG_COLOR),
+                Some("#335CFF"),
                 "a first press flags the row in the default color"
             );
             assert!(

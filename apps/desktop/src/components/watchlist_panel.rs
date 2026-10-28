@@ -472,12 +472,9 @@ fn watchlist_flag_slot(
             chart_css_color(flag, colors.primary),
         )],
         None => vec![
-            glyph(
-                HugeIcon::FlagFilled,
-                chart_css_color(DEFAULT_WATCHLIST_FLAG_COLOR, colors.primary),
-            )
-            .opacity(0.0)
-            .group_hover(WATCHLIST_FLAG_GROUP, |style| style.opacity(1.0)),
+            glyph(HugeIcon::FlagFilled, gpui_color(colors.swatch_default))
+                .opacity(0.0)
+                .group_hover(WATCHLIST_FLAG_GROUP, |style| style.opacity(1.0)),
         ],
     };
     let provider = row.instrument.provider.clone();
@@ -535,7 +532,7 @@ fn watchlist_flag_slot(
             "watchlist_flag_color_picker",
             row.flag
                 .clone()
-                .unwrap_or_else(|| DEFAULT_WATCHLIST_FLAG_COLOR.to_string()),
+                .unwrap_or_else(|| colors.swatch_default.css_hex()),
             &picker.input,
             theme,
         )

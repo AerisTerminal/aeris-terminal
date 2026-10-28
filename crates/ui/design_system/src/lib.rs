@@ -357,6 +357,23 @@ impl ThemeColor {
         )
     }
 
+    /// Returns the uppercase CSS hex form (`#RRGGBB`, or `#RRGGBBAA` when translucent) in which
+    /// user color choices are stored.
+    #[must_use]
+    pub fn css_hex(self) -> String {
+        let (red, green, blue, alpha) = (
+            channel_to_u8(self.red),
+            channel_to_u8(self.green),
+            channel_to_u8(self.blue),
+            channel_to_u8(self.alpha),
+        );
+        if alpha == u8::MAX {
+            format!("#{red:02X}{green:02X}{blue:02X}")
+        } else {
+            format!("#{red:02X}{green:02X}{blue:02X}{alpha:02X}")
+        }
+    }
+
     /// Returns a packed `0xRRGGBB` value for native UI color constructors.
     #[must_use]
     pub fn rgb_u32(self) -> u32 {
@@ -823,6 +840,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn color_choices_keep_their_stored_values_in_every_mode_and_preset() {
+        let aeris = AerisTheme::dark().colors;
+        let swatches = [
+            aeris.swatch_gray,
+            aeris.swatch_blue,
+            aeris.swatch_orange,
+            aeris.swatch_red,
+            aeris.swatch_green,
+            aeris.swatch_amber,
+            aeris.swatch_violet,
+            aeris.swatch_sky,
+        ]
+        .map(ThemeColor::css_hex);
+        // Released versions stored these exact values in user documents.
+        assert_eq!(
+            swatches,
+            [
+                "#6B7280", "#335CFF", "#FF7A45", "#FB3748", "#18B66A", "#F5A623", "#7C4DFF",
+                "#45B8F2",
+            ]
+        );
+        assert_eq!(aeris.swatch_default.css_hex(), "#335CFF");
+        assert_eq!(aeris.session_plan_level.css_hex(), "#F5A623");
+        for preset in ThemePreset::ALL {
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                let theme = AerisTheme::resolve(preset, mode);
+                let tokens = theme.color_tokens();
+                for identifier in crate::token_compiler::MODE_INVARIANT_COLORS {
+                    let resolved = |tokens: &[ColorToken]| {
+                        tokens
+                            .iter()
+                            .find(|token| token.canonical_identifier == identifier)
+                            .map(|token| token.resolved)
+                    };
+                    assert_eq!(
+                        resolved(&tokens),
+                        resolved(&AerisTheme::dark().color_tokens()),
+                        "--{identifier} changed in {} {}",
+                        preset.id(),
+                        mode.label()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn css_hex_is_uppercase_and_keeps_translucency() {
+        assert_eq!(ThemeColor::from_rgb8(0x0a, 0xbc, 0xff).css_hex(), "#0ABCFF");
+        assert_eq!(
+            ThemeColor::from_rgba8(0x33, 0x5c, 0xff, 0x80).css_hex(),
+            "#335CFF80"
+        );
     }
 
     /// `--ring-primary` is the only focus style; the retired neutral and per-action rings must

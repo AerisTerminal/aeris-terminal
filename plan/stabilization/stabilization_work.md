@@ -182,11 +182,15 @@ record it on this line.
 ### M7 desktop structure
 
 - [ ] M7.1 Chart and picker colors become design tokens
-  - Left: tokens for the session-plan level, picker swatches and default, the context-menu color
-    and the watchlist flag default.
-  - Update `CSS.md`, `platform.css`, the Rust tokens and the website mirror together.
-  - Add a naming_check `colors_come_from_tokens` rule.
-  - Check by screenshot that nothing changes visually. Closes UI-13.
+  - Landed: the color-choice tokens (`--swatch-*`, `--swatch-default`, `--session-plan-level`)
+    in `CSS.md`, `platform.css` and the Rust registry, and the build rejects them outside `:root`.
+    The session-plan level, picker swatches and default, and the watchlist flag default read
+    them, and the context-menu hex parser reuses the picker's. naming_check
+    `colors_come_from_tokens` allowlists only the picker spectrum and the legacy series fallbacks.
+    The website mirror is committed locally (aeris-website c759b71) after its typecheck, lint and
+    build passed; per M-D8 it waits for the maintainer to push it.
+  - Left: guarded GUI screenshot check that the session-plan level, the picker swatches and the
+    watchlist flag look unchanged. Closes UI-13.
 - [ ] M7.2 Account integration behind an account boundary
   - Left: `account/` module with plan policy at the account boundary.
   - Delete `CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED` and `current_plan_limits`.

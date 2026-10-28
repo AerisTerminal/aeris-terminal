@@ -15,6 +15,10 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Neutral text has three roles: `text-default` for content and labels, `text-secondary` for
   supporting text (AA 4.5:1 on every light and dark surface), and `text-muted` for placeholders and
   disabled text. Interactive items use `text-interactive` / `text-hover` / `text-active`.
+- Color choices a user can pick and store (the color picker swatches `swatch-*`, the
+  `swatch-default` a new choice such as a watchlist flag starts with) and the
+  `session-plan-level` chart line come from the color-choice tokens. Store a choice as
+  `ThemeColor::css_hex()`; never write a swatch value as a literal.
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
   `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for market-order buttons, `buy-subtle-*` / `sell-subtle-*` (with their
   `-foreground` text) for resting-order buttons and long / short position fills, `warning` +
@@ -157,7 +161,10 @@ token. The one exception is the Aeris-only popover layer (`--surface-popover`, `
 `--border-popover-highlight`), declared in `:root:not([data-theme])` and `.dark:not([data-theme])`.
 The build rejects those tokens anywhere else and resolves them for presets to their CSS fallbacks
 (`var(--surface-secondary)`, `var(--border-secondary)` and `transparent`), so web components read
-them as `var(--surface-popover, var(--surface-secondary))` and `var(--border-popover, var(--border-secondary))`. Natively, `AerisTheme::resolve(ThemePreset, ThemeMode)` returns the cascaded palette, so UI code
+them as `var(--surface-popover, var(--surface-secondary))` and `var(--border-popover, var(--border-secondary))`.
+The color choices (`--swatch-*` and `--session-plan-level`) are Aeris-owned, not part of the
+Theme System palette: a stored choice keeps its value, so they are declared once in their own
+`:root` block and the build rejects them in `.dark` and every preset block. Natively, `AerisTheme::resolve(ThemePreset, ThemeMode)` returns the cascaded palette, so UI code
 keeps reading `theme.colors.<token>` and never branches on the preset. The profile menu picks the preset.
 
 ## Theme CSS
@@ -404,5 +411,21 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --surface-popover: #262626;
   --border-popover: #000000cc;
   --border-popover-highlight: #ffffff1a;
+}
+
+/* Color choices — the color picker swatches, the default a new color starts with, and the
+   session-plan chart level. A user's choice is stored as its value, so these are declared once
+   here and dark mode and every preset inherit them unchanged. */
+:root {
+  --swatch-gray: #6b7280;
+  --swatch-blue: #335cff;
+  --swatch-orange: #ff7a45;
+  --swatch-red: #fb3748;
+  --swatch-green: #18b66a;
+  --swatch-amber: #f5a623;
+  --swatch-violet: #7c4dff;
+  --swatch-sky: #45b8f2;
+  --swatch-default: var(--swatch-blue);
+  --session-plan-level: #f5a623;
 }
 ```
