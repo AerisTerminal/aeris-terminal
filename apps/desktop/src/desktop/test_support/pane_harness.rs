@@ -2854,7 +2854,7 @@ fn pane_harness_study_reinitialization_outcome_preserves_failure_and_success(
         assert_eq!(pane.poll_market_worker(cx), 1);
         assert_eq!(pane.studies.active()[0].persisted, replacement);
         assert!(!pane.studies.is_reinitializing(study_id));
-        assert!(pane.chart_persistence_dirty);
+        assert!(pane.persistence.is_dirty());
     });
 }
 

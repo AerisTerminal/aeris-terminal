@@ -80,6 +80,8 @@ mod order_quantity;
 mod order_ticket;
 #[path = "desktop/pane_chrome_state.rs"]
 mod pane_chrome_state;
+#[path = "desktop/pane_persistence.rs"]
+mod pane_persistence;
 use pane_chrome_state::{ChromeOverlay, ChromeOverlayPhase, ChromeTrigger};
 #[path = "components/platform_menu.rs"]
 mod platform_menu;
@@ -957,8 +959,7 @@ struct WorkspaceSurface {
     restore_provider_display_name: Option<String>,
     interval: ChartInterval,
     chart_pane_controller: chart_pane_controller::ChartPaneController,
-    restored_viewport: Option<(i64, i64)>,
-    last_persisted_viewport: Option<(i64, i64)>,
+    persistence: pane_persistence::PanePersistence,
     observed_chart: ObservedChart,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
@@ -967,9 +968,6 @@ struct WorkspaceSurface {
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
     retained_chart_presentation: RetainedChartPresentation,
-    restored_chart_state: Option<WorkspaceChartState>,
-    chart_persistence_dirty: bool,
-    last_chart_user_state_revision: u64,
     alerts: alerts_controller::AlertsController,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
@@ -2766,10 +2764,10 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
     if let Some(chart) = chart {
         order_quantity::attach_chart_trade_bar(chart, cx);
         cx.observe(chart, |app, chart, cx| {
-            let user_state_revision = chart.read(cx).user_state_revision();
-            if user_state_revision != app.last_chart_user_state_revision {
-                app.last_chart_user_state_revision = user_state_revision;
-                app.chart_persistence_dirty = true;
+            if app
+                .persistence
+                .observe_chart_user_state(chart.read(cx).user_state_revision())
+            {
                 app.sync_order_book_demand(cx);
                 cx.notify();
             }
@@ -2815,13 +2813,11 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             }
             if provider_presentation(app.provider).is_some()
                 && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
-                && app.last_persisted_viewport != Some(viewport)
-                && app
-                    .market_worker
-                    .try_set_chart_viewport(viewport.0, viewport.1)
-                    .is_ok()
             {
-                app.last_persisted_viewport = Some(viewport);
+                let market_worker = &app.market_worker;
+                app.persistence.report_viewport(viewport, |(start, end)| {
+                    market_worker.try_set_chart_viewport(start, end).is_ok()
+                });
             }
         })
         .detach();
@@ -4756,7 +4752,7 @@ fn workspace_surface_entity(
         workspace.update(cx, |surface, surface_cx| {
             surface.chrome.restore_side_panel_size(width, split);
             surface.apply_side_panels(SidePanelVisibility::from_persisted(visibility), surface_cx);
-            surface.chart_persistence_dirty = false;
+            surface.persistence.discard_dirty();
         });
     }
     lifecycle.register_terminal(&workspace);
@@ -5285,18 +5281,18 @@ fn workspace_tab_state(workspace: &WorkspaceTab, cx: &App) -> WorkspaceTabState 
             .filter_map(|pane| {
                 let surface = pane.surface.read(cx);
                 let instrument = surface.product.clone()?;
-                let viewport = surface
-                    .chart
-                    .as_ref()
-                    .map_or(surface.restored_viewport, |chart| {
+                let viewport = surface.chart.as_ref().map_or(
+                    surface.persistence.restored_viewport(),
+                    |chart| {
                         let chart = chart.read(cx);
                         durable_workspace_viewport(
-                            surface.restored_viewport,
+                            surface.persistence.restored_viewport(),
                             chart.has_market_data(),
                             chart.is_at_latest(),
                             chart.visible_time_range_unix_nanos(),
                         )
-                    });
+                    },
+                );
                 Some(WorkspacePaneState {
                     pane_id: pane.id,
                     consumer_id: pane.consumer_id,

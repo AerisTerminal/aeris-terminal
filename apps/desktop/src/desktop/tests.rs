@@ -1948,7 +1948,7 @@ mod timeframe_input {
         cx.update(|window, cx| {
             input.update(cx, |input, cx| input.replace_all("0", window, cx));
             surface.update(cx, |surface, cx| {
-                surface.chart_persistence_dirty = false;
+                surface.persistence.discard_dirty();
                 surface.set_big_trades_dialog_filter(None, cx);
                 surface.set_big_trades_dialog_size(BigTradesSize::Large, cx);
                 surface.set_big_trades_dialog_show_volume(false, cx);
@@ -1964,7 +1964,7 @@ mod timeframe_input {
                 message.is_some_and(|message| message.contains("greater than zero")),
                 "an invalid minimum keeps the dialog open: {message:?}"
             );
-            assert!(!surface.chart_persistence_dirty);
+            assert!(!surface.persistence.is_dirty());
         });
         assert!(
             cx.debug_bounds("big_trades_dialog").is_some(),
@@ -1997,7 +1997,7 @@ mod timeframe_input {
             let surface = surface.read(cx);
             let dialog = surface.big_trades_dialog().expect("dialog stays open");
             assert_eq!(dialog.message, None, "a usable minimum clears the message");
-            assert!(surface.chart_persistence_dirty);
+            assert!(surface.persistence.is_dirty());
         });
 
         cx.update(|_, cx| surface.update(cx, WorkspaceSurface::apply_big_trades_dialog));
@@ -2157,7 +2157,7 @@ mod timeframe_input {
                 );
                 assert_eq!(dialog.draft.up_color, None);
                 surface.set_volume_dialog_color(VolumeColorTarget::Up, "#123456", cx);
-                surface.chart_persistence_dirty = false;
+                surface.persistence.discard_dirty();
             });
             input.update(cx, |input, cx| input.replace_all("0", window, cx));
             surface.update(cx, WorkspaceSurface::apply_volume_dialog);
@@ -2187,7 +2187,7 @@ mod timeframe_input {
                     .as_ref()
                     .is_some_and(|picker| picker.error.is_none())
             );
-            assert!(!surface.chart_persistence_dirty);
+            assert!(!surface.persistence.is_dirty());
         });
         assert!(
             cx.debug_bounds("volume_dialog").is_some(),
@@ -2221,7 +2221,7 @@ mod timeframe_input {
                 surface.set_volume_dialog_placement(VolumePlacement::OwnPane, cx);
                 surface.set_volume_dialog_color(VolumeColorTarget::Up, "#123456", cx);
                 surface.set_volume_dialog_color(VolumeColorTarget::Average, "#ff9800", cx);
-                surface.chart_persistence_dirty = false;
+                surface.persistence.discard_dirty();
             });
             input.update(cx, |input, cx| input.replace_all(" 50 ", window, cx));
         });
@@ -2241,7 +2241,7 @@ mod timeframe_input {
             Some(applied.clone()),
             "every edit, including the typed length, shows before Apply"
         );
-        cx.read(|cx| assert!(surface.read(cx).chart_persistence_dirty));
+        cx.read(|cx| assert!(surface.read(cx).persistence.is_dirty()));
         cx.update(|_, cx| surface.update(cx, WorkspaceSurface::apply_volume_dialog));
         cx.read(|cx| assert!(surface.read(cx).volume_dialog().is_none()));
         assert!(cx.debug_bounds("volume_dialog").is_none());
@@ -2379,7 +2379,7 @@ mod timeframe_input {
             edited,
             "edits show at once, and a color of another indicator is not part of the CVD dialog"
         );
-        cx.read(|cx| assert!(surface.read(cx).chart_persistence_dirty));
+        cx.read(|cx| assert!(surface.read(cx).persistence.is_dirty()));
         cx.update(|_, cx| surface.update(cx, WorkspaceSurface::apply_order_flow_dialog));
         cx.read(|cx| assert!(surface.read(cx).order_flow_dialog().is_none()));
         assert!(cx.debug_bounds("order_flow_dialog").is_none());

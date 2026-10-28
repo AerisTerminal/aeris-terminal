@@ -225,9 +225,11 @@ only on the guarded GUI checks on their lines.
     trigger anchors, the Accounts section and placement, the quick-timeframe rejection, the
     scope menu and the docked side-panel layout behind private fields, with enums instead of
     the former menu bools.
-  - Left: `PanePersistence`, with private fields.
-  - Remove the `too_many_lines` allow.
-  - GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
+    `desktop/pane_persistence.rs` owns the saved chart document and viewport a restore applies,
+    the chart's observed user-state revision, the viewport last reported to the market worker
+    and the dirty flag behind private fields; the surface's constructor no longer needs the
+    `too_many_lines` allow.
+  - Left: GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
 - [ ] M7.5 `TerminalApp` split into app controllers
   - Left: `TabStrip`, `SymbolEntry`, one `OverlayStack` and `ChartMenus`.
   - Bring `TerminalApp` to 15 fields or fewer and remove `struct_excessive_bools`.

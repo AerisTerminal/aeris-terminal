@@ -6,6 +6,7 @@ use super::order_flow_presenter::{
     ChartTradeProjection, OrderBookDemandChange, OrderFlowPresenter,
 };
 use super::pane_chrome_state::{PaneChromeState, TimeframeFlyoutChange};
+use super::pane_persistence::PanePersistence;
 use super::studies_controller::{StudiesController, StudySettingsRequest};
 use super::*;
 use aeris_observability::diagnostic;
@@ -94,9 +95,7 @@ struct WorkspaceSurfaceInitialization {
     order_quantity: order_quantity::OrderQuantityControls,
     order_ticket: order_ticket::OrderTicketControls,
     chart_chrome: chart_chrome::ChartChromePreferences,
-    restored_chart_state: Option<WorkspaceChartState>,
-    retained_chart_presentation: RetainedChartPresentation,
-    restored_viewport: Option<(i64, i64)>,
+    persistence: PanePersistence,
     interval: ChartInterval,
     symbol_browser: SymbolBrowser,
     studies: StudiesController,
@@ -112,8 +111,6 @@ struct WorkspaceSurfaceInitialization {
     theme: AerisTheme,
 }
 
-// One line per surface field; splitting the literal would only scatter the defaults.
-#[allow(clippy::too_many_lines)]
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
     let trading_pane_token = init.lifecycle.trading_feedback().pane();
     let descriptor = init
@@ -183,8 +180,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         restore_provider_display_name: None,
         interval: init.interval,
         chart_pane_controller,
-        restored_viewport: init.restored_viewport,
-        last_persisted_viewport: None,
+        persistence: init.persistence,
         observed_chart: ObservedChart::default(),
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
@@ -192,10 +188,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         pending_study_remove_request: None,
         resource_class: ConsumerResourceClass::Foreground,
         chart_chrome: init.chart_chrome,
-        retained_chart_presentation: init.retained_chart_presentation,
-        restored_chart_state: init.restored_chart_state,
-        chart_persistence_dirty: false,
-        last_chart_user_state_revision: 0,
+        retained_chart_presentation: RetainedChartPresentation::default(),
         alerts: init.alerts,
         #[cfg(feature = "diagnostics")]
         foreground_interactions: ForegroundInteractionDiagnostics::default(),
@@ -1767,27 +1760,23 @@ fn restored_pane_heights(saved: &[WorkspaceChartPaneHeightState]) -> Vec<ChartPa
         .collect()
 }
 
-/// Writes pane-owned presentation choices to the same document whether the chart is
-/// loaded or still waiting for a covering snapshot.
-struct PanePersistence<'a>(&'a WorkspaceSurface);
-
-impl PanePersistence<'_> {
-    fn apply_surface_fields(&self, state: &mut WorkspaceChartState) {
-        let surface = self.0;
-        state.time_zone.clone_from(&surface.chart_time_zone);
+impl WorkspaceSurface {
+    /// Writes pane-owned presentation choices to the same document whether the chart is
+    /// loaded or still waiting for a covering snapshot.
+    fn persist_pane_fields(&self, state: &mut WorkspaceChartState) {
+        state.time_zone.clone_from(&self.chart_time_zone);
         state.show_order_management_lines =
-            Some(surface.chart_trading_visibility.show_order_management_lines);
-        state.show_execution_marks = Some(surface.chart_trading_visibility.show_execution_marks);
-        state.extend_order_lines_left =
-            Some(surface.chart_trading_visibility.extend_order_lines_left);
-        surface.context_panel.persist_into(state);
-        state.chart_link_group = u32::from(surface.chart_link_group);
-        state.chart_link_flags = u32::from(surface.chart_link_flags);
+            Some(self.chart_trading_visibility.show_order_management_lines);
+        state.show_execution_marks = Some(self.chart_trading_visibility.show_execution_marks);
+        state.extend_order_lines_left = Some(self.chart_trading_visibility.extend_order_lines_left);
+        self.context_panel.persist_into(state);
+        state.chart_link_group = u32::from(self.chart_link_group);
+        state.chart_link_flags = u32::from(self.chart_link_flags);
     }
 
-    fn presentation(&self, saved: Option<&WorkspaceChartState>) -> PanePresentation {
+    fn pane_presentation(&self, saved: Option<&WorkspaceChartState>) -> PanePresentation {
         let mut state = saved.cloned().unwrap_or_default();
-        self.apply_surface_fields(&mut state);
+        self.persist_pane_fields(&mut state);
         PanePresentation {
             state,
             has_saved_chart: saved.is_some(),
@@ -1879,8 +1868,8 @@ impl PanePresentation {
 }
 
 impl WorkspaceSurface {
-    pub(super) fn take_chart_persistence_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.chart_persistence_dirty)
+    pub(super) const fn take_chart_persistence_dirty(&mut self) -> bool {
+        self.persistence.take_dirty()
     }
 
     /// State to persist while no chart has data to read from (startup, or a symbol or timeframe
@@ -1888,11 +1877,12 @@ impl WorkspaceSurface {
     /// falls back to the presentation retained from the chart it is replacing; either way the
     /// surface-owned time zone is kept, so a save mid-load never resets the pane.
     fn unloaded_chart_state(&self) -> Option<WorkspaceChartState> {
-        self.restored_chart_state
-            .clone()
-            .or_else(|| self.retained_chart_presentation.chart_state.clone())
+        self.persistence
+            .saved_chart()
+            .or(self.retained_chart_presentation.chart_state.as_ref())
+            .cloned()
             .map(|mut state| {
-                PanePersistence(self).apply_surface_fields(&mut state);
+                self.persist_pane_fields(&mut state);
                 state.instrument_drawings.clear();
                 state.chart_state_json.clear();
                 state.locked_drawing_ids.clear();
@@ -1939,7 +1929,7 @@ impl WorkspaceSurface {
             pane_heights: persisted_pane_heights(&chart.pane_heights()),
             ..WorkspaceChartState::default()
         };
-        PanePersistence(self).apply_surface_fields(&mut state);
+        self.persist_pane_fields(&mut state);
         Some(state)
     }
 
@@ -2000,9 +1990,7 @@ impl WorkspaceSurface {
             order_quantity,
             order_ticket,
             chart_chrome,
-            retained_chart_presentation: RetainedChartPresentation::default(),
-            restored_chart_state,
-            restored_viewport,
+            persistence: PanePersistence::restore(restored_chart_state, restored_viewport),
             interval,
             symbol_browser,
             studies,
@@ -2026,7 +2014,7 @@ impl WorkspaceSurface {
         let Some(chart) = self.chart.as_ref() else {
             return;
         };
-        let failed = PanePersistence(self).presentation(None).apply(chart, cx);
+        let failed = self.pane_presentation(None).apply(chart, cx);
         if failed {
             Self::post_chart_restore_failure(cx);
         } else {
@@ -2314,7 +2302,7 @@ impl WorkspaceSurface {
         Self::clear_indicator_failure("chart_time_zone", cx);
         if self.chart_time_zone != time_zone {
             self.chart_time_zone = time_zone.to_string();
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
         true
@@ -3248,19 +3236,15 @@ impl WorkspaceSurface {
         self.retained_chart_presentation
             .drawings
             .begin_chart(self.product.as_ref());
-        let mut restore_failed = if let Some(restored) = self.restored_chart_state.take() {
+        let mut restore_failed = if let Some(restored) = self.persistence.take_saved_chart() {
             self.retained_chart_presentation.rejected_saved =
                 RejectedSavedPresentation::of(&restored);
-            PanePersistence(self)
-                .presentation(Some(&restored))
-                .apply(&chart, cx)
+            self.pane_presentation(Some(&restored)).apply(&chart, cx)
         } else if let Some(state) = &self.retained_chart_presentation.chart_state {
-            PanePersistence(self)
-                .presentation(Some(state))
-                .apply(&chart, cx)
+            self.pane_presentation(Some(state)).apply(&chart, cx)
         } else {
             self.apply_retained_indicators_to_chart(&chart, cx);
-            PanePersistence(self).presentation(None).apply(&chart, cx)
+            self.pane_presentation(None).apply(&chart, cx)
         };
         restore_failed |= self.retained_chart_presentation.rejected_saved.any();
         if restore_failed {
@@ -3276,12 +3260,13 @@ impl WorkspaceSurface {
             self.product.as_ref(),
             cx,
         );
-        if let Some((start, end)) = self.restored_viewport {
+        if let Some((start, end)) = self.persistence.restored_viewport() {
             chart.update(cx, |chart, _| {
                 chart.set_visible_time_range_unix_nanos(start, end);
             });
         }
-        self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
+        self.persistence
+            .adopt_chart_user_state(chart.read(cx).user_state_revision());
         self.observed_chart = ObservedChart {
             clock_revision: chart.read(cx).clock_revision(),
             selected_drawing: chart.read(cx).selected_drawing_id(),
@@ -4021,7 +4006,7 @@ impl WorkspaceSurface {
                     .take()
                     .map(|(_, name)| name);
             }
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
     }
 
@@ -4404,13 +4389,13 @@ impl WorkspaceSurface {
                 // subsequent study synchronization retries it.
                 diagnostic!("Automatic study removal is waiting for market worker capacity");
             }
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
             return;
         }
         self.studies.activate(runtime_state);
         if state.persist_on_registration {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -4434,7 +4419,7 @@ impl WorkspaceSurface {
             return;
         };
         if state.persist_on_registration {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         if state.remove_on_registration {
             cx.notify();
@@ -4456,7 +4441,7 @@ impl WorkspaceSurface {
             return;
         };
         if persisted_changed {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         Self::clear_indicator_failure("study", cx);
         self.send_queued_study_settings(study_id, cx);
@@ -4616,7 +4601,7 @@ impl WorkspaceSurface {
             .collect::<Vec<_>>();
         let removed_runtime = self.studies.remove_runtime_subtree(&removed.study_ids);
         if removed_runtime {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             Self::clear_indicator_failure("study", cx);
         }
         if self
@@ -5044,8 +5029,7 @@ impl WorkspaceSurface {
                 self.order_flow.clear_instrument();
             }
         }
-        self.restored_viewport = None;
-        self.last_persisted_viewport = None;
+        self.persistence.forget_viewports();
         self.chart_state = ChartState::Loading;
         self.sync_order_book_demand(cx);
         cx.notify();
@@ -5454,7 +5438,7 @@ impl WorkspaceSurface {
             }
         }
         // The chart is rebuilt from the store's current view when visibility changes.
-        self.chart_persistence_dirty = true;
+        self.persistence.mark_dirty();
         cx.notify();
     }
 
@@ -5563,7 +5547,7 @@ impl WorkspaceSurface {
             Ok(true) => {
                 Self::clear_indicator_failure("order_flow", cx);
                 self.retained_chart_presentation.rejected_saved.order_flow = false;
-                self.chart_persistence_dirty = true;
+                self.persistence.mark_dirty();
                 if let Some(snapshot) = self.order_flow.tape().cloned() {
                     self.apply_trade_tape_to_chart(&snapshot, cx);
                 }
@@ -5634,7 +5618,7 @@ impl WorkspaceSurface {
             changed
         }) {
             self.retained_chart_presentation.rejected_saved.appearance = false;
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -5655,7 +5639,7 @@ impl WorkspaceSurface {
             changed
         }) {
             self.retained_chart_presentation.rejected_saved.appearance = false;
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -5675,7 +5659,7 @@ impl WorkspaceSurface {
             }
             changed
         }) {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -5696,7 +5680,7 @@ impl WorkspaceSurface {
             changed
         }) {
             self.retained_chart_presentation.rejected_saved.appearance = false;
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -5710,7 +5694,7 @@ impl WorkspaceSurface {
             chart_cx.notify();
         });
         self.retained_chart_presentation.rejected_saved.appearance = false;
-        self.chart_persistence_dirty = true;
+        self.persistence.mark_dirty();
         cx.notify();
     }
 
@@ -5725,7 +5709,7 @@ impl WorkspaceSurface {
             }
             changed
         }) {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -5745,7 +5729,7 @@ impl WorkspaceSurface {
             }
             changed
         }) {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -6200,7 +6184,7 @@ impl WorkspaceSurface {
             self.product = Some(instrument.clone());
             self.descriptor =
                 engine_market_worker::refreshed_descriptor(instrument, self.descriptor.take());
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
     }
 
@@ -6331,7 +6315,7 @@ impl WorkspaceSurface {
             return;
         }
         self.sync_order_book_demand(cx);
-        self.chart_persistence_dirty = true;
+        self.persistence.mark_dirty();
         cx.notify();
     }
 
@@ -6443,7 +6427,7 @@ impl WorkspaceSurface {
 
     fn context_panel_layout_changed(&mut self, changed: bool, cx: &mut Context<Self>) {
         if changed {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -6525,7 +6509,7 @@ impl WorkspaceSurface {
 
     pub(super) fn cycle_chart_link_group(&mut self, cx: &mut Context<Self>) {
         self.chart_link_group = (self.chart_link_group + 1) % 5;
-        self.chart_persistence_dirty = true;
+        self.persistence.mark_dirty();
         cx.notify();
     }
 
@@ -6607,14 +6591,14 @@ impl WorkspaceSurface {
 
     pub(super) fn set_side_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if self.chrome.set_side_panel_width(width) {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
 
     pub(super) fn set_side_panel_split_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
         if self.chrome.set_side_panel_split_ratio(ratio) {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
         }
     }
@@ -7017,7 +7001,7 @@ impl WorkspaceSurface {
         };
         let width = persisted_study_line_width(persisted);
         if changed {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         let colors = output_colors
             .iter()
@@ -7560,7 +7544,7 @@ impl WorkspaceSurface {
             Ok(true)
         })?;
         if changed {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         Ok(())
     }
@@ -7745,7 +7729,7 @@ impl WorkspaceSurface {
             });
         }
         if unregistered_removed {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         self.retain_chart_presentation(cx);
         cx.notify();
@@ -7799,7 +7783,7 @@ impl WorkspaceSurface {
                 return false;
             }
             Self::clear_indicator_failure("study", cx);
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
             cx.notify();
             return true;
         }

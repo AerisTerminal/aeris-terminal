@@ -285,7 +285,7 @@ impl WorkspaceSurface {
         }
         self.alerts.adopt_created(next);
         Self::clear_price_alert_action_notice(cx);
-        self.chart_persistence_dirty = true;
+        self.persistence.mark_dirty();
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
             self.alerts.alerts(),
@@ -311,7 +311,7 @@ impl WorkspaceSurface {
             return;
         }
         self.alerts.adopt(next);
-        self.chart_persistence_dirty = true;
+        self.persistence.mark_dirty();
         Self::clear_price_alert_action_notice(cx);
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
@@ -335,7 +335,7 @@ impl WorkspaceSurface {
             return;
         }
         if outcome == AlertTriggerOutcome::Retired {
-            self.chart_persistence_dirty = true;
+            self.persistence.mark_dirty();
         }
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
