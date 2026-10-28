@@ -195,6 +195,11 @@ violations and missing verification explicitly, and never describe them as satis
 - `FixtureMarketWorker` lives only under `apps/desktop/src/test_support/`; the module is
   compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
   construct fixture market publications. The diagnostic conformance command is gated likewise.
+- The embedded demo replay (`aeris_application::EmbeddedReplaySource`) and the demo chart
+  constructor (`AerisChartView::new` and `Default`) compile only for tests or the `test-support`
+  features of `aeris_application` and `aeris_chart_integration`. Only dev-dependencies, the chart
+  integration's own `test-support` feature and the desktop `diagnostics` feature may enable those
+  features; `embedded_demo_replay_is_test_support_only` checks every workspace manifest.
 - The desktop stores `ChartInterval` and must not construct `SeriesCadence`; interval-to-cadence mapping
   belongs to `market_runtime`.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a

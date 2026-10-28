@@ -23,7 +23,7 @@ pub struct LoadEmbeddedReplay {
     pub bar_count: usize,
 }
 
-/// Local Stage 1 source used until the real replay transport is implemented.
+/// Deterministic demo replay for tests and diagnostics builds.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EmbeddedReplaySource;
 

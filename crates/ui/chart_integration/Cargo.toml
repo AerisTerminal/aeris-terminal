@@ -8,6 +8,8 @@ publish.workspace = true
 
 [features]
 diagnostics = []
+# `AerisChartView::new` and `Default`, which install the embedded demo replay.
+test-support = ["aeris_application/test-support"]
 
 [dependencies]
 aeris_application = { path = "../../application" }
@@ -25,6 +27,7 @@ aeris_charts_render_gpui.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+aeris_application = { path = "../../application", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]

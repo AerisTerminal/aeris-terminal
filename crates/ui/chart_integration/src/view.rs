@@ -9,9 +9,10 @@ use crate::engine_bridge::{
 };
 use crate::provenance::DisplayedProvenance;
 use aeris_application::ReplayRecoveryCommand;
+#[cfg(any(test, feature = "test-support"))]
+use aeris_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
 use aeris_application::{
-    EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
-    ReplayStreamUpdate, ReplayValidationError,
+    MarketEventProvenance, ReplaySnapshot, ReplayStreamUpdate, ReplayValidationError,
 };
 pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 #[cfg(test)]
@@ -1157,6 +1158,7 @@ impl AerisChartView {
     ///
     /// Panics only if the application-owned embedded fixture violates its own
     /// validation contract.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new() -> Self {
         let replay = EmbeddedReplaySource
@@ -2589,6 +2591,7 @@ fn format_utc_offset(offset_seconds: i32) -> String {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for AerisChartView {
     fn default() -> Self {
         Self::new()

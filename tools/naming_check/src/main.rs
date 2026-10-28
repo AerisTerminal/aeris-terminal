@@ -2351,6 +2351,190 @@ mod tests {
         }
     }
 
+    /// One `key = value` entry of a manifest under its section header; a value whose array
+    /// or inline table spans several lines is joined onto one line.
+    struct ManifestEntry {
+        section: String,
+        key: String,
+        value: String,
+    }
+
+    fn manifest_entries(contents: &str) -> Vec<ManifestEntry> {
+        let mut section = String::new();
+        let mut entries: Vec<ManifestEntry> = Vec::new();
+        let mut depth = 0_i32;
+        for line in contents.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if depth > 0 {
+                if let Some(entry) = entries.last_mut() {
+                    entry.value.push(' ');
+                    entry.value.push_str(line);
+                }
+                depth += bracket_balance(line);
+                continue;
+            }
+            if line.starts_with('[') {
+                section = line.trim_matches(['[', ']']).to_string();
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                depth = bracket_balance(value);
+                entries.push(ManifestEntry {
+                    section: section.clone(),
+                    key: key.trim().to_string(),
+                    value: value.trim().to_string(),
+                });
+            }
+        }
+        entries
+    }
+
+    fn bracket_balance(text: &str) -> i32 {
+        text.chars()
+            .map(|character| match character {
+                '[' | '{' => 1,
+                ']' | '}' => -1,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DependencyKind {
+        Normal,
+        Dev,
+        Build,
+    }
+
+    /// The dependency kind a manifest section declares and, for a `[dependencies.name]`
+    /// table, that dependency's name. Target-specific sections count as their kind.
+    fn dependency_section(section: &str) -> Option<(DependencyKind, Option<&str>)> {
+        let section = section.strip_prefix("target.").map_or(section, |target| {
+            target
+                .rsplit_once("'.")
+                .or_else(|| target.rsplit_once("\"."))
+                .map_or(target, |(_, kind)| kind)
+        });
+        let (kind, name) = section
+            .split_once('.')
+            .map_or((section, None), |(kind, name)| (kind, Some(name)));
+        let kind = match kind {
+            "dependencies" => DependencyKind::Normal,
+            "dev-dependencies" => DependencyKind::Dev,
+            "build-dependencies" => DependencyKind::Build,
+            _ => return None,
+        };
+        Some((kind, name))
+    }
+
+    /// Every dependency a manifest declares, as its kind, name and declaration.
+    fn manifest_dependencies(contents: &str) -> Vec<(DependencyKind, String, String)> {
+        manifest_entries(contents)
+            .into_iter()
+            .filter_map(|entry| {
+                let (kind, table) = dependency_section(&entry.section)?;
+                Some(if let Some(name) = table {
+                    (
+                        kind,
+                        name.to_string(),
+                        format!("{} = {}", entry.key, entry.value),
+                    )
+                } else {
+                    let name = entry
+                        .key
+                        .split_once('.')
+                        .map_or(entry.key.as_str(), |(name, _)| name)
+                        .to_string();
+                    (kind, name, entry.value)
+                })
+            })
+            .collect()
+    }
+
+    /// Whether a manifest enables the embedded demo replay (`test-support` of
+    /// `aeris_application` or `aeris_chart_integration`) only from dev-dependencies, the chart
+    /// integration's own `test-support` feature or the desktop's explicit `diagnostics` feature.
+    fn demo_replay_enablement_is_allowed(relative: &str, contents: &str) -> bool {
+        let gated = ["aeris_application", "aeris_chart_integration"];
+        let dependencies_allowed =
+            manifest_dependencies(contents)
+                .iter()
+                .all(|(kind, name, declaration)| {
+                    *kind == DependencyKind::Dev
+                        || !gated.contains(&name.as_str())
+                        || !declaration.contains("\"test-support\"")
+                });
+        let features_allowed = manifest_entries(contents)
+            .iter()
+            .filter(|entry| entry.section == "features")
+            .all(|entry| {
+                !gated
+                    .iter()
+                    .any(|name| entry.value.contains(&format!("\"{name}/test-support\"")))
+                    || matches!(
+                        (relative, entry.key.as_str()),
+                        ("apps/desktop/Cargo.toml", "diagnostics")
+                            | ("crates/ui/chart_integration/Cargo.toml", "test-support")
+                    )
+            });
+        dependencies_allowed && features_allowed
+    }
+
+    #[test]
+    fn demo_replay_rule_accepts_and_rejects_fixtures() {
+        let allowed = "[features]\ndiagnostics = [\"aeris_application/test-support\"]\n\n[dependencies]\naeris_application = { path = \"../app\" }\n\n[dev-dependencies]\naeris_application = { path = \"../app\", features = [\n    \"test-support\",\n] }\n";
+        assert!(demo_replay_enablement_is_allowed(
+            "apps/desktop/Cargo.toml",
+            allowed
+        ));
+        assert!(!demo_replay_enablement_is_allowed(
+            "crates/market_runtime/Cargo.toml",
+            allowed
+        ));
+        assert!(!demo_replay_enablement_is_allowed(
+            "apps/desktop/Cargo.toml",
+            "[target.'cfg(windows)'.dependencies]\naeris_chart_integration = { path = \"../ci\", features = [\"test-support\"] }\n"
+        ));
+        assert!(!demo_replay_enablement_is_allowed(
+            "apps/desktop/Cargo.toml",
+            "[dependencies.aeris_application]\npath = \"../app\"\nfeatures = [\"test-support\"]\n"
+        ));
+    }
+
+    #[test]
+    fn embedded_demo_replay_is_test_support_only() {
+        let application = production_prefix(&manifest("crates/application/src/lib.rs"));
+        for declaration in ["mod embedded_source;", "pub use embedded_source::"] {
+            assert!(
+                application.contains(&format!(
+                    "#[cfg(any(test, feature = \"test-support\"))]\n{declaration}"
+                )),
+                "the embedded demo replay must stay behind the application test-support gate"
+            );
+        }
+        let view = production_prefix(&manifest("crates/ui/chart_integration/src/view.rs"));
+        for gated in [
+            "#[cfg(any(test, feature = \"test-support\"))]\nuse aeris_application::{EmbeddedReplaySource, LoadEmbeddedReplay};",
+            "#[cfg(any(test, feature = \"test-support\"))]\n    #[must_use]\n    pub fn new() -> Self {",
+            "#[cfg(any(test, feature = \"test-support\"))]\nimpl Default for AerisChartView {",
+        ] {
+            assert!(
+                view.contains(gated),
+                "the demo-replay chart constructor must stay test-support only"
+            );
+        }
+        for path in workspace_manifests() {
+            let relative = relative_string(&path);
+            let contents = super::read_source(&path).expect("manifest");
+            assert!(
+                demo_replay_enablement_is_allowed(&relative, &contents),
+                "{relative} may enable the embedded demo replay only for tests or diagnostics"
+            );
+        }
+    }
+
     fn contains_unsafe_code(source: &str) -> bool {
         source.contains("allow(unsafe_code)")
             || source.contains("unsafe {")

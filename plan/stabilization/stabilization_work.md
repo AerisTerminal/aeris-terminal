@@ -691,8 +691,11 @@ still wait on the GUI checks and the remaining work on their lines.
     installed app is not measured.
   - Left: a green windows-latest CI run of `lifecycle_e2e` with these cases.
 - [ ] M8.9 Dependency direction and `contracts`
-  - Left: move `EmbeddedReplaySource` to test support.
-  - Delete `GetAccountStatus` and `RefreshAccountProfile`, and reduce `contracts` to the persisted
+  - Landed: G5. `EmbeddedReplaySource` and the demo chart constructor compile only for tests or
+    the new `test-support` features of `application` and `chart_integration`; only
+    dev-dependencies and the desktop `diagnostics` feature enable them, which naming_check checks
+    in every manifest (`embedded_demo_replay_is_test_support_only`).
+  - Left: delete `GetAccountStatus` and `RefreshAccountProfile`, and reduce `contracts` to the persisted
     schema.
   - Add naming_check direction rules from `cargo metadata`.
   - Record `study_sdk -> market_runtime` as the accepted facade. Closes PL-13 and PL-14.
