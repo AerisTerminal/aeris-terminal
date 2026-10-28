@@ -601,11 +601,11 @@ confirm `main` is clean and pushed; bump `[workspace.package] version` (minor wh
 user-visible capability, patch when it only fixes) and run `cargo update --workspace --offline` so the
 lockfile changes only workspace versions (published installer names are versioned and served with
 immutable caching, so a version is never republished); commit `feat(release): release <version>` with
-a stabilization log entry naming the version and what it ships since the previous release; push;
+a release-record row naming the version and what it ships since the previous release; push;
 wait for CI on that commit; run both preview lanes; check their smoke tests and the Windows checksum;
 publish with `publish:desktop`; and confirm that `https://aeristerminal.com/downloads/latest.json` names
-the version and the public files hash to the built artifacts. The `feat(release)` entries in
-`plan/stabilization/stabilization_work.md` are the release record.
+the version and the public files hash to the built artifacts. The release-record table in
+`plan/stabilization/stabilization_work.md` is the release record.
 
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 
@@ -627,9 +627,12 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
   the code they describe.
 - `plan/stabilization/` is the one sanctioned exception to the rule above: it holds the stabilization
   tracking document `stabilization_work.md` and the audit/design report copies under
-  `plan/stabilization/reports/` (redacted; the repo is public). Every feature commit must update
-  `plan/stabilization/stabilization_work.md` in the same commit: check the work item, note the findings
-  it closes, append a progress-log line, and record any new restriction there.
+  `plan/stabilization/reports/` (redacted; the repo is public). Every stabilization commit updates its
+  item's line in `plan/stabilization/stabilization_work.md` in the same commit. A box is checked only
+  when the item's code has landed and every validation its spec requires (tests, probes, guarded GUI
+  checks) has passed; until then the line says exactly what is left. Git history is the progress log.
+  Stabilization work runs focused per-crate checks while iterating and the full workspace gate once
+  per milestone, before the milestone closeout; CI runs the full gate on every push.
 - Every commit that introduces or changes an architecture restriction (a `tools/naming_check` rule, a
   crate boundary, a writer or CI rule) must also update this `AGENTS.md` in the same commit, so the
   rule lives where future agents read it.
