@@ -703,7 +703,8 @@ the `AERIS_UPDATE_RESTART_READY_V1` and `AERIS_UPDATE_RESTART_COMMIT_V1` lines f
 `aeris_release_lifecycle`, and block plans sign under `AERIS_RELEASE_BLOCK_PLAN_V1`. Release
 manifests ship their exact bytes, signed under `AERIS_RELEASE_MANIFEST_V1`, and are verified
 before any field is read; a manifest's `minimum_launcher_protocol` is checked against
-`LAUNCHER_PROTOCOL_VERSION`, never the product version;
+`LAUNCHER_PROTOCOL_VERSION`, never the product version. A failed block-plan delivery returns a
+typed `BlockDeliveryError` and is logged before the launcher falls back to full downloads;
 `tools/naming_check` rejects any `AXIUSFLOW` token in Rust sources under `apps/` and `crates/`. Releases reach users through the website download page:
 after the fix is pushed to `main`, run both preview lanes with `-f rithmic_kit=true`, check that
 each smoke test passed, download `Aeris-Terminal-<version>.dmg` from the

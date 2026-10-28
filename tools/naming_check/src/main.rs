@@ -5026,6 +5026,20 @@ mod tests {
             signature < downgrade && downgrade < rollout,
             "rollout eligibility must be applied only after signature and downgrade validation"
         );
+        let delivery_start = launcher
+            .find("fn verified_block_delivery(")
+            .expect("block delivery");
+        let delivery_end = launcher[delivery_start..]
+            .find("\nfn reconstruct_release_file(")
+            .map_or(launcher.len(), |end| delivery_start + end);
+        let delivery = &launcher[delivery_start..delivery_end];
+        assert!(
+            delivery.contains("Result<VerifiedBlockDelivery, BlockDeliveryError>")
+                && !delivery.contains(".ok()?")
+                && launcher.contains("Aeris release delta delivery unavailable")
+                && launcher.contains("Aeris release block reconstruction of"),
+            "block delivery failures must return a typed BlockDeliveryError and be logged"
+        );
     }
     #[test]
     fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {

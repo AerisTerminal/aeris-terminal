@@ -21,13 +21,14 @@ use aeris_platform_runtime::{
     replace_file_atomically,
 };
 use aeris_release_lifecycle::{
-    ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleHooks,
-    MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION, ReadinessReport,
-    ReleaseChannelPointer, ReleaseConfig, ReleaseFile, ReleaseInstaller, ReleasePolicy,
-    ReleaseUninstaller, SignedBlockPlan, SignedReleaseManifest, UPDATE_RESTART_COMMIT,
-    UPDATE_RESTART_READY, VaultEntry, current_release_identity, decode_and_verify_block_plan,
-    native_install_root, native_installation_inventory, release_config, rollout_eligible,
-    verify_release_file, verify_release_manifest,
+    ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, InstallationInventory, LifecycleError,
+    LifecycleHooks, MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, RELEASE_CHANNEL_SCHEMA_VERSION,
+    ReadinessReport, ReleaseChannelPointer, ReleaseConfig, ReleaseDeliveryError, ReleaseFile,
+    ReleaseInstaller, ReleaseManifest, ReleasePolicy, ReleaseUninstaller, SignedBlockPlan,
+    SignedReleaseManifest, UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY, VaultEntry,
+    current_release_identity, decode_and_verify_block_plan, native_install_root,
+    native_installation_inventory, release_config, rollout_eligible, verify_release_file,
+    verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -624,21 +625,31 @@ fn download_release_bundle(
     let download_agent = release_http_agent(RELEASE_HTTP_TIMEOUT);
     let block_delivery = active.and_then(|active| {
         verified_block_delivery(installer, active, signed, verifying_key, &download_agent)
+            .inspect_err(|error| {
+                aeris_observability::diagnostic!(
+                    "Aeris release delta delivery unavailable, downloading full files: {error}"
+                );
+            })
+            .ok()
     });
     for file in &signed.manifest().files {
-        if block_delivery.as_ref().is_some_and(|delivery| {
+        let planned = block_delivery.as_ref().and_then(|delivery| {
             delivery
                 .signed_plan
                 .plan
                 .files
                 .iter()
                 .find(|plan| plan.path == file.path)
-                .is_some_and(|plan| {
-                    reconstruct_release_file(&download_agent, &bundle_root, file, delivery, plan)
-                        .is_ok()
-                })
-        }) {
-            continue;
+                .map(|plan| (delivery, plan))
+        });
+        if let Some((delivery, plan)) = planned {
+            match reconstruct_release_file(&download_agent, &bundle_root, file, delivery, plan) {
+                Ok(()) => continue,
+                Err(error) => aeris_observability::diagnostic!(
+                    "Aeris release block reconstruction of {} failed, downloading it in full: {error}",
+                    file.path
+                ),
+            }
         }
         download_release_file(&download_agent, &bundle_root, file)?;
         if let Ok(block_partial) = block_partial_download_path(&bundle_root.join(&file.path)) {
@@ -1385,16 +1396,55 @@ struct VerifiedBlockDelivery {
     source_root: PathBuf,
 }
 
+/// Why a release's delta delivery is not used; the launcher then downloads every file in full.
+#[derive(Debug, PartialEq)]
+enum BlockDeliveryError {
+    SourceUnverified(LifecycleError),
+    ReleaseBaseUnavailable(String),
+    PlanRequestFailed(String),
+    PlanStatus(u16),
+    PlanUnreadable,
+    PlanTooLarge,
+    PlanRejected(ReleaseDeliveryError),
+}
+
+impl std::fmt::Display for BlockDeliveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceUnverified(error) => {
+                write!(formatter, "the active release did not verify: {error}")
+            }
+            Self::ReleaseBaseUnavailable(error) => {
+                write!(formatter, "the release base URL is unavailable: {error}")
+            }
+            Self::PlanRequestFailed(error) => {
+                write!(formatter, "the block plan request failed: {error}")
+            }
+            Self::PlanStatus(status) => {
+                write!(formatter, "the block plan request returned HTTP {status}")
+            }
+            Self::PlanUnreadable => formatter.write_str("the block plan body could not be read"),
+            Self::PlanTooLarge => formatter.write_str("the block plan exceeds its size bound"),
+            Self::PlanRejected(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
 fn verified_block_delivery(
     installer: &ReleaseInstaller,
     active: &ActiveRelease,
     target: &SignedReleaseManifest,
     verifying_key: &VerifyingKey,
     agent: &ureq::Agent,
-) -> Option<VerifiedBlockDelivery> {
-    let source_manifest = installer.verified_release_manifest(active).ok()?;
-    let source_root = installer.release_directory(active).ok()?;
-    let base_url = embedded_release_base_url().ok()?;
+) -> Result<VerifiedBlockDelivery, BlockDeliveryError> {
+    let source_manifest = installer
+        .verified_release_manifest(active)
+        .map_err(BlockDeliveryError::SourceUnverified)?;
+    let source_root = installer
+        .release_directory(active)
+        .map_err(BlockDeliveryError::SourceUnverified)?;
+    let base_url =
+        embedded_release_base_url().map_err(BlockDeliveryError::ReleaseBaseUnavailable)?;
     let target_manifest = target.manifest();
     let url = format!(
         "{base_url}/{}/{}/{}-{}/{}",
@@ -1404,32 +1454,49 @@ fn verified_block_delivery(
         target_manifest.release_identity,
         BLOCK_PLAN_FILENAME
     );
-    let mut response = agent.get(&url).call().ok()?;
-    if response.status().as_u16() != 200 {
-        return None;
-    }
+    let mut response = agent.get(&url).call().map_err(|error| match error {
+        ureq::Error::StatusCode(status) => BlockDeliveryError::PlanStatus(status),
+        error => BlockDeliveryError::PlanRequestFailed(error.to_string()),
+    })?;
+    let status = response.status().as_u16();
     let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(MAXIMUM_SIGNED_BLOCK_PLAN_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > MAXIMUM_SIGNED_BLOCK_PLAN_BYTES {
-        return None;
+    if status == 200 {
+        response
+            .body_mut()
+            .as_reader()
+            .take(MAXIMUM_SIGNED_BLOCK_PLAN_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| BlockDeliveryError::PlanUnreadable)?;
     }
-    let signed_plan = decode_and_verify_block_plan(
+    let signed_plan = decode_block_plan_response(
+        status,
         &bytes,
         source_manifest.manifest(),
         target_manifest,
         verifying_key,
-    )
-    .ok()?;
-    Some(VerifiedBlockDelivery {
+    )?;
+    Ok(VerifiedBlockDelivery {
         signed_plan,
         source_manifest,
         source_root,
     })
+}
+
+fn decode_block_plan_response(
+    status: u16,
+    body: &[u8],
+    source: &ReleaseManifest,
+    target: &ReleaseManifest,
+    verifying_key: &VerifyingKey,
+) -> Result<SignedBlockPlan, BlockDeliveryError> {
+    if status != 200 {
+        return Err(BlockDeliveryError::PlanStatus(status));
+    }
+    if body.len() > MAXIMUM_SIGNED_BLOCK_PLAN_BYTES {
+        return Err(BlockDeliveryError::PlanTooLarge);
+    }
+    decode_and_verify_block_plan(body, source, target, verifying_key)
+        .map_err(BlockDeliveryError::PlanRejected)
 }
 
 fn reconstruct_release_file(
@@ -2332,9 +2399,9 @@ fn redacted<E>(_error: E) -> String {
 mod tests {
     use super::*;
     use aeris_release_lifecycle::{
-        BLOCK_PLAN_BLOCK_BYTES, BlockDescriptor, LAUNCHER_PROTOCOL_VERSION,
-        RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole, ReleaseInstallerMetadata,
-        ReleaseManifest, RolloutMetadata, sign_release_manifest,
+        BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor, BlockPlan,
+        LAUNCHER_PROTOCOL_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
+        ReleaseInstallerMetadata, RolloutMetadata, sign_block_plan, sign_release_manifest,
     };
     use ed25519_dalek::SigningKey;
 
@@ -2411,6 +2478,62 @@ mod tests {
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
             source_offset,
         }
+    }
+
+    #[test]
+    fn block_plan_responses_fail_with_typed_reasons() {
+        let (signing_key, source) = prepared_channel_fixture(7, b"desktop");
+        let (_, target) = prepared_channel_fixture(8, b"desktop");
+        let source = source.signed_release.manifest().clone();
+        let target = target.signed_release.manifest().clone();
+        let file = &target.files[0];
+        let plan = BlockPlan {
+            schema_version: BLOCK_PLAN_SCHEMA_VERSION,
+            source_release_identity: source.release_identity.clone(),
+            source_install_generation: source.install_generation,
+            target_release_identity: target.release_identity.clone(),
+            target_install_generation: target.install_generation,
+            files: vec![BlockFilePlan {
+                path: file.path.clone(),
+                source_size: source.files[0].size,
+                source_sha256: source.files[0].sha256.clone(),
+                target_size: file.size,
+                target_sha256: file.sha256.clone(),
+                blocks: vec![block_descriptor(b"desktop", Some(0))],
+            }],
+        };
+        let body = serde_json::to_vec(
+            &sign_block_plan(plan.clone(), &source, &target, &signing_key).expect("plan signs"),
+        )
+        .expect("plan encodes");
+        let key = signing_key.verifying_key();
+
+        assert!(decode_block_plan_response(200, &body, &source, &target, &key).is_ok());
+        assert_eq!(
+            decode_block_plan_response(404, &[], &source, &target, &key),
+            Err(BlockDeliveryError::PlanStatus(404))
+        );
+        let oversized = vec![b' '; MAXIMUM_SIGNED_BLOCK_PLAN_BYTES + 1];
+        assert_eq!(
+            decode_block_plan_response(200, &oversized, &source, &target, &key),
+            Err(BlockDeliveryError::PlanTooLarge)
+        );
+        let other_key = SigningKey::from_bytes(&[3; 32]);
+        let foreign = serde_json::to_vec(
+            &sign_block_plan(plan, &source, &target, &other_key).expect("plan signs"),
+        )
+        .expect("plan encodes");
+        let rejected = decode_block_plan_response(200, &foreign, &source, &target, &key);
+        assert_eq!(
+            rejected,
+            Err(BlockDeliveryError::PlanRejected(
+                ReleaseDeliveryError::InvalidSignature
+            ))
+        );
+        assert_eq!(
+            rejected.map(|_| ()).unwrap_err().to_string(),
+            "release block plan signature verification failed"
+        );
     }
 
     #[test]

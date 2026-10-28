@@ -620,8 +620,11 @@ still wait on the GUI checks and the remaining work on their lines.
     outside the signature, and the size bound.
   - Landed: LC-19. Manifests carry `minimum_launcher_protocol`, compared with
     `LAUNCHER_PROTOCOL_VERSION` (1) instead of the product version; `semver` is removed.
+  - Landed: LC-08. `verified_block_delivery` returns a typed `BlockDeliveryError` (unverified
+    source, base URL, request, HTTP status, unreadable or oversized body, rejected plan), and the
+    launcher logs it and each failed file reconstruction before falling back to full downloads.
+    A test covers each response failure; naming_check rejects `.ok()?` there.
   - Left:
-    - LC-08: typed block errors.
     - LC-12: a "Remove my Aeris data" uninstall choice, with the Axiusflow lines removed from
       `tools/windows/aeris_setup.iss`.
 - [ ] M8.7 Release packager and end-to-end lifecycle harness
