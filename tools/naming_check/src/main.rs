@@ -2701,6 +2701,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn release_authenticode_uses_platform_sys_trust() {
+        // A spawned PowerShell check was slow, depended on execution policy
+        // and parsed text; WinVerifyTrust runs in-process from platform_sys.
+        for path in production_sources_under("crates/release_lifecycle") {
+            let relative = relative_string(&path);
+            let production =
+                production_prefix(&fs::read_to_string(&path).expect("source")).to_lowercase();
+            for forbidden in ["powershell", "get-authenticodesignature"] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{relative} must verify Authenticode through platform_sys::trust, found {forbidden}"
+                );
+            }
+        }
+        assert!(
+            manifest("crates/release_lifecycle/src/lifecycle.rs")
+                .contains("aeris_platform_runtime::trust::verify_publisher(path, signer)"),
+            "release Authenticode audits must call platform_sys::trust::verify_publisher"
+        );
+        assert!(
+            manifest("crates/platform_sys/src/windows/trust.rs").contains("WinVerifyTrust("),
+            "platform_sys::trust must verify through WinVerifyTrust"
+        );
+    }
+
     /// Packaging variables of one release configuration; every one must stay
     /// out of GitHub Actions and be read only by the release build script.
     const RELEASE_CONFIG_VARIABLES: [&str; 6] = [

@@ -230,6 +230,9 @@ violations and missing verification explicitly, and never describe them as satis
   generates the static behind `release_lifecycle::release_config()`. None set is a development
   build; any set requires the complete valid set, or the build fails. Code reads the
   configuration through `release_config()`, never `option_env!`, and no workflow may set them.
+  Windows Authenticode audits call `platform_sys::trust::verify_publisher` (in-process
+  `WinVerifyTrust` on the embedded signature, the configured signer SHA-1 and a timestamp
+  countersignature; no revocation check or network fetch), never a spawned PowerShell.
 - Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
   derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
   non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.

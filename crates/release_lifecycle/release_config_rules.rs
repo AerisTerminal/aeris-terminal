@@ -23,8 +23,8 @@ pub struct ValidatedReleaseConfig {
     pub bootstrap_minimum_generation: u64,
     pub release_identity: String,
     pub install_generation: u64,
-    /// Present exactly for Windows targets.
-    pub authenticode_thumbprint: Option<String>,
+    /// SHA-1 signer thumbprint; present exactly for Windows targets.
+    pub authenticode_thumbprint: Option<[u8; 20]>,
 }
 
 /// Returns `None` when no release variable is set (a development build) and
@@ -71,13 +71,11 @@ pub fn validate_release_config(
     }
     let install_generation = positive_generation("AERIS_INSTALL_GENERATION", &required)?;
     let authenticode_thumbprint = if windows_target {
-        let thumbprint = required("AERIS_AUTHENTICODE_CERT_SHA1")?;
-        if thumbprint.len() != 40 || !thumbprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(
+        let thumbprint =
+            decode_thumbprint(&required("AERIS_AUTHENTICODE_CERT_SHA1")?).ok_or_else(|| {
                 "AERIS_AUTHENTICODE_CERT_SHA1 must be a 40-digit hexadecimal SHA-1 thumbprint"
-                    .to_string(),
-            );
-        }
+                    .to_string()
+            })?;
         Some(thumbprint)
     } else if lookup("AERIS_AUTHENTICODE_CERT_SHA1").is_some() {
         return Err("AERIS_AUTHENTICODE_CERT_SHA1 applies only to Windows targets".to_string());
@@ -103,6 +101,18 @@ fn positive_generation(
         .ok()
         .filter(|generation| *generation > 0)
         .ok_or_else(|| format!("{name} must be a positive integer"))
+}
+
+fn decode_thumbprint(hex: &str) -> Option<[u8; 20]> {
+    if hex.len() != 40 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut thumbprint = [0_u8; 20];
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    for (byte, pair) in thumbprint.iter_mut().zip(pairs) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(thumbprint)
 }
 
 fn valid_release_base_url(url: &str) -> bool {

@@ -14,12 +14,6 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
-#[cfg(target_os = "windows")]
-use std::{
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
-};
 
 use aeris_platform_runtime::data_root::{
     DataRootError, native_data_root, native_legacy_data_root, validate_owned_root,
@@ -47,8 +41,6 @@ const MAXIMUM_RELEASE_FILES: usize = 256;
 const MAXIMUM_OWNED_ROOTS: usize = 64;
 const MAXIMUM_VAULT_KEYS: usize = 64;
 const MAXIMUM_RELEASE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-#[cfg(target_os = "windows")]
-const AUTHENTICODE_AUDIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Role of one immutable release file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1823,20 +1815,15 @@ fn verify_installed_executable_authenticode(
         path,
         expected,
         embedded_authenticode_thumbprint(),
-        run_windows_authenticode_check,
     )
 }
 
 #[cfg(target_os = "windows")]
-fn verify_installed_executable_authenticode_with<F>(
+fn verify_installed_executable_authenticode_with(
     path: &Path,
     expected: &ReleaseFile,
-    expected_thumbprint: Option<&str>,
-    verify: F,
-) -> Result<(), LifecycleError>
-where
-    F: FnOnce(&Path, &Path, &Path, &str) -> Result<(), LifecycleError>,
-{
+    expected_signer: Option<&[u8; 20]>,
+) -> Result<(), LifecycleError> {
     if !expected.executable
         || !path
             .extension()
@@ -1845,18 +1832,18 @@ where
     {
         return Ok(());
     }
-    let Some(thumbprint) = expected_thumbprint else {
+    let Some(signer) = expected_signer else {
         // Only a development build lacks the signer: build.rs refuses a
         // Windows release configuration without it, so every release build's
         // installed .exe audit fails closed on any trust/signature mismatch.
         return Ok(());
     };
-    verify_windows_authenticode_with(path, thumbprint, verify)
+    verify_windows_publisher(path, signer)
 }
 
 #[cfg(target_os = "windows")]
-fn embedded_authenticode_thumbprint() -> Option<&'static str> {
-    crate::release_config().map(|config| config.authenticode_thumbprint)
+fn embedded_authenticode_thumbprint() -> Option<&'static [u8; 20]> {
+    crate::release_config().map(|config| &config.authenticode_thumbprint)
 }
 
 /// Verifies one Windows executable against the production publisher signer and
@@ -1870,89 +1857,20 @@ fn embedded_authenticode_thumbprint() -> Option<&'static str> {
 /// signer-thumbprint, or timestamp verification fails.
 #[cfg(target_os = "windows")]
 pub fn verify_windows_publisher_signature(path: &Path) -> Result<(), LifecycleError> {
-    let thumbprint =
-        embedded_authenticode_thumbprint().ok_or(LifecycleError::VerificationFailed)?;
-    verify_windows_authenticode_with(path, thumbprint, run_windows_authenticode_check)
+    verify_windows_publisher(
+        path,
+        embedded_authenticode_thumbprint().ok_or(LifecycleError::VerificationFailed)?,
+    )
 }
 
 #[cfg(target_os = "windows")]
-fn valid_authenticode_thumbprint(thumbprint: &str) -> bool {
-    thumbprint.len() == 40 && thumbprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-#[cfg(target_os = "windows")]
-fn system32_powershell() -> Result<(PathBuf, PathBuf), LifecycleError> {
-    let system_root = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or(LifecycleError::VerificationFailed)?;
-    let powershell = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let security_module = system_root.join(
-        "System32/WindowsPowerShell/v1.0/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1",
-    );
-    for path in [&powershell, &security_module] {
-        let metadata =
-            fs::symlink_metadata(path).map_err(|_| LifecycleError::VerificationFailed)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(LifecycleError::VerificationFailed);
-        }
-    }
-    Ok((powershell, security_module))
-}
-
-#[cfg(target_os = "windows")]
-fn verify_windows_authenticode_with<F>(
-    path: &Path,
-    expected_thumbprint: &str,
-    verify: F,
-) -> Result<(), LifecycleError>
-where
-    F: FnOnce(&Path, &Path, &Path, &str) -> Result<(), LifecycleError>,
-{
-    if !valid_authenticode_thumbprint(expected_thumbprint) {
-        return Err(LifecycleError::VerificationFailed);
-    }
-    let (powershell, security_module) = system32_powershell()?;
-    verify(&powershell, &security_module, path, expected_thumbprint)
-}
-
-#[cfg(target_os = "windows")]
-fn run_windows_authenticode_check(
-    powershell: &Path,
-    security_module: &Path,
-    path: &Path,
-    expected_thumbprint: &str,
-) -> Result<(), LifecycleError> {
-    const SCRIPT: &str = "$ErrorActionPreference='Stop'; Import-Module -Name $env:AERIS_AUTHENTICODE_SECURITY_MODULE -Force -ErrorAction Stop; $s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:AERIS_AUTHENTICODE_PATH -ErrorAction Stop; if ($s.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ine $env:AERIS_AUTHENTICODE_CERT_SHA1 -or $null -eq $s.TimeStamperCertificate) { exit 1 }; exit 0";
-    let mut child = Command::new(powershell)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            SCRIPT,
-        ])
-        .env("AERIS_AUTHENTICODE_SECURITY_MODULE", security_module)
-        .env("AERIS_AUTHENTICODE_PATH", path)
-        .env("AERIS_AUTHENTICODE_CERT_SHA1", expected_thumbprint)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| LifecycleError::VerificationFailed)?;
-    let deadline = Instant::now() + AUTHENTICODE_AUDIT_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(_)) | Err(_) => return Err(LifecycleError::VerificationFailed),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(LifecycleError::VerificationFailed);
-            }
-        }
-    }
+fn verify_windows_publisher(path: &Path, signer: &[u8; 20]) -> Result<(), LifecycleError> {
+    aeris_platform_runtime::trust::verify_publisher(path, signer).map_err(|error| {
+        aeris_observability::diagnostic!(
+            "Aeris lifecycle: an installed executable failed Authenticode verification: {error}"
+        );
+        LifecycleError::VerificationFailed
+    })
 }
 
 fn collect_relative_files(
@@ -2488,10 +2406,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn installed_exe_inventory_authenticode_gate_uses_absolute_system32_trust_check() {
+    fn installed_exe_inventory_requires_the_embedded_publisher_signature() {
         let root = temporary_root("authenticode-inventory");
         let executable = root.join("fixture.exe");
-        let bytes = b"signed-fixture-shape";
+        let bytes = b"unsigned-fixture";
         fs::write(&executable, bytes).expect("fixture executable");
         let expected = ReleaseFile {
             role: ReleaseFileRole::Desktop,
@@ -2501,45 +2419,28 @@ mod tests {
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
             executable: true,
         };
-        let calls = std::cell::Cell::new(0_u32);
+        let signer = [0x5a_u8; 20];
+        assert_eq!(
+            verify_candidate_inventory_with(
+                &root,
+                std::slice::from_ref(&expected),
+                |path, file| {
+                    verify_installed_executable_authenticode_with(path, file, Some(&signer))
+                }
+            ),
+            Err(LifecycleError::VerificationFailed),
+            "an unsigned installed executable fails a release build's audit"
+        );
         verify_candidate_inventory_with(&root, std::slice::from_ref(&expected), |path, file| {
-            verify_installed_executable_authenticode_with(
-                path,
-                file,
-                Some("0123456789ABCDEF0123456789ABCDEF01234567"),
-                |powershell, security_module, checked, thumbprint| {
-                    calls.set(calls.get() + 1);
-                    assert!(powershell.is_absolute());
-                    assert!(security_module.is_absolute());
-                    assert!(powershell.to_string_lossy().contains("System32"));
-                    assert!(security_module.to_string_lossy().contains("System32"));
-                    assert_eq!(checked, executable);
-                    assert_eq!(thumbprint, "0123456789ABCDEF0123456789ABCDEF01234567");
-                    Ok(())
-                },
-            )
+            verify_installed_executable_authenticode_with(path, file, None)
         })
-        .expect("inventory accepts trusted signer seam");
-        assert_eq!(calls.get(), 1);
-
-        assert_eq!(
-            verify_installed_executable_authenticode_with(
-                &executable,
-                &expected,
-                Some("0123456789ABCDEF0123456789ABCDEF01234567"),
-                |_, _, _, _| Err(LifecycleError::VerificationFailed),
-            ),
-            Err(LifecycleError::VerificationFailed)
-        );
-        assert_eq!(
-            verify_installed_executable_authenticode_with(
-                &executable,
-                &expected,
-                Some("not-a-thumbprint"),
-                |_, _, _, _| Ok(()),
-            ),
-            Err(LifecycleError::VerificationFailed)
-        );
+        .expect("a development build without a signer audits digests only");
+        let data_file = ReleaseFile {
+            executable: false,
+            ..expected
+        };
+        verify_installed_executable_authenticode_with(&executable, &data_file, Some(&signer))
+            .expect("non-executable release files carry no Authenticode signature");
         let _ = remove_owned_path(&root);
     }
 

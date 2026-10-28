@@ -19,7 +19,7 @@ pub struct ReleaseConfig {
     pub install_generation: u64,
     /// SHA-1 thumbprint of the certificate that signs every installed executable.
     #[cfg(target_os = "windows")]
-    pub authenticode_thumbprint: &'static str,
+    pub authenticode_thumbprint: [u8; 20],
 }
 
 include!(concat!(env!("OUT_DIR"), "/release_config.rs"));
@@ -82,7 +82,13 @@ mod tests {
         assert_eq!(config.bootstrap_minimum_generation, 3);
         assert_eq!(config.release_identity, "release_identity-0001");
         assert_eq!(config.install_generation, 7);
-        assert_eq!(config.authenticode_thumbprint.as_deref(), Some(THUMBPRINT));
+        assert_eq!(
+            config.authenticode_thumbprint,
+            Some([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+            ])
+        );
         assert!(ed25519_dalek::VerifyingKey::from_bytes(&config.verifying_key).is_ok());
     }
 

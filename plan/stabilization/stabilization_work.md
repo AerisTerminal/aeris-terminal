@@ -523,8 +523,19 @@ still wait on the GUI checks and the remaining work on their lines.
     the Windows-only thumbprint); a complete release-configured build passed the release_config
     tests and a build missing the thumbprint failed with that message. naming_check rejects
     any other read of the variables and keeps them all out of every workflow.
+  - Landed (LC-07): `platform_sys::trust::verify_publisher` (re-exported by `platform_runtime`)
+    verifies the embedded signature and chain in-process with `WinVerifyTrust` (no UI, no
+    revocation check, cache-only URL retrieval), then requires the configured signer's SHA-1
+    thumbprint (read with `CertGetCertificateContextProperty`) and a timestamp countersigner.
+    The release configuration now carries the thumbprint as 20 bytes. The spawned PowerShell
+    `Get-AuthenticodeSignature` check, its System32 path probing and 15-second poll are
+    deleted; a failed audit logs the typed reason. With LC-20 a Windows release build cannot
+    omit the thumbprint, so only a development build skips the audit. Tests: an embedded-signed
+    Microsoft executable verifies, its thumbprint matching PowerShell's independent reading;
+    a different signer, the unsigned test binary, a catalog-only system file and a modified
+    signed copy are all refused; the installed-inventory audit refuses an unsigned `.exe` with
+    a configured signer. naming_check rejects PowerShell in `release_lifecycle` production.
   - Left:
-    - LC-07: `WinVerifyTrust` with a thumbprint.
     - Check: a development desktop start spawns no launcher child (process list); not run here.
 - [ ] M8.3 Remaining FFI moves to `platform_sys`
   - Left: move the power, network, session-shutdown and `CancelIoEx` FFI.

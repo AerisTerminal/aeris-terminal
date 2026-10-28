@@ -1,6 +1,7 @@
 #![allow(unsafe_code)]
 
 pub(crate) mod process;
+pub(crate) mod trust;
 
 use std::{io, os::windows::ffi::OsStrExt as _, path::Path};
 use windows_sys::Win32::Storage::FileSystem::{

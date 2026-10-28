@@ -5,6 +5,8 @@
 
 pub mod fs;
 pub mod process;
+#[cfg(target_os = "windows")]
+pub mod trust;
 pub mod ui;
 
 #[cfg(target_os = "macos")]
