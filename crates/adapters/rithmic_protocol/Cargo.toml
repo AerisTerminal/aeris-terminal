@@ -9,10 +9,16 @@ publish.workspace = true
 [features]
 # Builds the interactive `provision_rithmic_test` binary, which prompts for a password.
 provision = ["dep:rpassword"]
+# Builds the live `rithmic_test_smoke` binary, which records live market gate evidence.
+live-gates = ["aeris_platform_runtime/live-gates"]
 
 [[bin]]
 name = "provision_rithmic_test"
 required-features = ["provision"]
+
+[[bin]]
+name = "rithmic_test_smoke"
+required-features = ["live-gates"]
 
 [dependencies]
 aeris_instruments = { path = "../../domain/instruments" }

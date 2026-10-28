@@ -351,6 +351,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: Exports were left after their consumers were removed.
 - Fix: Delete them or move test gates under `#[cfg(any(test, feature = "live-gates"))]`.
 - Verification: `cargo build -p desktop` passes after removal; `rg` shows no references.
+- Status (2026-10-28, M8.11): fixed. `NativeSessionShutdownMonitor` and `display_timing` were already removed; `replace_file_atomically` is used by the launcher and stays. `live_market_gate` compiles only under `cfg(test)` or the `live-gates` feature.
 
 ## Recommended restructuring (ordered)
 

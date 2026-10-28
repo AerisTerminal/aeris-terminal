@@ -10,6 +10,7 @@ publish.workspace = true
 diagnostics = [
     "aeris_application/test-support",
     "aeris_chart_integration/diagnostics",
+    "aeris_platform_runtime/live-gates",
     "dep:sha2",
 ]
 
@@ -52,6 +53,7 @@ embed-resource.workspace = true
 aeris_application = { path = "../../crates/application", features = ["test-support"] }
 aeris_chart_integration = { path = "../../crates/ui/chart_integration", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+aeris_platform_runtime = { path = "../../crates/platform_runtime", features = ["live-gates"] }
 sha2.workspace = true
 aeris_market_runtime = { path = "../../crates/market_runtime", features = ["replay"] }
 aeris_trading_runtime = { path = "../../crates/trading_runtime", features = ["test-observability", "test-support"] }

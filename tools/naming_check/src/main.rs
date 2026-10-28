@@ -2535,6 +2535,82 @@ mod tests {
         }
     }
 
+    /// Whether a manifest enables `aeris_platform_runtime/live-gates` only from a
+    /// dev-dependency, the Rithmic adapter's `live-gates` feature or the desktop's
+    /// `diagnostics` feature.
+    fn live_gate_enablement_is_allowed(relative: &str, contents: &str) -> bool {
+        let dependencies_allowed =
+            manifest_dependencies(contents)
+                .iter()
+                .all(|(kind, name, declaration)| {
+                    *kind == DependencyKind::Dev
+                        || name != "aeris_platform_runtime"
+                        || !declaration.contains("\"live-gates\"")
+                });
+        let features_allowed = manifest_entries(contents)
+            .iter()
+            .filter(|entry| entry.section == "features")
+            .all(|entry| {
+                !entry
+                    .value
+                    .contains("\"aeris_platform_runtime/live-gates\"")
+                    || matches!(
+                        (relative, entry.key.as_str()),
+                        ("apps/desktop/Cargo.toml", "diagnostics")
+                            | ("crates/adapters/rithmic_protocol/Cargo.toml", "live-gates")
+                    )
+            });
+        dependencies_allowed && features_allowed
+    }
+
+    #[test]
+    fn live_gate_rule_accepts_and_rejects_fixtures() {
+        let allowed = "[features]\ndiagnostics = [\n    \"aeris_platform_runtime/live-gates\",\n]\n\n[dependencies]\naeris_platform_runtime = { path = \"../pr\" }\n\n[dev-dependencies]\naeris_platform_runtime = { path = \"../pr\", features = [\"live-gates\"] }\n";
+        assert!(live_gate_enablement_is_allowed(
+            "apps/desktop/Cargo.toml",
+            allowed
+        ));
+        assert!(!live_gate_enablement_is_allowed(
+            "crates/market_runtime/Cargo.toml",
+            allowed
+        ));
+        assert!(!live_gate_enablement_is_allowed(
+            "crates/market_runtime/Cargo.toml",
+            "[dependencies]\naeris_platform_runtime = { path = \"../pr\", features = [\"live-gates\"] }\n"
+        ));
+        assert!(!live_gate_enablement_is_allowed(
+            "apps/desktop/Cargo.toml",
+            "[dependencies.aeris_platform_runtime]\npath = \"../pr\"\nfeatures = [\"live-gates\"]\n"
+        ));
+    }
+
+    #[test]
+    fn live_market_gate_stays_out_of_production_builds() {
+        let platform = production_prefix(&manifest("crates/platform_runtime/src/lib.rs"));
+        for declaration in ["mod live_market_gate;", "pub use live_market_gate::{"] {
+            assert!(
+                platform.contains(&format!(
+                    "#[cfg(any(test, feature = \"live-gates\"))]\n{declaration}"
+                )),
+                "live market gate evidence must stay behind the platform_runtime live-gates gate"
+            );
+        }
+        assert!(
+            manifest("crates/adapters/rithmic_protocol/Cargo.toml").contains(
+                "[[bin]]\nname = \"rithmic_test_smoke\"\nrequired-features = [\"live-gates\"]"
+            ),
+            "the Rithmic smoke binary must require the live-gates feature"
+        );
+        for path in workspace_manifests() {
+            let relative = relative_string(&path);
+            let contents = super::read_source(&path).expect("manifest");
+            assert!(
+                live_gate_enablement_is_allowed(&relative, &contents),
+                "{relative} may enable live market gates only for tests, the smoke binary or diagnostics"
+            );
+        }
+    }
+
     /// Architecture layers in dependency order (architecture section 2.2). Every workspace
     /// package belongs to exactly one.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

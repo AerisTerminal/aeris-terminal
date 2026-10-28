@@ -451,6 +451,10 @@ the check.
   exclusive instance lock. The optional `probe` feature's bounded Hyperliquid fault control
   interrupts only its WebSocket; never use a process-wide proxy that blocks catalog HTTP.
   `paper_trading_probe` exercises the practice trading lifecycle on the public Hyperliquid feed.
+- Live market gate evidence (`aeris_platform_runtime::LiveMarketGateRecorder`) compiles only under
+  `cfg(test)` or the `aeris_platform_runtime/live-gates` feature. Only dev-dependencies, the Rithmic
+  adapter's `live-gates` feature (required by `rithmic_test_smoke`) and the desktop `diagnostics`
+  feature may enable it; `live_market_gate_stays_out_of_production_builds` enforces this.
 - The trading owner's quote-interest revision is durable store metadata: the market coordinator
   fences stale revisions for its whole lifetime, so a trading-owner restart must resume above the
   fence, and a provider reconnect republishes trading sessions before its `Feed::Live`.

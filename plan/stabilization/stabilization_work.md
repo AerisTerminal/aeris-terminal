@@ -739,8 +739,12 @@ still wait on the GUI checks and the remaining work on their lines.
     `every_tool_script_is_referenced_by_ci_or_the_docs` requires a workflow, the Readme or AGENTS.md
     to name each remaining script. `display_timing` and `NativeSessionShutdownMonitor` were
     already gone; `replace_file_atomically` stays (the launcher uses it).
+  - Landed: `live_market_gate` compiles only for tests or the new `aeris_platform_runtime/live-gates`
+    feature, enabled by the `market_runtime` and desktop dev-dependencies, the desktop
+    `diagnostics` feature and the Rithmic adapter's `live-gates` feature, which `rithmic_test_smoke`
+    now requires (`live_market_gates.yml` passes it). naming_check
+    `live_market_gate_stays_out_of_production_builds` keeps the gate and the allowed enablers.
   - Left: trim the `gpui_base` LSP editor, then lint and pin it.
-  - Move `live_market_gate` out of the production `platform_runtime` library.
   - Prune `.gitignore`.
   - GUI text-input check. Closes PL-10, PL-12 and PL-19.
 - [ ] M8.12 Structural naming_check and final docs

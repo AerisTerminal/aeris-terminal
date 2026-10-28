@@ -10,6 +10,7 @@ mod dns;
 mod durable_container;
 mod file_manager;
 mod http_client;
+#[cfg(any(test, feature = "live-gates"))]
 mod live_market_gate;
 mod market_socket;
 mod network_notifications;
@@ -44,6 +45,7 @@ pub use durable_container::{
 };
 pub use file_manager::reveal_in_file_manager;
 pub use http_client::CancellableHttpClient;
+#[cfg(any(test, feature = "live-gates"))]
 pub use live_market_gate::{
     LIVE_MARKET_GATE_EVIDENCE_SCOPE, LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES,
     LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,

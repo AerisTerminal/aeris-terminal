@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Live market gate evidence, for the live-gate tests, the Rithmic smoke binary and desktop
+# diagnostics only.
+live-gates = []
+
 [dependencies]
 aeris_observability = { path = "../observability" }
 aeris_platform_sys = { path = "../platform_sys" }
