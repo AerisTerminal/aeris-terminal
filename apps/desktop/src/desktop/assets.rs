@@ -65,10 +65,13 @@ pub enum UiIcon {
     Watchlist,
     Flag,
     FlagFilled,
+    /// The filled flag drawn flush with the left of its box, for the watchlist row edge;
+    /// buttons and menus use the centered `FlagFilled`.
+    FlagEdge,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 54] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -122,6 +125,7 @@ impl UiIcon {
         Self::Watchlist,
         Self::Flag,
         Self::FlagFilled,
+        Self::FlagEdge,
     ];
 
     #[must_use]
@@ -180,6 +184,7 @@ impl UiIcon {
             Self::Watchlist => "watchlist.svg",
             Self::Flag => "flag.svg",
             Self::FlagFilled => "flag-filled.svg",
+            Self::FlagEdge => "flag-edge.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -577,6 +582,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "watchlist.svg" => include_bytes!("../../assets/icons/ui/watchlist.svg"),
         "flag.svg" => include_bytes!("../../assets/icons/ui/flag.svg"),
         "flag-filled.svg" => include_bytes!("../../assets/icons/ui/flag-filled.svg"),
+        "flag-edge.svg" => include_bytes!("../../assets/icons/ui/flag-edge.svg"),
         "trash.svg" => include_bytes!("../../assets/icons/ui/trash.svg"),
         "eraser.svg" => include_bytes!("../../assets/icons/ui/eraser.svg"),
         "failure.svg" => include_bytes!("../../assets/icons/ui/failure.svg"),
@@ -876,6 +882,62 @@ mod tests {
                 .expect("unknown lookup")
                 .is_none()
         );
+    }
+
+    /// The x coordinates of an absolute `M`/`L`/`H`/`Z` path, the only commands the flags use.
+    fn path_xs(svg: &str) -> Vec<f32> {
+        let data = svg.split(" d=\"").nth(1).expect("path data");
+        let data = &data[..data.find('"').expect("closed path data")];
+        let spaced: String = data
+            .chars()
+            .flat_map(|c| {
+                if c.is_ascii_alphabetic() {
+                    vec![' ', c, ' ']
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
+        let mut xs = Vec::new();
+        let mut command = "";
+        let mut index_in_command = 0;
+        for token in spaced.split_whitespace() {
+            if token.chars().all(|c| c.is_ascii_alphabetic()) {
+                assert!(
+                    ["M", "L", "H", "Z"].contains(&token),
+                    "unexpected command {token}"
+                );
+                command = token;
+                index_in_command = 0;
+                continue;
+            }
+            let value: f32 = token.parse().expect("number");
+            if command == "H" || index_in_command % 2 == 0 {
+                xs.push(value);
+            }
+            index_in_command += 1;
+        }
+        xs
+    }
+
+    #[test]
+    fn button_flags_are_centered_and_the_row_flag_sits_on_the_edge() {
+        let assets = AerisAssets;
+        let extent = |icon: UiIcon| {
+            let bytes = assets.load(icon.path().as_ref()).unwrap().expect("UI icon");
+            let xs = path_xs(std::str::from_utf8(&bytes).expect("UTF-8 SVG"));
+            let min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            (min, max)
+        };
+        for icon in [UiIcon::Flag, UiIcon::FlagFilled] {
+            let (min, max) = extent(icon);
+            assert!(
+                (f32::midpoint(min, max) - 12.0).abs() <= 0.5,
+                "{icon:?} spans {min}..{max}"
+            );
+        }
+        assert_eq!(extent(UiIcon::FlagEdge).0, 0.0);
     }
 
     #[test]

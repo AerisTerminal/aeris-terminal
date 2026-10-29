@@ -468,11 +468,11 @@ fn watchlist_flag_slot(
     };
     let glyphs = match &row.flag {
         Some(flag) => vec![glyph(
-            HugeIcon::FlagFilled,
+            HugeIcon::FlagEdge,
             chart_css_color(flag, colors.primary),
         )],
         None => vec![
-            glyph(HugeIcon::FlagFilled, gpui_color(colors.swatch_default))
+            glyph(HugeIcon::FlagEdge, gpui_color(colors.swatch_default))
                 .opacity(0.0)
                 .group_hover(WATCHLIST_FLAG_GROUP, |style| style.opacity(1.0)),
         ],
