@@ -377,7 +377,8 @@ only on the guarded GUI checks on their lines.
     `workspace-state.pb.pre-v3`, so a fresh root's second save "preserved" a current-schema
     document. Only a released bare payload or an older envelope is copied now
     (`saves_over_a_current_schema_workspace_write_no_pre_migration_copy`), and the unused
-    `DurableContainer::durable_payload_raw` helper is deleted.
+    `DurableContainer::durable_payload_raw` helper is deleted (the `aeris_platform_runtime`
+    string-error ratchet drops to 17 with it).
   - Left: the GUI checks below.
   - GUI checks: a corrupt workspace shows the notice with Open folder and the layout is not
     silently replaced; a newer-version workspace shows the read-only notice; a copied real
