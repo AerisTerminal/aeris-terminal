@@ -635,6 +635,29 @@ fn project_working_order_markers(
     (working_orders, position_marker)
 }
 
+/// A completed trading command is information, not a warning; only a failure is raised.
+fn trading_result_notice_style(
+    is_error: bool,
+) -> (
+    notification_center::NoticeSeverity,
+    notification_center::NoticeTone,
+    &'static str,
+) {
+    if is_error {
+        (
+            notification_center::NoticeSeverity::Error,
+            notification_center::NoticeTone::Loss,
+            "Trading command failed",
+        )
+    } else {
+        (
+            notification_center::NoticeSeverity::Info,
+            notification_center::NoticeTone::Info,
+            "Trading command completed",
+        )
+    }
+}
+
 /// Apply only a new subscription publication, never a timer or render-path read.
 impl TerminalApp {
     pub(super) fn apply_trading_request_results(&mut self, cx: &mut Context<Self>) {
@@ -660,6 +683,7 @@ impl TerminalApp {
                     pane_cx.notify();
                 });
             } else if let Some(host) = toast_host(self.tabs.active()) {
+                let (severity, tone, title) = trading_result_notice_style(result.is_error);
                 self.notices.toaster_mut().post_notice(
                     host,
                     notification_center::UserNotice {
@@ -667,22 +691,10 @@ impl TerminalApp {
                             scope: id.value(),
                             kind: "trading_result",
                         },
-                        severity: if result.is_error {
-                            notification_center::NoticeSeverity::Error
-                        } else {
-                            notification_center::NoticeSeverity::Warning
-                        },
-                        tone: if result.is_error {
-                            notification_center::NoticeTone::Loss
-                        } else {
-                            notification_center::NoticeTone::Warning
-                        },
+                        severity,
+                        tone,
                         source: notification_center::NoticeSource::Trading(id),
-                        title: if result.is_error {
-                            "Trading command failed"
-                        } else {
-                            "Trading command completed"
-                        },
+                        title,
                         detail: result.message,
                         action: None,
                         lifetime: notification_center::NoticeLifetime::Timed(Duration::from_secs(
@@ -698,6 +710,7 @@ impl TerminalApp {
             return;
         };
         while let Some(result) = self.lifecycle.trading_feedback().take_unscoped_notice() {
+            let (severity, tone, title) = trading_result_notice_style(result.is_error);
             self.notices.toaster_mut().post_notice(
                 host,
                 notification_center::UserNotice {
@@ -705,22 +718,10 @@ impl TerminalApp {
                         scope: result.revision,
                         kind: "trading_notice",
                     },
-                    severity: if result.is_error {
-                        notification_center::NoticeSeverity::Error
-                    } else {
-                        notification_center::NoticeSeverity::Warning
-                    },
-                    tone: if result.is_error {
-                        notification_center::NoticeTone::Loss
-                    } else {
-                        notification_center::NoticeTone::Warning
-                    },
+                    severity,
+                    tone,
                     source: notification_center::NoticeSource::Workspace,
-                    title: if result.is_error {
-                        "Trading command failed"
-                    } else {
-                        "Trading command completed"
-                    },
+                    title,
                     detail: result.message,
                     action: None,
                     lifetime: notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
@@ -968,6 +969,26 @@ pub(crate) fn apply_chart_trading_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_trading_commands_notify_as_info_and_failures_as_errors() {
+        assert_eq!(
+            trading_result_notice_style(false),
+            (
+                notification_center::NoticeSeverity::Info,
+                notification_center::NoticeTone::Info,
+                "Trading command completed",
+            )
+        );
+        assert_eq!(
+            trading_result_notice_style(true),
+            (
+                notification_center::NoticeSeverity::Error,
+                notification_center::NoticeTone::Loss,
+                "Trading command failed",
+            )
+        );
+    }
 
     #[test]
     fn absent_authoritative_trading_projection_clears_stale_chart_state() {
