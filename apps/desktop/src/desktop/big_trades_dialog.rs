@@ -84,8 +84,12 @@ fn setting_label(
         }))
 }
 
+/// The narrowest a setting row's label may get before its control wraps below it.
+const SETTING_LABEL_MIN_WIDTH: f32 = 160.0;
+
 /// One setting inside a [`settings_group`]: label and details on the left and its compact
-/// control on the right, the chart settings panel's row layout.
+/// control on the right, the chart settings panel's row layout. When the row is too narrow
+/// for both, the control wraps below the label instead of squeezing it.
 pub(super) fn described_setting_row(
     label: impl Into<SharedString>,
     details: impl IntoIterator<Item = SharedString>,
@@ -94,11 +98,13 @@ pub(super) fn described_setting_row(
 ) -> AnyElement {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
         .justify_between()
-        .gap_4()
+        .gap_x_4()
+        .gap_y_2()
         .py_2()
-        .child(setting_label(label, details, theme))
+        .child(setting_label(label, details, theme).min_w(design_rems(SETTING_LABEL_MIN_WIDTH)))
         .child(div().flex_none().child(control))
         .into_any_element()
 }
@@ -427,4 +433,78 @@ pub(super) fn big_trades_dialog_layer(
             }),
     )
     .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    const CONTROL_WIDTH: f32 = 240.0;
+
+    struct RowHarness {
+        width: f32,
+    }
+
+    impl Render for RowHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let theme = AerisTheme::initial();
+            div().size_full().child(
+                div()
+                    .w(px(self.width))
+                    .debug_selector(|| "setting_row".into())
+                    .child(described_setting_row(
+                        "Market data",
+                        [SharedString::from("Signed in and receiving live quotes")],
+                        div()
+                            .w(px(CONTROL_WIDTH))
+                            .h(px(32.0))
+                            .debug_selector(|| "setting_control".into())
+                            .into_any_element(),
+                        &theme,
+                    )),
+            )
+        }
+    }
+
+    fn row_bounds(
+        width: f32,
+        cx: &mut TestAppContext,
+    ) -> (gpui::Bounds<Pixels>, gpui::Bounds<Pixels>) {
+        let (_, cx) = cx.add_window_view(move |_, _| RowHarness { width });
+        cx.run_until_parked();
+        (
+            cx.debug_bounds("setting_row").expect("setting row"),
+            cx.debug_bounds("setting_control").expect("setting control"),
+        )
+    }
+
+    #[gpui::test]
+    fn a_wide_row_keeps_the_control_beside_its_label(cx: &mut TestAppContext) {
+        let (row, control) = row_bounds(640.0, cx);
+        assert_eq!(control.right(), row.right());
+        assert!(
+            control.size.height + px(32.0) > row.size.height,
+            "one line holds the label and the control"
+        );
+    }
+
+    #[gpui::test]
+    fn a_narrow_row_wraps_the_control_below_its_label(cx: &mut TestAppContext) {
+        let (row, control) = row_bounds(300.0, cx);
+        assert_eq!(
+            control.left(),
+            row.left(),
+            "the control starts its own line"
+        );
+        assert!(
+            control.top() > row.top() + px(16.0),
+            "the label keeps the first line"
+        );
+        assert!(
+            row.size.height < px(160.0),
+            "the label is not squeezed to one character per line: {:?}",
+            row.size.height
+        );
+    }
 }
