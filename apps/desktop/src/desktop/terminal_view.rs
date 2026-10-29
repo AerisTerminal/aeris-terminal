@@ -449,6 +449,7 @@ impl TerminalApp {
                 workspace_drag: self.tabs.drag(),
                 app_view: self.pages.view,
                 account: self.lifecycle.account(),
+                update_prompt: self.update_prompt(),
                 theme: self.theme,
             },
             window,

@@ -374,6 +374,7 @@ impl Toaster {
             return;
         };
         let tone = match notice.tone {
+            NoticeTone::Info => ToastTone::Muted,
             NoticeTone::Warning => ToastTone::Warning,
             NoticeTone::Loss => ToastTone::Loss,
         };
@@ -1550,6 +1551,8 @@ impl ToastHost for TerminalApp {
                     })
                     .detach();
             }
+            NoticeAction::RestartToUpdate => self.restart_to_update(cx),
+            NoticeAction::OpenDownloadPage => self.open_download_page(cx),
         }
     }
 }

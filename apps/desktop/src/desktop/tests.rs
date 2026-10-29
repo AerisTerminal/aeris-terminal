@@ -3330,6 +3330,63 @@ mod timeframe_input {
         );
     }
 
+    fn update_ready_notice(
+        terminal: &Entity<TerminalApp>,
+        cx: &mut VisualTestContext,
+    ) -> Option<notification_center::UserNotice> {
+        cx.read(|cx| {
+            terminal
+                .read(cx)
+                .notices
+                .toaster()
+                .notices()
+                .iter()
+                .find(|notice| notice.key.kind == "update_ready")
+                .cloned()
+        })
+    }
+
+    #[gpui::test]
+    fn a_ready_update_is_announced_marked_on_the_avatar_and_offered_in_the_menu(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, cx) = terminal_harness(cx);
+        let (updater, _requests) = DesktopUpdater::with_ready_update_for_test();
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.services.install_updater_for_test(updater);
+            terminal.maintain_updater(window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            update_ready_notice(&terminal, cx).and_then(|notice| notice.action),
+            Some(notification_center::NoticeAction::RestartToUpdate),
+            "the ready update posts a notice whose action restarts"
+        );
+        assert_eq!(
+            cx.read(|cx| terminal.read(cx).update_prompt()),
+            Some(platform_menu::UpdatePrompt::Restart)
+        );
+        assert!(
+            cx.debug_bounds("account_avatar_update_dot").is_some(),
+            "the avatar carries the update dot"
+        );
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.restart_to_update(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            update_ready_notice(&terminal, cx).is_none(),
+            "starting the restart retires the notice"
+        );
+        assert_eq!(
+            update_restart_outcome(&terminal, cx).0,
+            Some(UpdateState::PreparingRestart)
+        );
+        assert_eq!(cx.read(|cx| terminal.read(cx).update_prompt()), None);
+        assert!(cx.debug_bounds("account_avatar_update_dot").is_none());
+    }
+
     #[gpui::test]
     fn a_restart_whose_helper_stopped_is_cancelled_without_closing_or_quitting(
         cx: &mut TestAppContext,

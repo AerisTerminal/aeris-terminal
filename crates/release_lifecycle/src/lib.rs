@@ -2,9 +2,10 @@
 //! release delivery plans, rollout policy, the compiled release identity, the candidate
 //! readiness report, the release origin's layout and the `ReleaseSource` it is read through,
 //! the trading store schema a rollback must respect, the startup-complete marker that ends
-//! a new release's probation, and the stable launcher that the
-//! `aeris_launcher` binary runs.
+//! a new release's probation, the website download a build without updates is offered, and
+//! the stable launcher that the `aeris_launcher` binary runs.
 
+mod download_offer;
 mod launcher;
 mod lifecycle;
 mod origin_layout;
@@ -18,6 +19,9 @@ mod rollout;
 mod startup_marker;
 mod store_schema;
 
+pub use download_offer::{
+    DOWNLOAD_PAGE_URL, DownloadOfferError, newer_download_in, newer_published_download,
+};
 pub use launcher::{
     ReleaseOrigin, run_launcher, run_native_launcher, valid_release_identity,
     validate_release_channel,

@@ -100,7 +100,7 @@ impl HttpsReleaseSource {
     }
 }
 
-fn https_agent(timeout: Duration) -> ureq::Agent {
+pub(crate) fn https_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .https_only(true)
         .max_redirects(3)
@@ -126,7 +126,7 @@ fn get(
     })
 }
 
-fn read_complete(
+pub(crate) fn read_complete(
     agent: &ureq::Agent,
     url: &str,
     maximum: u64,

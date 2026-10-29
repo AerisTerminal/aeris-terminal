@@ -815,8 +815,15 @@ the version and the public files hash to the built artifacts. The release-record
 
 The desktop starts its update client (`desktop/update.rs`) only in a release build, one that
 carries `release_config()`; development builds and the current preview-lane installers have
-none, run the desktop directly and never check for updates. Do not claim installed-app or update
-behavior was verified unless exercised on that path.
+none and run the desktop directly. Such a build runs the download offer
+(`desktop/download_offer.rs`) instead: one worker reads `https://aeristerminal.com/downloads/latest.json`
+through `aeris_release_lifecycle::newer_published_download` (HTTPS only, at most 16 KiB, at start
+and every 6 hours, 30 minutes after a failure) and, when this platform's published version is
+newer, shows one notice per version, a profile-menu row and an avatar dot that open the download
+page; it never downloads or installs anything. A launcher update that is ready to restart shows
+the same notice (once per version), row and dot with "Restart to update". Neither runs on a
+validation root. Do not claim installed-app or update behavior was verified unless exercised on
+that path.
 
 If something fails, the user sends back `~/Library/Application Support/Aeris/logs/aeris.log` on macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
 

@@ -32,6 +32,42 @@ pub(super) fn update_restart_commit_claim<Q>(
     }
 }
 
+const UPDATE_READY_NOTICE: &str = "update_ready";
+const UPDATE_DOWNLOAD_NOTICE: &str = "update_download";
+
+/// An installed release runs the launcher's update client; any other build offers the
+/// website download instead. A validation root runs neither.
+fn start_update_clients() -> (
+    Option<DesktopUpdater>,
+    Option<download_offer::DownloadOfferClient>,
+) {
+    let Ok(root) = aeris_platform_runtime::active_data_root() else {
+        return (None, None);
+    };
+    let updater = root
+        .run_installed_app_side_effect(
+            aeris_platform_runtime::InstalledAppSideEffect::Update,
+            DesktopUpdater::new,
+        )
+        .and_then(Result::ok);
+    if updater.is_some() {
+        return (updater, None);
+    }
+    let download_offer = root
+        .run_installed_app_side_effect(
+            aeris_platform_runtime::InstalledAppSideEffect::Update,
+            download_offer::DownloadOfferClient::start,
+        )
+        .and_then(|started| match started {
+            Ok(client) => Some(client),
+            Err(error) => {
+                diagnostic!("Aeris download offer could not start: {error}");
+                None
+            }
+        });
+    (None, download_offer)
+}
+
 fn start_market_summary(
     factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
     workspace_id: u64,
@@ -232,6 +268,7 @@ impl TerminalApp {
         };
         let trading_store = start_trading_store(&lifecycle, frames.dirty(), cx);
         let restore_outcome = init.restore_outcome.clone();
+        let (updater, download_offer) = start_update_clients();
         let mut terminal = Self {
             tabs,
             theme: AerisTheme::dark(),
@@ -241,15 +278,8 @@ impl TerminalApp {
             services: AppServices::new(
                 trading_store,
                 init.workspace_factory,
-                aeris_platform_runtime::active_data_root()
-                    .ok()
-                    .and_then(|root| {
-                        root.run_installed_app_side_effect(
-                            aeris_platform_runtime::InstalledAppSideEffect::Update,
-                            DesktopUpdater::new,
-                        )
-                    })
-                    .and_then(Result::ok),
+                updater,
+                download_offer,
                 Instant::now(),
             ),
             market_watch: MarketWatch::restore(init.watchlist_entries),
@@ -1876,18 +1906,106 @@ impl TerminalApp {
     }
 
     pub(super) fn restart_to_update(&mut self, cx: &mut Context<Self>) {
-        if let Some(updater) = self.services.updater_mut()
-            && let Err(_error) = updater.request_restart()
-        {
-            diagnostic!("Aeris update restart degraded");
-            self.post_workspace_notice(
-                "update_restart",
-                "Update restart unavailable",
-                notification_center::NoticeLifetime::UntilDismissed,
-                cx,
-            );
+        let Some(updater) = self.services.updater_mut() else {
+            return;
+        };
+        match updater.request_restart() {
+            Ok(()) => self.clear_workspace_notice(UPDATE_READY_NOTICE),
+            Err(_error) => {
+                diagnostic!("Aeris update restart degraded");
+                self.post_workspace_notice(
+                    "update_restart",
+                    "Update restart unavailable",
+                    notification_center::NoticeLifetime::UntilDismissed,
+                    cx,
+                );
+            }
         }
         cx.notify();
+    }
+
+    /// The browser launch runs off the UI thread; the offer stays in the profile menu.
+    pub(super) fn open_download_page(&mut self, cx: &mut Context<Self>) {
+        cx.background_executor()
+            .spawn(async {
+                if let Err(error) = aeris_platform_runtime::open_system_browser(
+                    aeris_release_lifecycle::DOWNLOAD_PAGE_URL,
+                ) {
+                    diagnostic!("Aeris download page could not open: {error}");
+                }
+            })
+            .detach();
+        self.clear_workspace_notice(UPDATE_DOWNLOAD_NOTICE);
+        cx.notify();
+    }
+
+    /// What the profile menu and its avatar offer about a newer version, if anything.
+    pub(super) fn update_prompt(&self) -> Option<platform_menu::UpdatePrompt> {
+        if self
+            .update_presentation()
+            .is_some_and(|update| matches!(update.state, UpdateState::ReadyToRestart { .. }))
+        {
+            return Some(platform_menu::UpdatePrompt::Restart);
+        }
+        self.services
+            .download_offer()
+            .is_some_and(|offer| {
+                matches!(
+                    offer.state(),
+                    download_offer::DownloadOfferState::Available { .. }
+                )
+            })
+            .then_some(platform_menu::UpdatePrompt::Download)
+    }
+
+    fn post_update_ready_notice(&mut self, cx: &mut Context<Self>) {
+        let Some(UpdateState::ReadyToRestart { latest_version }) = self
+            .update_presentation()
+            .map(|update| update.state.clone())
+        else {
+            return;
+        };
+        self.post_update_notice(
+            UPDATE_READY_NOTICE,
+            "Update ready",
+            format!("Aeris Terminal {latest_version} is ready. Restart to finish updating."),
+            notification_center::NoticeAction::RestartToUpdate,
+            cx,
+        );
+    }
+
+    fn post_update_notice(
+        &mut self,
+        kind: &'static str,
+        title: &'static str,
+        detail: String,
+        action: notification_center::NoticeAction,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(host) = toast_host(self.tabs.active()) {
+            self.notices.toaster_mut().post_notice(
+                host,
+                notification_center::UserNotice {
+                    key: notification_center::NoticeKey { scope: 0, kind },
+                    severity: notification_center::NoticeSeverity::Info,
+                    tone: notification_center::NoticeTone::Info,
+                    source: notification_center::NoticeSource::Workspace,
+                    title,
+                    detail,
+                    action: Some(action),
+                    lifetime: notification_center::NoticeLifetime::UntilDismissed,
+                },
+                Instant::now(),
+            );
+            cx.notify();
+        }
+    }
+
+    fn clear_workspace_notice(&mut self, kind: &'static str) {
+        self.notices.toaster_mut().clear_notice(
+            &notification_center::NoticeKey { scope: 0, kind },
+            Instant::now(),
+        );
     }
 
     fn post_workspace_notice(
@@ -2093,6 +2211,11 @@ impl TerminalApp {
             viewport,
             platform_menu::PlatformMenuContent {
                 update: self.update_presentation(),
+                download_offer: self
+                    .services
+                    .download_offer()
+                    .map(download_offer::DownloadOfferClient::state),
+                update_prompt: self.update_prompt(),
                 window_frame: self.chrome.preferences().window_frame,
                 drawing_toolbar_visible: self.chrome.preferences().drawing_toolbar.shown(),
                 attribution: self.held_provider_attribution(cx),
@@ -3488,11 +3611,29 @@ impl TerminalApp {
         self.persist_due_layout(cx);
     }
 
-    fn maintain_updater(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn maintain_updater(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(offer) = self.services.download_offer_mut() {
+            let poll = offer.poll(Instant::now());
+            if let Some(latest_version) = poll.announce {
+                self.post_update_notice(
+                    UPDATE_DOWNLOAD_NOTICE,
+                    "Update available",
+                    format!("Aeris Terminal {latest_version} is available to download."),
+                    notification_center::NoticeAction::OpenDownloadPage,
+                    cx,
+                );
+            }
+            if poll.changed {
+                cx.notify();
+            }
+        }
         let Some(updater) = self.services.updater_mut() else {
             return;
         };
         let update = updater.poll();
+        if update.announce_ready {
+            self.post_update_ready_notice(cx);
+        }
         if update.changed {
             cx.notify();
         }
@@ -3604,10 +3745,10 @@ impl TerminalApp {
         Some(registration)
     }
 
-    /// Only a window with an update client (never a development build) has update work,
-    /// so only then does a maintenance interval mark the updater.
+    /// Only a window with an update client or a download offer has update work, so only
+    /// then does a maintenance interval mark the updater.
     fn start_updater_maintenance(&self, cx: &mut Context<Self>) {
-        if self.services.updater().is_none() {
+        if self.services.updater().is_none() && self.services.download_offer().is_none() {
             return;
         }
         let dirty = Arc::clone(self.frames.dirty());

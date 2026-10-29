@@ -1,5 +1,6 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
-//! application-level section in a single panel: account (profile, plan and sign-in actions), Theme
+//! application-level section in a single panel: account (profile, plan, sign-in actions and a
+//! newer version's restart or download), Theme
 //! with a preview card per mode and a chip per palette preset, Window with frameless mode and the drawing toolbar switch, the
 //! keyboard shortcuts list, and
 //! About with version, system, validation mode, provider notices while its session is held, and
@@ -8,6 +9,8 @@
 use aeris_observability::diagnostic;
 use std::rc::Rc;
 
+use super::download_offer::DownloadOfferState;
+use super::terminal_chrome::title_bar_fill;
 use super::*;
 use aeris_design_system::{ThemeMode, ThemePreset};
 use gpui_base::Button as BaseButton;
@@ -64,19 +67,26 @@ type WindowToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 /// stay visible, so image faults never break authentication or the avatar.
 /// Stale loads cannot win: the source derives from the current photo URL
 /// every frame, and the cache keys by URI.
+/// A newer version marks the avatar with a dot until the profile menu acts on it.
 pub(super) fn account_avatar_button(
     terminal: &Entity<TerminalApp>,
     account: &aeris_desktop::account::AccountMenuState,
+    update_prompt: Option<UpdatePrompt>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let presentation = &account.presentation;
-    let tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
+    let mut tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
         format!("Account — {}", presentation.display_name)
     } else if account.signed_in() {
         "Account".to_string()
     } else {
         "Account — Sign in".to_string()
     };
+    if let Some(prompt) = update_prompt {
+        tooltip.push_str(" · ");
+        tooltip.push_str(prompt.summary());
+    }
+    let colors = theme.colors;
     let toggle_terminal = terminal.clone();
     chrome_tooltip(
         "account_avatar",
@@ -93,14 +103,33 @@ pub(super) fn account_avatar_button(
             })
             .leading(
                 div()
+                    .relative()
                     .size(px(26.0))
                     .flex_none()
-                    .rounded_full()
-                    .overflow_hidden()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(account_avatar_face(account, theme)),
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded_full()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(account_avatar_face(account, theme)),
+                    )
+                    .when(update_prompt.is_some(), |avatar| {
+                        avatar.child(
+                            div()
+                                .debug_selector(|| "account_avatar_update_dot".into())
+                                .absolute()
+                                .top(px(-1.0))
+                                .right(px(-1.0))
+                                .size(px(9.0))
+                                .rounded_full()
+                                .border(platform_border_width(theme))
+                                .border_color(gpui_color(title_bar_fill(theme)))
+                                .bg(gpui_color(colors.primary)),
+                        )
+                    }),
             )
             .caret(header_icon(HugeIcon::ChevronDown)),
         theme,
@@ -158,10 +187,30 @@ fn account_avatar_face(
         .into_any_element()
 }
 
+/// What the profile menu offers about a newer version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UpdatePrompt {
+    /// The launcher has prepared the update.
+    Restart,
+    /// This build cannot update itself; the website has a newer one.
+    Download,
+}
+
+impl UpdatePrompt {
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::Restart => "Update ready",
+            Self::Download => "Update available",
+        }
+    }
+}
+
 /// The application state the platform menu shows below the account.
 #[derive(Clone, Copy)]
 pub(super) struct PlatformMenuContent<'a> {
     pub(super) update: Option<&'a UpdatePresentation>,
+    pub(super) download_offer: Option<&'a DownloadOfferState>,
+    pub(super) update_prompt: Option<UpdatePrompt>,
     pub(super) window_frame: chart_chrome::WindowFrame,
     pub(super) drawing_toolbar_visible: bool,
     /// Notices appear under About only while their provider's session is held.
@@ -182,13 +231,15 @@ pub(super) fn platform_menu_layer(
 ) -> AnyElement {
     let PlatformMenuContent {
         update,
+        download_offer,
+        update_prompt,
         window_frame,
         drawing_toolbar_visible,
         attribution,
         now_unix_seconds,
     } = content;
     let header = identity_header(account, theme);
-    let actions = account_actions(account);
+    let actions = account_actions(account, update_prompt);
     let details = about_details(account, update);
     let layout = PlatformMenuLayout {
         identity: header.is_some(),
@@ -225,6 +276,7 @@ pub(super) fn platform_menu_layer(
         update_terminal.update(cx, |terminal, terminal_cx| match action {
             UpdateAction::Restart => terminal.restart_to_update(terminal_cx),
             UpdateAction::Retry => terminal.retry_update_check(terminal_cx),
+            UpdateAction::Download => terminal.open_download_page(terminal_cx),
         });
     });
     let panel = MenuPanel::new("platform_menu", MenuPlacement::At(origin), theme)
@@ -262,7 +314,7 @@ pub(super) fn platform_menu_layer(
             details,
             attribution,
             now_unix_seconds,
-            &about_update_view(update, theme),
+            &about_update_view(update, download_offer, theme),
             &run_update,
             theme,
         ));
@@ -471,6 +523,8 @@ fn identity_header(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AccountAction {
+    RestartToUpdate,
+    DownloadUpdate,
     SignIn,
     Cancel,
     SignOut,
@@ -482,6 +536,8 @@ enum AccountAction {
 impl AccountAction {
     const fn id(self) -> &'static str {
         match self {
+            Self::RestartToUpdate => "platform_menu_restart_to_update",
+            Self::DownloadUpdate => "platform_menu_download_update",
             Self::SignIn => "platform_menu_sign_in",
             Self::Cancel => "platform_menu_cancel",
             Self::SignOut => "platform_menu_sign_out",
@@ -493,6 +549,8 @@ impl AccountAction {
 
     const fn label(self) -> &'static str {
         match self {
+            Self::RestartToUpdate => "Restart to update",
+            Self::DownloadUpdate => "Download update",
             Self::SignIn => "Sign in",
             Self::Cancel => "Cancel sign-in",
             Self::SignOut => "Sign out",
@@ -504,6 +562,8 @@ impl AccountAction {
 
     const fn icon(self) -> HugeIcon {
         match self {
+            Self::RestartToUpdate => HugeIcon::Refresh,
+            Self::DownloadUpdate => HugeIcon::Download,
             Self::SignIn => HugeIcon::ArrowRight,
             Self::Cancel => HugeIcon::Close,
             Self::SignOut | Self::RetrySignOut => HugeIcon::SignOut,
@@ -516,15 +576,26 @@ impl AccountAction {
         matches!(self, Self::SignOut | Self::RetrySignOut)
     }
 
-    /// Profile management opens the website and never races an account
-    /// request; every authentication verb waits for the pending one.
+    /// Profile management and updates never race an account request; every
+    /// authentication verb waits for the pending one.
     const fn waits_for_pending_request(self) -> bool {
-        !matches!(self, Self::ManageProfile)
+        !matches!(
+            self,
+            Self::ManageProfile | Self::RestartToUpdate | Self::DownloadUpdate
+        )
     }
 }
 
-fn account_actions(account: &aeris_desktop::account::AccountMenuState) -> Vec<AccountAction> {
-    if !account.sign_in_enabled {
+/// A newer version leads the rows, above the account's own actions.
+fn account_actions(
+    account: &aeris_desktop::account::AccountMenuState,
+    update_prompt: Option<UpdatePrompt>,
+) -> Vec<AccountAction> {
+    let update = update_prompt.map(|prompt| match prompt {
+        UpdatePrompt::Restart => AccountAction::RestartToUpdate,
+        UpdatePrompt::Download => AccountAction::DownloadUpdate,
+    });
+    let account_rows = if !account.sign_in_enabled {
         Vec::new()
     } else if account.authorizing() {
         // While the browser holds the transaction there are two recovery exits.
@@ -535,7 +606,8 @@ fn account_actions(account: &aeris_desktop::account::AccountMenuState) -> Vec<Ac
         vec![AccountAction::RetrySignOut, AccountAction::SignIn]
     } else {
         vec![AccountAction::SignIn]
-    }
+    };
+    update.into_iter().chain(account_rows).collect()
 }
 
 fn account_action_rows(
@@ -571,6 +643,8 @@ fn run_account_action(
     cx: &mut Context<TerminalApp>,
 ) {
     match action {
+        AccountAction::RestartToUpdate => terminal.restart_to_update(cx),
+        AccountAction::DownloadUpdate => terminal.open_download_page(cx),
         AccountAction::SignIn => terminal.request_sign_in(cx),
         AccountAction::Cancel => terminal.cancel_sign_in(cx),
         AccountAction::SignOut | AccountAction::RetrySignOut => terminal.sign_out(cx),
@@ -1076,6 +1150,7 @@ fn utc_year(unix_seconds: i64) -> i64 {
 enum UpdateAction {
     Restart,
     Retry,
+    Download,
 }
 
 struct UpdateView {
@@ -1084,8 +1159,18 @@ struct UpdateView {
     action: Option<UpdateAction>,
 }
 
-fn about_update_view(update: Option<&UpdatePresentation>, theme: &AerisTheme) -> UpdateView {
+/// The launcher's update state; a build without an update client shows its download offer.
+fn about_update_view(
+    update: Option<&UpdatePresentation>,
+    download_offer: Option<&DownloadOfferState>,
+    theme: &AerisTheme,
+) -> UpdateView {
     let colors = theme.colors;
+    if update.is_none()
+        && let Some(offer) = download_offer
+    {
+        return download_offer_view(offer, theme);
+    }
     let (status, status_color, action) = match update.map(|value| &value.state) {
         Some(UpdateState::Idle) => (
             "Updates are checked automatically.".to_string(),
@@ -1131,6 +1216,35 @@ fn about_update_view(update: Option<&UpdatePresentation>, theme: &AerisTheme) ->
     }
 }
 
+fn download_offer_view(offer: &DownloadOfferState, theme: &AerisTheme) -> UpdateView {
+    let colors = theme.colors;
+    let (status, status_color, action) = match offer {
+        DownloadOfferState::Checking => {
+            ("Checking for updates…".to_string(), colors.text_muted, None)
+        }
+        DownloadOfferState::Current => (
+            "Aeris Terminal is up to date.".to_string(),
+            colors.primary,
+            None,
+        ),
+        DownloadOfferState::Available { latest_version } => (
+            format!("Aeris Terminal {latest_version} is available."),
+            colors.primary,
+            Some(UpdateAction::Download),
+        ),
+        DownloadOfferState::Unavailable => (
+            "Update check unavailable.".to_string(),
+            colors.text_muted,
+            None,
+        ),
+    };
+    UpdateView {
+        status,
+        status_color,
+        action,
+    }
+}
+
 fn update_row(view: &UpdateView, on_update: &UpdateActivate, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
     let action_button = view.action.map(|action| {
@@ -1141,6 +1255,7 @@ fn update_row(view: &UpdateView, on_update: &UpdateActivate, theme: &AerisTheme)
             .label(match action {
                 UpdateAction::Restart => "Restart",
                 UpdateAction::Retry => "Retry",
+                UpdateAction::Download => "Download",
             })
             .on_click(move |_, window, cx| on_update(action, window, cx))
     });
@@ -1212,7 +1327,7 @@ mod tests {
                         about_details(&account, None),
                         None,
                         1_780_000_000,
-                        &about_update_view(None, &theme),
+                        &about_update_view(None, None, &theme),
                         &ignore_update,
                         &theme,
                     )
@@ -1225,7 +1340,7 @@ mod tests {
                             .iter()
                             .find_map(|p| p.attribution),
                         1_780_000_000,
-                        &about_update_view(None, &theme),
+                        &about_update_view(None, None, &theme),
                         &ignore_update,
                         &theme,
                     )
@@ -1272,7 +1387,7 @@ mod tests {
     #[test]
     fn validation_menu_reports_mode_under_about_without_account_rows() {
         let account = aeris_desktop::account::unavailable_menu_state();
-        assert_eq!(account_actions(&account), [] as [AccountAction; 0]);
+        assert_eq!(account_actions(&account, None), [] as [AccountAction; 0]);
         assert!(identity_header(&account, &AerisTheme::dark()).is_none());
         let details = about_details(&account, None);
         assert_eq!(details.len(), 2);
@@ -1349,8 +1464,48 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_version_leads_the_profile_menu_rows() {
+        let account = aeris_desktop::account::unavailable_menu_state();
+        assert_eq!(
+            account_actions(&account, Some(UpdatePrompt::Restart)),
+            [AccountAction::RestartToUpdate]
+        );
+        assert_eq!(
+            account_actions(&account, Some(UpdatePrompt::Download)),
+            [AccountAction::DownloadUpdate]
+        );
+    }
+
+    #[test]
+    fn a_build_without_an_update_client_offers_the_download_under_about() {
+        let theme = AerisTheme::dark();
+        let offered = about_update_view(
+            None,
+            Some(&DownloadOfferState::Available {
+                latest_version: "1.3.0".to_string(),
+            }),
+            &theme,
+        );
+        assert_eq!(offered.status, "Aeris Terminal 1.3.0 is available.");
+        assert_eq!(offered.action, Some(UpdateAction::Download));
+        let current = about_update_view(None, Some(&DownloadOfferState::Current), &theme);
+        assert_eq!(current.action, None);
+        let unavailable = about_update_view(None, None, &theme);
+        assert_eq!(
+            unavailable.status,
+            "Update checking is unavailable in this session."
+        );
+    }
+
+    #[test]
     fn only_authentication_actions_wait_for_a_pending_request() {
-        assert!(!AccountAction::ManageProfile.waits_for_pending_request());
+        for action in [
+            AccountAction::ManageProfile,
+            AccountAction::RestartToUpdate,
+            AccountAction::DownloadUpdate,
+        ] {
+            assert!(!action.waits_for_pending_request());
+        }
         for action in [
             AccountAction::SignIn,
             AccountAction::Cancel,

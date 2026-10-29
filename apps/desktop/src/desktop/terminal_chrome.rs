@@ -204,6 +204,7 @@ pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) workspace_drag: Option<WorkspaceDragState>,
     pub(super) app_view: super::market_screener::AppView,
     pub(super) account: Option<&'a aeris_desktop::account::DesktopAccount>,
+    pub(super) update_prompt: Option<super::platform_menu::UpdatePrompt>,
     pub(super) theme: AerisTheme,
 }
 
@@ -297,7 +298,12 @@ pub(super) fn workspace_title_bar(
         .pl_4()
         .pr_2()
         .gap_2()
-        .child(account_avatar_button(terminal, &account, &theme))
+        .child(account_avatar_button(
+            terminal,
+            &account,
+            state.update_prompt,
+            &theme,
+        ))
         .child(app_navigation_button(terminal, state.app_view, &theme));
     div()
         .w_full()

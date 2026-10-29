@@ -95,6 +95,8 @@ struct LauncherIdentityReport {
 pub struct UpdatePoll {
     pub changed: bool,
     pub restart_prepared: bool,
+    /// The update just became ready to restart, for a version not announced before.
+    pub announce_ready: bool,
 }
 
 pub struct DesktopUpdater {
@@ -105,6 +107,7 @@ pub struct DesktopUpdater {
     prepared_restart: Option<PreparedRestart>,
     next_check_at: Instant,
     check_retry_delay: Duration,
+    announced_version: Option<String>,
 }
 
 impl DesktopUpdater {
@@ -129,6 +132,7 @@ impl DesktopUpdater {
             prepared_restart: None,
             next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         };
         updater.request_check()?;
         Ok(updater)
@@ -176,12 +180,16 @@ impl DesktopUpdater {
     pub fn poll(&mut self) -> UpdatePoll {
         let now = Instant::now();
         let scheduled = self.request_periodic_check_if_due(now);
+        let changed = UpdatePoll {
+            changed: true,
+            ..UpdatePoll::default()
+        };
         let result = match self.results.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => {
                 return UpdatePoll {
                     changed: scheduled,
-                    restart_prepared: false,
+                    ..UpdatePoll::default()
                 };
             }
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -189,10 +197,7 @@ impl DesktopUpdater {
                     self.request_pending = false;
                     self.presentation.state =
                         UpdateState::Error("update client stopped unexpectedly".to_string());
-                    return UpdatePoll {
-                        changed: true,
-                        restart_prepared: false,
-                    };
+                    return changed;
                 }
                 return UpdatePoll::default();
             }
@@ -221,17 +226,20 @@ impl DesktopUpdater {
                         UpdateState::Error(error)
                     }
                 };
-                UpdatePoll {
-                    changed: true,
-                    restart_prepared: false,
-                }
+                changed
             }
             UpdateResult::Prepared(result) => {
                 self.request_pending = false;
+                let mut announce_ready = false;
                 self.presentation.state = match result {
-                    Ok(report) if report.update_available => UpdateState::ReadyToRestart {
-                        latest_version: report.latest_version,
-                    },
+                    Ok(report) if report.update_available => {
+                        announce_ready =
+                            self.announced_version.as_ref() != Some(&report.latest_version);
+                        self.announced_version = Some(report.latest_version.clone());
+                        UpdateState::ReadyToRestart {
+                            latest_version: report.latest_version,
+                        }
+                    }
                     Ok(_) => {
                         self.record_check_success(now);
                         UpdateState::Current
@@ -242,29 +250,25 @@ impl DesktopUpdater {
                     }
                 };
                 UpdatePoll {
-                    changed: true,
-                    restart_prepared: false,
+                    announce_ready,
+                    ..changed
                 }
             }
             UpdateResult::RestartPrepared(Ok(prepared)) => {
                 self.request_pending = false;
                 self.prepared_restart = Some(prepared);
                 UpdatePoll {
-                    changed: true,
                     restart_prepared: true,
+                    ..changed
                 }
             }
             UpdateResult::RestartPrepared(Err(error)) => {
                 self.request_pending = false;
                 self.presentation.state = UpdateState::Error(error);
-                UpdatePoll {
-                    changed: true,
-                    restart_prepared: false,
-                }
+                changed
             }
         }
     }
-
     /// Sends the launcher's explicit post-durability commit immediately before
     /// global shutdown. A helper that has already exited or whose commit pipe
     /// cannot be written is rejected and the desktop remains open.
@@ -318,7 +322,37 @@ impl DesktopUpdater {
             }),
             next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         }
+    }
+
+    /// An updater whose prepared update arrives on its next poll. The returned guard keeps
+    /// the request channel open, so a restart request is accepted.
+    #[cfg(test)]
+    pub(super) fn with_ready_update_for_test() -> (Self, Box<dyn std::any::Any>) {
+        let (requests, request_rx) = mpsc::sync_channel(1);
+        let (result_tx, results) = mpsc::sync_channel(1);
+        result_tx
+            .send(UpdateResult::Prepared(Ok(tests::update_report(true))))
+            .expect("prepared result queues");
+        (
+            Self {
+                requests,
+                results,
+                presentation: UpdatePresentation {
+                    system_version: "Windows".to_string(),
+                    state: UpdateState::Downloading {
+                        latest_version: tests::update_report(true).latest_version,
+                    },
+                },
+                request_pending: true,
+                prepared_restart: None,
+                next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+                check_retry_delay: CHECK_RETRY_INITIAL,
+                announced_version: None,
+            },
+            Box::new((request_rx, result_tx)),
+        )
     }
 
     fn request_periodic_check_if_due(&mut self, now: Instant) -> bool {
@@ -1128,7 +1162,7 @@ mod tests {
         path
     }
 
-    fn update_report(update_available: bool) -> LauncherUpdateCheck {
+    pub(super) fn update_report(update_available: bool) -> LauncherUpdateCheck {
         let current = aeris_release_lifecycle::current_release_identity().install_generation;
         LauncherUpdateCheck {
             schema_version: 2,
@@ -1163,6 +1197,7 @@ mod tests {
             prepared_restart: None,
             next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         };
         let report = update_report(true);
 
@@ -1185,11 +1220,16 @@ mod tests {
         result_tx
             .send(UpdateResult::Prepared(Ok(report.clone())))
             .expect("prepared result queues");
-        assert!(updater.poll().changed);
+        let prepared = updater.poll();
+        assert!(prepared.changed);
+        assert!(
+            prepared.announce_ready,
+            "a newly ready version is announced"
+        );
         assert_eq!(
             updater.presentation.state,
             UpdateState::ReadyToRestart {
-                latest_version: report.latest_version
+                latest_version: report.latest_version.clone()
             }
         );
         assert!(!updater.request_pending);
@@ -1201,6 +1241,22 @@ mod tests {
             UpdateRequest::Restart
         ));
         assert_eq!(updater.presentation.state, UpdateState::PreparingRestart);
+
+        result_tx
+            .send(UpdateResult::RestartPrepared(Err(
+                "restart helper failed".to_string()
+            )))
+            .expect("failed restart queues");
+        assert!(updater.poll().changed);
+        result_tx
+            .send(UpdateResult::Prepared(Ok(report)))
+            .expect("prepared again queues");
+        let prepared_again = updater.poll();
+        assert!(prepared_again.changed);
+        assert!(
+            !prepared_again.announce_ready,
+            "a version already announced this session is not announced again"
+        );
     }
 
     #[test]
@@ -1220,6 +1276,7 @@ mod tests {
             prepared_restart: None,
             next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         };
         result_tx
             .send(UpdateResult::Prepared(Ok(update_report(false))))
@@ -1248,6 +1305,7 @@ mod tests {
                 .checked_sub(std::time::Duration::from_secs(1))
                 .expect("one second is representable"),
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         };
 
         let scheduled = updater.poll();
@@ -1494,6 +1552,7 @@ mod tests {
             prepared_restart: None,
             next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         };
         result_tx
             .send(UpdateResult::RestartPrepared(Ok(PreparedRestart {
@@ -1542,6 +1601,7 @@ mod tests {
             }),
             next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
             check_retry_delay: CHECK_RETRY_INITIAL,
+            announced_version: None,
         };
 
         let cleanup = updater

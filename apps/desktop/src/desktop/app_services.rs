@@ -1,6 +1,6 @@
 //! The runtime handles the terminal holds beside its lifecycle: the trading view store, the
-//! factory that opens market demand for new panes, the update client with its restart phase,
-//! and the schedule that applies economic-event risk rules to the trading owner. The terminal
+//! factory that opens market demand for new panes, the update client with its restart phase
+//! (or, for a build the launcher does not update, the download offer), and the schedule that applies economic-event risk rules to the trading owner. The terminal
 //! runs the work; these only say what is held and what is due.
 
 use std::collections::BTreeMap;
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use gpui::Entity;
 
+use super::download_offer::DownloadOfferClient;
 use super::engine_market_worker::WorkspaceMarketFactory;
 use super::trading_store::TradingStore;
 use super::update::DesktopUpdater;
@@ -24,6 +25,8 @@ pub(super) struct AppServices {
     /// Absent in a window that cannot open market demand for new panes.
     market_factory: Option<WorkspaceMarketFactory>,
     updater: Option<DesktopUpdater>,
+    /// Only a session without an update client offers the website download.
+    download_offer: Option<DownloadOfferClient>,
     update_restart: UpdateRestart,
     event_risk: EconomicEventRiskSchedule,
 }
@@ -33,12 +36,14 @@ impl AppServices {
         trading_store: Entity<TradingStore>,
         market_factory: Option<WorkspaceMarketFactory>,
         updater: Option<DesktopUpdater>,
+        download_offer: Option<DownloadOfferClient>,
         now: Instant,
     ) -> Self {
         Self {
             trading_store,
             market_factory,
             updater,
+            download_offer,
             update_restart: UpdateRestart::Idle,
             event_risk: EconomicEventRiskSchedule::new(now),
         }
@@ -58,6 +63,14 @@ impl AppServices {
 
     pub(super) const fn updater_mut(&mut self) -> Option<&mut DesktopUpdater> {
         self.updater.as_mut()
+    }
+
+    pub(super) const fn download_offer(&self) -> Option<&DownloadOfferClient> {
+        self.download_offer.as_ref()
+    }
+
+    pub(super) const fn download_offer_mut(&mut self) -> Option<&mut DownloadOfferClient> {
+        self.download_offer.as_mut()
     }
 
     #[cfg(test)]

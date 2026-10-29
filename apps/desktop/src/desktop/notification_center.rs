@@ -1,4 +1,5 @@
-//! Bounded, keyed user-facing failures. The raw error is never retained or logged.
+//! Bounded, keyed user-facing notices: failures, and announcements such as a ready update.
+//! The raw error is never retained or logged.
 
 use std::time::Duration;
 
@@ -12,12 +13,14 @@ pub(super) struct NoticeKey {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NoticeSeverity {
+    Info,
     Warning,
     Error,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NoticeTone {
+    Info,
     Warning,
     Loss,
 }
@@ -35,12 +38,18 @@ pub(super) enum NoticeSource {
 pub(super) enum NoticeAction {
     /// Opens the file manager at the quarantined copy or the workspace data folder.
     OpenFolder(std::path::PathBuf),
+    /// Restarts into the update the launcher has prepared.
+    RestartToUpdate,
+    /// Opens the website download page for a build the launcher does not update.
+    OpenDownloadPage,
 }
 
 impl NoticeAction {
     pub(super) fn label(&self) -> &'static str {
         match self {
             Self::OpenFolder(_) => "Open folder",
+            Self::RestartToUpdate => "Restart to update",
+            Self::OpenDownloadPage => "Download",
         }
     }
 }

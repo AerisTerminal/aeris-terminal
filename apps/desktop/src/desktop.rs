@@ -24,6 +24,7 @@ mod chart_toolbar_menus;
 mod chrome_menu;
 mod command_palette;
 mod context_panel;
+mod download_offer;
 mod drawing_context_toolbar;
 mod drawing_settings_dialog;
 mod drawing_toolbar;
