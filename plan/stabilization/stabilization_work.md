@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-70 of 90 items are fully done (2026-10-29).
+78 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -38,15 +38,15 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M2 market foundations | 10 / 10 | 0 |
 | M3 market lifecycle | 12 / 12 | 0 |
 | M4 trading core | 9 / 10 | 1 (GUI check) |
-| M5 trading engine | 9 / 12 | 3 (GUI checks) |
-| M6 desktop bridge | 9 / 13 | 4 (code complete; GUI checks) |
-| M7 desktop structure | 2 / 12 | 10 (GUI checks and remaining work) |
+| M5 trading engine | 11 / 12 | 1 (GUI check) |
+| M6 desktop bridge | 13 / 13 | 0 |
+| M7 desktop structure | 4 / 12 | 8 (GUI checks and the idle CPU measurement) |
 | M8 lifecycle and trim | 10 / 12 | 2 (code complete; GUI checks) |
 
-Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
-guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
-can close several items together. The M6, M7 and M8 full gates and CI closeouts are recorded;
-every open item now has its code landed and waits only on the checks listed on its line.
+Every open item has its code landed and waits only on the checks listed on its line: guarded GUI
+checks on an isolated root with no other Aeris desktop running, the M7.6 idle CPU measurement, and
+the maintainer-only sign-in and macOS checks. The M6, M7 and M8 full gates and CI closeouts are
+recorded.
 
 ## 3. Work items
 
@@ -122,14 +122,16 @@ every open item now has its code landed and waits only on the checks listed on i
   - Fix found in that check: the drawing-bracket and keyboard Buy/Sell confirmations named the
     order-book frame's opaque instrument identifier instead of the pane product's display symbol
     (`order_confirmations_name_the_display_symbol_not_the_instrument_id`).
-- [ ] M5.7 Fill-driven cash ledger with configurable fees (2d8e32ab)
-  - Left: the VAL-TRD-058 minimum-quantity GUI clause (place 0.00001 BTC from the order ticket and
-    see it fill). The ticket now takes fractional quantities up to 8 decimals at the instrument's
-    lot, and the pane harness fills 0.00001 exactly through the owner; the guarded GUI run remains.
+- [x] M5.7 Fill-driven cash ledger with configurable fees (2d8e32ab)
+  - Verified: guarded GUI check VAL-TRD-058 (2026-10-29, same build and evidence as M5.6). The
+    order ticket took a typed 0.00001 BTC-USDC market buy, which filled as Open Qty 0.00001 and a
+    Long 0.00001 position. A 0.00001 ETH order got the typed reject "order quantity must use whole
+    provider units".
 - [x] M5.8 Checkpoints before retention, repair and equity history (11085c44)
 - [x] M5.9 Kill switch, flatten scopes and atomic reverse (f824e27b)
-- [ ] M5.10 Persisted risk session with rollover (f81bcb53)
-  - Left: guarded GUI check that a bracket order no longer produces a risk warning.
+- [x] M5.10 Persisted risk session with rollover (f81bcb53)
+  - Verified: guarded GUI check (2026-10-29, same build and evidence as M5.6). The VAL-TRD-053
+    bracket order produced no risk warning on the chart or in Portfolio.
 - [x] M5.11 Change-driven, bounded trading publication with paged history (1cecfa4b)
 - [x] M5.12 Live paper-trading probe on Hyperliquid (a0f2b730; clean-HEAD runs at 7fcb3a07, archived
   outside the repo in `C:\Users\devraj\aeris-evidence\m5.12-7fcb3a07\`: fees and no-fees runs
@@ -142,18 +144,24 @@ every open item now has its code landed and waits only on the checks listed on i
 - [x] M6.0 Fresh-workspace default chart draws, VAL-DSK-120 (f467f7a7)
 - [x] M6.1 Inject `DesktopServices`; fixture worker in test support only (0db7e973)
 - [x] M6.2 One `UserNotice` model and `NotificationCenter` (6987ecbe)
-- [ ] M6.3 Per-chart `ChartPaneController` drops stale publications (0947e8b0)
-  - Left: guarded GUI check VAL-DSK-014. A six-interval storm (1m, 1h, 1D, 3D, 5m, 3D, each within
-    1 s) ends with the interval button, legend and axis on 3D within 10 s. VAL-DSK-013 and 015
-    passed. Closes UI-02 and MD-15.
+- [x] M6.3 Per-chart `ChartPaneController` drops stale publications (0947e8b0)
+  - Verified: guarded GUI check VAL-DSK-014 (2026-10-29, same build and evidence as M5.6). A
+    six-interval storm by keyboard (1m, 1h, 1D, 3D, 5m, 3D, each pick within about 1 s) ended with
+    the interval button on 3D, the legend "BTC-USDC · 3D · Hyperliquid" and a 2022-2027 axis at
+    1 s and at 10 s. VAL-DSK-013 and 015 passed earlier. Closes UI-02 and MD-15.
+  - Seen: a click on the interval button while its menu is still closing is ignored.
 - [x] M6.4 `PanePresentation` applies every chart property in one place (33a1af51)
-- [ ] M6.5 One `select_and_demand` per selection (973a4fe8)
-  - Left: guarded GUI checks VAL-DSK-020 and VAL-CROSS-002.
-    - VAL-DSK-020: a four-pane restart is captured within 15 s, with each pane's saved pair
-      confirmed.
-    - VAL-CROSS-002: both tabs are all live within 30 s on one Hyperliquid session, and ETH is
-      chosen within 5 s.
-    - UI-04's picker part closes with them.
+- [x] M6.5 One `select_and_demand` per selection (973a4fe8)
+  - Verified: guarded GUI checks (2026-10-29, same build and evidence as M5.6), on a fresh root
+    with four panes (BTC 1m, ETH 5m, SOL 1h, HYPE 1D) and a second tab.
+    - VAL-DSK-020: after a restart the window opened at 2.1 s and all four panes were on their
+      saved pairs and live at 5 s.
+    - VAL-CROSS-002: on a second restart tab 1 was live at about 5 s and tab 2 (ETH 1D) at 9.7 s,
+      with one Hyperliquid market session per launch in the log; ETH picked by typing drew
+      ETH-USDC within 1.5 s. UI-04's picker part closes with them.
+  - Seen: without a Rithmic login each catalog request logs "Rithmic catalog session could not
+    start: CredentialMissing" (four per restart). Once tab 1's title showed ETH instead of its
+    active HYPE pane after a tab switch; it did not happen again on retry.
 - [x] M6.6 Desktop bridge message model collapsed (5a6da58c)
 - [x] M6.7 Runtime descriptors drive provider identity (42d99d1e)
   - Verified: guarded GUI check VAL-DSK-114 (2026-10-29, release build of df4ef296 on this PC,
@@ -174,19 +182,21 @@ every open item now has its code landed and waits only on the checks listed on i
       Rithmic `cmdkey` entries were unchanged.
     - The symbol menu listed only Hyperliquid, the one symbol-browser descriptor.
     - UI-03 closes with this item and M6.7.
-- [ ] M6.10 One workspace `TradingStore` fed by the change stream (bf626069)
+- [x] M6.10 One workspace `TradingStore` fed by the change stream (bf626069)
   - Verified: VAL-DSK-034 (2026-10-29, same build and evidence as M6.7). One chart Buy of
     ETH-USDC on a new practice account gave one fill toast and a Long 1.00 position row by
     1.5 s, and no second toast by 8 s.
-  - Left: guarded GUI check VAL-DSK-035, a 10,001-order fixture showing trade history within 10 s.
-- [ ] M6.11 Revisioned chart intents; snapshots confined to tests (a36f225f)
+  - Verified: guarded GUI check VAL-DSK-035 (2026-10-29, same build and evidence as M5.6). On the
+    10,001-order fixture, Portfolio > Trade history listed rows with "250 trades · 50 older
+    trades" 1 s after the tab click, unchanged at 10 s.
+- [x] M6.11 Revisioned chart intents; snapshots confined to tests (a36f225f)
   - Verified: VAL-DSK-037 and VAL-CROSS-015 (2026-10-29, same build and evidence as M6.7).
     With the order book off, long BTC (charted) and long ETH (no chart) positions were both
     closed by Flatten account (Ctrl+Shift+F, confirmed).
-  - Left: guarded GUI check VAL-CROSS-016, a switch storm ending on SOL with order lines only on
-    SOL.
-    - Also record VAL-DSK-110 as passed; its tests exist.
-    - Closes TR-10 and UI-10.
+  - Verified: guarded GUI check VAL-CROSS-016 (2026-10-29, same build and evidence as M5.6). With
+    working BTC orders and ETH and SOL positions, a switch storm BTC, ETH, SOL, BTC, SOL within
+    about 6 s ended on SOL, live by 15 s, with only the SOL position line and no BTC or ETH
+    lines at 15 s and 35 s. VAL-DSK-110 passed through its tests. Closes TR-10 and UI-10.
   - Fix found in the VAL-CROSS-015 run: after the flatten, the ETH fill toast read the raw
     instrument ID because the working set projected terms only for open orders, positions and
     ticket interests. It now also projects terms for its fills window
@@ -207,8 +217,11 @@ only on the guarded GUI checks on their lines.
     `colors_come_from_tokens` allowlists only the picker spectrum and the legacy series fallbacks.
     The website mirror is committed locally (aeris-website c759b71) after its typecheck, lint and
     build passed; per M-D8 it waits for the maintainer to push it.
-  - Left: guarded GUI screenshot check that the session-plan level, the picker swatches and the
-    watchlist flag look unchanged. Closes UI-13.
+  - Verified: guarded GUI screenshot comparison (2026-10-29, same build and evidence as M5.6) of
+    1.2.0 and this build on copies of the real workspace: the flag color picker's default and
+    swatches and the watchlist flags are identical.
+  - Left: the session-plan level. No GUI path in this build shows it, so it cannot be compared on
+    screen yet. Closes UI-13.
 - [ ] M7.2 Account integration behind an account boundary
   - Landed: `apps/desktop/src/account/` with `plan_policy()` (unrestricted) replacing
     `CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED` and `current_plan_limits`; the 8-tab and 64-pane
@@ -218,7 +231,7 @@ only on the guarded GUI checks on their lines.
     removed polls and placeholders. The dormant-code parts are superseded by mandatory sign-in.
   - Left: guarded GUI check that sign-in, sign-out and the Manage Profile refresh still update
     the sign-in window and the account menu.
-- [ ] M7.3 `AerisChartView` emits host events
+- [x] M7.3 `AerisChartView` emits host events
   - Landed: `AerisChartView` is an `EventEmitter<ChartHostEvent>` (activate, context menu,
     settings, study removal); the four `pending_*` fields, `ActivationRequest` and the
     `take_*_request` drains are deleted, and the workspace surface subscribes per chart. Host
@@ -226,7 +239,9 @@ only on the guarded GUI checks on their lines.
     `view/price_axis_menu.rs` and `view/legend.rs`. A gpui test shows one context-menu input
     emits exactly one host event; naming_check rejects the pending names in chart_integration and
     the `take_*` polls in the desktop. Part of UI-07 and UI-14.
-  - Left: guarded GUI check that the context menu, settings and study removal still work.
+  - Verified: guarded GUI check (2026-10-29, same build and evidence as M5.6). A right click on
+    the chart opened the context menu, its Settings opened and closed Chart settings, and an SMA 20
+    added from Indicators was removed by its legend X.
 - [ ] M7.4 `WorkspaceSurface` split into pane controllers
   - Landed: `desktop/context_panel_controller.rs` owns the context snapshot, panel visibility
     (an enum), tab, height, API-key dialog and risk message behind change-reporting setters.
@@ -395,13 +410,14 @@ only on the guarded GUI checks on their lines.
     (`saves_over_a_current_schema_workspace_write_no_pre_migration_copy`), and the unused
     `DurableContainer::durable_payload_raw` helper is deleted (the `aeris_platform_runtime`
     string-error ratchet drops to 17 with it).
-  - Left: the GUI checks below.
-  - GUI checks: a corrupt workspace shows the notice with Open folder and the layout is not
-    silently replaced; a newer-version workspace shows the read-only notice; a copied real
-    workspace migrates intact.
+  - Verified: a copied real workspace migrates intact (2026-10-29, same build and evidence as
+    M5.6). The user's workspace written by 1.2.0, opened by 1.2.0 and by this build on separate
+    copies, showed the same tab, panes, studies, order entry, watchlist flags and hollow style.
+  - Left: GUI checks that a corrupt workspace shows the notice with Open folder and the layout is
+    not silently replaced, and that a newer-version workspace shows the read-only notice.
   - Workspaces written by 1.0.0-1.2.0 must open unchanged in meaning, including saved layouts,
     watchlist flags and pane heights. Closes UI-09 and PL-18.
-- [ ] M7.9 Hollow candles as an Aeris Charts series style
+- [x] M7.9 Hollow candles as an Aeris Charts series style
   - Landed: aeris-charts `50bde98` (`feat(chart): engine-owned hollow candle bodies`) adds the
     engine `CandleBody` style (`Solid`/`Hollow`/`HollowBullish`/`HollowBearish`) with
     `set_candle_body`/`candle_body`; a hollow direction leaves its body unfilled while the frame
@@ -415,7 +431,8 @@ only on the guarded GUI checks on their lines.
     `PanePresentation` apply path reaches it through `install_product_price_series`; no new
     engine operation was needed. No other unused engine capability arrived between `8924f8d`
     and `50bde98` (the pin bump carries only the hollow-candle commit).
-  - Left: GUI check of the hollow style (screenshot comparison before/after). The wasm binding
+  - Verified: GUI screenshot comparison (2026-10-29, same build and evidence as M5.6). The hollow
+    styles on copies of the real workspace draw alike in 1.2.0 and this build. The wasm binding
     and web demo keep the transparent-body color path; exposing `CandleBody` there is a possible
     follow-up, not required by Terminal.
 - [x] M7.10 Sweep classification and incremental tape in `market_runtime` (012d2c5c)
@@ -818,8 +835,9 @@ still wait on the GUI checks and the remaining work on their lines.
     Objective-C bridges) and `clippy::all`; its `.gitignore` lines are gone. naming_check
     `gpui_base_retains_only_the_desktop_behavior_surface` checks the trim, the membership and the
     unsafe allowlist.
-  - Left: GUI text-input check (symbol search, order ticket) on Windows and macOS.
-    Not run. Closes PL-10, PL-12 and PL-19.
+  - Verified on Windows (2026-10-29, same build and evidence as M5.6): typing a symbol on a
+    focused chart picked ETH-USDC, and the order ticket took a typed 0.00001 quantity.
+  - Left: the same text-input check on macOS. Closes PL-10, PL-12 and PL-19.
 - [x] M8.12 Structural naming_check and final docs
   - Landed: the update-restart handshake is a `RestartHandshake` seam, and launcher tests prove a
     failed verification sends no READY, a missing COMMIT installs nothing, and every check runs
