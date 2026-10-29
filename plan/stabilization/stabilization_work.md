@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-68 of 90 items are fully done (2026-10-29).
+70 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -38,10 +38,10 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M2 market foundations | 10 / 10 | 0 |
 | M3 market lifecycle | 12 / 12 | 0 |
 | M4 trading core | 9 / 10 | 1 (GUI check) |
-| M5 trading engine | 8 / 12 | 4 (GUI checks) |
+| M5 trading engine | 9 / 12 | 3 (GUI checks) |
 | M6 desktop bridge | 9 / 13 | 4 (code complete; GUI checks) |
 | M7 desktop structure | 2 / 12 | 10 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 9 / 12 | 3 (code complete; GUI and install checks) |
+| M8 lifecycle and trim | 10 / 12 | 2 (code complete; GUI checks) |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -646,7 +646,7 @@ still wait on the GUI checks and the remaining work on their lines.
     before and after, and the trading folder held only `trading.sqlite3`. On a fresh root it
     exited 0 and created no database. The launcher-driven readiness of an installed candidate is
     covered by M8.7's end-to-end harness.
-- [ ] M8.6 Release wire protocol v1 and Axiusflow residue
+- [x] M8.6 Release wire protocol v1 and Axiusflow residue
   - Landed: LC-04. The update-restart lines are `AERIS_UPDATE_RESTART_READY_V1` and
     `AERIS_UPDATE_RESTART_COMMIT_V1`, defined once in `aeris_release_lifecycle` for the launcher
     and the desktop; the transitional aliases are deleted. Block plans sign under
@@ -681,8 +681,22 @@ still wait on the GUI checks and the remaining work on their lines.
     instance lock. It now shows "Aeris could not open its window" with the log location (off the
     UI thread) and quits after the dialog; seen in the sandbox, it exited 0.9 s after OK. The
     Windows preview smoke fails when its launch log says a window could not open.
-  - Left: the manual install and uninstall on a Windows VM (F17), checking the prompt and that
-    data is kept by default and removed only when ticked. Not run; maintainer-only.
+  - Fix found in the sandbox install check: the default uninstall failed with "Aeris Terminal
+    could not be removed" and left the install root and the uninstall stage folder. The installer
+    starts the launcher with the install root as its working directory, and Windows does not
+    remove a directory that is a process's working directory. `remove_local_install` now moves to
+    the install root's parent after relocating the running launcher and before removing the tree.
+    It is not unit-tested: the working directory is process-wide and the launcher tests run in
+    parallel, so the installed-app run below is the check.
+  - Checked (F17) in Windows Sandbox on this PC, not a VM (D29): a release build with a test
+    signing key and a self-signed Authenticode certificate, packaged with
+    `aeris_release_packager` and `aeris_setup.iss` (Inno Setup 6.7.3). The data root was seeded
+    with a workspace and trading journal written by the desktop, plus the two Aeris vault entries.
+    The silent install ran readiness on that data and activated the release with the files' SHA-256
+    unchanged. The uninstall page showed "Remove my Aeris data" unticked. Unticked, it removed the
+    install, lifecycle and stage folders and the Start menu link, and kept every data file
+    byte-for-byte and both vault entries. A reinstall over the kept data succeeded with the same
+    hashes. Ticked, it removed the data root and both vault entries.
 - [x] M8.7 Release packager and end-to-end lifecycle harness
   - Landed: LC-21. The launcher is library code (`aeris_release_lifecycle::launcher`,
     `run_launcher`) behind a thin `aeris_launcher` binary. It reads the origin only through
@@ -882,7 +896,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D26 | Restart verification bound | (2026-10-28) The restart helper's verification (a 15 s-bounded channel fetch plus hashing the prepared and active releases) runs before READY, and the desktop waits for READY up to a shared 2-minute bound rather than the former 20 s handshake, so a slow disk or channel no longer fails a restart. The READY-to-COMMIT window keeps its existing bounds, since the desktop's durability waits (up to 22 s) already fit the launcher's 60 s commit wait. |
 | D27 | Study SDK facade | (2026-10-28) PL-13 is resolved as accepted, as `architecture.md` section 2.2 rule 8 records: `study_sdk` is the published-API facade above the in-process study runtime and is used only by the desktop's built-in study packages, so it keeps its `market_runtime` dependency and with it the adapters (`cargo tree -p aeris_study_sdk` still lists them). It is not an inversion while `market_runtime` only dev-depends on it, which naming_check enforces. Moving the study types into a contract crate waits until third-party study authors exist. |
 | D28 | M8.12 naming_check scope | (2026-10-28) Text pins go: the 26 that only match source text are deleted, the 8 that guard behavior already covered by a test are deleted, and the other 7 behavior pins are replaced by behavior tests before they are deleted. Every structural rule (crate graph, file layout, workflow shape, allowlists) stays. `Readme` is renamed `README.md`. `plan/longterm_plan/` is the second sanctioned planning directory beside `plan/stabilization/`. |
-| D29 | Closing the tracker | (2026-10-29) The agent runs the guarded GUI checks itself on this Windows PC, on an isolated validation root, by driving the desktop with synthetic input and verifying screenshots, while the maintainer stays off the machine. M5.7 gets fractional order-ticket quantity input so its VAL-TRD-058 clause can run. The M8.6 install and uninstall check runs in an isolated VM on this PC. When every box is checked, the release record moves to a root `RELEASES.md` and `plan/stabilization/` is deleted with its AGENTS.md rules. |
+| D29 | Closing the tracker | (2026-10-29) The agent runs the guarded GUI checks itself on this Windows PC, on an isolated validation root, by driving the desktop with synthetic input and verifying screenshots, while the maintainer stays off the machine. M5.7 gets fractional order-ticket quantity input so its VAL-TRD-058 clause can run. The M8.6 install and uninstall check runs in Windows Sandbox on this PC (it ran there on 2026-10-29). When every box is checked, the release record moves to a root `RELEASES.md` and `plan/stabilization/` is deleted with its AGENTS.md rules. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in
@@ -946,13 +960,19 @@ Outside the work items; each needs a maintainer decision or access before it can
 
 - **Maintainer-only checks:**
   - logoff flush (M8.3)
-  - VM install and uninstall (M8.6)
+
   - Rithmic login through the native vault (M6.9)
   - real Cognito sign-in
   - update and rollback on an installed app
   - macOS signing and notarization
   - code-signing certificate and key custody
   - Rithmic live qualification and conformance approval before production order routing
+- **Lifecycle installer findings (M8.6 sandbox run):** when the launcher's `--install` fails (for
+  example, readiness refuses an unreadable workspace), `aeris_setup.iss` raises its error after
+  Inno has finished copying files. A silent install then still exits 0 and leaves the stub launcher
+  and the Start menu link without an active release. The uninstall also asks twice: the "Remove my
+  Aeris data" page and then Inno's standard "Are you sure" box. The lifecycle installer has not
+  shipped (the preview lanes use `aeris_terminal.iss`); fix both before it does.
 - **Shutdown retirement warning:** resolved. A worker batch holding a `Shutdown` command and the
   sender's disconnect retired the endpoint twice, so the second `remove_consumer` failed and a
   second acknowledgement was sent. `retire_endpoint` now returns for an inactive endpoint

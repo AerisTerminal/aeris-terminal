@@ -236,7 +236,13 @@ fn remove_local_install(executable: &Path, scope: RemovalScope) -> Result<(), St
     // permitted), then uninstall the original tree synchronously with an
     // honest exit code.
     let staged = relocate_running_binary(executable, &install_root).map_err(redacted)?;
-    let result = uninstall_from_root(&install_root, scope);
+    // Windows also refuses to remove a directory that is any process's working directory,
+    // and the installer starts this command with the install root as its working directory.
+    let result = install_root
+        .parent()
+        .ok_or_else(|| "stable launcher installation root is unavailable".to_string())
+        .and_then(|parent| std::env::set_current_dir(parent).map_err(redacted))
+        .and_then(|()| uninstall_from_root(&install_root, scope));
     remove_relocated_binary(&staged);
     result
 }
