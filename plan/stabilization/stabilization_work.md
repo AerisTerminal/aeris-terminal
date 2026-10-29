@@ -111,13 +111,18 @@ recorded.
 - [x] M5.1 Complete order state machine, revisions and typed events (73ff4a92)
 - [x] M5.2 One admission validator for simulated and broker routes (9b49f28e)
 - [x] M5.3 Bid/ask fill rules, stop and stop-limit triggering (140a8b3d)
-- [ ] M5.4 DAY expiry at session close or 00:00 UTC; GTC keeps working (05cc55bf)
+- [x] M5.4 DAY expiry at session close or 00:00 UTC; GTC keeps working (05cc55bf)
   - Fix found by the GUI check: no desktop surface showed a practice order's expiry (only a
     broker expiry toasted, and an ended order had already left the open orders, so its
     toast could not name it). A practice expiry now toasts "Buy 0.1 SOL-USDC expired" over
     the owner's detail and the account, with the order taken from the previous view;
     practice cancels stay silent.
-  - Left: guarded GUI check that an expired DAY order shows the Expired status.
+  - Verified: guarded GUI check (2026-10-29, release build of d48bda04 on this PC, a copy of a
+    validation root whose working DAY orders' deadline was moved 150 s ahead). At the deadline
+    the three working DAY orders became expired with terminal time equal to the deadline, the
+    GTC legs of the DAY bracket entry were cancelled with their group 6 ms later, the chart's
+    Buy Limit line went away, the ticket read "no working orders", and the pane toasted
+    "Buy 0.00001 BTC-USDC expired" over "DAY session ended · SIM • Practice" within one second.
 - [x] M5.5 One order-group model with bracket migration (064ca1e4)
 - [x] M5.6 Superseded protection layers deleted (71f36340)
   - Verified: guarded GUI check VAL-TRD-053 (2026-10-29, release build of f9a4d06a on this PC,
