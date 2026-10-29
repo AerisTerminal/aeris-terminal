@@ -24,6 +24,8 @@ use gpui::{DispatchPhase, EntityId, MouseMoveEvent, MouseUpEvent};
 use std::collections::{BTreeMap, BTreeSet};
 
 const TOAST_WIDTH: f32 = 320.0;
+/// The narrowest a stack shrinks to in a narrow chart; below it a toast overflows the plot.
+const MINIMUM_TOAST_WIDTH: f32 = 160.0;
 /// Space between the stack and the pane's top edge and price axis.
 const STACK_INSET: f32 = 12.0;
 /// Space between toasts in the expanded list.
@@ -258,12 +260,12 @@ impl Toast {
         self.measured_height.unwrap_or(ESTIMATED_HEIGHT)
     }
 
-    fn frame(&self, now: Instant) -> ToastFrame {
+    fn frame(&self, now: Instant, stack_width: f32) -> ToastFrame {
         let motion = &self.motion;
         ToastFrame {
             x: motion.x.value(now),
             y: motion.y.value(now),
-            width: TOAST_WIDTH * motion.scale.value(now),
+            width: stack_width * motion.scale.value(now),
             height: motion.height.value(now),
             opacity: motion.opacity.value(now).clamp(0.0, 1.0),
             content_opacity: motion.content_opacity.value(now).clamp(0.0, 1.0),
@@ -1305,8 +1307,20 @@ pub(super) struct ToastLayer<'a, H: ToastHost> {
     pub(super) toaster: &'a Toaster,
     pub(super) stack: ToastStack,
     pub(super) price_axis_width: f32,
+    /// The chart's plot width when it has been laid out; the stack narrows to fit inside it.
+    pub(super) plot_width: Option<f32>,
     pub(super) theme: &'a AerisTheme,
     pub(super) now: Instant,
+}
+
+/// The stack fits inside the plot with its inset on both sides; an unmeasured plot keeps the
+/// full width.
+fn stack_width(plot_width: Option<f32>) -> f32 {
+    plot_width
+        .filter(|width| *width > 0.0)
+        .map_or(TOAST_WIDTH, |width| {
+            (width - 2.0 * STACK_INSET).clamp(MINIMUM_TOAST_WIDTH, TOAST_WIDTH)
+        })
 }
 
 /// A pane's toast stack, in its top-right corner past the price axis. The stack's area blocks
@@ -1317,9 +1331,11 @@ pub(super) fn toast_stack<H: ToastHost>(layer: &ToastLayer<'_, H>) -> Option<Any
         toaster,
         stack,
         price_axis_width,
+        plot_width,
         theme,
         now,
     } = *layer;
+    let width = stack_width(plot_width);
     // Oldest first, so the newest toast paints on top.
     let cards: Vec<AnyElement> = toaster
         .toasts
@@ -1330,7 +1346,7 @@ pub(super) fn toast_stack<H: ToastHost>(layer: &ToastLayer<'_, H>) -> Option<Any
                 .notice_key
                 .as_ref()
                 .and_then(|key| toaster.notice_action(key));
-            toast_card(host, toast, action, theme, now)
+            toast_card(host, toast, action, width, theme, now)
         })
         .collect();
     if cards.is_empty() {
@@ -1344,7 +1360,7 @@ pub(super) fn toast_stack<H: ToastHost>(layer: &ToastLayer<'_, H>) -> Option<Any
             .absolute()
             .top(px(STACK_INSET))
             .right(px(price_axis_width + STACK_INSET))
-            .w(px(TOAST_WIDTH))
+            .w(px(width))
             .h(px(toaster.extent(stack)))
             .occlude()
             .debug_selector(|| "toast_stack".into())
@@ -1368,14 +1384,15 @@ fn toast_card<H: ToastHost>(
     host: &Entity<H>,
     toast: &Toast,
     action: Option<NoticeAction>,
+    stack_width: f32,
     theme: &AerisTheme,
     now: Instant,
 ) -> AnyElement {
-    let frame = toast.frame(now);
+    let frame = toast.frame(now, stack_width);
     let border = f32::from(platform_border_width(theme));
     // A narrower card behind the front one stays centred; its content keeps the full width so
     // nothing reflows while it shrinks.
-    let inset = (TOAST_WIDTH - frame.width) / 2.0;
+    let inset = (stack_width - frame.width) / 2.0;
     let id = toast.id;
     let measure_host = host.clone();
     let press_host = host.clone();
@@ -1468,7 +1485,7 @@ fn toast_card<H: ToastHost>(
             .absolute()
             .top_0()
             .left(px(-inset))
-            .w(px(TOAST_WIDTH - 2.0 * border))
+            .w(px(stack_width - 2.0 * border))
             .opacity(frame.content_opacity),
         )
         .into_any_element()
@@ -1771,7 +1788,7 @@ mod tests {
     }
 
     fn frame(toaster: &Toaster, id: u64, now: Instant) -> ToastFrame {
-        toaster.toasts[toaster.index_of(id).expect("toast")].frame(now)
+        toaster.toasts[toaster.index_of(id).expect("toast")].frame(now, TOAST_WIDTH)
     }
 
     fn corner(label: &'static str, detail: &str) -> ChartSurfaceNotice {
@@ -2482,6 +2499,7 @@ mod tests {
     struct StackHarness {
         toaster: Toaster,
         actions: Vec<NoticeAction>,
+        plot_width: Option<f32>,
     }
 
     impl ToastHost for StackHarness {
@@ -2505,6 +2523,7 @@ mod tests {
                     toaster: &self.toaster,
                     stack: stack(1),
                     price_axis_width: PRICE_AXIS_WIDTH,
+                    plot_width: self.plot_width,
                     theme: &AerisTheme::dark(),
                     now: Instant::now(),
                 }))
@@ -2520,6 +2539,7 @@ mod tests {
             StackHarness {
                 toaster,
                 actions: Vec::new(),
+                plot_width: None,
             }
         })
     }
@@ -2584,6 +2604,40 @@ mod tests {
             (right_inset - (PRICE_AXIS_WIDTH + STACK_INSET)).abs() <= 0.5,
             "the stack clears the price axis: {right_inset} from the right edge"
         );
+    }
+
+    #[gpui::test]
+    fn in_a_narrow_chart_the_stack_narrows_to_stay_inside_the_plot(cx: &mut TestAppContext) {
+        const PLOT_WIDTH: f32 = 250.0;
+        let (view, cx) = harness(cx);
+        view.update(cx, |host, cx| {
+            host.plot_width = Some(PLOT_WIDTH);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let plot_left = f32::from(viewport.width) - PRICE_AXIS_WIDTH - PLOT_WIDTH;
+        let stack = cx.debug_bounds("toast_stack").expect("toast stack");
+        let card = cx.debug_bounds("toast").expect("toast");
+        let expected = PLOT_WIDTH - 2.0 * STACK_INSET;
+        assert!((f32::from(stack.size.width) - expected).abs() <= 0.5);
+        assert!((f32::from(card.size.width) - expected).abs() <= 0.5);
+        assert!(
+            (f32::from(card.origin.x) - (plot_left + STACK_INSET)).abs() <= 0.5,
+            "the card keeps its inset from the plot's left edge"
+        );
+    }
+
+    #[test]
+    fn the_stack_width_fits_the_plot_between_its_bounds() {
+        assert!(approx(stack_width(None), TOAST_WIDTH));
+        assert!(
+            approx(stack_width(Some(0.0)), TOAST_WIDTH),
+            "not laid out yet"
+        );
+        assert!(approx(stack_width(Some(1_000.0)), TOAST_WIDTH));
+        assert!(approx(stack_width(Some(250.0)), 250.0 - 2.0 * STACK_INSET));
+        assert!(approx(stack_width(Some(100.0)), MINIMUM_TOAST_WIDTH));
     }
 
     #[gpui::test]

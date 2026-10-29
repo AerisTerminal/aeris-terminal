@@ -51,6 +51,7 @@ impl Render for PaneWindow {
                 toaster: &self.toaster,
                 stack: toaster::ToastStack::of(&self.pane),
                 price_axis_width: 64.0,
+                plot_width: None,
                 theme: &AerisTheme::dark(),
                 now: Instant::now(),
             }))

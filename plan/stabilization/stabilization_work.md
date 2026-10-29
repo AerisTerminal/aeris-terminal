@@ -123,6 +123,11 @@ recorded.
     GTC legs of the DAY bracket entry were cancelled with their group 6 ms later, the chart's
     Buy Limit line went away, the ticket read "no working orders", and the pane toasted
     "Buy 0.00001 BTC-USDC expired" over "DAY session ended · SIM • Practice" within one second.
+  - Fix found by the same check: in a chart narrower than a toast the stack ran past the plot's
+    left edge and was clipped under the drawing toolbar. The stack now narrows to the plot
+    width less its insets (320 px at most, 160 px at least). Verified with a guarded GUI check
+    (2026-10-29, release build of this change, a 420 px window on a fresh validation root):
+    a toast in the 248 px plot sat 12 px inside both edges with its text whole.
 - [x] M5.5 One order-group model with bracket migration (064ca1e4)
 - [x] M5.6 Superseded protection layers deleted (71f36340)
   - Verified: guarded GUI check VAL-TRD-053 (2026-10-29, release build of f9a4d06a on this PC,

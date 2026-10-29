@@ -1449,6 +1449,13 @@ impl AerisChartView {
         self.engine.axis_w.to_f32().unwrap_or_default()
     }
 
+    /// Width of the plot area left of the price axis as last laid out, so host overlays can
+    /// fit inside it.
+    #[must_use]
+    pub fn plot_width(&self) -> f32 {
+        self.engine.pane_w.to_f32().unwrap_or_default()
+    }
+
     /// Marks a load the trader is waiting on, so the symbol legend can carry it.
     ///
     /// Returns whether the surface changed, so a caller polling the host's

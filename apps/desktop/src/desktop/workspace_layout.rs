@@ -300,14 +300,13 @@ pub(super) fn workspace_pane_element(
         return div().into_any_element();
     };
     let surface = pane.surface.read(cx);
+    let chart = surface.chart.as_ref().map(|chart| chart.read(cx));
     let toasts = toast_stack(&ToastLayer {
         host: terminal,
         toaster,
         stack: ToastStack::of(&pane.surface),
-        price_axis_width: surface
-            .chart
-            .as_ref()
-            .map_or(0.0, |chart| chart.read(cx).price_axis_width()),
+        price_axis_width: chart.map_or(0.0, AerisChartView::price_axis_width),
+        plot_width: chart.map(AerisChartView::plot_width),
         theme,
         now: Instant::now(),
     });
