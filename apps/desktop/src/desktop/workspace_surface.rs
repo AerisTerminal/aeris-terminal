@@ -5815,8 +5815,8 @@ impl WorkspaceSurface {
         });
         match result {
             Ok(()) => Self::clear_indicator_failure("order_flow", cx),
-            // A tick-size correction tears the chart's window down; the
-            // runtime's next covering reset restores it.
+            // A tick-size correction tears the chart's window down; adopting
+            // the verified terms redraws the retained tape as a covering window.
             Err(OrderFlowApplyError::AwaitingCoveringWindow) => {
                 diagnostic!(
                     "Aeris pane order-flow append awaited a covering window; the next reset restores it"
@@ -6120,7 +6120,7 @@ impl WorkspaceSurface {
 
     fn apply_catalog_event(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
         if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
-            self.adopt_verified_terms(instrument);
+            self.adopt_verified_terms(instrument, cx);
         }
         let Some(provider) = ProviderId::find(provider_catalog_event_provider(&event))
             .filter(|provider| self.symbol_entry.browser().covers(*provider))
@@ -6169,14 +6169,25 @@ impl WorkspaceSurface {
 
     /// The chart's provisional descriptor has no price increment, which the
     /// footprint and order tools need; the provider's verified terms replace it.
-    fn adopt_verified_terms(&mut self, instrument: &InstallProviderInstrument) {
-        if self.product.as_ref().is_some_and(|product| {
-            product != instrument && verified_terms_supersede(product, instrument)
-        }) {
-            self.product = Some(instrument.clone());
-            self.descriptor =
-                engine_market_worker::refreshed_descriptor(instrument, self.descriptor.take());
-            self.persistence.mark_dirty();
+    fn adopt_verified_terms(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(product) = self.product.as_ref().filter(|product| {
+            *product != instrument && verified_terms_supersede(product, instrument)
+        }) else {
+            return;
+        };
+        let increment_changed = product.price_increment != instrument.price_increment;
+        self.product = Some(instrument.clone());
+        self.descriptor =
+            engine_market_worker::refreshed_descriptor(instrument, self.descriptor.take());
+        self.persistence.mark_dirty();
+        // Order flow is keyed by the price increment, and the runtime sends no new
+        // covering window for a terms change, so the retained tape is redrawn here.
+        if increment_changed && self.order_flow.tape().is_some() {
+            self.apply_trade_tape_to_chart(TapeApply::Reset, cx);
         }
     }
 

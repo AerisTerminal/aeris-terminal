@@ -437,6 +437,12 @@ only on the guarded GUI checks on their lines.
     no-op revisions only because the chart diffed and discarded already-applied trades), while
     the new path applies 10 single-print `Append`s in 24.8 ms total (~2.5 ms per print, inside
     one frame budget) with no re-projection and no ordinal diffing.
+  - Fix found on a fresh validation root: the default pane starts on a provisional descriptor
+    without a price increment, so the first tape `Reset` cannot draw the footprint, and since
+    the incremental tape no later `Reset` came, leaving the footprint blank and the "needs a
+    published price increment" notice up. Adopting the verified terms now redraws the
+    retained tape as a covering window
+    (`pane_harness_verified_terms_draw_the_tape_the_provisional_descriptor_could_not`).
   - Left: GUI Hyperliquid sweep-highlight check. Closes UI-14 with M7.3 and M7.9.
 - [x] M7.12 Desktop tests against controller boundaries
   - Landed: `test_support::provider_instruments` renamed to `test_support::providers` per the

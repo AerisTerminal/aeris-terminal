@@ -4761,6 +4761,91 @@ fn pane_harness_verified_terms_replace_the_provisional_chart_descriptor(cx: &mut
 }
 
 #[gpui::test]
+fn pane_harness_verified_terms_draw_the_tape_the_provisional_descriptor_could_not(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let provisional = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("initial instrument")
+    });
+    assert_eq!(provisional.price_increment, None);
+    let instrument_id = provisional.instrument_id.clone();
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.set_chart_order_flow_settings(
+            OrderFlowSettings {
+                show_cumulative_delta: true,
+                ..OrderFlowSettings::default()
+            },
+            cx,
+        ));
+    });
+    harness
+        .publications
+        .send(PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(
+                FixtureMarketEvents::default().trade_tape(
+                    aeris_desktop::test_support::fixture_trade_tape(&provisional, 1, 1, 3),
+                ),
+            ),
+        ))
+        .expect("provisional tape");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    let chart = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("chart"));
+    assert_eq!(applied_tape_ordinal(&chart, &instrument_id, 1, cx), None);
+    let order_flow_notices = |cx: &VisualTestContext| {
+        cx.read(|cx| {
+            harness
+                .window
+                .read(cx)
+                .toaster
+                .notices()
+                .iter()
+                .filter(|notice| notice.key.kind == "order_flow")
+                .count()
+        })
+    };
+    assert_eq!(order_flow_notices(cx), 1);
+
+    let mut verified = provisional;
+    verified.price_increment = Some(1);
+    harness
+        .publications
+        .send(PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(harness.market_events.catalog(
+                aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(
+                    aeris_market_runtime::MarketProviderInstrumentSelection {
+                        consumer_id: aeris_market_runtime::MarketConsumerId(
+                            std::num::NonZeroU64::MIN,
+                        ),
+                        command_generation: 1,
+                        instrument: verified,
+                    },
+                ),
+            )),
+        ))
+        .expect("verified terms enter mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        applied_tape_ordinal(&chart, &instrument_id, 1, cx),
+        Some(3),
+        "the retained tape is drawn under the verified increment without a new reset"
+    );
+    assert_eq!(order_flow_notices(cx), 0);
+}
+
+#[gpui::test]
 fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     cx: &mut TestAppContext,
 ) {
