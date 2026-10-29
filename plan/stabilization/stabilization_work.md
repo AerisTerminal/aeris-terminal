@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-64 of 90 items are fully done (2026-10-29).
+65 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -41,7 +41,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M5 trading engine | 8 / 12 | 4 (GUI checks) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 2 / 12 | 10 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 8 / 12 | 4 (code complete; GUI, VM and process checks) |
+| M8 lifecycle and trim | 9 / 12 | 3 (code complete; GUI and install checks) |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -500,7 +500,7 @@ still wait on the GUI checks and the remaining work on their lines.
     crate may enable `producer`, the moved dependencies and files cannot return to
     `platform_runtime`, and the signers stay gated. Kept, not deleted (D2). Closes PL-01.
     CI passed the workspace gate on 27dd1f50, which includes this commit.
-- [ ] M8.2 Launcher hygiene and trust
+- [x] M8.2 Launcher hygiene and trust
   - Landed (LC-01, LC-16, LC-14): the launcher parses its command into `LauncherCommand` before
     any key loads; `--launcher-identity` and `--remove-all-local-data` never load the verifying
     key, and every release command loads it in `run_verified`. Uninstall moved to the key-free
@@ -556,8 +556,10 @@ still wait on the GUI checks and the remaining work on their lines.
     a different signer, the unsigned test binary, a catalog-only system file and a modified
     signed copy are all refused; the installed-inventory audit refuses an unsigned `.exe` with
     a configured signer. naming_check rejects PowerShell in `release_lifecycle` production.
-  - Left:
-    - Check: a development desktop start spawns no launcher child (process list); not run here.
+  - Verified: a plain development start at 3c3cbb91 (no validation root, `LOCALAPPDATA`
+    redirected to a scratch folder) spawned no child process and no `aeris_launcher` in 20
+    one-second process-list samples, and left the real data root untouched (evidence archived
+    outside the repo in `C:\Users\devraj\aeris-evidence\m8.2\`).
 - [x] M8.3 Remaining FFI moves to `platform_sys`
   - Landed: `display_timing.rs` (display inventory, QPC and DWM composition probes) is deleted
     with its `Win32_Graphics_Dwm` and `Win32_System_Performance` features and its
