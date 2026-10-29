@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-79 of 90 items are fully done (2026-10-29).
+82 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -40,7 +40,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M4 trading core | 9 / 10 | 1 (GUI check) |
 | M5 trading engine | 11 / 12 | 1 (GUI check) |
 | M6 desktop bridge | 13 / 13 | 0 |
-| M7 desktop structure | 5 / 12 | 7 (GUI checks and the idle CPU measurement) |
+| M7 desktop structure | 8 / 12 | 4 (GUI checks and the idle CPU measurement) |
 | M8 lifecycle and trim | 10 / 12 | 2 (code complete; GUI checks) |
 
 Every open item has its code landed and waits only on the checks listed on its line: guarded GUI
@@ -265,7 +265,7 @@ only on the guarded GUI checks on their lines.
     workspace). Studies added and removed as in M7.3, the order book and Time & Sales showed live
     Hyperliquid books and prints, and an alert created from the price axis at 80,076 drew its line,
     fired a "BTC-USDC crossed" toast within a minute and turned triggered. Part of UI-07.
-- [ ] M7.5 `TerminalApp` split into app controllers
+- [x] M7.5 `TerminalApp` split into app controllers
   - Landed: `desktop/tab_strip.rs` owns the open tabs in order, the selected tab and the tab
     drag behind private fields; selecting, reordering, adding and closing keep the selection on
     the same tab and report what changed, and `TerminalApp` drops from 68 to 66 fields.
@@ -294,7 +294,10 @@ only on the guarded GUI checks on their lines.
     `components/`, `native_ui/`, `engine_market_worker/` and root-level files, lives under
     `apps/desktop/src/desktop/`, the library's fixtures under `apps/desktop/src/test_support/`,
     and `desktop_modules_follow_the_directory_tree` rejects a new `#[path]`.
-  - Left: GUI check of tabs, search and menus. Part of UI-07.
+  - Verified: guarded GUI check (2026-10-29, release build of `ed93b752` on a validation root
+    with two tabs). + created a tab from the layout picker, the layout menu's Rename renamed it,
+    dragging it left reordered the tabs with the selection kept, its X closed it, a symbol search
+    for XRP switched the pane on Enter, and Ctrl+K opened the command palette. Part of UI-07.
 - [ ] M7.6 Dirty-source `FrameScheduler`
   - Landed: `desktop/frame_scheduler.rs` replaces `frame_wakes.rs`. Its `DirtySet` holds one
     bit per `AppSource` (summaries, screener, trading, notices, persistence receipts, account,
@@ -354,7 +357,7 @@ only on the guarded GUI checks on their lines.
   - Left: GUI check with a truncated workspace file in a validation folder (the layout is
     restored from the backup); not run here. An envelope schema newer than 1 is rejected
     and quarantined like corruption until M7.8 adds `NewerVersion` read-only handling.
-- [ ] M7.8 Writer-owned workspace document and migration chain
+- [x] M7.8 Writer-owned workspace document and migration chain
   - Landed: `RestoreOutcome` (`Fresh`, `Restored`, `RestoredFromFallback`, `Migrated`,
     `NewerVersion`, `Defaulted`) in `desktop/local_state.rs`; `DurableContainer` carries the
     newest supported schema and reports a newer-version file without quarantining it or
@@ -416,8 +419,12 @@ only on the guarded GUI checks on their lines.
   - Verified: a copied real workspace migrates intact (2026-10-29, same build and evidence as
     M5.6). The user's workspace written by 1.2.0, opened by 1.2.0 and by this build on separate
     copies, showed the same tab, panes, studies, order entry, watchlist flags and hollow style.
-  - Left: GUI checks that a corrupt workspace shows the notice with Open folder and the layout is
-    not silently replaced, and that a newer-version workspace shows the read-only notice.
+  - Verified: guarded GUI checks (2026-10-29, release build of `ed93b752`, validation roots made
+    from a real workspace). With a flipped byte and no backup, Aeris showed "Workspace could not
+    be restored" with Open folder, kept the file as `workspace-state.pb.corrupt-1` and opened a
+    fresh layout. With the envelope schema set to 99 it showed "Workspace opened read-only",
+    Open folder opened File Explorer at the data folder, and after a clean exit the file was
+    byte-for-byte unchanged.
   - Workspaces written by 1.0.0-1.2.0 must open unchanged in meaning, including saved layouts,
     watchlist flags and pane heights. Closes UI-09 and PL-18.
 - [x] M7.9 Hollow candles as an Aeris Charts series style
@@ -451,7 +458,7 @@ only on the guarded GUI checks on their lines.
     sequencing across rewrite and selection-generation changes, overflow-replay reconstructs the
     exact tape, sweep classification over the retained trailing window. M7.11 made
     `TradeTapeUpdate` the only tape publication and removed the legacy full snapshot.
-- [ ] M7.11 Desktop consumes runtime sweeps and incremental tape
+- [x] M7.11 Desktop consumes runtime sweeps and incremental tape
   - Landed: `OrderFlowPresenter` applies the runtime's fenced `TradeTapeUpdate` stream into a
     ring bounded at the runtime's `MAXIMUM_RECENT_LADDER_TRADES` (65,536): a `Reset` installs
     the covering window, an `Append` must continue the ring exactly at `from_ordinal` (a gap
@@ -491,7 +498,9 @@ only on the guarded GUI checks on their lines.
     footprint got no prints). The presenter now follows the runtime cursor, under which an empty
     window continues at ordinal 1 (`an_empty_covering_window_continues_at_the_first_ordinal`);
     a 40 s live validation start then logged no broken append.
-  - Left: GUI Hyperliquid sweep-highlight check. Closes UI-14 with M7.3 and M7.9.
+  - Verified: guarded GUI check (2026-10-29, release build of `ed93b752`). BTC-USDC Time & Sales
+    on Hyperliquid highlighted a 20-print buy sweep (80,134 down to 80,130 within one second) and
+    kept it highlighted as later prints scrolled in. Closes UI-14 with M7.3 and M7.9.
 - [x] M7.12 Desktop tests against controller boundaries
   - Landed: `test_support::provider_instruments` renamed to `test_support::providers` per the
     spec (design 11 §8 does not name the module; the work item does), with
