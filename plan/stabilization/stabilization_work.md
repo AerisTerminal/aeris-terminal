@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-78 of 90 items are fully done (2026-10-29).
+79 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -40,7 +40,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M4 trading core | 9 / 10 | 1 (GUI check) |
 | M5 trading engine | 11 / 12 | 1 (GUI check) |
 | M6 desktop bridge | 13 / 13 | 0 |
-| M7 desktop structure | 4 / 12 | 8 (GUI checks and the idle CPU measurement) |
+| M7 desktop structure | 5 / 12 | 7 (GUI checks and the idle CPU measurement) |
 | M8 lifecycle and trim | 10 / 12 | 2 (code complete; GUI checks) |
 
 Every open item has its code landed and waits only on the checks listed on its line: guarded GUI
@@ -242,7 +242,7 @@ only on the guarded GUI checks on their lines.
   - Verified: guarded GUI check (2026-10-29, same build and evidence as M5.6). A right click on
     the chart opened the context menu, its Settings opened and closed Chart settings, and an SMA 20
     added from Indicators was removed by its legend X.
-- [ ] M7.4 `WorkspaceSurface` split into pane controllers
+- [x] M7.4 `WorkspaceSurface` split into pane controllers
   - Landed: `desktop/context_panel_controller.rs` owns the context snapshot, panel visibility
     (an enum), tab, height, API-key dialog and risk message behind change-reporting setters.
     `desktop/alerts_controller.rs` owns the alert list, create dialog, restore-failure notice and
@@ -261,7 +261,10 @@ only on the guarded GUI checks on their lines.
     the chart's observed user-state revision, the viewport last reported to the market worker
     and the dirty flag behind private fields; the surface's constructor no longer needs the
     `too_many_lines` allow.
-  - Left: GUI smoke test of studies, alerts, the order book and time and sales. Part of UI-07.
+  - Verified: guarded GUI check (2026-10-29, release build of `ed93b752` on a copy of a real
+    workspace). Studies added and removed as in M7.3, the order book and Time & Sales showed live
+    Hyperliquid books and prints, and an alert created from the price axis at 80,076 drew its line,
+    fired a "BTC-USDC crossed" toast within a minute and turned triggered. Part of UI-07.
 - [ ] M7.5 `TerminalApp` split into app controllers
   - Landed: `desktop/tab_strip.rs` owns the open tabs in order, the selected tab and the tab
     drag behind private fields; selecting, reordering, adding and closing keep the selection on
@@ -811,8 +814,11 @@ still wait on the GUI checks and the remaining work on their lines.
   - TR-12 order plant: not unused. `market_runtime::rithmic_venue` opens it for broker orders, so
     it stays in the default build.
   - Verified: workspace gate locally and CI run 40728456359 on `d54352cb` (Windows and Ubuntu) green.
-  - Left: GUI smoke test (charts, drawing stamps and image export after the `resvg` move), including
-    a signed-in avatar check. Not run.
+  - Verified: guarded GUI check (2026-10-29, release build of `ed93b752`). The desktop started,
+    charts drew live, a check stamp placed from the drawing toolbar rendered, and Capture chart >
+    Copy image put the chart with its drawings, logo and timestamp on the clipboard in the dark and
+    High Contrast themes.
+  - Left: a signed-in avatar check (maintainer sign-in; validation roots skip sign-in).
 - [ ] M8.11 Vendor and tooling trim
   - Landed: tools trim. The physical-pacing, desktop-endurance, transition-capture and evidence
     verifier scripts and every other unreferenced `tools/*.ps1`/`*.sh` wrapper are deleted (21
