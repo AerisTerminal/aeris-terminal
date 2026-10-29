@@ -927,10 +927,11 @@ Outside the work items; each needs a maintainer decision or access before it can
   - macOS signing and notarization
   - code-signing certificate and key custody
   - Rithmic live qualification and conformance approval before production order routing
-- **Shutdown retirement warning:** after a graceful window close,
-  `market consumer could not be removed during retirement` was logged twice
-  (`engine_market_worker/runtime.rs::retire_endpoint`). Investigate retirement ordering and
-  idempotence; never suppress the warning.
+- **Shutdown retirement warning:** resolved. A worker batch holding a `Shutdown` command and the
+  sender's disconnect retired the endpoint twice, so the second `remove_consumer` failed and a
+  second acknowledgement was sent. `retire_endpoint` now returns for an inactive endpoint
+  (`an_endpoint_retires_and_acknowledges_once`); the warning itself stays for real failures. A
+  live window close has not been rerun since the fix.
 - **Out of scope by D3:** depth-aware partial fills, slippage, margin and buying power, currency
   conversion, and the Funding/MarginReserve ledger kinds (hooks only).
 - **Old P&L data:** the `trade_pnl_cycles` and `risk_trade_cycles` tables and the per-fill P&L

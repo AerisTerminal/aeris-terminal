@@ -1011,6 +1011,10 @@ pub(super) fn retire_endpoint(
     client_id: u64,
     endpoint: &mut WorkerEndpoint,
 ) {
+    // A shutdown command and the sender's disconnect can arrive in one batch.
+    if !endpoint.active {
+        return;
+    }
     if let Err(error) = market.remove_consumer(client_id, endpoint.consumer_id) {
         diagnostic!("Aeris market consumer could not be removed during retirement: {error}");
     }
@@ -1035,6 +1039,38 @@ mod tests {
     };
     use aeris_trading_runtime::clock::ManualClock;
     use std::num::{NonZeroU64, NonZeroUsize};
+
+    #[test]
+    fn an_endpoint_retires_and_acknowledges_once() {
+        let market = MarketService::start().expect("market runtime");
+        market.attach(1).expect("client attaches");
+        market
+            .register_consumer(1, 1, 7)
+            .expect("consumer registers");
+        let (messages, _receiver) =
+            aeris_desktop::market_worker::market_projection_channel(NonZeroUsize::MIN);
+        let (_command_sender, commands) = mpsc::sync_channel(1);
+        let (shutdown, acknowledgements) = mpsc::sync_channel(1);
+        let mut endpoint = WorkerEndpoint {
+            consumer_id: 7,
+            messages,
+            commands,
+            shutdown,
+            pending_recovery: None,
+            active_generation: 1,
+            resource_class: super::super::ConsumerResourceClass::Foreground,
+            order_book: OrderBookDetail::Hidden,
+            active: true,
+        };
+        retire_endpoint(&market, 1, &mut endpoint);
+        assert_eq!(acknowledgements.try_recv(), Ok(()));
+        retire_endpoint(&market, 1, &mut endpoint);
+        assert!(
+            acknowledgements.try_recv().is_err(),
+            "a shutdown followed by a disconnect retires the consumer once"
+        );
+        market.detach(1).expect("client detaches");
+    }
 
     #[test]
     fn alert_publication_keeps_consumer_fence_and_rejects_wrong_identity() {
