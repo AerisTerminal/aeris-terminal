@@ -258,8 +258,8 @@ violations and missing verification explicitly, and never describe them as satis
   ID; written off the UI thread once its first sign-in or workspace window opens, never on a
   validation root). The launcher waits up to 60 seconds for its own child's marker; an
   unsuccessful exit or no marker in time (the child is stopped) quarantines the release and rolls
-  back. A marker for the active generation from an earlier launch ends probation, and
-  `tools/naming_check` keeps both the launcher bound and the desktop calls. The launcher waits on and
+  back. A marker for the active generation from an earlier launch ends probation; the launcher test
+  `probation_ends_on_the_child_marker_an_exit_or_the_bound` covers that bound. The launcher waits on and
   detects processes through `platform_sys::process` (re-exported by `platform_runtime`), never
   sysinfo, and uninstall renames the running launcher to `aeris_launcher.retired-<pid>` beside the
   install root; later launcher starts and the uninstaller delete it by that exact name, never
@@ -269,7 +269,8 @@ violations and missing verification explicitly, and never describe them as satis
   batches kept). The `--update-and-restart` helper audits the active release once and checks the
   prepared release and the current channel offer before it prints READY; after READY it only
   waits for COMMIT and the desktop's exit. The desktop waits for READY up to
-  `UPDATE_RESTART_VERIFICATION_TIMEOUT` (2 minutes), and `tools/naming_check` keeps that order.
+  `UPDATE_RESTART_VERIFICATION_TIMEOUT` (2 minutes). The launcher's `RestartHandshake` seam tests
+  (`restart_verifies_everything_before_ready_then_only_waits` and its siblings) prove that order.
 - `tools/release_packager` (`aeris_release_packager`) packages one signed release into an
   origin-shaped output tree (payload executables, rollback-compatibility data, signed manifest and,
   against a predecessor, a signed block plan), writes the channel pointer and prints the Inno Setup
@@ -446,10 +447,9 @@ the check.
 ## Market-data and provider work
 
 - Keep the four coordinator command/event characterization scenarios under
-  `market_service/tests/characterization.rs`; `tools/naming_check` requires their exact names so
-  lifecycle refactors cannot silently drop the baseline.
-- Keep the deterministic market replay scenarios under `market_service/replay/mod.rs`;
-  `tools/naming_check` requires their names so lifecycle changes retain replay coverage.
+  `market_service/tests/characterization.rs` and the deterministic market replay scenarios under
+  `market_service/replay/mod.rs`; lifecycle refactors change their expectations deliberately and
+  never delete a scenario to make a gate pass.
 - Live market probes run only from `tools/aeris_probes` on an isolated validation root with an
   exclusive instance lock. The optional `probe` feature's bounded Hyperliquid fault control
   interrupts only its WebSocket; never use a process-wide proxy that blocks catalog HTTP.

@@ -763,6 +763,14 @@ still wait on the GUI checks and the remaining work on their lines.
     before READY. The text pin `update_restart_verifies_everything_before_ready` and the
     Authenticode call-site pin are deleted; `installed_exe_inventory_requires_the_embedded_publisher_signature`
     already rejects an unsigned executable through `verify_publisher`.
+  - Landed: naming_check drops the source-text pins D28 names (exact test names for the market
+    characterization, replay and descriptor tests, launcher rollout/probation strings, packager
+    signing-key strings, install-shell constants and the other `contains` checks of a rule's
+    positive form). Each kept rule rejects only a retired or forbidden shape; retired paths are
+    one `RETIRED_PATHS` list and the production trait allowlist is counted per file. AGENTS.md
+    now cites the behavior tests that carry those guarantees.
+  - Left: behavior tests for the account refresh rotation, local clients, workspace writer and
+    development-build sign-in pins, then their deletion.
   - Left: structural checks with a recursive markdown inventory, with text pins replaced by
     behavior tests.
   - Finalize `Readme` and `AGENTS.md`, and close out this tracker. Closes PL-08.

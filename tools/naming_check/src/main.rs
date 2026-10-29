@@ -406,14 +406,6 @@ fn inspect_all_snapshot_boundaries(root: &Path, violations: &mut Vec<PathBuf>) -
     Ok(())
 }
 
-fn inspect_market_tests_and_snapshot_boundaries(
-    root: &Path,
-    violations: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-    inspect_market_test_names(root, violations)?;
-    inspect_all_snapshot_boundaries(root, violations)
-}
-
 fn has_process_global_desktop_account(source: &str) -> bool {
     let production = production_source_prefix(source);
     [
@@ -448,29 +440,7 @@ fn has_process_global_desktop_persistence(source: &str) -> bool {
     .iter()
     .any(|forbidden| production.contains(forbidden))
 }
-const MARKET_CHARACTERIZATION_TESTS: &[&str] = &[
-    "characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous_history",
-    "characterization_outbox_overflow_emits_covering_snapshot",
-    "characterization_stale_generation_history_completion_is_ignored",
-    "characterization_symbol_or_timeframe_change_keeps_provider_session",
-];
-const MARKET_REPLAY_TESTS: &[&str] = &[
-    "replay_day3_round_trip",
-    "replay_stall_while_open",
-    "replay_stall_while_closed",
-    "replay_cme_roll_across_dst",
-    "replay_non_cme_calendar_resolution",
-    "replay_backoff_schedules",
-    "replay_stale_epoch_completion",
-    "replay_overflow_covering_snapshot",
-    "replay_reseed_during_live_flow",
-    "replay_switch_storm",
-    "replay_gap_recovery",
-    "replay_history_exhaustion",
-    "replay_superseded_generations",
-    "replay_quote_lease_share_release",
-    "replay_sanitized_public_fixture",
-];
+
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     "Cargo.lock",
     "Cargo.toml",
@@ -749,8 +719,8 @@ fn main() -> ExitCode {
         eprintln!("failed to inspect repository names: {error}");
         return ExitCode::FAILURE;
     }
-    if let Err(error) = inspect_market_tests_and_snapshot_boundaries(&root, &mut violations) {
-        eprintln!("failed to inspect market tests or trading snapshot boundary: {error}");
+    if let Err(error) = inspect_all_snapshot_boundaries(&root, &mut violations) {
+        eprintln!("failed to inspect the trading snapshot boundary: {error}");
         return ExitCode::FAILURE;
     }
     for path in [
@@ -1008,10 +978,6 @@ fn desktop_control_flow_does_not_match_display_text(source: &str) -> bool {
     false
 }
 
-fn has_runtime_descriptor_test(source: &str) -> bool {
-    source.contains("fn every_registered_provider_has_a_complete_published_descriptor()")
-}
-
 // The fixture is available to the diagnostic executable and tests, never to the default
 // desktop. The only diagnostic caller is the explicitly gated conformance command; the
 // only other desktop user is the test-only pane harness.
@@ -1051,53 +1017,6 @@ fn inspect_desktop_boundaries(
         }
     }
     Ok(())
-}
-
-fn inspect_market_test_names(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
-    let descriptor_tests = root.join("crates/market_runtime/src/market_service/tests.rs");
-    if !has_runtime_descriptor_test(&read_source(&descriptor_tests)?) {
-        violations.push(relative_to(root, &descriptor_tests));
-    }
-    for (path, missing) in [
-        (
-            "crates/market_runtime/src/market_service/tests/characterization.rs",
-            missing_market_characterization_tests as fn(&str) -> Vec<&'static str>,
-        ),
-        (
-            "crates/market_runtime/src/market_service/replay/mod.rs",
-            missing_market_replay_tests as fn(&str) -> Vec<&'static str>,
-        ),
-    ] {
-        let file = root.join(path);
-        if !missing(&read_source(&file)?).is_empty() {
-            violations.push(relative_to(root, &file));
-        }
-    }
-    Ok(())
-}
-
-fn missing_market_characterization_tests(source: &str) -> Vec<&'static str> {
-    MARKET_CHARACTERIZATION_TESTS
-        .iter()
-        .copied()
-        .filter(|name| {
-            !source
-                .lines()
-                .any(|line| line.trim() == format!("fn {name}() {{"))
-        })
-        .collect()
-}
-
-fn missing_market_replay_tests(source: &str) -> Vec<&'static str> {
-    MARKET_REPLAY_TESTS
-        .iter()
-        .copied()
-        .filter(|name| {
-            !source
-                .lines()
-                .any(|line| line.trim() == format!("fn {name}() {{"))
-        })
-        .collect()
 }
 
 fn violates_calendar_boundary(path: &str, source: &str) -> bool {
@@ -1185,14 +1104,23 @@ fn consumer_delivery_is_unfenced(consumer: &str, runtime: &str, commands: &str) 
     let consumer = production_source_prefix(consumer);
     let runtime = production_source_prefix(runtime);
     let commands = production_source_prefix(commands);
-    !consumer.contains("pub type MarketConsumerEvent =")
-        || !consumer.contains("Fenced<aeris_market_engine::fence::ConsumerTag, MarketRuntimeEvent>")
-        || !runtime.contains("Result<Option<crate::MarketConsumerEvent>, String>")
-        || !runtime.contains("Result<Vec<(u64, crate::MarketConsumerEvent)>, String>")
-        || !commands.contains("Reply<Option<crate::MarketConsumerEvent>>")
-        || !commands.contains("Reply<Vec<(u64, crate::MarketConsumerEvent)>>")
-        || runtime.contains("Result<Option<MarketRuntimeEvent>, String>")
-        || runtime.contains("Result<Vec<(u64, MarketRuntimeEvent)>, String>")
+    let alias_is_fenced = consumer
+        .split_once("pub type MarketConsumerEvent =")
+        .and_then(|(_, alias)| alias.split_once(';'))
+        .is_some_and(|(alias, _)| {
+            alias.contains("Fenced<aeris_market_engine::fence::ConsumerTag, MarketRuntimeEvent>")
+        });
+    // Delivery replies and results; the outbox's internal slots hold raw events legitimately.
+    let unfenced = [
+        "Reply<Option<MarketRuntimeEvent>>",
+        "Reply<Vec<(u64, MarketRuntimeEvent)>>",
+        "Result<Option<MarketRuntimeEvent>",
+        "Result<Vec<(u64, MarketRuntimeEvent)>",
+    ];
+    !alias_is_fenced
+        || unfenced
+            .iter()
+            .any(|raw| runtime.contains(raw) || commands.contains(raw))
 }
 
 fn inspect_consumer_delivery(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -1565,15 +1493,6 @@ mod tests {
             "crates/trading_runtime/src/core/mod.rs",
             "pub struct TradingSnapshot {} // a removed test gate must fail"
         ));
-    }
-
-    #[test]
-    fn practice_account_capacity_survives_snapshot_confinement() {
-        assert!(
-            manifest("crates/trading_runtime/src/admission/mod.rs")
-                .contains("const MAXIMUM_PRACTICE_ACCOUNTS: usize = 10_000;"),
-            "trading owner lost the released practice account capacity"
-        );
     }
 
     #[test]
@@ -3279,36 +3198,68 @@ mod tests {
             ],
         );
     }
-    #[test]
-    fn transitional_backend_crate_names_do_not_return() {
-        let workspace = manifest("Cargo.toml");
-        for retired in [
-            "apps/engine",
+    /// Paths of retired boundaries that must not return, with what each was.
+    const RETIRED_PATHS: &[(&str, &str)] = &[
+        ("apps/engine", "the secondary market process"),
+        (
             "crates/local_engine_client",
-            "crates/local_history",
-            "crates/local_storage",
+            "the cross-process engine client",
+        ),
+        (
             "crates/engine_protocol",
-            "crates/transport",
+            "the cross-process engine protocol",
+        ),
+        ("crates/transport", "general transport framing"),
+        ("crates/local_history", "market-history persistence"),
+        ("crates/local_storage", "market-history persistence"),
+        (
             "crates/desktop_market_runtime",
+            "a desktop-owned market runtime",
+        ),
+        (
             "crates/desktop_provider_runtime",
-        ] {
+            "a desktop-owned provider runtime",
+        ),
+        (
+            "crates/market_engine_core",
+            "a split of the cohesive market_engine crate",
+        ),
+        (
+            "crates/market_engine_runtime",
+            "a split of the cohesive market_engine crate",
+        ),
+        (
+            "crates/market_engine_services",
+            "a split of the cohesive market_engine crate",
+        ),
+        (
+            "crates/market_engine_common",
+            "a split of the cohesive market_engine crate",
+        ),
+        (
+            "crates/market_engine_types",
+            "a split of the cohesive market_engine crate",
+        ),
+        (
+            "crates/platform_runtime/src/background_service.rs",
+            "the background market service",
+        ),
+        (
+            "apps/desktop/src/transition_capture.rs",
+            "the transition-capture producer",
+        ),
+        (
+            "tools/run_native_transition_capture.ps1",
+            "the engine-era transition runner",
+        ),
+    ];
+
+    #[test]
+    fn retired_paths_do_not_return() {
+        for (path, retired) in RETIRED_PATHS {
             assert!(
-                !repository_root().join(retired).exists(),
-                "retired architecture boundary {retired} must not return"
-            );
-        }
-        for replacement in ["market_runtime", "account_runtime", "contracts"] {
-            assert!(
-                repository_root()
-                    .join("crates")
-                    .join(replacement)
-                    .join("Cargo.toml")
-                    .is_file(),
-                "current boundary crates/{replacement} is missing"
-            );
-            assert!(
-                workspace.contains(replacement),
-                "workspace lost crates/{replacement}"
+                !repository_root().join(path).exists(),
+                "{path} restores {retired}"
             );
         }
     }
@@ -3500,8 +3451,6 @@ mod tests {
                 );
             }
         }
-        let host_events = manifest("crates/ui/chart_integration/src/view/host_events.rs");
-        assert!(host_events.contains("impl gpui::EventEmitter<ChartHostEvent> for AerisChartView"));
     }
 
     /// Hollow candle bodies are an engine-owned `CandleBody` series style: the host selects it
@@ -3569,7 +3518,6 @@ mod tests {
             ],
         );
         let packages = manifest("apps/desktop/src/desktop/study_packages.rs");
-        assert!(packages.contains("TRUSTED_NATIVE_STUDY_PACKAGES"));
         for forbidden in ["LoadLibrary", "dlopen", "read_dir", "libloading"] {
             assert!(
                 !packages.contains(forbidden),
@@ -3680,17 +3628,6 @@ mod tests {
             production,
             "#[cfg(test)] mod tests { use FixtureMarketWorker; }\nfn production() {}"
         ));
-        let library = manifest("apps/desktop/src/lib.rs");
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(
-            library.contains("#[cfg(any(test, feature = \"diagnostics\"))]\npub mod test_support;")
-        );
-        assert!(
-            desktop.contains(
-                "#[cfg(any(test, feature = \"diagnostics\"))]\nmod readiness_conformance;"
-            )
-        );
-        assert!(desktop.contains("#[cfg(test)]\nmod pane_harness;"));
         assert!(!super::violates_fixture_market_boundary(
             "apps/desktop/src/desktop/pane_harness.rs",
             "market: FixtureMarketWorker,"
@@ -3750,20 +3687,6 @@ mod tests {
 
     #[test]
     fn market_engine_has_one_lock_free_mutable_owner() {
-        let owner = manifest("crates/market_engine/src/lib.rs");
-        for field in [
-            "demands: DemandRegistry",
-            "providers: ProviderManager",
-            "series: SeriesStore",
-            "subscriptions: SubscriptionRegistry",
-            "publications: PublicationManager",
-        ] {
-            assert!(
-                owner.contains(field),
-                "MarketEngine must retain authoritative ownership of {field}"
-            );
-        }
-
         for path in production_sources_under("crates/market_engine/src") {
             let contents = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -3775,75 +3698,6 @@ mod tests {
                     relative_string(&path)
                 );
             }
-        }
-    }
-
-    #[test]
-    fn market_characterization_names_are_required_individually() {
-        let source = fs::read_to_string(
-            repository_root()
-                .join("crates/market_runtime/src/market_service/tests/characterization.rs"),
-        )
-        .expect("characterization test file");
-        assert_eq!(
-            super::missing_market_characterization_tests(&source),
-            Vec::<&str>::new()
-        );
-        for required in super::MARKET_CHARACTERIZATION_TESTS {
-            let without = source.replace(&format!("fn {required}() {{"), "");
-            assert_eq!(
-                super::missing_market_characterization_tests(&without),
-                vec![*required],
-                "{required} must be individually enforced"
-            );
-        }
-    }
-
-    #[test]
-    fn market_replay_names_are_required_individually() {
-        let source = fs::read_to_string(
-            repository_root().join("crates/market_runtime/src/market_service/replay/mod.rs"),
-        )
-        .expect("market replay tests");
-        assert_eq!(
-            super::missing_market_replay_tests(&source),
-            Vec::<&str>::new()
-        );
-        for required in super::MARKET_REPLAY_TESTS {
-            let without = source.replace(&format!("fn {required}() {{"), "");
-            assert_eq!(
-                super::missing_market_replay_tests(&without),
-                vec![*required],
-                "{required} must be individually enforced"
-            );
-        }
-    }
-
-    #[test]
-    /// Only the files are asserted here, never the names of the tests inside
-    /// them.
-    ///
-    /// Asserting that a source contains a particular test-function name proves
-    /// nothing about behaviour: renaming a test failed the gate while gutting
-    /// its body passed it, so the assertion punished the one change that was
-    /// safe and waved through the one that was not. What a test covers is the
-    /// test's job to assert; this one only keeps the boundaries from vanishing.
-    fn durable_migration_test_boundaries_remain_present() {
-        for relative in [
-            "crates/market_runtime/src/market_service/history/tracker.rs",
-            "crates/provider_history/tests/handoff_conformance.rs",
-            "crates/contracts/tests/contracts.rs",
-            "crates/market_runtime/src/market_service/tests.rs",
-            "crates/market_runtime/src/study/tests.rs",
-            "crates/account_runtime/src/account_service/tests.rs",
-            "apps/desktop/src/desktop/workspace_surface/tests.rs",
-            "apps/desktop/src/desktop/http_wiring_tests.rs",
-            "apps/desktop/src/desktop/readiness_conformance.rs",
-        ] {
-            assert!(
-                repository_root().join(relative).is_file(),
-                "durable test boundary {relative} is missing"
-            );
         }
     }
 
@@ -3970,28 +3824,7 @@ mod tests {
 
     #[test]
     fn desktop_rendering_remains_component_owned() {
-        for relative in [
-            "apps/desktop/src/desktop/chart_context_menus.rs",
-            "apps/desktop/src/desktop/chart_surface.rs",
-            "apps/desktop/src/desktop/chart_toolbar_menus.rs",
-            "apps/desktop/src/desktop/chrome_menu.rs",
-            "apps/desktop/src/desktop/drawing_toolbar.rs",
-            "apps/desktop/src/desktop/indicator_menu.rs",
-            "apps/desktop/src/desktop/provider_login.rs",
-            "apps/desktop/src/desktop/symbol_menu.rs",
-            "apps/desktop/src/desktop/terminal_chrome.rs",
-            "apps/desktop/src/desktop/terminal_view.rs",
-            "apps/desktop/src/desktop/workspace_layout.rs",
-        ] {
-            assert!(
-                repository_root().join(relative).is_file(),
-                "desktop component boundary {relative} is missing"
-            );
-        }
-
         let main = manifest("apps/desktop/src/main.rs");
-        assert!(main.contains("desktop::run("));
-        assert!(!main.contains("struct WorkspaceSurface"));
         let production = production_prefix(&main);
         for rendering_primitive in [
             "impl Render for",
@@ -4199,18 +4032,6 @@ mod tests {
                 ],
             );
         }
-        for relative in [
-            "apps/engine",
-            "crates/local_engine_client",
-            "crates/local_history",
-            "crates/desktop_market_runtime",
-            "crates/desktop_provider_runtime",
-        ] {
-            assert!(
-                !repository_root().join(relative).exists(),
-                "retired runtime {relative} returned"
-            );
-        }
     }
     #[test]
     fn workspace_excludes_distributed_system_dependencies() {
@@ -4381,59 +4202,108 @@ mod tests {
         }
     }
 
+    /// Files allowed to declare production traits, with how many each declares. Counting per
+    /// file keeps a trait rename free while a new trait or a moved one needs a review here.
+    const PRODUCTION_TRAIT_FILES: &[(&str, usize, &str)] = &[
+        (
+            "apps/desktop/src/desktop.rs",
+            1,
+            "account refresh exit claim shared by the readiness and normal exit paths",
+        ),
+        (
+            "crates/context_runtime/src/lib.rs",
+            2,
+            "context credential store and fetcher seams for tests without the vault or network",
+        ),
+        (
+            "crates/domain/instruments/src/calendar/weekly_hours.rs",
+            1,
+            "one recurring-session projection over domain and provider wire segments",
+        ),
+        (
+            "crates/domain/trading/src/market.rs",
+            1,
+            "bounded quote interest published without depending on market_runtime",
+        ),
+        (
+            "crates/market_runtime/src/market_service/clock.rs",
+            1,
+            "one injectable time boundary for the market owner and provider workers",
+        ),
+        (
+            "crates/market_runtime/src/market_service/mod.rs",
+            2,
+            "history source and the one bounded catalog channel for registered providers",
+        ),
+        (
+            "crates/market_runtime/src/rithmic_realtime.rs",
+            1,
+            "catalog session seam so search queueing and caching are tested without a session",
+        ),
+        (
+            "crates/adapters/rithmic_protocol/src/history_adapter.rs",
+            1,
+            "history transport seam",
+        ),
+        (
+            "crates/adapters/rithmic_protocol/src/provider_runtime.rs",
+            1,
+            "provider session driver seam",
+        ),
+        (
+            "crates/platform_runtime/src/credential_vault.rs",
+            2,
+            "credential vault and its native backend",
+        ),
+        (
+            "crates/release_lifecycle/src/lifecycle.rs",
+            1,
+            "native install hooks",
+        ),
+        (
+            "crates/release_lifecycle/src/launcher.rs",
+            1,
+            "the READY/COMMIT/exit handoff with the desktop, faked in tests",
+        ),
+        (
+            "crates/release_lifecycle/src/release_source.rs",
+            1,
+            "release origin: HTTPS in production, a directory in the lifecycle test",
+        ),
+        (
+            "crates/provider_history/src/model.rs",
+            1,
+            "provider history adapter boundary",
+        ),
+        (
+            "crates/trading_runtime/src/clock.rs",
+            1,
+            "injectable wall and monotonic time for the trading owner",
+        ),
+        (
+            "crates/trading_runtime/src/execution/mod.rs",
+            2,
+            "approved touch-only fill price and full-quantity liquidity policies",
+        ),
+    ];
+
     #[test]
     fn production_traits_remain_justified_boundaries() {
-        let mut actual = BTreeSet::new();
+        let mut observed = std::collections::BTreeMap::new();
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            let relative = relative_string(&path);
-            for name in production_prefix(&contents)
+            let count = production_prefix(&contents)
                 .lines()
                 .filter_map(declared_trait_name)
-            {
-                actual.insert(format!("{relative}::{name}"));
+                .count();
+            if count > 0 {
+                observed.insert(relative_string(&path), count);
             }
         }
-        let expected = BTreeSet::from([
-            "apps/desktop/src/desktop.rs::AccountRefreshExitClaim".to_string(),
-            "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
-            "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
-            // The single recurring-session projection accepts domain and provider wire segments
-            // without importing the provider-owned contracts into the leaf instrument crate.
-            "crates/domain/instruments/src/calendar/weekly_hours.rs::WeeklySegment".to_string(),
-            // Trading publishes bounded quote interest without depending on market_runtime.
-            "crates/domain/trading/src/market.rs::QuoteInterestSink".to_string(),
-            // The market owner and provider workers share one injectable time boundary.
-            "crates/market_runtime/src/market_service/clock.rs::Clock".to_string(),
-            "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
-            // One bounded catalog command/event boundary for all registered provider workers.
-            "crates/market_runtime/src/market_service/mod.rs::ProviderCatalogChannel".to_string(),
-            // The Rithmic catalog worker's one session-command seam, so its single in-flight
-            // search, latest-wins queue and listing cache are tested without a live session.
-            "crates/market_runtime/src/rithmic_realtime.rs::CatalogSession".to_string(),
-            "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
-                .to_string(),
-            "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
-                .to_string(),
-            "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
-            "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
-            "crates/release_lifecycle/src/lifecycle.rs::LifecycleHooks".to_string(),
-            // The launcher's READY/COMMIT/exit handoff with the desktop, faked in its tests.
-            "crates/release_lifecycle/src/launcher.rs::RestartHandshake".to_string(),
-            // The launcher's release origin: HTTPS in production, a local directory in the
-            // end-to-end lifecycle test.
-            "crates/release_lifecycle/src/release_source.rs::ReleaseSource".to_string(),
-            "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
-            // The sole trading owner receives injectable wall and monotonic time.
-            "crates/trading_runtime/src/clock.rs::Clock".to_string(),
-            // The simulated venue's explicitly approved, touch-only execution policy hooks.
-            "crates/trading_runtime/src/execution/mod.rs::FillPrice".to_string(),
-            // The same venue fills full quantity without modeling order-book depth.
-            "crates/trading_runtime/src/execution/mod.rs::Liquidity".to_string(),
-        ]);
         assert_eq!(
-            actual, expected,
+            super::counted_allowlist_violations(PRODUCTION_TRAIT_FILES, &observed),
+            Vec::<PathBuf>::new(),
             "production traits require an intentional provider/platform/security or execution-policy boundary"
         );
     }
@@ -4489,10 +4359,6 @@ mod tests {
             "market_engine_types",
         ] {
             assert!(
-                !repository_root().join("crates").join(forbidden).exists(),
-                "{forbidden} must remain part of the cohesive market_engine crate"
-            );
-            assert!(
                 !manifest("Cargo.toml").contains(forbidden),
                 "workspace must not contain speculative crate {forbidden}"
             );
@@ -4527,12 +4393,6 @@ mod tests {
 
     #[test]
     fn in_process_runtime_manifests_exclude_server_dependencies() {
-        for retired in ["apps/engine", "crates/local_engine_client"] {
-            assert!(
-                !repository_root().join(retired).exists(),
-                "retired cross-process boundary {retired} returned"
-            );
-        }
         for relative in [
             "crates/market_runtime/Cargo.toml",
             "crates/account_runtime/Cargo.toml",
@@ -4572,27 +4432,8 @@ mod tests {
                 "desktop must not resolve startup catalogs through {forbidden}"
             );
         }
-        assert!(source.contains("market.select_and_demand("));
-        let runtime = manifest("crates/market_runtime/src/market_service/instrument_selection.rs");
-        assert!(
-            runtime.contains("fn begin_selection(")
-                && runtime.contains("pending_selections")
-                && runtime.contains("ProviderCatalogCommand::Search(search)")
-                && runtime.contains("SelectionError::Superseded")
-        );
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(!desktop.contains("RITHMIC_CATALOG_READY_MESSAGE"));
-        let fences = manifest("crates/market_runtime/src/market_service/command_fences.rs");
-        for required in [
-            "CommandKind::StartupResolve",
-            "Epoch<CommandTag>",
-            "remove_consumer",
-        ] {
-            assert!(
-                fences.contains(required),
-                "catalog command fence lost {required}"
-            );
-        }
         let coordinator = manifest("crates/market_runtime/src/market_service/coordinator.rs");
         for forbidden in [
             "catalog_searches:",
@@ -4612,7 +4453,6 @@ mod tests {
 
     #[test]
     fn workspace_persistence_has_no_general_transport_layer() {
-        assert!(!repository_root().join("crates/transport").exists());
         let contracts = manifest("crates/contracts/Cargo.toml");
         assert!(!contracts.contains("transport"));
         let local = manifest("apps/desktop/src/desktop/local_state.rs");
@@ -4620,16 +4460,6 @@ mod tests {
             assert!(
                 !local.contains(forbidden),
                 "workspace persistence reintroduced transport framing through {forbidden}"
-            );
-        }
-        for required in [
-            "WorkspaceState::decode",
-            "workspace.encode_to_vec()",
-            "LegacyWorkspaceEnvelope",
-        ] {
-            assert!(
-                local.contains(required),
-                "workspace persistence lost {required}"
             );
         }
     }
@@ -4652,10 +4482,6 @@ mod tests {
         );
         let relative = "apps/desktop/src/desktop/local_state.rs";
         let production = production_prefix(&manifest(relative));
-        assert!(
-            production.contains("DurableContainer::new("),
-            "{relative} must persist through the durable container"
-        );
         for forbidden in [
             "write_file_durably",
             "StagedFile",
@@ -4708,28 +4534,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_manifest_owns_backend_composition_without_ui() {
-        let market = manifest("crates/market_runtime/Cargo.toml");
-        for dependency in [
-            "aeris_rithmic_protocol_adapter",
-            "aeris_hyperliquid_market_adapter",
-            "aeris_market_engine",
-            "aeris_provider_history",
-            "aeris_platform_runtime",
-        ] {
-            assert!(
-                market.contains(dependency),
-                "market_runtime must compose {dependency}"
-            );
-        }
-        let account = manifest("crates/account_runtime/Cargo.toml");
-        // ID tokens are RS256 JWTs verified with ring against the user pool JWKS.
-        for dependency in ["aeris_account", "aeris_platform_runtime", "ring.workspace"] {
-            assert!(
-                account.contains(dependency),
-                "account_runtime must compose {dependency}"
-            );
-        }
+    fn runtime_manifests_exclude_ui() {
         for relative in [
             "crates/market_runtime/Cargo.toml",
             "crates/account_runtime/Cargo.toml",
@@ -4742,42 +4547,10 @@ mod tests {
     }
     #[test]
     fn market_history_is_on_demand_and_nonpersistent() {
-        for retired in ["crates/local_history", "crates/local_storage"] {
-            assert!(
-                !repository_root().join(retired).exists(),
-                "retired market-history persistence boundary {retired} returned"
-            );
-        }
-        let market = manifest("crates/market_runtime/Cargo.toml");
         assert!(
-            market.contains("aeris_provider_history"),
-            "market runtime lost provider-history adapter boundary"
-        );
-        assert!(
-            !market.contains("aeris_local_storage"),
+            !manifest("crates/market_runtime/Cargo.toml").contains("aeris_local_storage"),
             "market runtime must not persist market history"
         );
-        let module = manifest("crates/market_runtime/src/market_service/mod.rs");
-        assert!(
-            module.contains("INITIAL_HISTORY_BARS")
-                && module.contains("MAXIMUM_HISTORY_BARS_PER_REQUEST")
-        );
-        let history = manifest("crates/market_runtime/src/market_service/history.rs");
-        assert!(
-            history.contains("historical_backfill_is_retained_beyond_one_provider_page_limit"),
-            "market runtime lost untruncated back-scroll retention regression"
-        );
-    }
-
-    #[test]
-    fn every_registered_provider_has_a_complete_published_descriptor() {
-        let runtime_tests = manifest("crates/market_runtime/src/market_service/tests.rs");
-        assert!(
-            super::has_runtime_descriptor_test(&runtime_tests),
-            "runtime must verify every registration's published identity and capabilities"
-        );
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(!super::desktop_has_fixed_provider_set(&desktop));
     }
 
     #[test]
@@ -4793,12 +4566,6 @@ mod tests {
         ));
         assert!(!super::desktop_has_fixed_provider_set(
             "#[cfg(test)]\nmod tests { enum TerminalProvider {} const FALLBACK_TERMINAL_PROVIDER: &str = \"\"; }"
-        ));
-        assert!(super::has_runtime_descriptor_test(
-            "fn every_registered_provider_has_a_complete_published_descriptor() {}"
-        ));
-        assert!(!super::has_runtime_descriptor_test(
-            "fn retired_provider_mapping_test() {}"
         ));
     }
 
@@ -4852,59 +4619,7 @@ mod tests {
         assert!(violations.is_empty(), "{violations:?}");
     }
     #[test]
-    fn in_process_market_contracts_remain_explicit_and_provider_neutral() {
-        let demand = manifest("crates/market_engine/src/demand.rs");
-        assert!(
-            demand.contains("pub(crate) fn set_viewport")
-                && demand.contains("StaleConsumerGeneration")
-        );
-        let engine_core = manifest("crates/market_engine/src/lib.rs");
-        for regression in [
-            "provider_and_viewport_generations_are_exactly_fenced",
-            "provider_configuration_routes_only_supported_generation_fenced_requests",
-            "shared_subscriptions_ref_count_streams_and_release_only_the_last_consumer",
-        ] {
-            assert!(
-                engine_core.contains(regression),
-                "market engine lost regression {regression}"
-            );
-        }
-        let coordinator = manifest("crates/market_runtime/src/market_service/coordinator.rs");
-        for regression in [
-            "provider_connected_after_history_promotes_rithmic_series_live",
-            "provider_connected_after_history_promotes_hyperliquid_series_live",
-            "fresh_depth_demand_publishes_identified_awaiting_snapshot_frame",
-        ] {
-            assert!(
-                coordinator.contains(regression),
-                "market runtime lost initialization regression {regression}"
-            );
-        }
-    }
-    #[test]
     fn provider_runtime_registry_remains_the_single_engine_dispatch_boundary() {
-        let shared_state = manifest("crates/market_runtime/src/market_service/mod.rs");
-        let runtime = manifest("crates/market_runtime/src/market_service/runtime.rs");
-        let production = format!(
-            "{}\n{}",
-            production_prefix(&shared_state),
-            production_prefix(&runtime)
-        );
-        for contract in [
-            "struct ProviderRuntimeRegistry",
-            "records: BTreeMap<&'static str, ProviderRuntimeRecord>",
-            "struct ProviderRuntimeRecord",
-            "history: SyncSender<HistoryRequest>",
-            "cancellation: Arc<AtomicBool>",
-            "lifecycle: Arc<ProviderRuntimeLifecycle>",
-            "workers: Vec<thread::JoinHandle<()>>",
-            "impl ProviderRuntimeRegistry",
-        ] {
-            assert!(
-                production.contains(contract),
-                "market runtime registry lost {contract}"
-            );
-        }
         for root in ["apps/desktop/src", "crates/market_engine/src", "crates/ui"] {
             for path in production_sources_under(root) {
                 let contents = fs::read_to_string(&path).expect("source");
@@ -4922,46 +4637,6 @@ mod tests {
     #[test]
     fn market_service_responsibilities_remain_decomposed_under_one_coordinator() {
         let root = "crates/market_runtime/src/market_service";
-        let module = manifest(&format!("{root}/mod.rs"));
-        for owner in [
-            "coordinator",
-            "history",
-            "instrument_selection",
-            "publication",
-            "realtime",
-            "runtime",
-        ] {
-            assert!(
-                module.contains(&format!("mod {owner};")),
-                "market service lost responsibility owner {owner}"
-            );
-        }
-        assert!(
-            manifest(&format!("{root}/coordinator.rs"))
-                .contains("pub(super) struct Coordinator<'a>")
-        );
-        for path in [
-            "history.rs",
-            "instrument_selection.rs",
-            "publication.rs",
-            "realtime.rs",
-            "provider_event.rs",
-            "runtime.rs",
-        ] {
-            let manifest = manifest(&format!("{root}/{path}"));
-            let source = production_prefix(&manifest);
-            assert!(
-                source.lines().any(|line| {
-                    let trimmed = line.trim_start();
-                    trimmed.starts_with("fn ")
-                        || trimmed.starts_with("pub(")
-                        || trimmed.starts_with("struct ")
-                        || trimmed.starts_with("enum ")
-                        || trimmed.starts_with("impl ")
-                }),
-                "market-service owner {path} has no production item"
-            );
-        }
         let realtime = manifest(&format!("{root}/realtime.rs"));
         for superseded in [
             "fn handle_rithmic_realtime(",
@@ -4975,7 +4650,6 @@ mod tests {
         }
         let coordinator_source = manifest(&format!("{root}/coordinator.rs"));
         let coordinator = production_prefix(&coordinator_source);
-        assert!(coordinator.contains("series: lifecycle::SeriesLifecycles::default()"));
         for superseded in ["rithmic_live:", "candle_live:"] {
             assert!(
                 !coordinator.contains(superseded),
@@ -5291,81 +4965,10 @@ mod tests {
     }
 
     #[test]
-    fn signed_transactional_lifecycle_remains_release_lifecycle_owned() {
-        let lifecycle = manifest("crates/release_lifecycle/src/lifecycle.rs");
-        for contract in [
-            "key.verify(&message, &signature)",
-            "policy.launcher_protocol < signed.manifest.minimum_launcher_protocol",
-            "verify_candidate_inventory(&root, &signed.manifest.files)",
-            "enum UpdateState",
-            "pub fn recover<",
-            "pub fn uninstall<",
-            "native_installation_inventory",
-            "remove_owned_path",
-            "UpdatePendingCleanup",
-        ] {
-            assert!(
-                lifecycle.contains(contract),
-                "release lifecycle lost {contract}"
-            );
-        }
-        let uninstaller_start = lifecycle
-            .find("pub struct ReleaseUninstaller")
-            .expect("release uninstaller");
-        let uninstaller_end = lifecycle[uninstaller_start..]
-            .find("\nfn lifecycle_paths(")
-            .map(|offset| uninstaller_start + offset)
-            .expect("release uninstaller boundary");
-        let uninstaller = &lifecycle[uninstaller_start..uninstaller_end];
-        assert!(
-            !uninstaller.contains("VerifyingKey") && !uninstaller.contains("verify_release"),
-            "uninstall must never need a release verifying key"
-        );
+    fn retired_launcher_engine_paths_do_not_return() {
         let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
-        let keyless_start = launcher
-            .find("pub fn run_launcher(")
-            .expect("launcher dispatch");
-        let keyless_end = launcher[keyless_start..]
-            .find("LauncherCommand::Verified(command) =>")
-            .map(|offset| keyless_start + offset)
-            .expect("verified launcher dispatch");
-        let uninstall_start = launcher
-            .find("fn uninstall_from_root(")
-            .expect("launcher uninstall");
-        let uninstall_end = launcher[uninstall_start..]
-            .find("\n}\n")
-            .map(|offset| uninstall_start + offset)
-            .expect("launcher uninstall boundary");
-        assert!(
-            !launcher[keyless_start..keyless_end].contains("verifying_key()")
-                && !launcher[keyless_start..keyless_end].contains("origin()")
-                && !launcher[uninstall_start..uninstall_end].contains("verifying_key"),
-            "launcher identity and uninstall must dispatch before any verifying key loads"
-        );
-        for contract in [
-            "--check-update",
-            "--prepare-update",
-            "--update-and-restart",
-            "--desktop-readiness",
-            "let readiness: ReadinessReport = read_bounded_json(&report)?;",
-            "owned_process_is_running(&self.install_root)",
-        ] {
-            assert!(
-                launcher.contains(contract),
-                "stable launcher lost {contract}"
-            );
-        }
-        assert!(
-            launcher.contains("bootstrap_requires_remote_install(active_release.as_ref())"),
-            "healthy installed startup must decide locally before remote update work"
-        );
         assert!(!launcher.contains("--launch-engine"));
         assert!(!launcher.contains("BackgroundService"));
-        assert!(
-            !repository_root()
-                .join("crates/platform_runtime/src/background_service.rs")
-                .exists()
-        );
     }
 
     #[test]
@@ -5462,11 +5065,7 @@ mod tests {
     #[test]
     fn desktop_account_session_wakes_windows_and_owns_plan_policy() {
         let account = manifest("apps/desktop/src/account/mod.rs");
-        assert!(account.contains("pub fn register_change_wake("));
         assert!(!account.contains("pub fn poll("));
-        assert!(
-            manifest("apps/desktop/src/account/plan.rs").contains("pub const fn plan_policy()")
-        );
         for relative in [
             "apps/desktop/src/desktop.rs",
             "apps/desktop/src/desktop/workspace_tabs.rs",
@@ -5515,159 +5114,12 @@ mod tests {
                 "{relative} must obtain the signing key through read_signing_key"
             );
         }
-        let library = manifest("tools/release_packager/src/lib.rs");
-        let library = super::production_source_prefix(&library);
-        let reader = library
-            .find("pub fn read_signing_key(")
-            .expect("the packager reads its signing key from a file");
-        let reader_end = library[reader..]
-            .find("\n}\n")
-            .map(|offset| reader + offset)
-            .expect("signing key reader boundary");
-        assert!(
-            library.matches("SigningKey::from_bytes(").count() == 1
-                && library[reader..reader_end].contains("SigningKey::from_bytes(")
-                && library[reader..reader_end].contains("Zeroizing"),
-            "the packager constructs its signing key only from the zeroized key file seed"
-        );
     }
 
     #[test]
-    fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
-        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
-        for contract in [
-            "rollout_eligible",
-            "current_update_check_report",
-            "QUARANTINED_RELEASE_FILE",
-            "failed release could not be quarantined",
-            "STARTUP_COMPLETE_TIMEOUT",
-            "marker.process_id == process_id",
-            "stop_unfinished_desktop(&mut child)",
-            "rollback_to_retained_known_good",
-            "prepared_matches_current_offer",
-            "&current.channel.signed_release == prepared",
-            "retained.is_some()",
-            "launcher_generation < active.install_generation",
-            "spawn_desktop_release(installer, &retained, true)",
-            "command.arg(\"--workspace-tabs\")",
-        ] {
-            assert!(launcher.contains(contract), "launcher lost {contract}");
-        }
-        // Probation ends only on the marker the desktop records once a window is open.
-        for (path, call) in [
-            (
-                "apps/desktop/src/desktop.rs",
-                "update::record_startup_complete(cx)",
-            ),
-            (
-                "apps/desktop/src/desktop/sign_in_gate.rs",
-                "super::update::record_startup_complete(cx)",
-            ),
-        ] {
-            assert!(
-                production_prefix(&manifest(path)).contains(call),
-                "{path} must record the startup-complete marker"
-            );
-        }
-        let channel_validation = launcher
-            .find("fn check_release_channel(")
-            .expect("checked channel function");
-        let channel_tail = &launcher[channel_validation..];
-        let signature = channel_tail
-            .find("verify_release_manifest(")
-            .expect("channel signature validation");
-        let downgrade = channel_tail
-            .find("release channel generation regressed below the active release")
-            .expect("channel downgrade rejection");
-        let rollout = channel_tail
-            .find("release_offer_eligible(")
-            .expect("channel rollout policy");
-        assert!(
-            signature < downgrade && downgrade < rollout,
-            "rollout eligibility must be applied only after signature and downgrade validation"
-        );
-        let delivery_start = launcher
-            .find("fn verified_block_delivery(")
-            .expect("block delivery");
-        let delivery_end = launcher[delivery_start..]
-            .find("\nfn reconstruct_release_file(")
-            .map_or(launcher.len(), |end| delivery_start + end);
-        let delivery = &launcher[delivery_start..delivery_end];
-        assert!(
-            delivery.contains("Result<VerifiedBlockDelivery, BlockDeliveryError>")
-                && !delivery.contains(".ok()?")
-                && launcher.contains("Aeris release delta delivery unavailable")
-                && launcher.contains("Aeris release block reconstruction of"),
-            "block delivery failures must return a typed BlockDeliveryError and be logged"
-        );
-    }
-    #[test]
-    fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
-        for path in [
-            "apps/desktop/src/main.rs",
-            "crates/release_lifecycle/src/bin/aeris_launcher.rs",
-        ] {
-            assert!(
-                manifest(path).contains("windows_subsystem = \"windows\""),
-                "Windows GUI binary {path} lost subsystem marker"
-            );
-        }
+    fn windows_install_shell_carries_no_retired_engine_or_brand_cleanup() {
         let setup = manifest("tools/windows/aeris_setup.iss");
-        for contract in [
-            "PrivilegesRequired=lowest",
-            "DefaultDirName={localappdata}\\Programs\\Aeris",
-            "UninstallDisplayIcon={app}\\aeris_launcher.exe",
-            "AppUserModelID: \"com.aeris.desktop\"",
-            "Subkey: \"Software\\Classes\\AppUserModelId\\com.aeris.desktop\"; Flags: uninsdeletekey",
-            "DestName: \"aeris_launcher.exe\"",
-            "--install \"' + Manifest + '\" \"' + Bundle + '\"",
-            "ValueName: \"Aeris Engine\"; Flags: deletevalue",
-            "RollbackCompatibilityPath",
-            "DestName: \"rollback-compatibility.json\"",
-            "function PrepareToInstall(var NeedsRestart: Boolean): String;",
-            "{localappdata}\\Programs\\.Aeris-lifecycle\\uninstall.json",
-            "Finishing the previous Aeris Terminal uninstall...",
-        ] {
-            assert!(
-                setup.contains(contract),
-                "Windows installer lost {contract}"
-            );
-        }
-        let pending_cleanup = setup
-            .find("function PrepareToInstall")
-            .expect("pending uninstall preflight");
-        let install_files = setup
-            .find("procedure CurStepChanged")
-            .expect("signed release installation hook");
-        assert!(
-            pending_cleanup < install_files,
-            "pending uninstall cleanup must run before the bundled release installation hook"
-        );
         assert!(!setup.contains("EnginePath"));
-        // Uninstall keeps the user's data unless they tick the box; silent uninstalls keep it.
-        let choice_start = setup
-            .find("function InitializeUninstall(): Boolean;")
-            .expect("uninstall data choice");
-        let choice = &setup[choice_start..];
-        for contract in [
-            "RemoveUserData := False;",
-            "if UninstallSilent then\n    exit;",
-            "RemoveData.Caption := 'Remove my Aeris data';",
-            "RemoveData.Checked := False;",
-            "RemoveUserData := RemoveData.Checked",
-            "if RemoveUserData then\n  begin\n    Removal := '--remove-all-local-data';",
-            "Removal := '--remove-application';",
-        ] {
-            assert!(
-                choice.contains(contract),
-                "Windows uninstall data choice lost {contract}"
-            );
-        }
-        assert_eq!(
-            setup.matches("--remove-all-local-data").count(),
-            2,
-            "only an explicit data removal or a pending full uninstall removes user data"
-        );
         assert!(
             !setup.to_ascii_lowercase().contains("axiusflow"),
             "the lifecycle installer carries no Axiusflow cleanup"
@@ -6342,73 +5794,12 @@ jobs:
     }
 
     #[test]
-    fn live_market_gates_keep_candidate_bound_evidence_producers() {
-        let workflow = manifest(".github/workflows/live_market_gates.yml");
-        assert!(
-            workflow.contains("live_worker_cancellation_is_prompt")
-                && workflow.contains("live_market_gate_hyperliquid.*"),
-            "Hyperliquid live workflow must execute and upload its self-recording gate"
-        );
-        assert!(
-            workflow.contains("--bin rithmic_test_smoke")
-                && workflow.contains("live_market_gate_rithmic.*"),
-            "Rithmic live workflow must execute and upload its self-recording gate"
-        );
-
-        let hyperliquid = manifest("crates/market_runtime/src/hyperliquid_realtime.rs");
-        assert!(
-            hyperliquid.contains("LiveMarketGateRecorder::start(\"hyperliquid\")")
-                && hyperliquid.contains("live Hyperliquid worker never connected")
-                && hyperliquid.contains("live Hyperliquid worker never published a candle")
-                && hyperliquid
-                    .contains("connected, published a live candle, and cancelled promptly"),
-            "Hyperliquid live gate must bind evidence to a real connection and live payload"
-        );
-
-        let rithmic = manifest("crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs");
-        assert!(
-            rithmic.contains("LiveMarketGateRecorder::start(\"rithmic\")")
-                && rithmic.contains(
-                    "live trades, quotes, depth, history, heartbeat, and reconnect passed"
-                ),
-            "Rithmic default smoke must retain candidate-bound evidence recording"
-        );
-    }
-
-    #[test]
-    fn desktop_transition_capture_command_matches_tool_contract() {
-        assert!(
-            !repository_root()
-                .join("apps/desktop/src/transition_capture.rs")
-                .exists(),
-            "retired transition-capture producer returned"
-        );
-        assert!(
-            !repository_root()
-                .join("tools/run_native_transition_capture.ps1")
-                .exists(),
-            "retired engine-era transition runner returned"
-        );
+    fn desktop_has_no_transition_capture_command() {
         assert!(!manifest("apps/desktop/src/desktop.rs").contains("--capture-native-transitions"));
     }
     #[test]
-    fn launcher_uninstall_relocates_outside_install_root() {
+    fn launcher_uninstall_never_returns_to_a_batch_file_deleter() {
         let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
-        // The launcher runs from inside the tree uninstall deletes, and
-        // Windows refuses to delete a running executable: uninstall must
-        // rename the image to a sibling staging dir first so the original
-        // tree can be removed synchronously with an honest exit code.
-        for marker in [
-            "relocate_running_binary",
-            "sweep_retired_binaries",
-            "aeris_launcher.retired-",
-            "uninstall-stage",
-        ] {
-            assert!(
-                launcher.contains(marker),
-                "launcher uninstall lost its out-of-tree relocation {marker}"
-            );
-        }
         // The retired launcher is swept by name, never by a generated batch
         // file whose interpolated paths break on shell metacharacters.
         for retired in [
@@ -6421,11 +5812,6 @@ jobs:
                 "launcher uninstall must not return to a batch-file deleter ({retired})"
             );
         }
-        let setup = manifest("tools/windows/aeris_setup.iss");
-        assert!(
-            setup.contains("\\.Aeris-uninstall-stage\\aeris_launcher.retired-*"),
-            "the uninstaller must delete the retired launcher after it exits"
-        );
     }
 
     #[test]
@@ -6441,12 +5827,6 @@ jobs:
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
             "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
         ];
-        for path in readers {
-            assert!(
-                manifest(path).contains("RITHMIC_LOGIN_VAULT_KEY"),
-                "{path} lost the native-vault Rithmic login boundary"
-            );
-        }
         for path in readers
             .into_iter()
             .chain(["apps/desktop/src/desktop/provider_login.rs"])
@@ -6505,8 +5885,6 @@ jobs:
 
     #[test]
     fn rithmic_application_name_has_one_canonical_source() {
-        let adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
-        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Aeris\";"));
         for relative in [
             "crates/adapters/rithmic_protocol/src/provider_session.rs",
             "crates/adapters/rithmic_protocol/src/protocol.rs",
@@ -6520,10 +5898,6 @@ jobs:
             assert!(
                 !source.contains("\"Aeris\""),
                 "{relative} reintroduced non-canonical identity"
-            );
-            assert!(
-                source.contains("RITHMIC_APPLICATION_NAME"),
-                "{relative} must use shared Rithmic application name"
             );
         }
     }
@@ -6596,16 +5970,10 @@ jobs:
                 "market coordinator must not own account state {identifier}"
             );
         }
-        assert!(manifest("apps/desktop/Cargo.toml").contains("aeris_account_runtime"));
         assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("aeris_account"));
     }
     #[test]
     fn trading_owner_and_store_remain_single_process_and_single_owner() {
-        let workspace = manifest("Cargo.toml");
-        for member in ["crates/domain/trading", "crates/trading_runtime"] {
-            assert!(workspace.contains(member), "workspace lost {member}");
-        }
-
         let domain = manifest("crates/domain/trading/Cargo.toml");
         for forbidden in [
             "rusqlite",
@@ -6620,55 +5988,11 @@ jobs:
         }
 
         let runtime_manifest = manifest("crates/trading_runtime/Cargo.toml");
-        for required in ["aeris_trading", "aeris_instruments", "rusqlite.workspace"] {
-            assert!(
-                runtime_manifest.contains(required),
-                "trading owner lost {required}"
-            );
-        }
         for forbidden in ["aeris_market_runtime", "aeris_account_runtime", "gpui"] {
             assert!(
                 !runtime_manifest.contains(forbidden),
                 "trading owner depends in the wrong direction on {forbidden}"
             );
-        }
-
-        let runtime = manifest("crates/trading_runtime/src/core/mod.rs");
-        for contract in [
-            "pub struct TradingService",
-            "mpsc::sync_channel(COMMAND_CAPACITY)",
-            "MAXIMUM_OPEN_ORDERS",
-            "AccountEnvironment::Simulated",
-        ] {
-            assert!(runtime.contains(contract), "trading owner lost {contract}");
-        }
-        let store = [
-            "schema.rs",
-            "mod.rs",
-            "orders.rs",
-            "fills.rs",
-            "ledger.rs",
-            "groups.rs",
-            "risk.rs",
-            "user_records.rs",
-            "retention.rs",
-            "export.rs",
-        ]
-        .into_iter()
-        .map(|file| manifest(&format!("crates/trading_runtime/src/store/{file}")))
-        .collect::<String>();
-        for contract in [
-            "journal_mode\", \"WAL",
-            "user_version",
-            "CREATE TABLE order_events",
-            "CREATE TABLE fills",
-            "CREATE TABLE positions",
-            "CREATE TABLE user_records",
-            "maximum_user_records_per_kind",
-            "executions.csv",
-            "user_records.json",
-        ] {
-            assert!(store.contains(contract), "trading store lost {contract}");
         }
 
         for path in production_rust_sources() {
@@ -6693,16 +6017,6 @@ jobs:
                 "{manifest_path} bypasses the desktop trading command boundary"
             );
         }
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(desktop.contains("start_trading_service"));
-        assert!(
-            manifest("apps/desktop/src/desktop/lifecycle.rs")
-                .contains("trading.shutdown(Duration::from_secs(2))")
-        );
-        assert!(
-            manifest("AGENTS.md")
-                .contains("`trading_runtime` is the single in-process owner of broker accounts")
-        );
     }
 
     #[test]
@@ -6838,9 +6152,6 @@ jobs:
 
     #[test]
     fn injected_desktop_persistence_accepts_instance_owner_and_test_globals() {
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(desktop.contains("DesktopServices::new("));
-        assert!(desktop.contains("trading,\n        account_service,\n        persistence,"));
         assert!(!super::has_process_global_desktop_persistence(
             "fn save(services: &DesktopServices) { services.persistence.workspace_path(); }\n\
              #[cfg(test)] mod tests { static CHART_CHROME_SAVE_STATE: u8 = 0; }\n"
@@ -6870,45 +6181,8 @@ jobs:
         }
     }
     #[test]
-    fn trading_core_owner_shell_has_one_command_and_deadline_boundary() {
-        let runtime = manifest("crates/trading_runtime/src/core/mod.rs");
-        for contract in [
-            "struct TradingCore",
-            "fn handle(&mut self, command: Command, now: i64)",
-            "fn on_market(&mut self, batch: Vec<SimulatedMarketObservation>, now: i64)",
-            "fn on_timer(&mut self, now: i64)",
-        ] {
-            assert!(runtime.contains(contract), "trading core lost {contract}");
-        }
-        let service = manifest("crates/trading_runtime/src/service/mod.rs");
-        assert!(service.contains("pub(crate) enum Command"));
-        let owner = manifest("crates/trading_runtime/src/service/owner.rs");
-        for contract in [
-            "aeris-trading-owner",
-            "recv_timeout",
-            "core.handle(",
-            "core.on_timer(",
-        ] {
-            assert!(
-                owner.contains(contract),
-                "trading owner shell lost {contract}"
-            );
-        }
-    }
-    #[test]
     fn context_data_remains_one_bounded_runtime_owned_boundary() {
-        assert!(manifest("Cargo.toml").contains("crates/context_runtime"));
         let runtime_manifest = manifest("crates/context_runtime/Cargo.toml");
-        for required in [
-            "aeris_platform_runtime",
-            "ureq.workspace",
-            "zeroize.workspace",
-        ] {
-            assert!(
-                runtime_manifest.contains(required),
-                "context owner lost {required}"
-            );
-        }
         for forbidden in [
             "aeris_market_runtime",
             "aeris_trading_runtime",
@@ -6920,24 +6194,7 @@ jobs:
                 "context owner depends in the wrong direction on {forbidden}"
             );
         }
-        let runtime = manifest("crates/context_runtime/src/lib.rs");
-        for contract in [
-            "pub struct ContextService",
-            "mpsc::sync_channel(COMMAND_CAPACITY)",
-            "aeris-context-runtime",
-            "MAXIMUM_CONTEXT_ITEMS",
-            "NativeContextCredentialStore",
-            "Zeroizing",
-        ] {
-            assert!(runtime.contains(contract), "context owner lost {contract}");
-        }
-        let desktop_manifest = manifest("apps/desktop/Cargo.toml");
-        assert!(desktop_manifest.contains("aeris_context_runtime"));
-        assert!(!desktop_manifest.contains("ureq"));
-        assert!(
-            manifest("apps/desktop/src/desktop/lifecycle.rs")
-                .contains("context.shutdown(Duration::from_secs(2))")
-        );
+        assert!(!manifest("apps/desktop/Cargo.toml").contains("ureq"));
         let desktop = manifest("apps/desktop/src/desktop.rs");
         for endpoint in [
             "api.eia.gov",
@@ -6956,13 +6213,6 @@ jobs:
     #[test]
     fn account_views_remain_plain_bounded_values() {
         let account = manifest("crates/account_runtime/src/view.rs");
-        for view in [
-            "pub struct LoginAuthorization",
-            "pub struct AccountView",
-            "pub enum AccountSessionState",
-        ] {
-            assert!(account.contains(view), "account view boundary lost {view}");
-        }
         assert!(!account.contains("prost::Message"));
         assert!(!account.contains("#[prost"));
 
@@ -6991,9 +6241,7 @@ jobs:
                 "{runtime} must stay plain in-process types"
             );
         }
-        let messages = manifest("crates/contracts/src/messages.rs");
-        assert!(messages.contains("Tags 6, 7, and 9-13 are permanently retired"));
-        assert!(!messages.contains("pub struct Envelope"));
+        assert!(!manifest("crates/contracts/src/messages.rs").contains("pub struct Envelope"));
     }
 
     /// The first `pub struct` or `pub enum` whose attributes derive no prost message,
