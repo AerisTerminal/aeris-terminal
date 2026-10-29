@@ -51,11 +51,16 @@ VersionInfoDescription=Aeris Terminal Installer
 VersionInfoProductName=Aeris Terminal
 VersionInfoProductVersion={#AppVersion}
 
+[Tasks]
+; Same task name as the direct 1.x installer, so an upgrade keeps the user's desktop shortcut choice.
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [InstallDelete]
-Type: files; Name: "{app}\aeris_desktop.exe"
+; The direct 1.x installer's aeris_desktop.exe is removed only after the bundled release is
+; active (InstallBundledRelease), so a failed upgrade leaves that installation runnable.
 Type: files; Name: "{app}\aeris_engine.exe"
 Type: filesandordirs; Name: "{app}\.release-downloads"
+Type: files; Name: "{autodesktop}\Aeris Terminal.lnk"; Tasks: not desktopicon
 
 [UninstallDelete]
 ; Both launcher removal commands retire the running launcher outside {app}; it can be deleted once
@@ -73,15 +78,23 @@ Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "aeris_launcher.exe"; Fla
 Source: "{#ManifestPath}"; DestDir: "{tmp}\AerisRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
 Source: "{#LauncherPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "aeris_launcher.exe"; Flags: deleteafterinstall
 Source: "{#DesktopPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "aeris_desktop.exe"; Flags: deleteafterinstall
-Source: "{#RollbackCompatibilityPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "rollback-compatibility.json"; Flags: deleteafterinstall
+; The last file runs the launcher's verified install while Setup can still roll back and fail.
+Source: "{#RollbackCompatibilityPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "rollback-compatibility.json"; Flags: deleteafterinstall; AfterInstall: InstallBundledRelease
 
 [Icons]
-Name: "{autoprograms}\Aeris\Aeris"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"
+; The shortcut names match the direct 1.x installer's, so an upgrade repoints them at the launcher.
+Name: "{autoprograms}\Aeris Terminal"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"
+Name: "{autodesktop}\Aeris Terminal"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\aeris_launcher.exe"; Description: "Launch Aeris Terminal"; Flags: nowait postinstall skipifsilent
 
 [Code]
+const
+  { Marks the uninstall started from Windows' installed-apps list: /SILENT skips Inno's own
+    confirmation box, and this switch still shows the one data-choice confirmation. }
+  InteractiveRemovalSwitch = '/INTERACTIVE';
+
 procedure RegisterCloseResource(const Filename: String);
 begin
 #if Ver >= EncodeVer(7, 0)
@@ -97,6 +110,9 @@ var
   VersionsRoot: String;
   DesktopPath: String;
 begin
+  { A direct 1.x installation runs the desktop from the install root. }
+  RegisterCloseResource(ExpandConstant('{app}\aeris_desktop.exe'));
+
   { Desktop binaries live in immutable version directories rather than in the
     installer's direct file list. Register them with Restart Manager so Setup closes the running
     desktop before the launcher's transactional activation. }
@@ -159,8 +175,68 @@ begin
     'Aeris Terminal could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.');
 end;
 
+procedure InstallBundledRelease;
+var
+  ResultCode: Integer;
+  Manifest: String;
+  Bundle: String;
+  LegacyDesktop: String;
+begin
+  { An exception here is a fatal installation error: Setup rolls back its changes and exits
+    with code 4 instead of reporting a finished install without an active release. }
+  Manifest := ExpandConstant('{tmp}\AerisRelease\manifest.json');
+  Bundle := ExpandConstant('{tmp}\AerisRelease\bundle');
+  WizardForm.StatusLabel.Caption := 'Verifying and installing the signed Aeris Terminal release...';
+  if (not Exec(
+      ExpandConstant('{app}\aeris_launcher.exe'),
+      '--install "' + Manifest + '" "' + Bundle + '"',
+      ExpandConstant('{app}'),
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode)) or (ResultCode <> 0) then
+  begin
+    RaiseException('Aeris Terminal could not verify and install the bundled release. Setup has stopped without activating an unverified application.');
+  end;
+
+  LegacyDesktop := ExpandConstant('{app}\aeris_desktop.exe');
+  if FileExists(LegacyDesktop) and not DeleteFile(LegacyDesktop) then
+    Log('The direct 1.x desktop executable could not be removed: ' + LegacyDesktop);
+end;
+
+procedure RouteInstalledAppsUninstallThroughDataChoice;
+var
+  Key: String;
+begin
+  { Setup rewrites UninstallString after [Registry] runs, so it is replaced here. }
+  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' +
+    ExpandConstant('{#SetupSetting("AppId")}') + '_is1';
+  if not RegWriteStringValue(
+      HKA,
+      Key,
+      'UninstallString',
+      '"' + ExpandConstant('{uninstallexe}') + '" /SILENT ' + InteractiveRemovalSwitch) then
+    Log('The uninstall command could not be updated; uninstall will ask twice.');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RouteInstalledAppsUninstallThroughDataChoice;
+end;
+
 var
   RemoveUserData: Boolean;
+  InteractiveRemoval: Boolean;
+
+function HasInteractiveRemovalSwitch(): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), InteractiveRemovalSwitch) = 0 then
+      Result := True;
+end;
 
 function InitializeUninstall(): Boolean;
 var
@@ -172,8 +248,9 @@ var
 begin
   { The user's data is kept unless they tick the box; a silent uninstall always keeps it. }
   RemoveUserData := False;
+  InteractiveRemoval := HasInteractiveRemovalSwitch();
   Result := True;
-  if UninstallSilent then
+  if UninstallSilent and not InteractiveRemoval then
     exit;
 
   Form := CreateCustomForm(ScaleX(440), ScaleY(140), False, True);
@@ -238,6 +315,13 @@ var
   Removal: String;
   FailureMessage: String;
 begin
+  { /SILENT also suppresses Inno's completion message, so the interactive removal shows it. }
+  if (CurUninstallStep = usPostUninstall) and InteractiveRemoval then
+  begin
+    MsgBox(FmtMessage(SetupMessage(msgUninstalledAll), ['Aeris Terminal']), mbInformation, MB_OK);
+    exit;
+  end;
+
   if CurUninstallStep <> usUninstall then
     exit;
 
@@ -265,29 +349,5 @@ begin
   begin
     MsgBox(FailureMessage, mbError, MB_OK);
     Abort;
-  end;
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ResultCode: Integer;
-  Manifest: String;
-  Bundle: String;
-begin
-  if CurStep <> ssPostInstall then
-    exit;
-
-  Manifest := ExpandConstant('{tmp}\AerisRelease\manifest.json');
-  Bundle := ExpandConstant('{tmp}\AerisRelease\bundle');
-  WizardForm.StatusLabel.Caption := 'Verifying and installing the signed Aeris Terminal release...';
-  if (not Exec(
-      ExpandConstant('{app}\aeris_launcher.exe'),
-      '--install "' + Manifest + '" "' + Bundle + '"',
-      ExpandConstant('{app}'),
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode)) or (ResultCode <> 0) then
-  begin
-    RaiseException('Aeris Terminal could not verify and install the bundled release. Setup has stopped without activating an unverified application.');
   end;
 end;

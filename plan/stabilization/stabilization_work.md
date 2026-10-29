@@ -1042,12 +1042,16 @@ Outside the work items; each needs a maintainer decision or access before it can
   - macOS signing and notarization
   - code-signing certificate and key custody
   - Rithmic live qualification and conformance approval before production order routing
-- **Lifecycle installer findings (M8.6 sandbox run):** when the launcher's `--install` fails (for
-  example, readiness refuses an unreadable workspace), `aeris_setup.iss` raises its error after
-  Inno has finished copying files. A silent install then still exits 0 and leaves the stub launcher
-  and the Start menu link without an active release. The uninstall also asks twice: the "Remove my
-  Aeris data" page and then Inno's standard "Are you sure" box. The lifecycle installer has not
-  shipped (the preview lanes use `aeris_terminal.iss`); fix both before it does.
+- **Lifecycle installer findings (M8.6 sandbox run):** fixed in `aeris_setup.iss`, not yet
+  re-run in Windows Sandbox. The launcher's `--install` used to fail after Inno had finished
+  (an `ssPostInstall` exception is only displayed), so a silent install exited 0 without an active
+  release; it now runs in the last file's `AfterInstall`, a fatal install error that rolls back and
+  exits 4, and a direct 1.x installation's `aeris_desktop.exe` is removed only after it succeeds.
+  The uninstall asked twice ("Remove my Aeris data" and Inno's "Are you sure" box); the registered
+  uninstall command is now `/SILENT /INTERACTIVE`, which shows only the data choice. The Start menu
+  and optional desktop shortcuts take the 1.x names, so an upgrade repoints them at the launcher.
+  Left: a sandbox run of a failing silent install (exit code 4, 1.x still launches), an upgrade over
+  a 1.x install (shortcuts launch the new release) and an uninstall from Installed apps (one prompt).
 - **Shutdown retirement warning:** resolved. A worker batch holding a `Shutdown` command and the
   sender's disconnect retired the endpoint twice, so the second `remove_consumer` failed and a
   second acknowledgement was sent. `retire_endpoint` now returns for an inactive endpoint

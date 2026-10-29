@@ -596,4 +596,36 @@ mod tests {
             Some("aeris_setup.iss")
         );
     }
+
+    #[test]
+    fn setup_script_installs_while_it_can_fail_and_confirms_uninstall_once() {
+        let script = include_str!("../../windows/aeris_setup.iss");
+        let files = script
+            .split("[Files]")
+            .nth(1)
+            .and_then(|section| section.split("\n[").next())
+            .expect("the setup script has a [Files] section");
+        let last_file = files
+            .lines()
+            .rfind(|line| line.starts_with("Source:"))
+            .expect("the [Files] section names files");
+        // An ssPostInstall exception is only displayed and Setup exits 0, so the
+        // verified install must run inside the file copy, where a failure rolls back.
+        assert!(last_file.ends_with("AfterInstall: InstallBundledRelease"));
+        assert!(script.contains("procedure InstallBundledRelease;"));
+        // Inno's own confirmation box is skipped only for a silent uninstall.
+        assert!(script.contains("'\" /SILENT ' + InteractiveRemovalSwitch"));
+        assert!(script.contains("InteractiveRemovalSwitch = '/INTERACTIVE';"));
+        // Removing the 1.x desktop before the install succeeds would strand a failed upgrade.
+        let install_delete = script
+            .split("[InstallDelete]")
+            .nth(1)
+            .and_then(|section| section.split("\n[").next())
+            .expect("the setup script has an [InstallDelete] section");
+        assert!(
+            !install_delete
+                .lines()
+                .any(|line| line.starts_with("Type:") && line.contains("aeris_desktop.exe"))
+        );
+    }
 }

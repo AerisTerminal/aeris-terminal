@@ -250,10 +250,15 @@ violations and missing verification explicitly, and never describe them as satis
   migration that the lifecycle reuses. The launcher parses its command before loading the release
   verifying key: `--launcher-identity`, `--remove-application` and `--remove-all-local-data` never
   load it, and `ReleaseUninstaller` holds no key. The lifecycle installer (`tools/windows/aeris_setup.iss`)
-  asks before uninstalling, with "Remove my Aeris data" unchecked: by default (and always when
-  silent) it runs `--remove-application`, which keeps every data, cache, log and legacy root and
-  vault entry; only a ticked box or a pending full uninstall runs `--remove-all-local-data`. It
-  carries no Axiusflow cleanup. The desktop spawns launcher promotion only on a plain start of
+  asks once before uninstalling, with "Remove my Aeris data" unchecked: the installed-apps
+  uninstall command it registers is `/SILENT /INTERACTIVE`, which skips Inno's own confirmation
+  box but still shows that choice. By default (and always for a silent uninstall without
+  `/INTERACTIVE`) it runs `--remove-application`, which keeps every data, cache, log and legacy
+  root and vault entry; only a ticked box or a pending full uninstall runs
+  `--remove-all-local-data`. It carries no Axiusflow cleanup. Its launcher `--install` runs while
+  Inno can still roll back (the last file's `AfterInstall`), so a failed install exits 4 and a
+  failed upgrade of a direct 1.x installation keeps its `aeris_desktop.exe` and shortcuts; the shortcuts
+  share the 1.x names and point at the launcher. The desktop spawns launcher promotion only on a plain start of
   an installed release (install generation above 0) and reaps that child. While a retained
   known-good release exists, a release generation stays on probation until a desktop it started
   records the install-root `.startup-complete.json` marker (generation, release identity, process
