@@ -161,17 +161,6 @@ impl DurableContainer {
         self.sibling(&format!(".corrupt-{index}"))
     }
 
-    /// An `inspect`/`load` decoder that yields the candidate's validated raw payload bytes,
-    /// for callers that preserve the pre-migration bytes of a file they are about to rewrite.
-    ///
-    /// # Errors
-    ///
-    /// Never fails; the candidate's payload is already validated. The `Result` matches the
-    /// decoder shape `inspect` and `load` expect.
-    pub fn durable_payload_raw(candidate: DurableCandidate<'_>) -> Result<Vec<u8>, String> {
-        Ok(candidate.payload.to_vec())
-    }
-
     /// Loads the newest usable payload, quarantining an unusable primary.
     pub fn load<T, E: fmt::Display>(
         &self,

@@ -169,6 +169,19 @@ fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
     })
 }
 
+/// The primary's payload when it predates the current schema: a released bare payload or an
+/// older envelope. A current-schema primary has no pre-migration bytes to keep.
+fn pre_migration_payload(candidate: DurableCandidate<'_>) -> Option<Vec<u8>> {
+    match candidate.format {
+        DurableFormat::Envelope { schema_version }
+            if schema_version >= CURRENT_WORKSPACE_SCHEMA =>
+        {
+            None
+        }
+        DurableFormat::Envelope { .. } | DurableFormat::Legacy => Some(candidate.payload.to_vec()),
+    }
+}
+
 /// One copy of the bytes a migration started from, kept next to the workspace file; a copy
 /// failure never blocks the migration.
 fn preserve_pre_migration_copy(path: &Path, bytes: &[u8]) {
@@ -298,13 +311,14 @@ fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(),
     if bytes.is_empty() || bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
         return Err("workspace file exceeds the local persistence bound".to_string());
     }
-    // Every successful write is at the current schema, so the first one preserves a copy of
-    // the pre-migration primary payload next to the workspace file.
+    // Every successful write is at the current schema, so the first one over an older
+    // primary preserves a copy of its pre-migration payload next to the workspace file.
     let container = workspace_container(path);
     if let DurableLoad {
-        restored: Some((payload, DurableSource::Primary)),
+        restored: Some((Some(payload), DurableSource::Primary)),
         ..
-    } = container.inspect(DurableContainer::durable_payload_raw)
+    } = container
+        .inspect(|candidate| Ok::<_, std::convert::Infallible>(pre_migration_payload(candidate)))
     {
         preserve_pre_migration_copy(path, &payload);
     }
@@ -2277,6 +2291,19 @@ mod tests {
             std::fs::read(&copy_path).expect("pre-migration copy"),
             b"manual recovery copy",
             "the copy is written once and never overwritten"
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn saves_over_a_current_schema_workspace_write_no_pre_migration_copy() {
+        let path = temporary_workspace_path();
+        save_workspace_to_path(&workspace_with_revision(1), &path).expect("first save");
+        save_workspace_to_path(&workspace_with_revision(2), &path).expect("second save");
+        assert!(
+            !path.with_file_name("workspace-state.pb.pre-v3").exists(),
+            "a fresh workspace has no pre-migration document to preserve"
         );
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace cleanup");
