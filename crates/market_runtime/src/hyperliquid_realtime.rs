@@ -533,6 +533,11 @@ fn hyperliquid_terms(
         // for perps, 8 - szDecimals for spot. The normalized quantity
         // scale is not the native szDecimals.
         price_max_decimals: (if spot { 8_u32 } else { 6_u32 }).checked_sub(resolved.sz_decimals),
+        // Sizes are multiples of 10^-szDecimals (exchange tick/lot docs), expressed in
+        // the normalized quantity scale; a size finer than the scale stays unknown.
+        order_quantity_increment: u32::from(resolved.quantity_scale)
+            .checked_sub(resolved.sz_decimals)
+            .and_then(|digits| 10_i64.checked_pow(digits)),
         instrument_class: Some(if spot {
             aeris_contracts::ProviderInstrumentClass::CryptoSpot
         } else {
@@ -1563,6 +1568,34 @@ fn unix_nanos_now() -> i64 {
 mod tests {
     use super::*;
     use aeris_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
+
+    #[test]
+    fn hyperliquid_terms_publish_the_size_decimals_as_the_order_lot() {
+        let instrument = |sz_decimals| aeris_hyperliquid_market_adapter::HyperliquidInstrument {
+            instrument_id: "hyperliquid:perp:BTC".to_string(),
+            wire_coin: "BTC".to_string(),
+            display: "BTC-USDC".to_string(),
+            venue: "Hyperliquid".to_string(),
+            kind: aeris_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp,
+            price_scale: 8,
+            quantity_scale: 8,
+            sz_decimals,
+        };
+        // BTC trades in 0.00001 lots: 1,000 units at the normalized scale of 8.
+        assert_eq!(
+            hyperliquid_terms(&instrument(5)).order_quantity_increment,
+            Some(1_000)
+        );
+        assert_eq!(
+            hyperliquid_terms(&instrument(0)).order_quantity_increment,
+            Some(100_000_000)
+        );
+        assert_eq!(
+            hyperliquid_terms(&instrument(9)).order_quantity_increment,
+            None,
+            "a lot finer than the normalized scale is not guessed"
+        );
+    }
 
     fn demand() -> BTreeMap<String, HyperliquidInstrumentDemand> {
         BTreeMap::from([(

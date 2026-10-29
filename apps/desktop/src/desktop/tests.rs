@@ -598,13 +598,19 @@ mod timeframe_input {
                 controls.menu_input().clone(),
             )
         });
+        let quantity = |text| aeris_desktop::trading::OrderQuantity::parse(text).expect("quantity");
         cx.read(|cx| assert_eq!(ticket.read(cx).value(), "1"));
 
         cx.update(|window, cx| {
-            surface.update(cx, |surface, cx| surface.set_order_quantity(7, window, cx));
+            surface.update(cx, |surface, cx| {
+                surface.set_order_quantity(quantity("7"), window, cx);
+            });
         });
         cx.read(|cx| {
-            assert_eq!(surface.read(cx).trading_pnl.order_entry.quantity, 7);
+            assert_eq!(
+                surface.read(cx).trading_pnl.order_entry.quantity,
+                quantity("7")
+            );
             assert_eq!(
                 ticket.read(cx).value(),
                 "7",
@@ -618,22 +624,39 @@ mod timeframe_input {
         });
         cx.read(|cx| {
             let surface = surface.read(cx);
-            assert_eq!(surface.trading_pnl.order_entry.quantity, 12);
+            assert_eq!(surface.trading_pnl.order_entry.quantity, quantity("12"));
             assert!(!surface.order_quantity.ticket_invalid());
         });
 
         cx.update(|window, cx| {
-            ticket.update(cx, |input, cx| input.set_value("1000", window, cx));
+            ticket.update(cx, |input, cx| input.set_value("0.00001", window, cx));
             surface.update(cx, WorkspaceSurface::apply_ticket_quantity_text);
         });
         cx.read(|cx| {
             let surface = surface.read(cx);
             assert_eq!(
-                surface.trading_pnl.order_entry.quantity, 12,
-                "rejected text never becomes the order quantity"
+                surface.trading_pnl.order_entry.quantity,
+                quantity("0.00001"),
+                "a fractional crypto size is an order quantity"
             );
-            assert!(surface.order_quantity.ticket_invalid());
+            assert!(!surface.order_quantity.ticket_invalid());
         });
+
+        for rejected in ["1000", "0.000000001"] {
+            cx.update(|window, cx| {
+                ticket.update(cx, |input, cx| input.set_value(rejected, window, cx));
+                surface.update(cx, WorkspaceSurface::apply_ticket_quantity_text);
+            });
+            cx.read(|cx| {
+                let surface = surface.read(cx);
+                assert_eq!(
+                    surface.trading_pnl.order_entry.quantity,
+                    quantity("0.00001"),
+                    "rejected text {rejected:?} never becomes the order quantity"
+                );
+                assert!(surface.order_quantity.ticket_invalid());
+            });
+        }
 
         cx.update(|window, cx| {
             surface.update(cx, |surface, cx| {
@@ -648,11 +671,14 @@ mod timeframe_input {
             let surface = surface.read(cx);
             assert!(surface.order_quantity.menu_open());
             assert!(surface.order_quantity.menu_invalid());
-            assert_eq!(surface.trading_pnl.order_entry.quantity, 12);
+            assert_eq!(
+                surface.trading_pnl.order_entry.quantity,
+                quantity("0.00001")
+            );
         });
 
         cx.update(|window, cx| {
-            menu.update(cx, |input, cx| input.set_value("40", window, cx));
+            menu.update(cx, |input, cx| input.set_value("2.5", window, cx));
             surface.update(cx, |surface, cx| {
                 surface.submit_order_quantity_menu(window, cx);
             });
@@ -660,15 +686,10 @@ mod timeframe_input {
         cx.read(|cx| {
             let surface = surface.read(cx);
             assert!(!surface.order_quantity.menu_open());
-            assert_eq!(surface.trading_pnl.order_entry.quantity, 40);
+            assert_eq!(surface.trading_pnl.order_entry.quantity, quantity("2.5"));
             assert!(!surface.order_quantity.ticket_invalid());
-            assert_eq!(ticket.read(cx).value(), "40");
+            assert_eq!(ticket.read(cx).value(), "2.5");
         });
-
-        cx.update(|window, cx| {
-            surface.update(cx, |surface, cx| surface.set_order_quantity(0, window, cx));
-        });
-        cx.read(|cx| assert_eq!(surface.read(cx).trading_pnl.order_entry.quantity, 1));
     }
 
     #[gpui::test]

@@ -1016,7 +1016,7 @@ impl WorkspaceSurface {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TradingOrderEntryState {
-    quantity: u64,
+    quantity: aeris_desktop::trading::OrderQuantity,
     selected_account_id: Option<aeris_trading::TradingAccountId>,
     ticket: order_ticket::TicketSettings,
 }
@@ -1024,7 +1024,7 @@ struct TradingOrderEntryState {
 impl Default for TradingOrderEntryState {
     fn default() -> Self {
         Self {
-            quantity: 1,
+            quantity: aeris_desktop::trading::OrderQuantity::ONE,
             selected_account_id: None,
             ticket: order_ticket::TicketSettings::default(),
         }

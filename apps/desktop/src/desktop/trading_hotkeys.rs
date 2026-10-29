@@ -338,14 +338,16 @@ impl TerminalApp {
                     return;
                 }
                 let quantity = self.trading_order_entry(cx).1;
-                let quantity = f64::from(u32::try_from(quantity).unwrap_or(u32::MAX));
                 // Aeris Charts turns the drawing into a bracket intent, which the chart's pane
                 // dispatches like any other chart order.
-                let placed = chart.update(cx, |chart, chart_cx| {
-                    let placed = chart.place_bracket_order_from_drawing(*drawing, quantity);
-                    chart_cx.notify();
-                    placed
-                });
+                let placed = match quantity.chart_size() {
+                    Some(quantity) => chart.update(cx, |chart, chart_cx| {
+                        let placed = chart.place_bracket_order_from_drawing(*drawing, quantity);
+                        chart_cx.notify();
+                        placed
+                    }),
+                    None => Err(ChartIntentRejection::InvalidQuantity.message().to_string()),
+                };
                 if let Err(reason) = placed {
                     let pane = self.active_surface().read(cx).trading_pane_token.clone();
                     self.lifecycle

@@ -4,10 +4,11 @@
 
 use super::order_ticket::trade_variant;
 use super::*;
+use aeris_desktop::trading::{
+    MAXIMUM_ORDER_QUANTITY, MAXIMUM_ORDER_QUANTITY_DECIMALS, OrderQuantity,
+};
 use gpui::{anchored, deferred};
 
-/// The largest quantity one order entry accepts.
-pub(super) const MAXIMUM_ORDER_QUANTITY: u64 = 999;
 /// The quantities the chart's quantity menu offers under its custom field.
 const QUANTITY_PRESETS: [u64; 8] = [1, 2, 3, 5, 10, 15, 20, 25];
 const QUANTITY_MENU_WIDTH: f32 = 168.0;
@@ -15,14 +16,6 @@ const QUANTITY_FIELD_HEIGHT: f32 = 28.0;
 const TRADE_BAR_BUTTON_WIDTH: f32 = 56.0;
 /// Keeps the quantity menu clear of the window edges when it has to slide inside.
 const QUANTITY_MENU_WINDOW_MARGIN: f32 = 8.0;
-
-/// A typed quantity, accepted only as a whole number of lots within the order-entry range.
-pub(super) fn parse_order_quantity(text: &str) -> Option<u64> {
-    text.trim()
-        .parse::<u64>()
-        .ok()
-        .filter(|quantity| (1..=MAXIMUM_ORDER_QUANTITY).contains(quantity))
-}
 
 /// The editing state of the surface's quantity controls.
 pub(super) struct OrderQuantityControls {
@@ -38,7 +31,7 @@ pub(super) struct OrderQuantityControls {
 }
 
 impl OrderQuantityControls {
-    pub(super) fn new(quantity: u64, window: &mut Window, cx: &mut App) -> Self {
+    pub(super) fn new(quantity: OrderQuantity, window: &mut Window, cx: &mut App) -> Self {
         let ticket_input = cx.new(|input_cx| InputState::new(window, input_cx));
         ticket_input.update(cx, |input, input_cx| {
             input.set_text_align(gpui::TextAlign::Right, input_cx);
@@ -131,11 +124,11 @@ impl WorkspaceSurface {
     /// Sets the quantity every order control on this surface sends.
     pub(super) fn set_order_quantity(
         &mut self,
-        quantity: u64,
+        quantity: OrderQuantity,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.trading_pnl.order_entry.quantity = quantity.clamp(1, MAXIMUM_ORDER_QUANTITY);
+        self.trading_pnl.order_entry.quantity = quantity;
         self.show_order_quantity_in_ticket(window, cx);
     }
 
@@ -143,7 +136,7 @@ impl WorkspaceSurface {
         let quantity = self.trading_pnl.order_entry.quantity;
         self.order_quantity.ticket_invalid = false;
         let input = self.order_quantity.ticket_input.clone();
-        if parse_order_quantity(input.read(cx).value().as_ref()) != Some(quantity) {
+        if OrderQuantity::parse(input.read(cx).value().as_ref()) != Some(quantity) {
             input.update(cx, |input, input_cx| {
                 input.set_value(quantity.to_string(), window, input_cx);
             });
@@ -153,7 +146,7 @@ impl WorkspaceSurface {
 
     pub(super) fn apply_ticket_quantity_text(&mut self, cx: &mut Context<Self>) {
         let text = self.order_quantity.ticket_input.read(cx).value();
-        match parse_order_quantity(text.as_ref()) {
+        match OrderQuantity::parse(text.as_ref()) {
             Some(quantity) => {
                 self.trading_pnl.order_entry.quantity = quantity;
                 self.order_quantity.ticket_invalid = false;
@@ -200,7 +193,7 @@ impl WorkspaceSurface {
 
     fn choose_order_quantity(
         &mut self,
-        quantity: u64,
+        quantity: OrderQuantity,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -214,7 +207,7 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         let text = self.order_quantity.menu_input.read(cx).value();
-        if let Some(quantity) = parse_order_quantity(text.as_ref()) {
+        if let Some(quantity) = OrderQuantity::parse(text.as_ref()) {
             self.choose_order_quantity(quantity, window, cx);
         } else {
             self.order_quantity.menu_invalid = true;
@@ -349,7 +342,7 @@ struct MarketOrderTarget {
     surface: Entity<WorkspaceSurface>,
     product: Option<InstallProviderInstrument>,
     account: Option<String>,
-    quantity: u64,
+    quantity: OrderQuantity,
     ready: bool,
 }
 
@@ -399,7 +392,7 @@ fn trade_bar_order_button(
 
 fn quantity_trigger(
     surface: Entity<WorkspaceSurface>,
-    quantity: u64,
+    quantity: OrderQuantity,
     open: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
@@ -482,7 +475,7 @@ pub(super) fn order_quantity_menu_layer(
                 .text_xs()
                 .text_color(gpui_color(theme.colors.danger))
                 .child(format!(
-                    "Enter a whole number from 1 to {MAXIMUM_ORDER_QUANTITY}"
+                    "Enter a quantity above 0, up to {MAXIMUM_ORDER_QUANTITY}, with at most {MAXIMUM_ORDER_QUANTITY_DECIMALS} decimals"
                 )),
         );
     }
@@ -490,19 +483,22 @@ pub(super) fn order_quantity_menu_layer(
         .width(px(QUANTITY_MENU_WIDTH))
         .animate_from(PopupAnimationOrigin::TOP_LEFT)
         .header(header)
-        .children(QUANTITY_PRESETS.map(|preset| {
+        .children(QUANTITY_PRESETS.into_iter().filter_map(|preset| {
             let choose = surface_entity.clone();
-            MenuRow::compact(
-                ("chart_trade_quantity_preset", preset),
-                preset.to_string(),
-                theme,
+            let preset_quantity = OrderQuantity::whole(preset)?;
+            Some(
+                MenuRow::compact(
+                    ("chart_trade_quantity_preset", preset),
+                    preset.to_string(),
+                    theme,
+                )
+                .checked(quantity == preset_quantity)
+                .on_click(move |_, window, cx| {
+                    choose.update(cx, |surface, surface_cx| {
+                        surface.choose_order_quantity(preset_quantity, window, surface_cx);
+                    });
+                }),
             )
-            .checked(quantity == preset)
-            .on_click(move |_, window, cx| {
-                choose.update(cx, |surface, surface_cx| {
-                    surface.choose_order_quantity(preset, window, surface_cx);
-                });
-            })
         }));
     let dismiss = surface_entity.clone();
     let escape = surface_entity.clone();
@@ -546,22 +542,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typed_quantities_must_be_whole_lots_within_the_order_entry_range() {
-        assert_eq!(parse_order_quantity("7"), Some(7));
-        assert_eq!(parse_order_quantity(" 25 "), Some(25));
-        assert_eq!(
-            parse_order_quantity(&MAXIMUM_ORDER_QUANTITY.to_string()),
-            Some(MAXIMUM_ORDER_QUANTITY)
-        );
-        for rejected in ["", "0", "-3", "2.5", "1000", "ten"] {
-            assert_eq!(parse_order_quantity(rejected), None, "{rejected:?}");
-        }
-    }
-
-    #[test]
     fn every_preset_is_an_accepted_quantity() {
         for preset in QUANTITY_PRESETS {
-            assert_eq!(parse_order_quantity(&preset.to_string()), Some(preset));
+            assert_eq!(
+                OrderQuantity::parse(&preset.to_string()),
+                OrderQuantity::whole(preset)
+            );
+            assert!(OrderQuantity::whole(preset).is_some());
         }
     }
 }

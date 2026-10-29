@@ -117,9 +117,9 @@ every open item now has its code landed and waits only on the checks listed on i
 - [ ] M5.6 Superseded protection layers deleted (71f36340)
   - Left: guarded GUI check VAL-TRD-053, placing a chart bracket.
 - [ ] M5.7 Fill-driven cash ledger with configurable fees (2d8e32ab)
-  - Left: the VAL-TRD-058 minimum-quantity GUI clause. The ticket accepts whole contracts only, so
-    0.00001 BTC cannot be entered. Fractional ticket quantity input is needed first, and no item
-    owns it yet.
+  - Left: the VAL-TRD-058 minimum-quantity GUI clause (place 0.00001 BTC from the order ticket and
+    see it fill). The ticket now takes fractional quantities up to 8 decimals at the instrument's
+    lot, and the pane harness fills 0.00001 exactly through the owner; the guarded GUI run remains.
 - [x] M5.8 Checkpoints before retention, repair and equity history (11085c44)
 - [x] M5.9 Kill switch, flatten scopes and atomic reverse (f824e27b)
 - [ ] M5.10 Persisted risk session with rollover (f81bcb53)

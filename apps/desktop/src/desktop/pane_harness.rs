@@ -325,7 +325,7 @@ fn place_scope_resting_order(
         product,
         aeris_trading::OrderSide::Buy,
         Some(account.as_str().into()),
-        1,
+        aeris_desktop::trading::OrderQuantity::ONE,
         aeris_trading::OrderType::Limit,
         aeris_trading::TimeInForce::Day,
     )
@@ -463,6 +463,64 @@ fn pane_harness_chart_buy_intent_fills_through_owner_and_projects_position(
     std::fs::remove_dir_all(root).expect("remove test root");
 }
 
+/// A fractional crypto size typed into the ticket reaches the owner as the exact
+/// fixed-point quantity at the instrument's scale and fills.
+#[gpui::test]
+fn pane_harness_fractional_ticket_quantity_fills_exactly_through_owner(cx: &mut TestAppContext) {
+    let lot = trading_store::FixtureLot {
+        quantity_scale: 8,
+        increment_units: 1_000,
+    };
+    let (owner, root, account, _, instrument, _, _) =
+        trading_store::real_owner_fill_fixture_with_lot("hyperliquid", lot);
+    let subscription = owner.subscribe().expect("owner subscription");
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.instrument_id = instrument.as_str().into();
+    product.price_scale = 2;
+    product.quantity_scale = 8;
+    product.price_increment = Some(1);
+    let (mut harness, cx) = PaneHarness::open_with_product_and_owner(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product,
+        ChartInterval::Minute1,
+        Some(owner.clone()),
+        cx,
+    );
+    harness.publish_snapshot(120, cx);
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            let ticket = pane.order_quantity.ticket_input().clone();
+            ticket.update(cx, |input, cx| input.set_value("0.00001", window, cx));
+            pane.apply_ticket_quantity_text(cx);
+        });
+        window.refresh();
+    });
+    cx.run_until_parked();
+    let buy = cx
+        .debug_bounds("chart_trade_buy")
+        .expect("host Buy control is painted");
+    cx.simulate_click(buy.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let update = subscription
+        .recv_timeout(Duration::from_secs(2))
+        .expect("owner fill publication after the fractional Buy");
+    let fills = &update.event.working_set.fills;
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].account_id, account);
+    assert_eq!(
+        fills[0].quantity,
+        aeris_trading::FixedPoint::try_new(1_000, 8).expect("quantity"),
+        "0.00001 is sent as 1,000 units at scale 8, neither rounded nor scaled as whole lots"
+    );
+    owner
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+        .expect("owner stopped");
+    std::fs::remove_dir_all(root).expect("remove test root");
+}
+
 fn place_owner_protective_target(
     owner: &aeris_trading_runtime::TradingService,
     product: &InstallProviderInstrument,
@@ -478,7 +536,7 @@ fn place_owner_protective_target(
         product,
         OrderSide::Buy,
         Some(account.as_str().into()),
-        1,
+        aeris_desktop::trading::OrderQuantity::ONE,
         OrderType::Market,
         TimeInForce::Day,
     )
@@ -491,7 +549,7 @@ fn place_owner_protective_target(
         product,
         OrderSide::Sell,
         Some(account.as_str().into()),
-        1,
+        aeris_desktop::trading::OrderQuantity::ONE,
         OrderType::Limit,
         TimeInForce::Day,
     )

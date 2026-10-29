@@ -853,7 +853,7 @@ impl TerminalApp {
         cx: &App,
     ) -> (
         Option<String>,
-        u64,
+        aeris_desktop::trading::OrderQuantity,
         aeris_trading::OrderType,
         aeris_trading::TimeInForce,
     ) {

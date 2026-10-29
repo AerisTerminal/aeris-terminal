@@ -650,12 +650,7 @@ fn quantity_field(state: &TradingOrderControlsState<'_>) -> impl IntoElement + u
         let app = state.app.clone();
         step_button(id, plus, theme).on_click(move |_, window, cx| {
             app.update(cx, |surface, surface_cx| {
-                let next = if plus {
-                    quantity.saturating_add(1)
-                } else {
-                    quantity.saturating_sub(1)
-                };
-                surface.set_order_quantity(next, window, surface_cx);
+                surface.set_order_quantity(quantity.stepped(plus), window, surface_cx);
             });
         })
     };

@@ -579,6 +579,8 @@ impl Drop for TradingStore {
 pub(in crate::desktop) use tests::real_owner_fill_fixture_for;
 #[cfg(test)]
 pub(in crate::desktop) use tests::real_owner_fill_fixture_for_with_clock;
+#[cfg(test)]
+pub(in crate::desktop) use tests::{FixtureLot, real_owner_fill_fixture_with_lot};
 
 #[cfg(test)]
 mod tests {
@@ -989,6 +991,35 @@ mod tests {
         InstrumentId,
         Arc<ManualClock>,
     ) {
+        real_owner_fill_fixture_with_lot(provider, FixtureLot::WHOLE)
+    }
+
+    /// The quantity terms the real-fill fixture's instrument publishes to the owner.
+    #[derive(Clone, Copy)]
+    pub(in crate::desktop) struct FixtureLot {
+        pub(in crate::desktop) quantity_scale: u8,
+        pub(in crate::desktop) increment_units: i64,
+    }
+
+    impl FixtureLot {
+        pub(in crate::desktop) const WHOLE: Self = Self {
+            quantity_scale: 0,
+            increment_units: 1,
+        };
+    }
+
+    pub(in crate::desktop) fn real_owner_fill_fixture_with_lot(
+        provider: &str,
+        lot: FixtureLot,
+    ) -> (
+        aeris_trading_runtime::TradingService,
+        std::path::PathBuf,
+        TradingAccountId,
+        TradingAccountId,
+        InstrumentId,
+        InstrumentId,
+        Arc<ManualClock>,
+    ) {
         use aeris_trading::{AccountEnvironment, FixedPoint, TradingAccount};
         use aeris_trading_runtime::{
             ExecutionPolicy, TradingRetention, TradingService, TradingServiceConfig,
@@ -1037,7 +1068,7 @@ mod tests {
                 starting_equity: Some(price(1_000_000)),
             })
             .expect("other account registered");
-        script_owner_quote_for(&service, &instrument, provider);
+        script_owner_quote_for(&service, &instrument, provider, lot);
         (
             service,
             root,
@@ -1053,6 +1084,7 @@ mod tests {
         service: &aeris_trading_runtime::TradingService,
         instrument: &InstrumentId,
         provider: &str,
+        lot: FixtureLot,
     ) {
         use aeris_instruments::{
             CalendarSourceKind, InstrumentClass, InstrumentDecimal, PriceGrid, SessionPhase,
@@ -1081,14 +1113,16 @@ mod tests {
             venue_id: "Fixture".into(),
             entitlement_id: None,
             price_scale: 2,
-            quantity_scale: 0,
+            quantity_scale: lot.quantity_scale,
         };
         feed.push(MarketFeedEvent::Terms(InstrumentTerms {
             route: route.clone(),
             instrument_class: InstrumentClass::CryptoPerpetual,
             price_grid: PriceGrid::Fixed(InstrumentDecimal::try_new(1, 2).expect("tick")),
             point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point")),
-            quantity_increment: Some(InstrumentDecimal::try_new(1, 0).expect("lot")),
+            quantity_increment: Some(
+                InstrumentDecimal::try_new(lot.increment_units, lot.quantity_scale).expect("lot"),
+            ),
             currency: "USD".into(),
             expiry: None,
             first_notice: None,
@@ -1253,7 +1287,7 @@ mod tests {
             &product,
             OrderSide::Buy,
             Some(account.as_str().into()),
-            1,
+            aeris_desktop::trading::OrderQuantity::ONE,
             OrderType::Market,
             TimeInForce::Day,
         )
@@ -1305,7 +1339,7 @@ mod tests {
                 &product,
                 side,
                 Some(account.as_str().into()),
-                1,
+                aeris_desktop::trading::OrderQuantity::ONE,
                 OrderType::Market,
                 TimeInForce::Day,
             )
@@ -1444,13 +1478,10 @@ mod tests {
             None
         );
         assert_eq!(
-            super::super::order_quantity::parse_order_quantity("999"),
-            Some(999)
+            aeris_desktop::trading::OrderQuantity::parse("999"),
+            aeris_desktop::trading::OrderQuantity::whole(999)
         );
-        assert_eq!(
-            super::super::order_quantity::parse_order_quantity("1000"),
-            None
-        );
+        assert_eq!(aeris_desktop::trading::OrderQuantity::parse("1000"), None);
     }
 
     #[test]

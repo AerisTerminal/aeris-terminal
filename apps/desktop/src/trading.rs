@@ -15,6 +15,165 @@ const REQUEST_CAPACITY_NOTICE: &str = "Too many trading commands are waiting for
 pub const STALE_ORDER_NOTICE: &str = "Order changed before your edit; it was not modified";
 /// Allows a burst of global commands and venue notices between UI wakes without loss.
 pub const MAXIMUM_UNSCOPED_NOTICES: usize = 64;
+/// The largest quantity one order entry accepts.
+pub const MAXIMUM_ORDER_QUANTITY: u64 = 999;
+/// The most fractional digits an order-entry quantity carries.
+pub const MAXIMUM_ORDER_QUANTITY_DECIMALS: u8 = 8;
+
+/// A positive order-entry quantity, kept as the exact decimal the user chose and stored
+/// without trailing fractional zeros. It becomes an instrument's fixed-point quantity
+/// only when an order is prepared, so no precision is lost or invented on the way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderQuantity {
+    units: u64,
+    scale: u8,
+}
+
+impl OrderQuantity {
+    pub const ONE: Self = Self { units: 1, scale: 0 };
+
+    /// A whole quantity within the order-entry range.
+    #[must_use]
+    pub fn whole(quantity: u64) -> Option<Self> {
+        (1..=MAXIMUM_ORDER_QUANTITY)
+            .contains(&quantity)
+            .then_some(Self {
+                units: quantity,
+                scale: 0,
+            })
+    }
+
+    /// A typed quantity: decimal digits with an optional point and at most
+    /// [`MAXIMUM_ORDER_QUANTITY_DECIMALS`] significant fractional digits, above zero and at
+    /// most [`MAXIMUM_ORDER_QUANTITY`]. Signs, exponents and separators are refused.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        if (whole.is_empty() && fraction.is_empty())
+            || !whole
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let fraction = fraction.trim_end_matches('0');
+        let scale = u8::try_from(fraction.len())
+            .ok()
+            .filter(|scale| *scale <= MAXIMUM_ORDER_QUANTITY_DECIMALS)?;
+        let whole = if whole.is_empty() {
+            0
+        } else {
+            whole.parse::<u64>().ok()?
+        };
+        let fraction = if fraction.is_empty() {
+            0
+        } else {
+            fraction.parse::<u64>().ok()?
+        };
+        let units = whole
+            .checked_mul(10_u64.pow(u32::from(scale)))?
+            .checked_add(fraction)?;
+        let quantity = Self { units, scale };
+        (units > 0 && !quantity.exceeds_maximum()).then_some(quantity)
+    }
+
+    fn unit(self) -> u64 {
+        10_u64.pow(u32::from(self.scale))
+    }
+
+    fn exceeds_maximum(self) -> bool {
+        self.units > MAXIMUM_ORDER_QUANTITY.saturating_mul(self.unit())
+    }
+
+    /// One whole unit more or less. An increase stops at [`MAXIMUM_ORDER_QUANTITY`]; a
+    /// decrease that would not stay above zero leaves the quantity unchanged.
+    #[must_use]
+    pub fn stepped(self, increase: bool) -> Self {
+        let unit = self.unit();
+        if increase {
+            let next = Self {
+                units: self.units.saturating_add(unit),
+                scale: self.scale,
+            };
+            if next.exceeds_maximum() {
+                Self {
+                    units: MAXIMUM_ORDER_QUANTITY,
+                    scale: 0,
+                }
+            } else {
+                next
+            }
+        } else if self.units > unit {
+            Self {
+                units: self.units - unit,
+                scale: self.scale,
+            }
+        } else {
+            self
+        }
+    }
+
+    /// The same quantity in an instrument's fixed-point `scale`, or `None` when it has
+    /// more fractional digits than the instrument carries.
+    #[must_use]
+    pub fn fixed_point(self, scale: u8) -> Option<aeris_trading::FixedPoint> {
+        let extra = scale.checked_sub(self.scale)?;
+        let units = self
+            .units
+            .checked_mul(10_u64.checked_pow(u32::from(extra))?)?;
+        aeris_trading::FixedPoint::try_new(i64::try_from(units).ok()?, scale).ok()
+    }
+
+    /// The nearest floating-point size, for chart APIs that take one; the chart's order
+    /// intent is converted back to the instrument's exact scale before it is sent.
+    #[must_use]
+    pub fn chart_size(self) -> Option<f64> {
+        self.to_string().parse().ok()
+    }
+}
+
+impl std::fmt::Display for OrderQuantity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let unit = self.unit();
+        let whole = self.units / unit;
+        if self.scale == 0 {
+            write!(formatter, "{whole}")
+        } else {
+            let fraction = self.units % unit;
+            write!(
+                formatter,
+                "{whole}.{fraction:0width$}",
+                width = usize::from(self.scale)
+            )
+        }
+    }
+}
+
+/// Why the desktop could not turn the order entry into an owner instruction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderEntryRefusal {
+    /// No valid account, instrument or ready order book for the instruction.
+    Incomplete,
+    /// The quantity has more fractional digits than the instrument's quantity scale.
+    QuantityTooPrecise { decimals: u8 },
+}
+
+impl OrderEntryRefusal {
+    #[must_use]
+    pub fn message(self) -> String {
+        match self {
+            Self::Incomplete => "Choose a valid account and instrument for this order".to_string(),
+            Self::QuantityTooPrecise { decimals: 0 } => {
+                "This market takes whole quantities only".to_string()
+            }
+            Self::QuantityTooPrecise { decimals } => {
+                format!("This market takes quantities with at most {decimals} decimals")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(u64);
@@ -560,7 +719,7 @@ pub fn dispatch_simulated_order(
     }
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some(command) = prepare_product_order(
+    let command = match prepare_product_order(
         feedback.now(),
         product,
         side,
@@ -568,12 +727,12 @@ pub fn dispatch_simulated_order(
         selection.quantity,
         selection.order_type,
         selection.time_in_force,
-    ) else {
-        feedback.record_for_pane(
-            pane,
-            Err("Choose a valid account and instrument for this order".to_string()),
-        );
-        return;
+    ) {
+        Ok(command) => command,
+        Err(refusal) => {
+            feedback.record_for_pane(pane, Err(refusal.message()));
+            return;
+        }
     };
     let Some(request_id) = feedback.begin_request(pane) else {
         return;
@@ -591,7 +750,7 @@ pub fn dispatch_simulated_order(
 /// User-selected order instruction with an optional runtime-owned bracket template.
 pub struct SimulatedOrderSelection {
     pub account_key: Option<String>,
-    pub quantity: u64,
+    pub quantity: OrderQuantity,
     pub order_type: aeris_trading::OrderType,
     pub time_in_force: aeris_trading::TimeInForce,
     pub template_id: Option<String>,
@@ -613,7 +772,7 @@ pub fn dispatch_simulated_selected_order(
     }
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some(entry) = prepare_product_order(
+    let entry = match prepare_product_order(
         feedback.now(),
         product,
         side,
@@ -621,12 +780,12 @@ pub fn dispatch_simulated_selected_order(
         selection.quantity,
         selection.order_type,
         selection.time_in_force,
-    ) else {
-        feedback.record_for_pane(
-            pane,
-            Err("Choose a valid account and instrument for this order".to_string()),
-        );
-        return;
+    ) {
+        Ok(entry) => entry,
+        Err(refusal) => {
+            feedback.record_for_pane(pane, Err(refusal.message()));
+            return;
+        }
     };
     let Some(request_id) = feedback.begin_request(pane) else {
         return;
@@ -753,7 +912,7 @@ pub struct SimulatedPricedOrder {
     pub side: aeris_trading::OrderSide,
     pub order_type: aeris_trading::OrderType,
     pub account_key: Option<String>,
-    pub quantity: u64,
+    pub quantity: OrderQuantity,
     pub time_in_force: aeris_trading::TimeInForce,
     pub price_units: i64,
 }
@@ -769,7 +928,7 @@ pub fn dispatch_simulated_order_at_price(
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let Some(mut command) = prepare_simulated_order(
+    let mut command = match prepare_simulated_order(
         feedback.now(),
         frame,
         order.side,
@@ -777,12 +936,12 @@ pub fn dispatch_simulated_order_at_price(
         order.quantity,
         order.order_type,
         order.time_in_force,
-    ) else {
-        feedback.record_for_pane(
-            pane,
-            Err("Choose a valid account and instrument for this order".to_string()),
-        );
-        return;
+    ) {
+        Ok(command) => command,
+        Err(refusal) => {
+            feedback.record_for_pane(pane, Err(refusal.message()));
+            return;
+        }
     };
     let Ok(price) = aeris_trading::FixedPoint::try_new(order.price_units, frame.price_scale) else {
         feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
@@ -833,7 +992,7 @@ pub struct TicketOrder {
     pub side: aeris_trading::OrderSide,
     pub order_type: aeris_trading::OrderType,
     pub account_key: Option<String>,
-    pub quantity: u64,
+    pub quantity: OrderQuantity,
     pub price_units: Option<i64>,
     pub bracket: Option<TicketBracket>,
 }
@@ -862,24 +1021,26 @@ pub fn dispatch_ticket_order(
                 aeris_trading::TimeInForce::Day,
             )
         } else {
-            frame.and_then(|frame| {
-                prepare_simulated_order(
-                    feedback.now(),
-                    frame,
-                    order.side,
-                    order.account_key,
-                    order.quantity,
-                    order.order_type,
-                    aeris_trading::TimeInForce::Day,
-                )
-            })
+            frame
+                .ok_or(OrderEntryRefusal::Incomplete)
+                .and_then(|frame| {
+                    prepare_simulated_order(
+                        feedback.now(),
+                        frame,
+                        order.side,
+                        order.account_key,
+                        order.quantity,
+                        order.order_type,
+                        aeris_trading::TimeInForce::Day,
+                    )
+                })
         };
-    let Some(mut entry) = entry else {
-        feedback.record_for_pane(
-            pane,
-            Err("Choose a valid account and instrument for this order".to_string()),
-        );
-        return;
+    let mut entry = match entry {
+        Ok(entry) => entry,
+        Err(refusal) => {
+            feedback.record_for_pane(pane, Err(refusal.message()));
+            return;
+        }
     };
     if let Some(price_units) = order.price_units {
         let Ok(scale) = u8::try_from(product.price_scale) else {
@@ -1191,37 +1352,22 @@ pub fn register_trade_copier(
         .detach();
 }
 
-/// Prepares a validated local market order and its optional BBO observation.
-#[must_use]
-pub fn prepare_simulated_market_order(
-    submitted_unix_nanos: i64,
-    frame: &aeris_market_data::OrderBookFrame,
-    side: aeris_trading::OrderSide,
-) -> Option<PlaceOrder> {
-    prepare_simulated_order(
-        submitted_unix_nanos,
-        frame,
-        side,
-        None,
-        1,
-        aeris_trading::OrderType::Market,
-        aeris_trading::TimeInForce::Day,
-    )
-}
-
 /// Prepares an identity-bearing order instruction; the owner prices it from its quote book.
-#[must_use]
+///
+/// # Errors
+/// Refuses when the book is not ready, the account or instrument is invalid, or the
+/// quantity is more precise than the instrument's quantity scale.
 pub fn prepare_simulated_order(
     submitted_unix_nanos: i64,
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
     selected_account_key: Option<String>,
-    quantity_units: u64,
+    quantity: OrderQuantity,
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
-) -> Option<PlaceOrder> {
+) -> Result<PlaceOrder, OrderEntryRefusal> {
     if frame.state != aeris_market_data::OrderBookState::Ready {
-        return None;
+        return Err(OrderEntryRefusal::Incomplete);
     }
     prepare_order_identity(
         submitted_unix_nanos,
@@ -1233,34 +1379,38 @@ pub fn prepare_simulated_order(
         },
         side,
         selected_account_key,
-        quantity_units,
+        quantity,
         order_type,
         time_in_force,
     )
 }
 
 /// A market-priced ticket instruction needs instrument terms, not a pane quote.
-#[must_use]
+///
+/// # Errors
+/// Refuses when the account or instrument is invalid or the quantity is more precise
+/// than the instrument's quantity scale.
 pub fn prepare_product_order(
     submitted_unix_nanos: i64,
     product: &aeris_contracts::InstallProviderInstrument,
     side: aeris_trading::OrderSide,
     selected_account_key: Option<String>,
-    quantity_units: u64,
+    quantity: OrderQuantity,
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
-) -> Option<PlaceOrder> {
+) -> Result<PlaceOrder, OrderEntryRefusal> {
     prepare_order_identity(
         submitted_unix_nanos,
         OrderInstrumentTerms {
             instrument: &product.instrument_id,
             provider: &product.provider,
             session_generation: product.session_generation,
-            quantity_scale: u8::try_from(product.quantity_scale).ok()?,
+            quantity_scale: u8::try_from(product.quantity_scale)
+                .map_err(|_| OrderEntryRefusal::Incomplete)?,
         },
         side,
         selected_account_key,
-        quantity_units,
+        quantity,
         order_type,
         time_in_force,
     )
@@ -1279,13 +1429,15 @@ fn prepare_order_identity(
     terms: OrderInstrumentTerms<'_>,
     side: aeris_trading::OrderSide,
     selected_account_key: Option<String>,
-    quantity_units: u64,
+    quantity: OrderQuantity,
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
-) -> Option<PlaceOrder> {
+) -> Result<PlaceOrder, OrderEntryRefusal> {
     let account_id = selected_account_key
-        .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
-    let instrument_id = InstrumentId::try_new(terms.instrument.to_string()).ok()?;
+        .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
+        .ok_or(OrderEntryRefusal::Incomplete)?;
+    let instrument_id = InstrumentId::try_new(terms.instrument.to_string())
+        .map_err(|_| OrderEntryRefusal::Incomplete)?;
     let client_order_id = aeris_trading::ClientOrderId::try_new(format!(
         "ui-{}-{submitted_unix_nanos}",
         match side {
@@ -1293,12 +1445,12 @@ fn prepare_order_identity(
             aeris_trading::OrderSide::Sell => "sell",
         }
     ))
-    .ok()?;
-    let quantity = aeris_trading::FixedPoint::try_new(
-        display_quantity_units(quantity_units, terms.quantity_scale)?,
-        terms.quantity_scale,
-    )
-    .ok()?;
+    .map_err(|_| OrderEntryRefusal::Incomplete)?;
+    let quantity = quantity.fixed_point(terms.quantity_scale).ok_or(
+        OrderEntryRefusal::QuantityTooPrecise {
+            decimals: terms.quantity_scale,
+        },
+    )?;
     let provenance = aeris_trading::TradingProvenance {
         venue_id: "aeris-sim".to_string(),
         provider_id: terms.provider.to_string(),
@@ -1320,14 +1472,7 @@ fn prepare_order_identity(
         submitted_unix_nanos,
         provenance,
     };
-    Some(command)
-}
-
-fn display_quantity_units(quantity: u64, scale: u8) -> Option<i64> {
-    let multiplier = 10_u64.checked_pow(u32::from(scale))?;
-    quantity
-        .checked_mul(multiplier)
-        .and_then(|units| i64::try_from(units).ok())
+    Ok(command)
 }
 
 /// Flattens every instrument of the selected account using the trading owner's quotes.
@@ -1420,8 +1565,9 @@ pub fn prepare_flatten_for(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAXIMUM_IN_FLIGHT_TRADING_REQUESTS, TradingFeedback, account_flatten_scope,
-        parse_usd_equity, prepare_simulated_order,
+        MAXIMUM_IN_FLIGHT_TRADING_REQUESTS, MAXIMUM_ORDER_QUANTITY, OrderEntryRefusal,
+        OrderQuantity, TradingFeedback, account_flatten_scope, parse_usd_equity,
+        prepare_simulated_order,
     };
 
     #[test]
@@ -1587,7 +1733,7 @@ mod tests {
             &product,
             aeris_trading::OrderSide::Buy,
             Some(selected.as_str().into()),
-            1,
+            OrderQuantity::ONE,
             aeris_trading::OrderType::Market,
             aeris_trading::TimeInForce::Day,
         )
@@ -1641,7 +1787,7 @@ mod tests {
             &order_book_frame(),
             aeris_trading::OrderSide::Sell,
             Some(account_id.as_str().to_string()),
-            5,
+            OrderQuantity::whole(5).expect("quantity"),
             aeris_trading::OrderType::StopLimit,
             aeris_trading::TimeInForce::GoodTillCancelled,
         )
@@ -1663,18 +1809,86 @@ mod tests {
     fn order_entry_converts_display_quantity_to_provider_fixed_point_units() {
         let mut frame = order_book_frame();
         frame.quantity_scale = 3;
-        let order = prepare_simulated_order(
-            1_000_000_000,
-            &frame,
-            aeris_trading::OrderSide::Buy,
-            Some("aeris-practice-1".to_string()),
-            5,
-            aeris_trading::OrderType::Market,
-            aeris_trading::TimeInForce::Day,
-        )
-        .expect("scaled order command");
-        assert_eq!(order.quantity.units(), 5_000);
-        assert_eq!(order.quantity.scale(), 3);
+        let order = |frame: &aeris_market_data::OrderBookFrame, quantity| {
+            prepare_simulated_order(
+                1_000_000_000,
+                frame,
+                aeris_trading::OrderSide::Buy,
+                Some("aeris-practice-1".to_string()),
+                OrderQuantity::parse(quantity).expect("typed quantity"),
+                aeris_trading::OrderType::Market,
+                aeris_trading::TimeInForce::Day,
+            )
+        };
+        let whole = order(&frame, "5").expect("scaled order command");
+        assert_eq!(whole.quantity.units(), 5_000);
+        assert_eq!(whole.quantity.scale(), 3);
+        let fractional = order(&frame, "0.125").expect("fractional order command");
+        assert_eq!(fractional.quantity.units(), 125);
+        assert_eq!(fractional.quantity.scale(), 3);
+        assert_eq!(
+            order(&frame, "0.0001").map(|order| order.quantity),
+            Err(OrderEntryRefusal::QuantityTooPrecise { decimals: 3 }),
+            "a quantity finer than the instrument is refused, never rounded"
+        );
+        frame.quantity_scale = 8;
+        let minimum = order(&frame, "0.00001").expect("minimum crypto size");
+        assert_eq!(minimum.quantity.units(), 1_000);
+        assert_eq!(minimum.quantity.scale(), 8);
+    }
+
+    #[test]
+    fn typed_order_quantities_are_exact_positive_decimals_within_the_range() {
+        for (text, shown) in [
+            ("7", "7"),
+            (" 25 ", "25"),
+            ("0.5", "0.5"),
+            (".5", "0.5"),
+            ("2.", "2"),
+            ("1.2500", "1.25"),
+            ("0.00001", "0.00001"),
+            ("0.00000001", "0.00000001"),
+            ("999", "999"),
+            ("999.000", "999"),
+        ] {
+            assert_eq!(
+                OrderQuantity::parse(text).map(|quantity| quantity.to_string()),
+                Some(shown.to_string()),
+                "{text:?}"
+            );
+        }
+        for rejected in [
+            "",
+            ".",
+            "0",
+            "0.000",
+            "-3",
+            "+3",
+            "1e3",
+            "1,5",
+            "1.5.0",
+            "999.5",
+            "1000",
+            "0.000000001",
+            "ten",
+        ] {
+            assert_eq!(OrderQuantity::parse(rejected), None, "{rejected:?}");
+        }
+        assert_eq!(OrderQuantity::whole(1), Some(OrderQuantity::ONE));
+        assert_eq!(OrderQuantity::whole(0), None);
+        assert_eq!(OrderQuantity::whole(MAXIMUM_ORDER_QUANTITY + 1), None);
+    }
+
+    #[test]
+    fn order_quantity_steps_by_whole_units_and_stays_in_range() {
+        let quantity = |text| OrderQuantity::parse(text).expect("quantity");
+        assert_eq!(quantity("0.5").stepped(true), quantity("1.5"));
+        assert_eq!(quantity("1.5").stepped(false), quantity("0.5"));
+        assert_eq!(quantity("0.5").stepped(false), quantity("0.5"));
+        assert_eq!(OrderQuantity::ONE.stepped(false), OrderQuantity::ONE);
+        assert_eq!(quantity("998.5").stepped(true), quantity("999"));
+        assert_eq!(quantity("999").stepped(true), quantity("999"));
+        assert_eq!(quantity("0.00001").chart_size(), Some(0.000_01));
     }
 
     #[test]
@@ -1771,17 +1985,18 @@ mod tests {
     fn recovering_book_cannot_fill_a_practice_order() {
         let mut frame = order_book_frame();
         frame.state = aeris_market_data::OrderBookState::Stale;
-        assert!(
+        assert_eq!(
             prepare_simulated_order(
                 1_000_000_000,
                 &frame,
                 aeris_trading::OrderSide::Buy,
                 Some("aeris-practice-1".into()),
-                1,
+                OrderQuantity::ONE,
                 aeris_trading::OrderType::Market,
                 aeris_trading::TimeInForce::Day,
             )
-            .is_none()
+            .map(|order| order.quantity),
+            Err(OrderEntryRefusal::Incomplete)
         );
     }
 
