@@ -486,7 +486,10 @@ impl AerisChartView {
             .and_then(|state| state.presentation.big_trades())
     }
 
-    fn order_flow_presentation_requested(&self) -> bool {
+    /// Whether the chart shows anything drawn from the trade tape: a footprint, a delta study
+    /// or big trades.
+    #[must_use]
+    pub fn order_flow_presentation_requested(&self) -> bool {
         self.chart_type == super::ChartType::Footprint
             || self.order_flow_settings.show_cumulative_delta
             || self.order_flow_settings.show_delta_histogram

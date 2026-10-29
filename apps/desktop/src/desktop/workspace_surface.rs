@@ -5787,16 +5787,23 @@ impl WorkspaceSurface {
         let aggregation = order_flow_aggregation(self.interval);
         let provider_generation = tape.provider_generation;
         let Some(tick_size) = tick_size else {
-            chart.update(cx, |chart, chart_cx| {
+            // A chart that draws nothing from the tape loses nothing without an increment;
+            // a fresh pane's provisional descriptor reaches here before its verified terms.
+            let shows_order_flow = chart.update(cx, |chart, chart_cx| {
                 chart.clear_order_flow_trades();
                 chart_cx.notify();
+                chart.order_flow_presentation_requested()
             });
-            Self::post_indicator_failure(
-                "order_flow",
-                "Order flow unavailable",
-                "Footprint needs a published price increment for this market.",
-                cx,
-            );
+            if shows_order_flow {
+                Self::post_indicator_failure(
+                    "order_flow",
+                    "Order flow unavailable",
+                    "Footprint needs a published price increment for this market.",
+                    cx,
+                );
+            } else {
+                Self::clear_indicator_failure("order_flow", cx);
+            }
             return;
         };
         let result = chart.update(cx, |chart, chart_cx| {

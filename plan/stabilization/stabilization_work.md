@@ -519,6 +519,12 @@ only on the guarded GUI checks on their lines.
     footprint got no prints). The presenter now follows the runtime cursor, under which an empty
     window continues at ordinal 1 (`an_empty_covering_window_continues_at_the_first_ordinal`);
     a 40 s live validation start then logged no broken append.
+  - Fix found on validation starts: every fresh pane posted "Order flow unavailable" (needs a
+    published price increment) while its provisional descriptor waited for verified terms,
+    even on a candle chart that draws nothing from the tape. The notice now posts only when
+    the chart shows a footprint, a delta study or big trades
+    (`pane_harness_a_candle_chart_without_a_price_increment_posts_no_order_flow_notice`); a
+    fresh-root start of the release build logged no order-flow notice.
   - Verified: guarded GUI check (2026-10-29, release build of `ed93b752`). BTC-USDC Time & Sales
     on Hyperliquid highlighted a 20-print buy sweep (80,134 down to 80,130 within one second) and
     kept it highlighted as later prints scrolled in. Closes UI-14 with M7.3 and M7.9.

@@ -4846,6 +4846,70 @@ fn pane_harness_verified_terms_draw_the_tape_the_provisional_descriptor_could_no
 }
 
 #[gpui::test]
+fn pane_harness_a_candle_chart_without_a_price_increment_posts_no_order_flow_notice(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let provisional = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("initial instrument")
+    });
+    assert_eq!(provisional.price_increment, None);
+    harness
+        .publications
+        .send(PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(
+                FixtureMarketEvents::default().trade_tape(
+                    aeris_desktop::test_support::fixture_trade_tape(&provisional, 1, 1, 3),
+                ),
+            ),
+        ))
+        .expect("provisional tape");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    let order_flow_notices = |cx: &VisualTestContext| {
+        cx.read(|cx| {
+            harness
+                .window
+                .read(cx)
+                .toaster
+                .notices()
+                .iter()
+                .filter(|notice| notice.key.kind == "order_flow")
+                .count()
+        })
+    };
+    assert_eq!(
+        order_flow_notices(cx),
+        0,
+        "a chart drawing nothing from the tape has nothing to warn about"
+    );
+
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.set_chart_order_flow_settings(
+            OrderFlowSettings {
+                show_cumulative_delta: true,
+                ..OrderFlowSettings::default()
+            },
+            cx,
+        ));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        order_flow_notices(cx),
+        1,
+        "turning on a tape study without an increment explains why it stays empty"
+    );
+}
+
+#[gpui::test]
 fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
     cx: &mut TestAppContext,
 ) {
