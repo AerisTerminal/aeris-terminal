@@ -700,7 +700,8 @@ When changing shared platform tokens such as colors, typography, radii, or inter
 4. do not reintroduce one-off duplicate platform tokens in landing/auth/account CSS.
 
 Theme presets are the `[data-theme="<id>"]` blocks in `platform.css`, compiled into `ThemePreset` and
-`AerisTheme::resolve`; `themes.md` is their palette source and the preset blocks must match it.
+`AerisTheme::resolve`; the desktop opens in `AerisTheme::initial()` (High Contrast, dark), while Aeris
+stays the stylesheet's `:root` palette; `themes.md` is their palette source and the preset blocks must match it.
 The popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`) is
 Aeris-only: it lives solely in `:root:not([data-theme])` and `.dark:not([data-theme])`, the
 design-system build rejects it in any other block, and presets resolve it to the CSS fallbacks

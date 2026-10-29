@@ -271,7 +271,7 @@ impl TerminalApp {
         let (updater, download_offer) = start_update_clients();
         let mut terminal = Self {
             tabs,
-            theme: AerisTheme::dark(),
+            theme: AerisTheme::initial(),
             frames,
             window: WindowState::new(cx.focus_handle().tab_stop(true)),
             lifecycle,

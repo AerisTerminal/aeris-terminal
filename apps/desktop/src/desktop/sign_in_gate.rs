@@ -498,7 +498,7 @@ fn finish_signed_in_start(
 
 impl Render for SignInWindow {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = AerisTheme::dark();
+        let theme = AerisTheme::initial();
         let notice = match self.gate.borrow().phase {
             GatePhase::SignedOut => StartupNotice::None,
             GatePhase::Starting | GatePhase::Mounted | GatePhase::Closing => StartupNotice::Opening,

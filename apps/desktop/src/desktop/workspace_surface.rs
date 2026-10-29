@@ -1867,7 +1867,7 @@ impl WorkspaceSurface {
         chart_chrome: chart_chrome::ChartChromePreferences,
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
-        let theme = AerisTheme::dark();
+        let theme = AerisTheme::initial();
         let MarketWorkerStartup::Loading(ref loading) = startup;
         let interval = loading.interval;
         let restored_viewport = loading.restored_viewport;

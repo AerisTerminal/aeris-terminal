@@ -521,7 +521,13 @@ impl AerisTheme {
         Self::resolve(ThemePreset::Aeris, mode)
     }
 
-    /// Resolves the dark theme used by the desktop terminal initially.
+    /// Resolves the theme the desktop opens with: High Contrast in dark mode.
+    #[must_use]
+    pub fn initial() -> Self {
+        Self::resolve(ThemePreset::HighContrast, ThemeMode::Dark)
+    }
+
+    /// Resolves the dark mode of the Aeris preset.
     #[must_use]
     pub fn dark() -> Self {
         Self::for_mode(ThemeMode::Dark)
@@ -557,7 +563,7 @@ impl AerisTheme {
 
 impl Default for AerisTheme {
     fn default() -> Self {
-        Self::dark()
+        Self::initial()
     }
 }
 
@@ -1095,6 +1101,8 @@ mod tests {
         }
         assert_eq!(ThemePreset::from_id("missing"), None);
         let high_contrast = AerisTheme::resolve(ThemePreset::HighContrast, ThemeMode::Dark);
+        assert_eq!(AerisTheme::initial(), high_contrast);
+        assert_eq!(AerisTheme::default(), high_contrast);
         assert_eq!(high_contrast.colors.surface, ThemeColor::from_rgb8(0, 0, 0));
         assert_eq!(
             token_source(&high_contrast.color_tokens(), "border-secondary"),

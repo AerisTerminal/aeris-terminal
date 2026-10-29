@@ -5939,7 +5939,7 @@ fn run_sign_in(gate: sign_in_gate::SignInGate) {
 
 fn prepare_application(cx: &mut App) {
     gpui_base::init(cx);
-    cx.set_global(base_theme(&AerisTheme::dark()));
+    cx.set_global(base_theme(&AerisTheme::initial()));
     if aeris_platform_runtime::active_data_root().is_ok_and(|root| {
         root.allows_installed_app_side_effect(
             aeris_platform_runtime::InstalledAppSideEffect::NotificationIdentityRegistration,
