@@ -117,6 +117,33 @@ impl ConfirmedTrade {
     }
 }
 
+// The order goes to the pane's selected product, so the confirmation names that product's
+// display symbol; the order-book frame carries only the opaque instrument identifier.
+fn market_order_message(
+    side: &str,
+    quantity: aeris_desktop::trading::OrderQuantity,
+    product: &InstallProviderInstrument,
+    account: &str,
+) -> String {
+    format!(
+        "{side} {quantity} {} at market on {account}.",
+        product.display_symbol
+    )
+}
+
+fn drawing_bracket_message(
+    long: bool,
+    quantity: aeris_desktop::trading::OrderQuantity,
+    product: &InstallProviderInstrument,
+    account: &str,
+) -> String {
+    let side = if long { "Buy" } else { "Sell" };
+    format!(
+        "{side} {quantity} {} when price reaches the drawing's entry, with its stop and target, on {account}.",
+        product.display_symbol
+    )
+}
+
 pub(super) fn risk_increasing_trade_refusal(account: &str, reason: Option<&str>) -> Option<String> {
     reason.map(|reason| format!("{account} is locked: {reason}"))
 }
@@ -278,13 +305,14 @@ impl TerminalApp {
         ) {
             return Err(message);
         }
-        let frame = self
-            .trading_order_frame(cx)
+        self.trading_order_frame(cx)
             .ok_or("No order book for this instrument yet")?;
-        let side = if long { "Buy" } else { "Sell" };
-        Ok(format!(
-            "{side} {} {} when price reaches the drawing's entry, with its stop and target, on {account}.",
-            trading.order_entry.quantity, frame.instrument_id
+        let product = surface.product.as_ref().ok_or("Choose a symbol first")?;
+        Ok(drawing_bracket_message(
+            long,
+            trading.order_entry.quantity,
+            product,
+            &account,
         ))
     }
 
@@ -304,14 +332,14 @@ impl TerminalApp {
                 ) {
                     return Err(message);
                 }
-                let frame = self
-                    .trading_order_frame(cx)
+                self.trading_order_frame(cx)
                     .ok_or("No order book for this instrument yet")?;
-                let side = hotkey.confirm_label();
-                let quantity = trading.order_entry.quantity;
-                Ok(format!(
-                    "{side} {quantity} {} at market on {account}.",
-                    frame.instrument_id
+                let product = surface.product.as_ref().ok_or("Choose a symbol first")?;
+                Ok(market_order_message(
+                    hotkey.confirm_label(),
+                    trading.order_entry.quantity,
+                    product,
+                    &account,
                 ))
             }
             TradingHotkey::CancelAll => {
@@ -507,5 +535,24 @@ impl TerminalApp {
             )
             .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aeris_desktop::trading::OrderQuantity;
+
+    #[test]
+    fn order_confirmations_name_the_display_symbol_not_the_instrument_id() {
+        let product = aeris_desktop::test_support::fixture_public_crypto();
+        let quantity = OrderQuantity::parse("0.00001").expect("quantity");
+        assert_eq!(
+            super::market_order_message("Buy", quantity, &product, "Practice"),
+            "Buy 0.00001 BTC-USDC at market on Practice."
+        );
+        assert_eq!(
+            super::drawing_bracket_message(false, quantity, &product, "Practice"),
+            "Sell 0.00001 BTC-USDC when price reaches the drawing's entry, with its stop and target, on Practice."
+        );
     }
 }

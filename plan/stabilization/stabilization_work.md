@@ -114,8 +114,14 @@ every open item now has its code landed and waits only on the checks listed on i
 - [ ] M5.4 DAY expiry at session close or 00:00 UTC; GTC keeps working (05cc55bf)
   - Left: guarded GUI check that an expired DAY order shows the Expired status.
 - [x] M5.5 One order-group model with bracket migration (064ca1e4)
-- [ ] M5.6 Superseded protection layers deleted (71f36340)
-  - Left: guarded GUI check VAL-TRD-053, placing a chart bracket.
+- [x] M5.6 Superseded protection layers deleted (71f36340)
+  - Verified: guarded GUI check VAL-TRD-053 (2026-10-29, release build of f9a4d06a on this PC,
+    validation root, evidence outside the repo in `C:\Users\devraj\aeris-evidence\gui2\`). A Long
+    Position drawing on BTC-USDC, Create order and Place order gave a working bracket: entry
+    80,051, target 80,207, stop 79,973.
+  - Fix found in that check: the drawing-bracket and keyboard Buy/Sell confirmations named the
+    order-book frame's opaque instrument identifier instead of the pane product's display symbol
+    (`order_confirmations_name_the_display_symbol_not_the_instrument_id`).
 - [ ] M5.7 Fill-driven cash ledger with configurable fees (2d8e32ab)
   - Left: the VAL-TRD-058 minimum-quantity GUI clause (place 0.00001 BTC from the order ticket and
     see it fill). The ticket now takes fractional quantities up to 8 decimals at the instrument's
