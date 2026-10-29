@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-62 of 90 items are fully done (2026-10-28).
+63 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -40,7 +40,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M4 trading core | 9 / 10 | 1 (GUI check) |
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
-| M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
+| M7 desktop structure | 2 / 12 | 10 (GUI checks and remaining work) |
 | M8 lifecycle and trim | 8 / 12 | 4 (code complete; GUI, VM and process checks) |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
@@ -437,7 +437,7 @@ only on the guarded GUI checks on their lines.
     the new path applies 10 single-print `Append`s in 24.8 ms total (~2.5 ms per print, inside
     one frame budget) with no re-projection and no ordinal diffing.
   - Left: GUI Hyperliquid sweep-highlight check. Closes UI-14 with M7.3 and M7.9.
-- [ ] M7.12 Desktop tests against controller boundaries
+- [x] M7.12 Desktop tests against controller boundaries
   - Landed: `test_support::provider_instruments` renamed to `test_support::providers` per the
     spec (design 11 §8 does not name the module; the work item does), with
     `tools/naming_check` fixture paths and gate-test strings updated. The last guard-specific
@@ -451,10 +451,13 @@ only on the guarded GUI checks on their lines.
     pass-through stays covered by `catalog_rejection_lane_comes_from_the_runtime_not_the_reason`).
     Added `pane_harness_seeded_switch_interleavings_project_only_the_committed_generation`
     (seeded xorshift interleavings of commit/snapshot/tail-update/readiness from the retired
-    and committed generations; the tape leg of the interleaving requirement stays covered by
-    `interval_switch_keeps_order_flow_off_the_superseded_chart`).
-  - Left: tape events are not yet part of the seeded interleavings mix; GUI checks none.
-    Closes UI-15.
+    and committed generations). Trade tape events from both generations are now in the same
+    seeded mix: the original chart draws only tape its own selection accepted before the
+    commit, and the replacement draws the retained tape, never a retired revision (removing
+    the tape generation fence in `apply_trade_tape` fails the test). The tape builder moved to
+    the shared `test_support::fixture_trade_tape`, also used by
+    `interval_switch_keeps_order_flow_off_the_superseded_chart`. Desktop clippy and all 939
+    desktop tests passed. GUI checks: none (internal only). Closes UI-15.
 
 M7 closeout: the full gate (fmt, workspace clippy, workspace tests, naming_check) passed locally on
 24dc339a, and CI run 40677305725 passed on 24dc339a, which contains all M7 code. The open M7 items
@@ -833,6 +836,7 @@ Original decisions (2026-10-13). They override the research design documents.
 | D26 | Restart verification bound | (2026-10-28) The restart helper's verification (a 15 s-bounded channel fetch plus hashing the prepared and active releases) runs before READY, and the desktop waits for READY up to a shared 2-minute bound rather than the former 20 s handshake, so a slow disk or channel no longer fails a restart. The READY-to-COMMIT window keeps its existing bounds, since the desktop's durability waits (up to 22 s) already fit the launcher's 60 s commit wait. |
 | D27 | Study SDK facade | (2026-10-28) PL-13 is resolved as accepted, as `architecture.md` section 2.2 rule 8 records: `study_sdk` is the published-API facade above the in-process study runtime and is used only by the desktop's built-in study packages, so it keeps its `market_runtime` dependency and with it the adapters (`cargo tree -p aeris_study_sdk` still lists them). It is not an inversion while `market_runtime` only dev-depends on it, which naming_check enforces. Moving the study types into a contract crate waits until third-party study authors exist. |
 | D28 | M8.12 naming_check scope | (2026-10-28) Text pins go: the 26 that only match source text are deleted, the 8 that guard behavior already covered by a test are deleted, and the other 7 behavior pins are replaced by behavior tests before they are deleted. Every structural rule (crate graph, file layout, workflow shape, allowlists) stays. `Readme` is renamed `README.md`. `plan/longterm_plan/` is the second sanctioned planning directory beside `plan/stabilization/`. |
+| D29 | Closing the tracker | (2026-10-29) The agent runs the guarded GUI checks itself on this Windows PC, on an isolated validation root, by driving the desktop with synthetic input and verifying screenshots, while the maintainer stays off the machine. M5.7 gets fractional order-ticket quantity input so its VAL-TRD-058 clause can run. The M8.6 install and uninstall check runs in an isolated VM on this PC. When every box is checked, the release record moves to a root `RELEASES.md` and `plan/stabilization/` is deleted with its AGENTS.md rules. |
 
 Reconciled defaults from `architecture.md`: per-pane account selection is kept; the risk session
 boundary defaults to 00:00 UTC (`ChicagoClose` exists but no desktop code selects it); V24 runs in

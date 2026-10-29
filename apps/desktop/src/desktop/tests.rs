@@ -457,6 +457,7 @@ mod timeframe_input {
     use aeris_desktop::market_worker::{
         EngineWorkerStartup, MarketProjectionSender, MarketWorkerCommand, market_projection_channel,
     };
+    use aeris_desktop::test_support::fixture_trade_tape;
     use gpui::{TestAppContext, VisualTestContext};
     use std::num::NonZeroUsize;
     use std::sync::{atomic::AtomicU64, mpsc};
@@ -761,61 +762,6 @@ mod timeframe_input {
         }
     }
 
-    fn order_flow_tape(
-        product: &InstallProviderInstrument,
-        generation: u64,
-        revision: u64,
-        last_ordinal: u64,
-    ) -> aeris_market_runtime::MarketTradeTapeUpdate {
-        let trades = (1..=last_ordinal)
-            .map(|ordinal| {
-                let seconds = 1_700_000_000 + i64::try_from(ordinal).expect("small ordinal");
-                aeris_market_runtime::RetainedMarketTrade {
-                    ingestion_ordinal: ordinal,
-                    observed_unix_nanos: seconds * 1_000_000_000,
-                    trading_day: None,
-                    trade: Arc::new(aeris_market_data::MarketTrade {
-                        metadata: aeris_market_data::EventMetadata {
-                            provider_id: product.provider.clone(),
-                            instrument_id: product.instrument_id.clone(),
-                            entitlement_id: product.entitlement_id.clone(),
-                            session_generation: 1,
-                            source_sequence: ordinal,
-                            timestamps: aeris_market_data::QualifiedTimestamp {
-                                exchange_unix_nanos: Some(seconds * 1_000_000_000),
-                                provider_unix_nanos: None,
-                                received_unix_nanos: seconds * 1_000_000_000,
-                            },
-                        },
-                        trade_id: format!("trade-{ordinal}"),
-                        price: 100,
-                        quantity: 2,
-                        aggressor: aeris_market_data::AggressorSide::Buy,
-                    }),
-                }
-            })
-            .collect::<Vec<_>>();
-        aeris_market_runtime::MarketTradeTapeUpdate {
-            consumer_id: aeris_market_runtime::MarketConsumerId(std::num::NonZeroU64::MIN),
-            generation: aeris_market_runtime::MarketGenerationId(
-                std::num::NonZeroU64::new(generation).expect("selection generation is nonzero"),
-            ),
-            provider_id: product.provider.clone(),
-            instrument_id: product.instrument_id.clone(),
-            entitlement_id: product.entitlement_id.clone(),
-            provider_generation: 1,
-            revision,
-            source_watermark: last_ordinal,
-            rewrite_generation: 0,
-            price_scale: 0,
-            quantity_scale: 0,
-            sweeps: Arc::from([]),
-            operation: aeris_market_runtime::MarketTradeTapeOperation::Reset {
-                trades: trades.into(),
-            },
-        }
-    }
-
     fn tape_message(update: aeris_market_runtime::MarketTradeTapeUpdate) -> PaneProjectionEvent {
         PaneProjectionEvent::RuntimeProjection(
             aeris_desktop::market_worker::RuntimeProjection::event(
@@ -907,7 +853,7 @@ mod timeframe_input {
                 );
             });
         });
-        deliver(tape_message(order_flow_tape(&product, 1, 1, 3)), cx);
+        deliver(tape_message(fixture_trade_tape(&product, 1, 1, 3)), cx);
         let one_minute = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
@@ -926,7 +872,7 @@ mod timeframe_input {
         );
         // A rewritten prefix must not invalidate the old chart's resume cursor.
         // The rewrite belongs to the replacement, which has not been drawn yet.
-        let mut rewritten = order_flow_tape(&product, five_minutes, 2, 5);
+        let mut rewritten = fixture_trade_tape(&product, five_minutes, 2, 5);
         rewritten.rewrite_generation = 1;
         rewritten.provider_generation = 9;
         deliver(tape_message(rewritten), cx);
@@ -939,7 +885,7 @@ mod timeframe_input {
         // A second selection before the 5m chart is drawn leaves the 1m chart on screen too.
         let fifteen_minutes =
             requested_interval_sequence(&surface, &requests, ChartInterval::Minute15, cx);
-        let mut old_tape = order_flow_tape(&product, five_minutes, 3, 6);
+        let mut old_tape = fixture_trade_tape(&product, five_minutes, 3, 6);
         old_tape.provider_generation = 9;
         deliver(tape_message(old_tape), cx);
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
@@ -956,14 +902,14 @@ mod timeframe_input {
         // Even a higher revision from the retired selection cannot replace the
         // new binding's tape while the old chart is still on screen.
         deliver(
-            tape_message(order_flow_tape(&product, five_minutes, 99, 99)),
+            tape_message(fixture_trade_tape(&product, five_minutes, 99, 99)),
             cx,
         );
         // A new selection may move to another provider session whose generation
         // starts lower than the previous one's. The selection fence, not the
         // provider's unrelated epoch, decides whether its tape is current.
         deliver(
-            tape_message(order_flow_tape(&product, fifteen_minutes, 1, 6)),
+            tape_message(fixture_trade_tape(&product, fifteen_minutes, 1, 6)),
             cx,
         );
         publish_snapshot_at_selection(&surface, fifteen_minutes, cx);
@@ -975,7 +921,7 @@ mod timeframe_input {
             "the replacement chart rebuilds its order flow from the retained tape"
         );
         deliver(
-            tape_message(order_flow_tape(&product, fifteen_minutes, 2, 7)),
+            tape_message(fixture_trade_tape(&product, fifteen_minutes, 2, 7)),
             cx,
         );
         assert_eq!(applied_ordinal(&replacement, 15, cx), Some(7));

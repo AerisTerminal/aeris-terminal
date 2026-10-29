@@ -2,12 +2,17 @@
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use aeris_market_data::{BarSeriesKey, MarketBar, OrderBookPublication};
+use aeris_contracts::InstallProviderInstrument;
+use aeris_market_data::{
+    AggressorSide, BarSeriesKey, EventMetadata, MarketBar, MarketTrade, OrderBookPublication,
+    QualifiedTimestamp,
+};
 use aeris_market_runtime::{
     CanonicalMarketSeriesSnapshot, MarketConsumerEvent, MarketConsumerId, MarketDemandError,
     MarketDemandErrorScope, MarketGenerationId, MarketOrderBookSnapshot, MarketProviderGeneration,
     MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate,
-    MarketStudyRemoved, MarketTradeTapeUpdate, SeriesTailOperation,
+    MarketStudyRemoved, MarketTradeTapeOperation, MarketTradeTapeUpdate, RetainedMarketTrade,
+    SeriesTailOperation,
     fence::{ConsumerTag, EpochSequence, Fenced},
 };
 use aeris_market_runtime::{EngineFaultCode, FailureStage, SeriesLoadState};
@@ -24,6 +29,65 @@ pub struct FixtureSeries {
     pub provider_generation: u64,
     pub price_scale: u8,
     pub quantity_scale: u8,
+}
+
+/// A covering tape `Reset` of buy prints with ordinals `1..=last_ordinal` for `product`
+/// under selection `generation`, at provider generation 1 and scale 0.
+///
+/// # Panics
+/// Panics if `generation` is zero.
+#[must_use]
+pub fn fixture_trade_tape(
+    product: &InstallProviderInstrument,
+    generation: u64,
+    revision: u64,
+    last_ordinal: u64,
+) -> MarketTradeTapeUpdate {
+    let trades = (1..=last_ordinal)
+        .map(|ordinal| {
+            let seconds = 1_700_000_000 + i64::try_from(ordinal).expect("small ordinal");
+            RetainedMarketTrade {
+                ingestion_ordinal: ordinal,
+                observed_unix_nanos: seconds * 1_000_000_000,
+                trading_day: None,
+                trade: Arc::new(MarketTrade {
+                    metadata: EventMetadata {
+                        provider_id: product.provider.clone(),
+                        instrument_id: product.instrument_id.clone(),
+                        entitlement_id: product.entitlement_id.clone(),
+                        session_generation: 1,
+                        source_sequence: ordinal,
+                        timestamps: QualifiedTimestamp {
+                            exchange_unix_nanos: Some(seconds * 1_000_000_000),
+                            provider_unix_nanos: None,
+                            received_unix_nanos: seconds * 1_000_000_000,
+                        },
+                    },
+                    trade_id: format!("trade-{ordinal}"),
+                    price: 100,
+                    quantity: 2,
+                    aggressor: AggressorSide::Buy,
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    MarketTradeTapeUpdate {
+        consumer_id: MarketConsumerId(NonZeroU64::MIN),
+        generation: FixtureMarketEvents::generation(generation),
+        provider_id: product.provider.clone(),
+        instrument_id: product.instrument_id.clone(),
+        entitlement_id: product.entitlement_id.clone(),
+        provider_generation: 1,
+        revision,
+        source_watermark: last_ordinal,
+        rewrite_generation: 0,
+        price_scale: 0,
+        quantity_scale: 0,
+        sweeps: Arc::from([]),
+        operation: MarketTradeTapeOperation::Reset {
+            trades: trades.into(),
+        },
+    }
 }
 
 impl Default for FixtureMarketEvents {

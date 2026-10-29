@@ -7,7 +7,7 @@ mod market_events;
 mod providers;
 
 pub use fixture_market::FixtureMarketWorker;
-pub use market_events::{FixtureMarketEvents, FixtureSeries};
+pub use market_events::{FixtureMarketEvents, FixtureSeries, fixture_trade_tape};
 pub use providers::{fixture_futures_contract, fixture_futures_contracts, fixture_public_crypto};
 
 /// Test trading owners checkpoint SQLite while parallel tests compete for the disk, so their

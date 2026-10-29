@@ -1936,11 +1936,11 @@ fn pane_harness_snapshot_order_new_old_commit(cx: &mut TestAppContext) {
     check_snapshot_switch_order([2, 1, 0], cx);
 }
 
-/// Seeded random interleavings of the commit, snapshot, tail update and readiness events
-/// from the retired and the committed selection generation: the chart is replaced only by
-/// the committed generation's snapshot after the commit, and retired-generation events
-/// never present old data as current. Tape fencing for the same switch is covered by
-/// `interval_switch_keeps_order_flow_off_the_superseded_chart` in `desktop/tests.rs`.
+/// Seeded random interleavings of the commit, snapshot, tail update, readiness and trade
+/// tape events from the retired and the committed selection generation: the chart is
+/// replaced only by the committed generation's snapshot after the commit, retired-generation
+/// events never present old data as current, and the displayed chart's order flow shows
+/// only tape its own selection accepted.
 #[gpui::test]
 fn pane_harness_seeded_switch_interleavings_project_only_the_committed_generation(
     cx: &mut TestAppContext,
@@ -1954,14 +1954,14 @@ fn pane_harness_seeded_switch_interleavings_project_only_the_committed_generatio
         state
     };
     for run in 0..12u64 {
-        // 1..=6 are the shuffled non-commit events; 0 is the selection commit.
-        let mut pool = [1u8, 2, 3, 4, 5, 6];
+        // 1..=8 are the shuffled non-commit events; 0 is the selection commit.
+        let mut pool = [1u8, 2, 3, 4, 5, 6, 7, 8];
         for index in (1..pool.len()).rev() {
             let swap = usize::try_from(next() % (index as u64 + 1)).expect("small index");
             pool.swap(index, swap);
         }
-        let commit_at = usize::try_from(next() % 7).expect("small index");
-        let mut order = Vec::with_capacity(7);
+        let commit_at = usize::try_from(next() % 9).expect("small index");
+        let mut order = Vec::with_capacity(9);
         order.extend_from_slice(&pool[..commit_at]);
         order.push(0);
         order.extend_from_slice(&pool[commit_at..]);
@@ -2030,23 +2030,103 @@ impl SeededSwitchFixture {
                     },
                 )
             }
+            7 | 8 => {
+                let update = if event == 7 {
+                    // A higher revision and ordinal from the retired selection.
+                    aeris_desktop::test_support::fixture_trade_tape(&self.product, 1, 50, 4)
+                } else {
+                    aeris_desktop::test_support::fixture_trade_tape(
+                        &self.product,
+                        self.sequence,
+                        1,
+                        6,
+                    )
+                };
+                PaneProjectionEvent::RuntimeProjection(
+                    aeris_desktop::market_worker::RuntimeProjection::event(
+                        self.events.trade_tape(update),
+                    ),
+                )
+            }
             _ => panic!("unknown seeded event"),
         }
     }
 }
 
-fn check_seeded_switch_order(run: u64, order: &[u8], cx: &mut TestAppContext) {
-    let (mut harness, cx) = PaneHarness::open(cx);
+/// The tape ordinal `chart` drew for `instrument_id` at `minutes`-minute bars.
+fn applied_tape_ordinal(
+    chart: &Entity<AerisChartView>,
+    instrument_id: &str,
+    minutes: u64,
+    cx: &VisualTestContext,
+) -> Option<u64> {
+    cx.read(|cx| {
+        chart.read(cx).order_flow_applied_through(
+            instrument_id,
+            1,
+            aeris_chart_integration::OrderFlowAggregation::TimeMicros(minutes * 60_000_000),
+            1.0,
+        )
+    })
+}
+
+/// A pane with order flow on and a three-print tape drawn on its original chart.
+fn open_with_seeded_tape(
+    cx: &mut TestAppContext,
+) -> (
+    PaneHarness,
+    &mut VisualTestContext,
+    Entity<AerisChartView>,
+    String,
+) {
+    let mut product = local_state::fixture_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("fixture product");
+    product.price_increment = Some(1);
+    let (mut harness, cx) = PaneHarness::open_with_product(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product,
+        ChartInterval::Minute1,
+        cx,
+    );
     harness.publish_snapshot(12, cx);
-    let original = cx.read(|cx| {
-        harness
-            .pane
-            .read(cx)
-            .chart
-            .as_ref()
-            .expect("original chart")
-            .entity_id()
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.set_chart_order_flow_settings(
+            OrderFlowSettings {
+                show_cumulative_delta: true,
+                ..OrderFlowSettings::default()
+            },
+            cx,
+        ));
     });
+    let seed_product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    harness
+        .publications
+        .send(PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(
+                FixtureMarketEvents::default().trade_tape(
+                    aeris_desktop::test_support::fixture_trade_tape(&seed_product, 1, 1, 3),
+                ),
+            ),
+        ))
+        .expect("seed tape");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let original = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("original chart"));
+    let instrument_id = seed_product.instrument_id.clone();
+    assert_eq!(
+        applied_tape_ordinal(&original, &instrument_id, 1, cx),
+        Some(3),
+        "the seeded tape is drawn on the original chart"
+    );
+    (harness, cx, original, instrument_id)
+}
+
+fn check_seeded_switch_order(run: u64, order: &[u8], cx: &mut TestAppContext) {
+    let (harness, cx, original, instrument_id) = open_with_seeded_tape(cx);
     harness.pane.update(cx, |pane, cx| {
         assert!(pane.select_interval(ChartInterval::Minute5, cx));
     });
@@ -2077,18 +2157,23 @@ fn check_seeded_switch_order(run: u64, order: &[u8], cx: &mut TestAppContext) {
     };
     let mut committed = false;
     let mut installed = false;
+    // Tape the original selection still accepts, and the committed selection's tape.
+    let mut original_ordinal = 3;
+    let mut committed_tape = false;
     for &event in order {
         let message = fixture.message(event, &harness);
         harness.publications.send(message).expect("fixture message");
+        match event {
+            0 => committed = true,
+            2 if committed => installed = true,
+            7 if !committed => original_ordinal = 4,
+            8 if committed => committed_tape = true,
+            _ => {}
+        }
         harness.pane.update(cx, |pane, cx| {
             assert_eq!(pane.poll_market_worker(cx), 1, "run {run} event {event}");
-            if event == 0 {
-                committed = true;
-            } else if event == 2 && committed {
-                installed = true;
-            }
             assert_eq!(
-                pane.chart.as_ref().map(Entity::entity_id) != Some(original),
+                pane.chart.as_ref().map(Entity::entity_id) != Some(original.entity_id()),
                 installed,
                 "run {run} event {event}: only the committed generation's snapshot replaces the chart"
             );
@@ -2098,6 +2183,20 @@ fn check_seeded_switch_order(run: u64, order: &[u8], cx: &mut TestAppContext) {
                 "run {run} event {event}: retired events never settle the replacement"
             );
         });
+        assert_eq!(
+            applied_tape_ordinal(&original, &instrument_id, 1, cx),
+            Some(original_ordinal),
+            "run {run} event {event}: the original chart draws only its own selection's tape"
+        );
+        if installed {
+            let replacement = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("chart"));
+            let expected = if committed_tape { 6 } else { original_ordinal };
+            assert_eq!(
+                applied_tape_ordinal(&replacement, &instrument_id, 5, cx),
+                Some(expected),
+                "run {run} event {event}: the replacement draws the retained tape, never a retired revision"
+            );
+        }
     }
 }
 
