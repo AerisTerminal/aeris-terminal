@@ -5,7 +5,8 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 /// Every packaging variable of one release configuration. Setting any of them
-/// makes the build a release build, which then requires the complete set.
+/// makes the build a release build, which then requires every one except the
+/// optional Windows Authenticode thumbprint.
 pub const RELEASE_CONFIG_VARIABLES: [&str; 6] = [
     "AERIS_RELEASE_VERIFYING_KEY",
     "AERIS_RELEASE_BASE_URL",
@@ -23,7 +24,9 @@ pub struct ValidatedReleaseConfig {
     pub bootstrap_minimum_generation: u64,
     pub release_identity: String,
     pub install_generation: u64,
-    /// SHA-1 signer thumbprint; present exactly for Windows targets.
+    /// SHA-1 signer thumbprint; only a Windows target may carry one. A Windows
+    /// release without it audits installed executables by their signed
+    /// manifest digests alone, as every other platform does.
     pub authenticode_thumbprint: Option<[u8; 20]>,
 }
 
@@ -70,17 +73,15 @@ pub fn validate_release_config(
         );
     }
     let install_generation = positive_generation("AERIS_INSTALL_GENERATION", &required)?;
-    let authenticode_thumbprint = if windows_target {
-        let thumbprint =
-            decode_thumbprint(&required("AERIS_AUTHENTICODE_CERT_SHA1")?).ok_or_else(|| {
-                "AERIS_AUTHENTICODE_CERT_SHA1 must be a 40-digit hexadecimal SHA-1 thumbprint"
-                    .to_string()
-            })?;
-        Some(thumbprint)
-    } else if lookup("AERIS_AUTHENTICODE_CERT_SHA1").is_some() {
-        return Err("AERIS_AUTHENTICODE_CERT_SHA1 applies only to Windows targets".to_string());
-    } else {
-        None
+    let authenticode_thumbprint = match lookup("AERIS_AUTHENTICODE_CERT_SHA1") {
+        None => None,
+        Some(_) if !windows_target => {
+            return Err("AERIS_AUTHENTICODE_CERT_SHA1 applies only to Windows targets".to_string());
+        }
+        Some(hex) => Some(decode_thumbprint(&hex).ok_or_else(|| {
+            "AERIS_AUTHENTICODE_CERT_SHA1 must be a 40-digit hexadecimal SHA-1 thumbprint"
+                .to_string()
+        })?),
     };
     Ok(Some(ValidatedReleaseConfig {
         verifying_key,

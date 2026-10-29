@@ -37,8 +37,6 @@ use aeris_release_lifecycle::{
 };
 
 static UPDATE_RESTART_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-const UPDATE_BACKEND_CONFIGURED: bool = false;
-const LOCAL_PACKAGE_BUILD: bool = option_env!("AERIS_LOCAL_PACKAGE").is_some();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UpdateState {
@@ -111,10 +109,8 @@ pub struct DesktopUpdater {
 
 impl DesktopUpdater {
     pub fn new() -> Result<Self, String> {
-        if !UPDATE_BACKEND_CONFIGURED || LOCAL_PACKAGE_BUILD {
-            return Err(
-                "automatic updates are disabled until a release backend is configured".to_string(),
-            );
+        if aeris_release_lifecycle::release_config().is_none() {
+            return Err("automatic updates need a release build".to_string());
         }
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);

@@ -25,20 +25,23 @@ fn embed_release_config(out_dir: &std::path::Path, windows_target: bool) {
         .unwrap_or_else(|error| panic!("invalid Aeris release configuration: {error}"));
     fs::write(
         out_dir.join("release_config.rs"),
-        render_release_config(config.as_ref()),
+        render_release_config(config.as_ref(), windows_target),
     )
     .expect("write the embedded release configuration");
 }
 
-fn render_release_config(config: Option<&ValidatedReleaseConfig>) -> String {
+fn render_release_config(config: Option<&ValidatedReleaseConfig>, windows_target: bool) -> String {
     let Some(config) = config else {
         return "static EMBEDDED_RELEASE_CONFIG: Option<ReleaseConfig> = None;\n".to_string();
     };
-    let thumbprint = config
-        .authenticode_thumbprint
-        .as_ref()
-        .map(|thumbprint| format!("    authenticode_thumbprint: {thumbprint:?},\n"))
-        .unwrap_or_default();
+    let thumbprint = if windows_target {
+        format!(
+            "    authenticode_thumbprint: {:?},\n",
+            config.authenticode_thumbprint
+        )
+    } else {
+        String::new()
+    };
     format!(
         "static EMBEDDED_RELEASE_CONFIG: Option<ReleaseConfig> = Some(ReleaseConfig {{\n    \
          verifying_key: {:?},\n    base_url: {:?},\n    bootstrap_minimum_generation: {},\n    \

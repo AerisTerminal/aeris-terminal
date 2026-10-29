@@ -293,15 +293,19 @@ violations and missing verification explicitly, and never describe them as satis
   there are copies of the `aeris_lifecycle_fixture` binary; never copy a test executable into a
   release, because antivirus heuristics quarantine a program that copies and runs its own image.
 - The release packaging variables (`AERIS_RELEASE_VERIFYING_KEY`, `AERIS_RELEASE_BASE_URL`,
-  `AERIS_BOOTSTRAP_MIN_GENERATION`, `AERIS_RELEASE_IDENTITY`, `AERIS_INSTALL_GENERATION` and, for
-  Windows targets only, `AERIS_AUTHENTICODE_CERT_SHA1`) are read only by
+  `AERIS_BOOTSTRAP_MIN_GENERATION`, `AERIS_RELEASE_IDENTITY`, `AERIS_INSTALL_GENERATION` and the
+  optional, Windows-only `AERIS_AUTHENTICODE_CERT_SHA1`) are read only by
   `crates/release_lifecycle/build.rs`, which validates them with `release_config_rules.rs` and
   generates the static behind `release_lifecycle::release_config()`. None set is a development
-  build; any set requires the complete valid set, or the build fails. Code reads the
+  build; any set requires every other one valid, or the build fails. Code reads the
   configuration through `release_config()`, never `option_env!`, and no workflow may set them.
-  Windows Authenticode audits call `platform_sys::trust::verify_publisher` (in-process
-  `WinVerifyTrust` on the embedded signature, the configured signer SHA-1 and a timestamp
-  countersignature; no revocation check or network fetch), never a spawned PowerShell.
+  Releases ship without Authenticode until a code-signing certificate exists: a Windows release
+  without the thumbprint audits installed executables by their signed manifest digests alone (as
+  macOS does), and `verify_windows_publisher_signature` fails closed, so a stable launcher that
+  differs from the active release is not trusted. With the thumbprint set, Windows Authenticode
+  audits call `platform_sys::trust::verify_publisher` (in-process `WinVerifyTrust` on the
+  embedded signature, the configured signer SHA-1 and a timestamp countersignature; no revocation
+  check or network fetch), never a spawned PowerShell.
 - Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
   derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
   non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.
@@ -809,7 +813,10 @@ publish with `publish:desktop`; and confirm that `https://aeristerminal.com/down
 the version and the public files hash to the built artifacts. The release-record table in
 `plan/stabilization/stabilization_work.md` is the release record.
 
-The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
+The desktop starts its update client (`desktop/update.rs`) only in a release build, one that
+carries `release_config()`; development builds and the current preview-lane installers have
+none, run the desktop directly and never check for updates. Do not claim installed-app or update
+behavior was verified unless exercised on that path.
 
 If something fails, the user sends back `~/Library/Application Support/Aeris/logs/aeris.log` on macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
 

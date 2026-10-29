@@ -2104,9 +2104,9 @@ fn verify_installed_executable_authenticode_with(
         return Ok(());
     }
     let Some(signer) = expected_signer else {
-        // Only a development build lacks the signer: build.rs refuses a
-        // Windows release configuration without it, so every release build's
-        // installed .exe audit fails closed on any trust/signature mismatch.
+        // A development build, or a release built without a code-signing
+        // certificate: the caller has already matched every file to the
+        // signed manifest's size and SHA-256.
         return Ok(());
     };
     verify_windows_publisher(path, signer)
@@ -2114,7 +2114,7 @@ fn verify_installed_executable_authenticode_with(
 
 #[cfg(target_os = "windows")]
 fn embedded_authenticode_thumbprint() -> Option<&'static [u8; 20]> {
-    crate::release_config().map(|config| &config.authenticode_thumbprint)
+    crate::release_config().and_then(|config| config.authenticode_thumbprint.as_ref())
 }
 
 /// Verifies one Windows executable against the production publisher signer and
@@ -2124,7 +2124,8 @@ fn embedded_authenticode_thumbprint() -> Option<&'static [u8; 20]> {
 /// newer than the active version directory after a retained-known-good rollback.
 ///
 /// # Errors
-/// Fails closed when the production signer is not embedded or Windows trust,
+/// Fails closed when no publisher signer is embedded (a development build or a
+/// release without a code-signing certificate) or Windows trust,
 /// signer-thumbprint, or timestamp verification fails.
 #[cfg(target_os = "windows")]
 pub fn verify_windows_publisher_signature(path: &Path) -> Result<(), LifecycleError> {
@@ -2752,7 +2753,7 @@ mod tests {
         verify_candidate_inventory_with(&root, std::slice::from_ref(&expected), |path, file| {
             verify_installed_executable_authenticode_with(path, file, None)
         })
-        .expect("a development build without a signer audits digests only");
+        .expect("a build without a publisher signer audits digests only");
         let data_file = ReleaseFile {
             executable: false,
             ..expected

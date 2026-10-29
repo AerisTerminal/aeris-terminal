@@ -17,9 +17,11 @@ pub struct ReleaseConfig {
     pub bootstrap_minimum_generation: u64,
     pub release_identity: &'static str,
     pub install_generation: u64,
-    /// SHA-1 thumbprint of the certificate that signs every installed executable.
+    /// SHA-1 thumbprint of the certificate that signs every installed executable,
+    /// when releases carry an Authenticode signature. Without it installed
+    /// executables are audited by their signed manifest digests alone.
     #[cfg(target_os = "windows")]
-    pub authenticode_thumbprint: [u8; 20],
+    pub authenticode_thumbprint: Option<[u8; 20]>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/release_config.rs"));
@@ -94,7 +96,10 @@ mod tests {
 
     #[test]
     fn any_missing_variable_fails_a_partial_release_build() {
-        for missing in RELEASE_CONFIG_VARIABLES {
+        for missing in RELEASE_CONFIG_VARIABLES
+            .into_iter()
+            .filter(|name| *name != "AERIS_AUTHENTICODE_CERT_SHA1")
+        {
             let mut variables = complete();
             variables.remove(missing);
             let error = validate(&variables, true).expect_err("partial configuration");
@@ -103,14 +108,20 @@ mod tests {
     }
 
     #[test]
-    fn thumbprint_is_windows_only() {
+    fn thumbprint_is_optional_and_windows_only() {
         let mut variables = complete();
         assert!(validate(&variables, false).is_err());
         variables.remove("AERIS_AUTHENTICODE_CERT_SHA1");
-        let config = validate(&variables, false)
-            .expect("valid configuration")
-            .expect("release build");
-        assert_eq!(config.authenticode_thumbprint, None);
+        for windows_target in [false, true] {
+            let config = validate(&variables, windows_target)
+                .expect("valid configuration")
+                .expect("release build");
+            assert_eq!(config.authenticode_thumbprint, None);
+        }
+        let mut thumbprint_only = BTreeMap::new();
+        thumbprint_only.insert("AERIS_AUTHENTICODE_CERT_SHA1", THUMBPRINT.to_string());
+        let error = validate(&thumbprint_only, true).expect_err("a thumbprint alone is partial");
+        assert!(error.contains("AERIS_RELEASE_VERIFYING_KEY"), "{error}");
     }
 
     #[test]
