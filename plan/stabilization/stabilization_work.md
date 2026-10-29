@@ -45,8 +45,8 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
-can close several items together. The M6 and M7 full gates and CI closeouts are recorded; M8
-follows.
+can close several items together. The M6, M7 and M8 full gates and CI closeouts are recorded;
+every open item now has its code landed and waits only on the checks listed on its line.
 
 ## 3. Work items
 
@@ -793,6 +793,11 @@ still wait on the GUI checks and the remaining work on their lines.
     planning directories, the inventory and every rule above. Closes PL-08 and PL-11 (README and
     `.gitignore` part). naming_check is 6,647 lines: D28 keeps every structural rule, so the
     audit's 800-line estimate does not apply.
+
+M8 closeout: the full gate (fmt, workspace clippy, the same clippy with
+`AERIS_RITHMIC_KIT_DISABLED=1` in a separate target directory, workspace tests, naming_check)
+passed locally on 6f3eeb62, and CI run 40811907421 passed on 6f3eeb62 (Windows and Ubuntu), which
+contains all M8 code. The open M8 items still wait on the checks on their lines.
 
 ## 4. Decisions
 
