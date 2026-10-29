@@ -448,6 +448,12 @@ only on the guarded GUI checks on their lines.
     published price increment" notice up. Adopting the verified terms now redraws the
     retained tape as a covering window
     (`pane_harness_verified_terms_draw_the_tape_the_provisional_descriptor_could_not`).
+  - Fix found on a live validation start: a selection's first publication is often an empty
+    `Reset`, and the presenter required an append to continue the ring's last trade, so every
+    append after it was refused for the whole session (seven in 20 s; Time & Sales and the
+    footprint got no prints). The presenter now follows the runtime cursor, under which an empty
+    window continues at ordinal 1 (`an_empty_covering_window_continues_at_the_first_ordinal`);
+    a 40 s live validation start then logged no broken append.
   - Left: GUI Hyperliquid sweep-highlight check. Closes UI-14 with M7.3 and M7.9.
 - [x] M7.12 Desktop tests against controller boundaries
   - Landed: `test_support::provider_instruments` renamed to `test_support::providers` per the

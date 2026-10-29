@@ -189,12 +189,17 @@ impl OrderFlowPresenter {
                 let Some(tape) = self.tape.as_mut() else {
                     return TapeApply::Broken;
                 };
+                // The runtime's cursor after an empty covering window sits at
+                // ordinal 0, so that stream continues at ordinal 1.
+                let next_ordinal = tape
+                    .trades
+                    .back()
+                    .map_or(1, |last| last.ingestion_ordinal.saturating_add(1));
                 let continues = trades.is_empty()
-                    || (tape.trades.back().is_some_and(|last| {
-                        last.ingestion_ordinal.saturating_add(1) == *from_ordinal
-                    }) && trades
-                        .first()
-                        .is_some_and(|first| first.ingestion_ordinal == *from_ordinal));
+                    || (*from_ordinal == next_ordinal
+                        && trades
+                            .first()
+                            .is_some_and(|first| first.ingestion_ordinal == *from_ordinal));
                 if !continues {
                     return TapeApply::Broken;
                 }
@@ -477,6 +482,35 @@ mod tests {
                 .map(|trade| trade.ingestion_ordinal)
                 .collect::<Vec<_>>(),
             [4, 5]
+        );
+    }
+
+    #[test]
+    fn an_empty_covering_window_continues_at_the_first_ordinal() {
+        let mut presenter = OrderFlowPresenter::default();
+        assert_eq!(
+            presenter.apply_tape_update(&reset(1, 0, Vec::new())),
+            TapeApply::Reset,
+            "a selection's first publication can precede its first print"
+        );
+        let apply = presenter.apply_tape_update(&append(
+            1,
+            2,
+            1,
+            (1..=2).map(retained_tape_trade).collect(),
+        ));
+        assert_eq!(apply, TapeApply::Append { start: 0 });
+        assert_eq!(ring_ordinals(&presenter), [1, 2]);
+
+        let mut gapped = OrderFlowPresenter::default();
+        assert_eq!(
+            gapped.apply_tape_update(&reset(1, 0, Vec::new())),
+            TapeApply::Reset
+        );
+        assert_eq!(
+            gapped.apply_tape_update(&append(1, 2, 2, vec![retained_tape_trade(2)])),
+            TapeApply::Broken,
+            "an empty window still fences a gap"
         );
     }
 
