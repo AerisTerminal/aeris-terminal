@@ -1042,16 +1042,22 @@ Outside the work items; each needs a maintainer decision or access before it can
   - macOS signing and notarization
   - code-signing certificate and key custody
   - Rithmic live qualification and conformance approval before production order routing
-- **Lifecycle installer findings (M8.6 sandbox run):** fixed in `aeris_setup.iss`, not yet
-  re-run in Windows Sandbox. The launcher's `--install` used to fail after Inno had finished
-  (an `ssPostInstall` exception is only displayed), so a silent install exited 0 without an active
-  release; it now runs in the last file's `AfterInstall`, a fatal install error that rolls back and
-  exits 4, and a direct 1.x installation's `aeris_desktop.exe` is removed only after it succeeds.
-  The uninstall asked twice ("Remove my Aeris data" and Inno's "Are you sure" box); the registered
-  uninstall command is now `/SILENT /INTERACTIVE`, which shows only the data choice. The Start menu
-  and optional desktop shortcuts take the 1.x names, so an upgrade repoints them at the launcher.
-  Left: a sandbox run of a failing silent install (exit code 4, 1.x still launches), an upgrade over
-  a 1.x install (shortcuts launch the new release) and an uninstall from Installed apps (one prompt).
+- **Lifecycle installer findings (M8.6 sandbox run):** fixed in `aeris_setup.iss` and checked on
+  the maintainer's machine with staging generations 1 and 2. The launcher's `--install` used to
+  fail after Inno had finished (an `ssPostInstall` exception is only displayed), so a silent install
+  exited 0 without an active release. Moving it into the last file's `AfterInstall` was not enough:
+  Inno Setup also discards exceptions raised there (its source catches them in
+  `NotifyInstallEntry`), and a generation 1 setup over generation 2 still exited 0 after the
+  launcher refused the downgrade, with generation 1's launcher left in place. A failed install now
+  restores the replaced launcher, skips the shortcuts and launch entry and exits 20; that run left
+  generation 2's launcher and shortcuts, and generation 2 still launched. A direct 1.x
+  installation's `aeris_desktop.exe` is removed only after the install succeeds. The uninstall
+  asked twice; the registered command is now `/SILENT /INTERACTIVE`, and an uninstall with it
+  showed one prompt ("Remove my Aeris data" unchecked), removed the app, shortcuts and uninstall
+  entry, and kept the workspace and trading store byte-identical. The shortcuts take the 1.x names:
+  generation 1 over the public 1.2.0 install repointed both at the launcher and removed the root
+  `aeris_desktop.exe`. Left: a failing install over a direct 1.x installation (not run), and Inno leaves a temporary uninstaller
+  copy in `Aeris-Uninstall` after an uninstall.
 - **Shutdown retirement warning:** resolved. A worker batch holding a `Shutdown` command and the
   sender's disconnect retired the endpoint twice, so the second `remove_consumer` failed and a
   second acknowledgement was sent. `retire_endpoint` now returns for an inactive endpoint

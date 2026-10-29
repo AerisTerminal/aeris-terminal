@@ -598,21 +598,39 @@ mod tests {
     }
 
     #[test]
-    fn setup_script_installs_while_it_can_fail_and_confirms_uninstall_once() {
+    fn setup_script_fails_closed_and_confirms_uninstall_once() {
         let script = include_str!("../../windows/aeris_setup.iss");
         let files = script
             .split("[Files]")
             .nth(1)
             .and_then(|section| section.split("\n[").next())
             .expect("the setup script has a [Files] section");
-        let last_file = files
+        let entries: Vec<&str> = files
             .lines()
-            .rfind(|line| line.starts_with("Source:"))
-            .expect("the [Files] section names files");
-        // An ssPostInstall exception is only displayed and Setup exits 0, so the
-        // verified install must run inside the file copy, where a failure rolls back.
-        assert!(last_file.ends_with("AfterInstall: InstallBundledRelease"));
+            .filter(|line| line.starts_with("Source:"))
+            .collect();
+        // Setup discards AfterInstall exceptions and exits 0, so a failed install is
+        // reported through the custom exit code, restores the replaced launcher, and
+        // the shortcuts and launch entry wait for an active release.
+        let install = entries.last().expect("the [Files] section names files");
+        assert!(install.ends_with("AfterInstall: InstallBundledRelease"));
         assert!(script.contains("procedure InstallBundledRelease;"));
+        assert!(script.contains("Result := BundledReleaseFailedExitCode"));
+        assert!(entries[0].ends_with("BeforeInstall: KeepPreviousLauncher"));
+        assert!(script.contains("RestorePreviousLauncher;"));
+        for section in ["[Icons]", "[Run]"] {
+            let entries = script
+                .split(section)
+                .nth(1)
+                .and_then(|section| section.split("\n[").next())
+                .expect("the setup script has the section");
+            assert!(
+                entries
+                    .lines()
+                    .filter(|line| line.starts_with("Name:") || line.starts_with("Filename:"))
+                    .all(|line| line.ends_with("Check: BundledReleaseActive"))
+            );
+        }
         // Inno's own confirmation box is skipped only for a silent uninstall.
         assert!(script.contains("'\" /SILENT ' + InteractiveRemovalSwitch"));
         assert!(script.contains("InteractiveRemovalSwitch = '/INTERACTIVE';"));

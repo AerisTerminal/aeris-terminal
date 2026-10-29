@@ -74,20 +74,21 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\com.aeris.desktop"; Flags: uninsdeletekey
 
 [Files]
-Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "aeris_launcher.exe"; Flags: ignoreversion
+Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "aeris_launcher.exe"; Flags: ignoreversion; BeforeInstall: KeepPreviousLauncher
 Source: "{#ManifestPath}"; DestDir: "{tmp}\AerisRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
 Source: "{#LauncherPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "aeris_launcher.exe"; Flags: deleteafterinstall
 Source: "{#DesktopPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "aeris_desktop.exe"; Flags: deleteafterinstall
-; The last file runs the launcher's verified install while Setup can still roll back and fail.
+; The last file runs the launcher's verified install before any shortcut or registry change.
 Source: "{#RollbackCompatibilityPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "rollback-compatibility.json"; Flags: deleteafterinstall; AfterInstall: InstallBundledRelease
 
 [Icons]
-; The shortcut names match the direct 1.x installer's, so an upgrade repoints them at the launcher.
-Name: "{autoprograms}\Aeris Terminal"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"
-Name: "{autodesktop}\Aeris Terminal"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"; Tasks: desktopicon
+; The shortcut names match the direct 1.x installer's, so an upgrade repoints them at the launcher
+; once its release is active; a failed upgrade keeps the 1.x shortcuts.
+Name: "{autoprograms}\Aeris Terminal"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"; Check: BundledReleaseActive
+Name: "{autodesktop}\Aeris Terminal"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"; Tasks: desktopicon; Check: BundledReleaseActive
 
 [Run]
-Filename: "{app}\aeris_launcher.exe"; Description: "Launch Aeris Terminal"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\aeris_launcher.exe"; Description: "Launch Aeris Terminal"; Flags: nowait postinstall skipifsilent; Check: BundledReleaseActive
 
 [Code]
 const
@@ -175,6 +176,36 @@ begin
     'Aeris Terminal could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.');
 end;
 
+const
+  { Setup's own codes stop at 8. Inno Setup discards exceptions raised by AfterInstall and
+    cannot roll back from it, so a failed bundled install reports this code instead. }
+  BundledReleaseFailedExitCode = 20;
+
+var
+  BundledReleaseFailure: String;
+
+function PreviousLauncherCopy(): String;
+begin
+  Result := ExpandConstant('{tmp}\previous_aeris_launcher.exe');
+end;
+
+procedure KeepPreviousLauncher;
+var
+  Launcher: String;
+begin
+  { A failed bundled install restores the launcher this Setup replaced from this copy. }
+  Launcher := ExpandConstant('{app}\aeris_launcher.exe');
+  if FileExists(Launcher) and not CopyFile(Launcher, PreviousLauncherCopy(), False) then
+    BundledReleaseFailure := 'Aeris Terminal could not keep a copy of the installed launcher, so Setup has stopped before installing the release.';
+end;
+
+procedure RestorePreviousLauncher;
+begin
+  if FileExists(PreviousLauncherCopy()) and
+     not CopyFile(PreviousLauncherCopy(), ExpandConstant('{app}\aeris_launcher.exe'), False) then
+    Log('The replaced launcher could not be restored.');
+end;
+
 procedure InstallBundledRelease;
 var
   ResultCode: Integer;
@@ -182,25 +213,54 @@ var
   Bundle: String;
   LegacyDesktop: String;
 begin
-  { An exception here is a fatal installation error: Setup rolls back its changes and exits
-    with code 4 instead of reporting a finished install without an active release. }
-  Manifest := ExpandConstant('{tmp}\AerisRelease\manifest.json');
-  Bundle := ExpandConstant('{tmp}\AerisRelease\bundle');
-  WizardForm.StatusLabel.Caption := 'Verifying and installing the signed Aeris Terminal release...';
-  if (not Exec(
-      ExpandConstant('{app}\aeris_launcher.exe'),
-      '--install "' + Manifest + '" "' + Bundle + '"',
-      ExpandConstant('{app}'),
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode)) or (ResultCode <> 0) then
+  if BundledReleaseFailure = '' then
   begin
-    RaiseException('Aeris Terminal could not verify and install the bundled release. Setup has stopped without activating an unverified application.');
+    Manifest := ExpandConstant('{tmp}\AerisRelease\manifest.json');
+    Bundle := ExpandConstant('{tmp}\AerisRelease\bundle');
+    WizardForm.StatusLabel.Caption := 'Verifying and installing the signed Aeris Terminal release...';
+    if (not Exec(
+        ExpandConstant('{app}\aeris_launcher.exe'),
+        '--install "' + Manifest + '" "' + Bundle + '"',
+        ExpandConstant('{app}'),
+        SW_HIDE,
+        ewWaitUntilTerminated,
+        ResultCode)) or (ResultCode <> 0) then
+      BundledReleaseFailure := 'Aeris Terminal could not verify and install the bundled release. Setup has stopped without activating an unverified application.';
+  end;
+
+  if BundledReleaseFailure <> '' then
+  begin
+    Log(BundledReleaseFailure);
+    RestorePreviousLauncher;
+    SuppressibleMsgBox(BundledReleaseFailure, mbCriticalError, MB_OK, IDOK);
+    exit;
   end;
 
   LegacyDesktop := ExpandConstant('{app}\aeris_desktop.exe');
   if FileExists(LegacyDesktop) and not DeleteFile(LegacyDesktop) then
     Log('The direct 1.x desktop executable could not be removed: ' + LegacyDesktop);
+end;
+
+function BundledReleaseActive(): Boolean;
+begin
+  Result := BundledReleaseFailure = '';
+end;
+
+function GetCustomSetupExitCode(): Integer;
+begin
+  if BundledReleaseFailure <> '' then
+    Result := BundledReleaseFailedExitCode
+  else
+    Result := 0;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and (BundledReleaseFailure <> '') then
+  begin
+    WizardForm.FinishedHeadingLabel.Caption := 'Aeris Terminal was not installed';
+    WizardForm.FinishedLabel.Caption := BundledReleaseFailure;
+  end;
 end;
 
 procedure RouteInstalledAppsUninstallThroughDataChoice;

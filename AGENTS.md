@@ -255,10 +255,12 @@ violations and missing verification explicitly, and never describe them as satis
   box but still shows that choice. By default (and always for a silent uninstall without
   `/INTERACTIVE`) it runs `--remove-application`, which keeps every data, cache, log and legacy
   root and vault entry; only a ticked box or a pending full uninstall runs
-  `--remove-all-local-data`. It carries no Axiusflow cleanup. Its launcher `--install` runs while
-  Inno can still roll back (the last file's `AfterInstall`), so a failed install exits 4 and a
-  failed upgrade of a direct 1.x installation keeps its `aeris_desktop.exe` and shortcuts; the shortcuts
-  share the 1.x names and point at the launcher. The desktop spawns launcher promotion only on a plain start of
+  `--remove-all-local-data`. It carries no Axiusflow cleanup. Its launcher `--install` runs in the
+  last file's `AfterInstall`, before any shortcut or registry entry. Inno Setup discards
+  exceptions raised there and cannot roll back from it, so a failed install restores the launcher
+  Setup replaced, skips the shortcuts and launch entry (`Check: BundledReleaseActive`) and exits
+  with the custom code 20; a failed upgrade of a direct 1.x installation keeps its
+  `aeris_desktop.exe` and 1.x shortcuts. The shortcuts share the 1.x names and point at the launcher. The desktop spawns launcher promotion only on a plain start of
   an installed release (install generation above 0) and reaps that child. While a retained
   known-good release exists, a release generation stays on probation until a desktop it started
   records the install-root `.startup-complete.json` marker (generation, release identity, process
