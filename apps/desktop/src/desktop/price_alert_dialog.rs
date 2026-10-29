@@ -552,7 +552,7 @@ fn price_alert_existing_rows(
                 .px_2()
                 .py_1()
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .bg(gpui_color(colors.surface))
+                .bg(gpui_color(field_surface(theme)))
                 .child(
                     div()
                         .flex_1()
@@ -636,7 +636,7 @@ fn price_alert_dialog_body(
                 .px_3()
                 .py_2()
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .bg(gpui_color(colors.surface))
+                .bg(gpui_color(field_surface(theme)))
                 .text_sm()
                 .text_color(gpui_color(colors.text_secondary))
                 .child("Aeris monitors accepted live trades and sends an operating-system notification while the desktop app is running."),
