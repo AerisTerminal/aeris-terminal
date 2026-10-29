@@ -769,6 +769,11 @@ still wait on the GUI checks and the remaining work on their lines.
     positive form). Each kept rule rejects only a retired or forbidden shape; retired paths are
     one `RETIRED_PATHS` list and the production trait allowlist is counted per file. AGENTS.md
     now cites the behavior tests that carry those guarantees.
+  - Landed: `tools/naming_check/ratchets.toml` holds each package's production `Result<_, String>`
+    and `let _ =` counts, and a count off its ratchet fails. The Aeris Charts rule now requires
+    identical `aeris_charts_*` revisions that match `Cargo.lock` instead of a hard-coded revision,
+    and `trading_runtime_test_features_are_dev_only` keeps `test-support` and
+    `test-observability` on dev-dependencies. Each rule has accepting and rejecting fixtures.
   - Left: behavior tests for the account refresh rotation, local clients, workspace writer and
     development-build sign-in pins, then their deletion.
   - Left: structural checks with a recursive markdown inventory, with text pins replaced by

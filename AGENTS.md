@@ -419,7 +419,8 @@ violations and missing verification explicitly, and never describe them as satis
   and market observation error projections remain owner-owned.
 - `TradingSnapshot`, `TradingService::snapshot`, its command and ledger construction are
   available only under `cfg(test)` or the explicit `trading_runtime/test-support` feature;
-  only dev-dependencies may enable that feature. Desktop production and probes use
+  only dev-dependencies may enable that feature (`trading_runtime_test_features_are_dev_only`
+  checks every manifest, including `[features]` forwards). Desktop production and probes use
   subscription working sets and paged history, never the snapshot API.
 - Desktop production trading reads use the subscription-backed `TradingStore`, never
   `service.snapshot()`, `trading_service.snapshot()` or `trading().snapshot()` on the owner.
@@ -433,7 +434,7 @@ violations and missing verification explicitly, and never describe them as satis
   with a visible cap; account changes and lagged subscription resync fence old completions
   and reload the first page.
 - The `trading_runtime/test-observability` feature is enabled only by the desktop's
-  dev-dependency to count calls to the instance's real `TradingService::history` API
+  dev-dependency (the same `naming_check` rule) to count calls to the instance's real `TradingService::history` API
   in idle regressions. Default production builds carry no history-read counter.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
@@ -597,6 +598,9 @@ Record the reviewed policy versions in the feature's release notes.
 Aeris Charts is a separate pinned Git dependency. Do not clone or vendor it into this repository.
 Host integration belongs in `crates/ui/chart_integration`. When intentionally updating Aeris Charts, change
 only the `aeris_charts_*` revisions required by that update; do not update GPUI incidentally.
+`aeris_charts_revisions_are_identical_and_locked` in `tools/naming_check` requires every
+`aeris_charts_*` workspace dependency to carry one git source and revision and `Cargo.lock` to
+resolve every `aeris_charts_*` package to it, so a bump changes the revisions and the lockfile together.
 
 Chart behavior is owned by Aeris Charts, never re-implemented here:
 
@@ -808,6 +812,10 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
   `clippy::let_underscore_future`. Desktop production code must not use `let _ =`;
   propagate failures, log them through observability, or explicitly handle a typed
   retired/absent outcome. Test-only discards do not count toward the production scan.
+- `tools/naming_check/ratchets.toml` holds each package's count of production `Result<_, String>`
+  types and `let _ =` discards (`production_string_errors_and_discards_stay_within_their_ratchets`).
+  A count above its ratchet fails; a change that lowers a count lowers the ratchet in the same
+  commit; an unlisted package is held at zero, so new crates start with typed errors.
 - Keep file/directory names snake_case.
 - Every file under `tools/` outside its Cargo packages is named by a workflow, the `Readme` or this
   file; `every_tool_script_is_referenced_by_ci_or_the_docs` in `tools/naming_check` enforces it.

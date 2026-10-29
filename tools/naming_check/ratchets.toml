@@ -1,0 +1,36 @@
+# Production counts of `Result<_, String>` types and `let _ =` discards per workspace package,
+# read by `production_string_errors_and_discards_stay_within_their_ratchets`. Each count must
+# equal its ratchet: a higher count fails, and a change that lowers a count lowers its ratchet in
+# the same commit. A package that is not listed is held at zero.
+
+[result_string]
+aeris_account_runtime = 37
+aeris_chart_integration = 29
+aeris_context_runtime = 22
+aeris_desktop = 229
+aeris_hyperliquid_market_adapter = 52
+aeris_market_data = 3
+aeris_market_runtime = 217
+aeris_platform_runtime = 18
+aeris_probes = 1
+aeris_provider_history = 1
+aeris_release_lifecycle = 95
+aeris_release_packager = 25
+aeris_rithmic_protocol_adapter = 51
+aeris_study_sdk = 18
+aeris_trading_runtime = 493
+
+[let_underscore]
+aeris_account_runtime = 7
+aeris_chart_integration = 27
+aeris_context_runtime = 4
+aeris_hyperliquid_market_adapter = 1
+aeris_market_runtime = 86
+aeris_observability = 12
+aeris_platform_runtime = 10
+aeris_platform_sys = 20
+aeris_probes = 4
+aeris_release_lifecycle = 18
+aeris_rithmic_protocol_adapter = 15
+aeris_terminal_ui = 3
+aeris_trading_runtime = 11

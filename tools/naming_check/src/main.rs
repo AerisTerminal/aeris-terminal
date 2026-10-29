@@ -3302,24 +3302,6 @@ mod tests {
         assert!(rithmic_adapter.contains("mod generated {"));
         assert!(!rithmic_adapter.contains("pub mod generated"));
 
-        let root_manifest = manifest("Cargo.toml");
-        let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "50bde982233a6f7e3dff09b8bc7bb4635fa5f635";
-        for dependency in [
-            "aeris_charts_engine",
-            "aeris_charts_indicators",
-            "aeris_charts_render",
-            "aeris_charts_render_gpui",
-            "aeris_charts_native",
-        ] {
-            assert!(
-                root_manifest.contains(&format!(
-                    "{dependency} = {{ git = \"{expected_source}\", rev = \"{expected_revision}\""
-                )),
-                "{dependency} must remain pinned to the approved Aeris Charts revision"
-            );
-        }
-
         for path in workspace_manifests() {
             let relative = relative_string(&path);
             let contents = fs::read_to_string(&path).expect("manifest");
@@ -3339,6 +3321,422 @@ mod tests {
         }
     }
 
+    /// The string value of `key` inside an inline-table manifest value.
+    fn inline_string(value: &str, key: &str) -> Option<String> {
+        let marker = format!("{key} = \"");
+        let start = value.find(&marker)? + marker.len();
+        let end = start + value[start..].find('"')?;
+        Some(value[start..end].to_string())
+    }
+
+    /// Every way the Aeris Charts pin is inconsistent: each `aeris_charts_*` workspace
+    /// dependency names one git source and one revision, and every locked `aeris_charts_*`
+    /// package resolves to exactly that source and revision.
+    fn aeris_charts_pin_violations(workspace_manifest: &str, lockfile: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        let mut pins = BTreeSet::new();
+        for entry in manifest_entries(workspace_manifest) {
+            if entry.section != "workspace.dependencies" || !entry.key.starts_with("aeris_charts_")
+            {
+                continue;
+            }
+            match (
+                inline_string(&entry.value, "git"),
+                inline_string(&entry.value, "rev"),
+            ) {
+                (Some(source), Some(revision)) => {
+                    pins.insert((source, revision));
+                }
+                _ => violations.push(format!(
+                    "{} must be a git dependency pinned by rev",
+                    entry.key
+                )),
+            }
+        }
+        let Some((source, revision)) = pins.first().cloned() else {
+            violations.push("no aeris_charts_* workspace dependency is pinned".to_string());
+            return violations;
+        };
+        if pins.len() > 1 {
+            violations.push(format!("aeris_charts_* pins differ: {pins:?}"));
+        }
+        let expected = format!("git+{source}?rev={revision}#{revision}");
+        let mut locked = 0_usize;
+        for package in lockfile.split("[[package]]") {
+            let field = |name: &str| {
+                package.lines().find_map(|line| {
+                    line.trim()
+                        .strip_prefix(name)?
+                        .strip_prefix(" = ")
+                        .map(|value| value.trim_matches('"').to_string())
+                })
+            };
+            let Some(name) = field("name").filter(|name| name.starts_with("aeris_charts_")) else {
+                continue;
+            };
+            locked += 1;
+            if field("source").as_deref() != Some(expected.as_str()) {
+                violations.push(format!("Cargo.lock resolves {name} away from {expected}"));
+            }
+        }
+        if locked == 0 {
+            violations.push("Cargo.lock holds no aeris_charts_* package".to_string());
+        }
+        violations
+    }
+
+    #[test]
+    fn aeris_charts_pin_rule_accepts_and_rejects_fixtures() {
+        let workspace = |engine: &str, render: &str| {
+            format!(
+                "[workspace.dependencies]\n\
+                 aeris_charts_engine = {{ git = \"https://example.invalid/charts.git\", rev = \"{engine}\", version = \"=0.3.0\" }}\n\
+                 aeris_charts_render = {{ git = \"https://example.invalid/charts.git\", rev = \"{render}\" }}\n"
+            )
+        };
+        let lock = |revision: &str| {
+            format!(
+                "[[package]]\nname = \"aeris_charts_engine\"\nversion = \"0.3.0\"\n\
+                 source = \"git+https://example.invalid/charts.git?rev={revision}#{revision}\"\n\n\
+                 [[package]]\nname = \"anyhow\"\nversion = \"1.0.0\"\n"
+            )
+        };
+        assert_eq!(
+            aeris_charts_pin_violations(&workspace("aaa", "aaa"), &lock("aaa")),
+            Vec::<String>::new()
+        );
+        for (manifest, lockfile) in [
+            (workspace("aaa", "bbb"), lock("aaa")),
+            (workspace("aaa", "aaa"), lock("bbb")),
+            (
+                "[workspace.dependencies]\naeris_charts_engine = { path = \"../charts\" }\n"
+                    .to_string(),
+                lock("aaa"),
+            ),
+            (workspace("aaa", "aaa"), String::new()),
+        ] {
+            assert!(
+                !aeris_charts_pin_violations(&manifest, &lockfile).is_empty(),
+                "{manifest}{lockfile}"
+            );
+        }
+    }
+
+    #[test]
+    fn aeris_charts_revisions_are_identical_and_locked() {
+        let violations =
+            aeris_charts_pin_violations(&manifest("Cargo.toml"), &manifest("Cargo.lock"));
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
+
+    fn package_name(manifest_contents: &str) -> Option<String> {
+        manifest_entries(manifest_contents)
+            .into_iter()
+            .find(|entry| entry.section == "package" && entry.key == "name")
+            .map(|entry| entry.value.trim_matches('"').to_string())
+    }
+
+    /// Whether a manifest enables one of `features` of `package` only through a
+    /// dev-dependency: never a normal or build dependency nor a `[features]` forward.
+    fn features_are_dev_only(contents: &str, package: &str, features: &[&str]) -> bool {
+        let enables = |text: &str| {
+            features
+                .iter()
+                .any(|feature| text.contains(&format!("\"{feature}\"")))
+        };
+        let dependencies_allowed =
+            manifest_dependencies(contents)
+                .iter()
+                .all(|(kind, name, declaration)| {
+                    *kind == DependencyKind::Dev || name != package || !enables(declaration)
+                });
+        let features_allowed = manifest_entries(contents)
+            .iter()
+            .filter(|entry| entry.section == "features")
+            .all(|entry| {
+                !features
+                    .iter()
+                    .any(|feature| entry.value.contains(&format!("\"{package}/{feature}\"")))
+            });
+        dependencies_allowed && features_allowed
+    }
+
+    const TRADING_TEST_FEATURES: [&str; 2] = ["test-support", "test-observability"];
+
+    #[test]
+    fn dev_only_feature_rule_accepts_and_rejects_fixtures() {
+        let package = "aeris_trading_runtime";
+        assert!(features_are_dev_only(
+            "[dependencies]\naeris_trading_runtime = { path = \"../t\" }\n\n[dev-dependencies]\naeris_trading_runtime = { path = \"../t\", features = [\"test-observability\", \"test-support\"] }\n",
+            package,
+            &TRADING_TEST_FEATURES
+        ));
+        for rejected in [
+            "[dependencies]\naeris_trading_runtime = { path = \"../t\", features = [\"test-support\"] }\n",
+            "[target.'cfg(windows)'.dependencies]\naeris_trading_runtime = { path = \"../t\", features = [\"test-observability\"] }\n",
+            "[dependencies.aeris_trading_runtime]\npath = \"../t\"\nfeatures = [\"test-support\"]\n",
+            "[features]\ndiagnostics = [\"aeris_trading_runtime/test-support\"]\n",
+        ] {
+            assert!(
+                !features_are_dev_only(rejected, package, &TRADING_TEST_FEATURES),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn trading_runtime_test_features_are_dev_only() {
+        for path in workspace_manifests() {
+            let contents = super::read_source(&path).expect("manifest");
+            assert!(
+                features_are_dev_only(&contents, "aeris_trading_runtime", &TRADING_TEST_FEATURES),
+                "{} enables a trading_runtime test feature outside a dev-dependency",
+                relative_string(&path)
+            );
+        }
+    }
+
+    /// The trimmed error argument of a `Result<` whose generic arguments begin `rest`, when
+    /// it has exactly two top-level arguments.
+    fn result_error_argument(rest: &str) -> Option<&str> {
+        let mut depth = 0_u32;
+        let mut error_start = None;
+        let mut previous = '\0';
+        for (index, character) in rest.char_indices() {
+            match character {
+                '<' | '(' | '[' => depth += 1,
+                '>' if previous == '-' => {}
+                '>' | ')' | ']' if depth > 0 => depth -= 1,
+                '>' => return error_start.map(|start| rest[start..index].trim()),
+                ',' if depth == 0 => {
+                    if error_start.is_some() {
+                        return None;
+                    }
+                    error_start = Some(index + 1);
+                }
+                ')' | ']' | ';' | '{' => return None,
+                _ => {}
+            }
+            previous = character;
+        }
+        None
+    }
+
+    /// The `Result<_, String>` types in `source`; `io::Result<String>` and named result
+    /// aliases such as `LaunchResult<..>` do not count.
+    fn string_error_results(source: &str) -> usize {
+        let bytes = source.as_bytes();
+        source
+            .match_indices("Result<")
+            .filter(|(index, _)| {
+                let joined = *index > 0
+                    && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_');
+                !joined
+                    && result_error_argument(&source[index + "Result<".len()..]) == Some("String")
+            })
+            .count()
+    }
+
+    fn discarded_bindings(source: &str) -> usize {
+        source.matches("let _ =").count()
+    }
+
+    type RatchetKey = (String, String);
+
+    /// `ratchets.toml`: `[result_string]` and `[let_underscore]` sections of
+    /// `package = count` lines. A package that is absent is held at zero, so a count is positive.
+    fn parse_ratchets(
+        contents: &str,
+    ) -> Result<std::collections::BTreeMap<RatchetKey, usize>, String> {
+        let mut ratchets = std::collections::BTreeMap::new();
+        let mut section = None;
+        for (number, line) in contents
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.trim()))
+        {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(name) = line
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                if !matches!(name, "result_string" | "let_underscore") {
+                    return Err(format!("line {number}: unknown ratchet section [{name}]"));
+                }
+                section = Some(name.to_string());
+                continue;
+            }
+            let Some(section) = &section else {
+                return Err(format!("line {number}: ratchet outside a section"));
+            };
+            let Some((package, count)) = line.split_once('=') else {
+                return Err(format!("line {number}: expected `package = count`"));
+            };
+            let count = count
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|count| *count > 0)
+                .ok_or_else(|| format!("line {number}: a ratchet is a positive count"))?;
+            if ratchets
+                .insert((section.clone(), package.trim().to_string()), count)
+                .is_some()
+            {
+                return Err(format!("line {number}: duplicate ratchet"));
+            }
+        }
+        Ok(ratchets)
+    }
+
+    /// Each observed count must equal its ratchet: above it is a regression, below it must
+    /// lower the ratchet, and a ratchet with nothing left to count must go.
+    fn ratchet_violations(
+        ratchets: &std::collections::BTreeMap<RatchetKey, usize>,
+        observed: &std::collections::BTreeMap<RatchetKey, usize>,
+    ) -> Vec<String> {
+        let mut violations = Vec::new();
+        for ((section, package), count) in observed {
+            match ratchets.get(&(section.clone(), package.clone())) {
+                None => violations.push(format!(
+                    "[{section}] {package}: {count} found where none is allowed"
+                )),
+                Some(maximum) if count > maximum => violations.push(format!(
+                    "[{section}] {package}: {count} found above the ratchet of {maximum}"
+                )),
+                Some(maximum) if count < maximum => violations.push(format!(
+                    "[{section}] {package}: {count} found; lower the ratchet from {maximum}"
+                )),
+                Some(_) => {}
+            }
+        }
+        for ((section, package), maximum) in ratchets {
+            if !observed.contains_key(&(section.clone(), package.clone())) {
+                violations.push(format!(
+                    "[{section}] {package}: none found; remove the ratchet of {maximum}"
+                ));
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn ratchet_counts_accept_and_reject_fixtures() {
+        assert_eq!(
+            string_error_results(
+                "fn a() -> Result<(), String> {}\n\
+                 fn b() -> Result<Vec<(u8, String)>, String> {}\n\
+                 fn c() -> Result<fn() -> u8, String> {}\n"
+            ),
+            3
+        );
+        assert_eq!(
+            string_error_results(
+                "fn a() -> io::Result<String> {}\n\
+                 fn b() -> LaunchResult<String, String> {}\n\
+                 fn c() -> Result<String, io::Error> {}\n\
+                 fn d() -> Result<(), Box<String>> {}\n"
+            ),
+            0
+        );
+        assert_eq!(
+            discarded_bindings("let _ = sender.send(1);\nlet _guard = lock();"),
+            1
+        );
+        let ratchets = parse_ratchets(
+            "# held\n[result_string]\naeris_a = 2\n\n[let_underscore]\naeris_b = 1\n",
+        )
+        .expect("valid ratchets");
+        let observed = |a: usize, b: usize| {
+            [
+                ("result_string", "aeris_a", a),
+                ("let_underscore", "aeris_b", b),
+            ]
+            .into_iter()
+            .filter(|(_, _, count)| *count > 0)
+            .map(|(section, package, count)| ((section.to_string(), package.to_string()), count))
+            .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            ratchet_violations(&ratchets, &observed(2, 1)),
+            Vec::<String>::new()
+        );
+        for (a, b) in [(3, 1), (1, 1), (2, 0)] {
+            assert!(
+                !ratchet_violations(&ratchets, &observed(a, b)).is_empty(),
+                "{a} {b}"
+            );
+        }
+        let mut unlisted = observed(2, 1);
+        unlisted.insert(("let_underscore".to_string(), "aeris_c".to_string()), 1);
+        assert!(
+            !ratchet_violations(&ratchets, &unlisted).is_empty(),
+            "an unlisted package is held at zero"
+        );
+        for invalid in [
+            "aeris_a = 1",
+            "[result_string]\naeris_a = 0",
+            "[unknown]\naeris_a = 1",
+            "[let_underscore]\naeris_a = 1\naeris_a = 2",
+        ] {
+            assert!(parse_ratchets(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    /// The production source of the package whose manifest is `manifest_path`: its `src/`
+    /// tree without test-only module files or `#[cfg(test)]` module bodies.
+    fn package_production_sources(manifest_path: &Path) -> Vec<String> {
+        let source_root = manifest_path
+            .parent()
+            .expect("manifest directory")
+            .join("src");
+        let mut files = Vec::new();
+        if source_root.is_dir() {
+            super::collect_rust_sources(&source_root, &mut files).expect("package sources");
+        }
+        let test_only = super::test_only_module_files(&files).expect("module declarations");
+        files
+            .iter()
+            .filter(|path| !test_only.contains(*path))
+            .map(|path| production_prefix(&super::read_source(path).expect("package source")))
+            .collect()
+    }
+
+    #[test]
+    fn production_string_errors_and_discards_stay_within_their_ratchets() {
+        let mut observed = std::collections::BTreeMap::new();
+        for path in workspace_manifests() {
+            let Some(package) = package_name(&super::read_source(&path).expect("manifest")) else {
+                continue;
+            };
+            let sources = package_production_sources(&path);
+            for (section, count) in [
+                (
+                    "result_string",
+                    sources
+                        .iter()
+                        .map(|source| string_error_results(source))
+                        .sum(),
+                ),
+                (
+                    "let_underscore",
+                    sources
+                        .iter()
+                        .map(|source| discarded_bindings(source))
+                        .sum(),
+                ),
+            ] {
+                if count > 0 {
+                    observed.insert((section.to_string(), package.clone()), count);
+                }
+            }
+        }
+        let ratchets = parse_ratchets(&manifest("tools/naming_check/ratchets.toml"))
+            .unwrap_or_else(|error| panic!("tools/naming_check/ratchets.toml: {error}"));
+        let violations = ratchet_violations(&ratchets, &observed);
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
     /// With default features disabled, `gpui_platform` only enables the macOS text system through
     /// `font-kit`; without it GPUI installs a no-op text system and macOS renders no text at all.
     #[test]
