@@ -830,6 +830,17 @@ the same notice (once per version), row and dot with "Restart to update". Neithe
 validation root. Do not claim installed-app or update behavior was verified unless exercised on
 that path.
 
+Windows release builds with updates come only from `tools/release/publish_update.ps1`, run on the
+maintainer's machine (never in CI). It refuses a dirty worktree, a missing Rithmic kit or release
+variables already set in the shell (production also needs `HEAD` at the pushed `origin/main`),
+takes the next install generation from the channel's current pointer, builds the packager without
+a release configuration, then the desktop and launcher with one (verifying key read from the KMS
+key), checks the launcher's `--launcher-identity`, packages and signs through `--kms-key` against
+the current release (block plan) and builds `Aeris-Setup.exe` with ISCC. Only `-Publish` uploads:
+the immutable release folder first, the channel pointer last, then a CloudFront invalidation and
+an HTTPS read-back. `-Channel staging` (the default) publishes below
+`https://releases.aeristerminal.com/staging`; production is the base URL itself.
+
 If something fails, the user sends back `~/Library/Application Support/Aeris/logs/aeris.log` on macOS or `%LOCALAPPDATA%\Aeris\logs\aeris.log` on Windows.
 
 ## Rust and documentation conventions
