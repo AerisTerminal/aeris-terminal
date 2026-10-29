@@ -7,6 +7,7 @@ use super::{
 };
 use crate::book::lifecycle::CancellationCause;
 use crate::store::OrderStep;
+use aeris_trading::RejectReason;
 
 impl TradingCore {
     /// The kill switch is one durable step per invocation: it locks every in-scope tradable
@@ -258,7 +259,7 @@ impl TradingCore {
             .map_err(|reason| reason.to_string())?;
         self.quote_book
             .observation(instrument_id)
-            .ok_or_else(|| "a current live market quote is unavailable".to_string())
+            .ok_or_else(|| RejectReason::QuoteUnavailable.to_string())
     }
 
     /// Cancels the scope's non-protective working orders with `cause` and stages one

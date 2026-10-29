@@ -70,8 +70,9 @@ use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
     AccountEnvironment, AccountPnl, ClientOrderId, EquitySample, FeeSchedule, Fill, FillId,
     FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, RiskWarning, TimeInForce,
-    TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
+    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, RejectReason,
+    RiskWarning, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
+    project_unrealized_pnl,
 };
 pub use groups::model::{MovePlannedLeg, PlannedLeg};
 pub use publication::{
@@ -2025,7 +2026,7 @@ impl TradingCore {
         }
         self.quote_book
             .observation(instrument)
-            .ok_or_else(|| "a current live market quote is unavailable".to_string())
+            .ok_or_else(|| RejectReason::QuoteUnavailable.to_string())
     }
 
     fn market_order(&self, mut order: PlaceOrder, at_touch: bool) -> Result<PlaceOrder, String> {

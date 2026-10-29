@@ -1931,6 +1931,34 @@ fn unavailable_and_stale_feeds_reject_without_durable_orders() {
 }
 
 #[test]
+fn owner_priced_orders_on_a_live_feed_without_a_quote_reject_as_quote_unavailable() {
+    let directory = TestDirectory::new("feed-live-no-quote");
+    let (service, _clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    service.status().unwrap();
+    let mut limit = market_order("live-no-quote-limit", OrderSide::Buy, 1, 1_000);
+    limit.order_type = OrderType::Limit;
+    limit.limit_price = Some(FixedPoint::try_new(10_000, 2).unwrap());
+    for order in [
+        market_order("live-no-quote-market", OrderSide::Buy, 1, 1_000),
+        limit,
+    ] {
+        assert_eq!(
+            service.place_order(order, false).unwrap_err(),
+            aeris_trading::RejectReason::QuoteUnavailable.to_string()
+        );
+    }
+    assert_eq!(service.snapshot().unwrap().orders, []);
+    service.shutdown_after_owner_exit_for_test().unwrap();
+}
+
+#[test]
 fn manual_clock_enforces_per_class_quote_age_on_order_admission() {
     for (class, limit_ms) in [
         (
