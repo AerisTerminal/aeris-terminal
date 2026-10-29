@@ -410,7 +410,7 @@ violations and missing verification explicitly, and never describe them as satis
   to one account and use exit time and exit fill ID as the stable cursor; they project
   exact per-exit P&L through the same round-trip projection as the owner, using at most
   500 fills per historical cycle prefix. The working set projects registered terms only for
-  open orders, open positions and ticket interests; its newest event and fill windows each
+  open orders, open positions, its fills window and ticket interests; its newest event and fill windows each
   have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
   closed round trip carries its durable exit fill ID, distinct even for partial exits of
   one cycle; an open round trip has no exit fill ID. Active

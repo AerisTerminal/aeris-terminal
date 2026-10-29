@@ -450,6 +450,37 @@ fn working_set_includes_registered_ticket_terms_without_an_order() {
 }
 
 #[test]
+fn working_set_keeps_terms_for_a_closed_positions_recent_fills() {
+    let directory = TestDirectory::new("publication-closed-terms");
+    let (service, _clock, feed) = live_feed_service(&directory);
+    let instrument = instrument();
+    service
+        .register_instrument(instrument.clone())
+        .expect("instrument");
+    bootstrap_live_feed(&feed, &instrument, market_feed::route());
+    service.status().expect("feed drains");
+    service
+        .place_order_caller_priced(market_order("closed-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry");
+    push_live_quote(&feed, &instrument, 2, 9_975, 10_000, 2);
+    service.status().expect("entry fills");
+    service
+        .place_order_caller_priced(market_order("closed-exit", OrderSide::Sell, 3, 2_000))
+        .expect("exit");
+    push_live_quote(&feed, &instrument, 4, 9_975, 10_000, 2);
+    service.status().expect("exit fills");
+    let subscription = service.subscribe().expect("subscribe");
+    let working = subscription.try_recv().expect("initial").event.working_set;
+    assert_eq!(working.positions.len(), 0);
+    assert_eq!(working.orders.len(), 0);
+    assert_eq!(working.fills.len(), 2);
+    assert_eq!(working.instruments, vec![instrument]);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
 fn working_set_active_bracket_and_protection_match_snapshot() {
     let directory = TestDirectory::new("publication-group-views");
     let instrument = instrument();

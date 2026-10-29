@@ -175,6 +175,10 @@ every open item now has its code landed and waits only on the checks listed on i
     - VAL-CROSS-016: a switch storm ends on SOL with order lines only on SOL.
     - Also record VAL-DSK-110 as passed; its tests exist.
     - Closes TR-10 and UI-10.
+  - Fix found in the VAL-CROSS-015 run: after the flatten, the ETH fill toast read the raw
+    instrument ID because the working set projected terms only for open orders, positions and
+    ticket interests. It now also projects terms for its fills window
+    (`working_set_keeps_terms_for_a_closed_positions_recent_fills`).
 - [x] M6.12 No unhandled discards in desktop production code; deny lints (34698887)
 
 M6 closeout: the full gate (fmt, workspace clippy, workspace tests) passed locally on 1b85770e, and

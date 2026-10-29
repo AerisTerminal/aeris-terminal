@@ -47,7 +47,8 @@ pub struct WorkingSet {
     /// The owner revision this working set reflects; equal revisions are identical views.
     pub revision: u64,
     pub accounts: Vec<TradingAccount>,
-    /// Registered terms for open orders, positions and current ticket interests.
+    /// Registered terms for open orders, positions, the fills window and current ticket
+    /// interests, so a closed position's recent fills still name their instrument.
     pub instruments: Vec<TradingInstrument>,
     pub orders: Vec<Order>,
     /// The newest events, newest first, as in the snapshot window.
@@ -464,6 +465,7 @@ impl crate::TradingCore {
             .iter()
             .map(|order| &order.instrument_id)
             .chain(positions.iter().map(|position| &position.instrument_id))
+            .chain(fills.iter().map(|fill| &fill.instrument_id))
             .chain(self.ticket_interest.keys())
             .collect::<BTreeSet<&InstrumentId>>();
         let WorkingGroupViews {
