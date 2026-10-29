@@ -40,7 +40,18 @@ pub const MANAGE_PROFILE_URL: &str = "https://aeristerminal.com/account/";
 /// without an account session; an unresolved data root fails closed.
 #[must_use]
 pub fn sign_in_required() -> bool {
-    aeris_platform_runtime::active_data_root().map_or(true, |root| !root.is_validation())
+    sign_in_required_for(
+        aeris_platform_runtime::active_data_root()
+            .ok()
+            .map(aeris_platform_runtime::DataRoot::mode),
+    )
+}
+
+fn sign_in_required_for(data_root: Option<&aeris_platform_runtime::DataRootMode>) -> bool {
+    !matches!(
+        data_root,
+        Some(aeris_platform_runtime::DataRootMode::Validation { .. })
+    )
 }
 
 /// Opens the production account hub on a background thread. The GPUI thread
@@ -1520,6 +1531,22 @@ mod tests {
             Err("account profile refresh is already queued".to_string())
         );
         release_tx.send(()).expect("worker resumes");
+    }
+
+    #[test]
+    fn only_a_validation_data_root_runs_without_sign_in() {
+        assert!(super::sign_in_required_for(Some(
+            &aeris_platform_runtime::DataRootMode::Production
+        )));
+        assert!(
+            super::sign_in_required_for(None),
+            "an unresolved data root fails closed"
+        );
+        assert!(!super::sign_in_required_for(Some(
+            &aeris_platform_runtime::DataRootMode::Validation {
+                root: std::env::temp_dir().join("aeris-validation-sign-in"),
+            }
+        )));
     }
 
     #[test]

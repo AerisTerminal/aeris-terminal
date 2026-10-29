@@ -774,8 +774,17 @@ still wait on the GUI checks and the remaining work on their lines.
     identical `aeris_charts_*` revisions that match `Cargo.lock` instead of a hard-coded revision,
     and `trading_runtime_test_features_are_dev_only` keeps `test-support` and
     `test-observability` on dev-dependencies. Each rule has accepting and rejecting fixtures.
-  - Left: behavior tests for the account refresh rotation, local clients, workspace writer and
-    development-build sign-in pins, then their deletion.
+  - Landed: desktop behavior tests replace the update-restart, workspace-writer, account-refresh
+    and sign-in pins: the restart commits only on a current durable generation, then claims the
+    close before it quits, and a stopped helper cancels it; an unsettled refresh blocks exit over
+    any other failure; readiness restores only behind the session guard and drains refresh on
+    every exit; readiness trading runs on a copy and never creates the user's database; only a
+    validation root skips sign-in. The pins are deleted. The one kept entrypoint check (no
+    provider owner starts before sign-in) finds the entrypoint by its account-session call, so
+    renaming desktop functions needs no naming_check edit (checked by renaming four of them).
+    The extracted readiness seams carry the existing `String` errors, so the desktop ratchet
+    rises once from 229 to 233. Not covered by a test: the GPUI wiring that queues the writer's
+    receipt when a tabs window closes, and the signed-out workspace rendering the sign-in gate.
   - Left: structural checks with a recursive markdown inventory, with text pins replaced by
     behavior tests.
   - Finalize `Readme` and `AGENTS.md`, and close out this tracker. Closes PL-08.

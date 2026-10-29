@@ -3777,14 +3777,125 @@ fn validate_workspace_boot_for_readiness(workspace: &WorkspaceState) -> Result<(
 mod desktop_readiness_account_tests {
     use super::{
         AccountRefreshExitClaim, retain_account_refresh_quiesce_for_exit,
-        wait_for_account_restore_readiness,
+        wait_for_account_restore_readiness, with_readiness_account_session,
     };
     use aeris_account_runtime::AccountRestoreReadiness;
     use std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
+        rc::Rc,
         sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     };
+
+    type Events = Rc<RefCell<Vec<&'static str>>>;
+
+    /// A refresh claim that records its drain, and whether it settles.
+    struct RecordingQuiesce {
+        events: Events,
+        settles: bool,
+    }
+
+    impl AccountRefreshExitClaim for RecordingQuiesce {
+        fn wait_for_exit(&self) -> Result<(), String> {
+            self.events.borrow_mut().push("refresh drained");
+            if self.settles {
+                Ok(())
+            } else {
+                Err("refresh grant is mid-rotation".to_string())
+            }
+        }
+
+        fn retain_for_exit(self) {
+            self.events.borrow_mut().push("refresh claim retained");
+        }
+    }
+
+    struct RecordingGuard(Events);
+
+    impl Drop for RecordingGuard {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("session guard released");
+        }
+    }
+
+    fn readiness_session(
+        guard_installs: bool,
+        refresh_settles: bool,
+        readiness: Result<(), String>,
+    ) -> (Result<(), String>, Vec<&'static str>) {
+        let events = Events::default();
+        let result = with_readiness_account_session(
+            || {
+                events.borrow_mut().push("session guard installed");
+                if guard_installs {
+                    Ok(RecordingGuard(Rc::clone(&events)))
+                } else {
+                    Err("session guard unavailable".to_string())
+                }
+            },
+            || {
+                Ok(RecordingQuiesce {
+                    events: Rc::clone(&events),
+                    settles: refresh_settles,
+                })
+            },
+            || events.borrow_mut().push("restore started"),
+            || {
+                events.borrow_mut().push("readiness ran");
+                readiness
+            },
+        );
+        let recorded = events.borrow().clone();
+        (result, recorded)
+    }
+
+    #[test]
+    fn readiness_restores_only_behind_the_session_guard_and_drains_refresh_before_releasing_it() {
+        assert_eq!(
+            readiness_session(true, true, Ok(())),
+            (
+                Ok(()),
+                vec![
+                    "session guard installed",
+                    "restore started",
+                    "readiness ran",
+                    "refresh drained",
+                    "refresh claim retained",
+                    "session guard released",
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn every_readiness_exit_after_the_account_owner_exists_drains_refresh_rotation() {
+        let (result, events) = readiness_session(false, true, Ok(()));
+        assert_eq!(result, Err("session guard unavailable".to_string()));
+        assert_eq!(
+            events,
+            [
+                "session guard installed",
+                "refresh drained",
+                "refresh claim retained"
+            ],
+            "a missing guard never starts restore but still drains refresh rotation"
+        );
+
+        let (result, events) = readiness_session(true, true, Err("candidate failed".to_string()));
+        assert_eq!(result, Err("candidate failed".to_string()));
+        assert!(events.contains(&"refresh claim retained"));
+
+        let (result, events) = readiness_session(true, false, Err("candidate failed".to_string()));
+        let error = result.expect_err("an unsettled refresh fails readiness");
+        assert!(error.starts_with("candidate failed; "), "{error}");
+        assert!(error.contains("refresh grant is mid-rotation"), "{error}");
+        assert_eq!(
+            events.last(),
+            Some(&"session guard released"),
+            "the guard stays installed while the unsettled refresh is drained"
+        );
+        assert!(!events.contains(&"refresh claim retained"));
+    }
 
     static EXIT_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -3863,8 +3974,41 @@ mod desktop_readiness_account_tests {
 
 #[cfg(test)]
 mod desktop_readiness_workspace_tests {
-    use super::validate_workspace_boot_for_readiness;
+    use super::{start_readiness_trading, validate_workspace_boot_for_readiness};
     use aeris_contracts::WorkspacePaneKind;
+
+    #[test]
+    fn readiness_trading_runs_on_a_copy_and_never_creates_the_users_database() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "aeris-desktop-readiness-trading-{}-{nanos}",
+            std::process::id()
+        ));
+        let database = root.join("trading.sqlite3");
+
+        let (copy, trading) = start_readiness_trading(&database).expect("candidate trading starts");
+        assert_ne!(copy.database_path(), database.as_path());
+        assert!(
+            trading
+                .status()
+                .expect("candidate trading status")
+                .schema_version
+                > 0
+        );
+        trading
+            .shutdown(std::time::Duration::from_secs(2))
+            .expect("candidate trading stops");
+        drop(trading);
+        drop(copy);
+
+        assert!(
+            !database.exists(),
+            "readiness must never open, create or migrate the user's trading database"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn readiness_reuses_the_production_workspace_boot_planner() {
@@ -3904,41 +4048,68 @@ fn run_desktop_readiness_command(
     let account_service = aeris_account_runtime::AccountService::new(
         aeris_account_runtime::AccountServiceConfig::production(),
     );
+    let sign_in_required = aeris_desktop::account::sign_in_required();
     #[cfg(target_os = "windows")]
-    let _session_shutdown_guard = {
+    let install_session_guard = || {
         let session_account = account_service.clone();
-        match native_account_session_shutdown_guard(move || session_account.begin_refresh_quiesce())
-        {
-            Ok(guard) => guard,
-            Err(error) => {
-                retain_account_refresh_quiesce_for_exit(
-                    account_service.begin_refresh_quiesce(),
-                    "candidate readiness exit",
-                )?;
-                return Err(error);
+        native_account_session_shutdown_guard(move || session_account.begin_refresh_quiesce())
+    };
+    // Only Windows lets the session end veto an unsettled refresh; elsewhere there is no
+    // guard to install.
+    #[cfg(not(target_os = "windows"))]
+    let install_session_guard = || Ok::<(), String>(());
+    with_readiness_account_session(
+        install_session_guard,
+        || account_service.begin_refresh_quiesce(),
+        || {
+            if sign_in_required {
+                account_service.start_restore();
             }
+        },
+        || {
+            if sign_in_required {
+                wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
+                    account_service.restore_readiness()
+                })?;
+            }
+            let encoded = run_candidate_services(workspace.workspace_revision)?
+                .encode()
+                .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
+            aeris_platform_runtime::fs::write_file_durably(
+                std::path::Path::new(&report_path),
+                &encoded,
+            )
+            .map_err(|_| "candidate readiness report could not be written".to_string())
+        },
+    )
+}
+
+/// Runs the candidate's account phase once its account owner exists. The native
+/// session-shutdown guard is installed before the saved session restores and is held until
+/// refresh-token rotation has drained, and every exit path drains that rotation.
+fn with_readiness_account_session<G, Q: AccountRefreshExitClaim>(
+    install_session_guard: impl FnOnce() -> Result<G, String>,
+    begin_refresh_quiesce: impl Fn() -> Result<Q, String>,
+    start_restore: impl FnOnce(),
+    readiness: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let session_guard = match install_session_guard() {
+        Ok(guard) => guard,
+        Err(error) => {
+            retain_account_refresh_quiesce_for_exit(
+                begin_refresh_quiesce(),
+                "candidate readiness exit",
+            )?;
+            return Err(error);
         }
     };
-    let sign_in_required = aeris_desktop::account::sign_in_required();
-    if sign_in_required {
-        account_service.start_restore();
-    }
-    let result = (|| {
-        if sign_in_required {
-            wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
-                account_service.restore_readiness()
-            })?;
-        }
-        let encoded = run_candidate_services(workspace.workspace_revision)?
-            .encode()
-            .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
-        aeris_platform_runtime::fs::write_file_durably(std::path::Path::new(&report_path), &encoded)
-            .map_err(|_| "candidate readiness report could not be written".to_string())
-    })();
+    start_restore();
+    let result = readiness();
     let quiesce_result = retain_account_refresh_quiesce_for_exit(
-        account_service.begin_refresh_quiesce(),
+        begin_refresh_quiesce(),
         "candidate readiness exit",
     );
+    drop(session_guard);
     match (result, quiesce_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -3953,14 +4124,8 @@ fn run_candidate_services(
     workspace_revision: u64,
 ) -> Result<aeris_release_lifecycle::ReadinessReport, String> {
     let market = aeris_market_runtime::MarketService::start()?;
-    // The candidate migrates a private copy, so a failed or rolled-back update leaves
-    // the user's trading database openable by the release it came from.
-    let trading_copy = aeris_trading_runtime::ReadinessDatabaseCopy::create(
-        &trading_database_path().map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let trading = start_trading_service(trading_copy.database_path().to_path_buf())
-        .map_err(|error| error.to_string())?;
+    let (trading_copy, trading) =
+        start_readiness_trading(&trading_database_path().map_err(|error| error.to_string())?)?;
     let report = (|| {
         let context = start_context_service()?;
         let status = market.status()?;
@@ -4003,6 +4168,25 @@ fn run_candidate_services(
     trading_stopped?;
     drop(trading_copy);
     Ok(report)
+}
+
+/// Starts the candidate's trading owner on a private copy of `database`. The copy is taken
+/// without opening the user's store, so a failed or rolled-back update leaves it openable by
+/// the release it came from. Shut the owner down before dropping the copy.
+fn start_readiness_trading(
+    database: &std::path::Path,
+) -> Result<
+    (
+        aeris_trading_runtime::ReadinessDatabaseCopy,
+        aeris_trading_runtime::TradingService,
+    ),
+    String,
+> {
+    let copy = aeris_trading_runtime::ReadinessDatabaseCopy::create(database)
+        .map_err(|error| error.to_string())?;
+    let trading = start_trading_service(copy.database_path().to_path_buf())
+        .map_err(|error| error.to_string())?;
+    Ok((copy, trading))
 }
 
 fn readiness_data_root_fields() -> Result<(bool, String, &'static str), String> {

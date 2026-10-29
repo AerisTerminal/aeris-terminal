@@ -60,6 +60,11 @@ impl AppServices {
         self.updater.as_mut()
     }
 
+    #[cfg(test)]
+    pub(super) fn install_updater_for_test(&mut self, updater: DesktopUpdater) {
+        self.updater = Some(updater);
+    }
+
     pub(super) fn update_restart_pending(&self) -> bool {
         self.update_restart == UpdateRestart::AwaitingDurability
     }

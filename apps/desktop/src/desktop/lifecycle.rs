@@ -235,20 +235,18 @@ impl DesktopLifecycle {
                 failure = Some(error);
             }
             drop(instance_lock);
-            if let Some(detail) = account_failure {
-                Err(DesktopShutdownError {
-                    detail,
-                    blocks_exit: true,
-                })
-            } else if let Some(detail) = failure {
-                Err(DesktopShutdownError {
-                    detail,
-                    blocks_exit: false,
-                })
-            } else {
-                Ok(())
-            }
+            shutdown_outcome(account_failure, failure)
         }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn shutdown_started(&self) -> bool {
+        self.shutdown_started.get()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_workspace_persistence_waits(&self) -> usize {
+        self.workspace_persistence.borrow().len()
     }
 
     pub(super) fn quit_after_shutdown(&self, cx: &mut App) {
@@ -273,5 +271,70 @@ impl DesktopLifecycle {
             cx.update(|cx| cx.quit());
         })
         .detach();
+    }
+}
+
+/// An account refresh that did not reach durability blocks the exit, because exiting then
+/// could lose a rotated refresh token; any other shutdown failure is reported and the
+/// process still quits.
+fn shutdown_outcome(
+    account_failure: Option<String>,
+    failure: Option<String>,
+) -> Result<(), DesktopShutdownError> {
+    if let Some(detail) = account_failure {
+        Err(DesktopShutdownError {
+            detail,
+            blocks_exit: true,
+        })
+    } else if let Some(detail) = failure {
+        Err(DesktopShutdownError {
+            detail,
+            blocks_exit: false,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DesktopLifecycle, shutdown_outcome};
+
+    #[test]
+    fn an_unsettled_account_refresh_blocks_exit_over_any_other_failure() {
+        let blocked = shutdown_outcome(
+            Some("account refresh did not settle".to_string()),
+            Some("market owner did not stop".to_string()),
+        )
+        .expect_err("an unsettled refresh fails shutdown");
+        assert!(blocked.blocks_exit());
+        assert_eq!(blocked.to_string(), "account refresh did not settle");
+
+        let reported = shutdown_outcome(None, Some("market owner did not stop".to_string()))
+            .expect_err("an owner failure is reported");
+        assert!(!reported.blocks_exit());
+        assert!(shutdown_outcome(None, None).is_ok());
+    }
+
+    #[gpui::test]
+    async fn a_duplicate_quit_request_gets_no_shutdown_of_its_own(cx: &mut gpui::TestAppContext) {
+        let lifecycle = DesktopLifecycle::new_for_test();
+        let first = cx
+            .update(|cx| lifecycle.begin_quit(cx))
+            .expect("the first quit request owns the shutdown");
+        assert!(lifecycle.shutdown_started());
+        assert!(
+            cx.update(|cx| lifecycle.begin_quit(cx)).is_none(),
+            "a duplicate request must not start a second shutdown that could bypass the first's fences"
+        );
+        cx.update(|cx| lifecycle.quit_after_shutdown(cx));
+        // The in-memory test trading store cannot checkpoint its WAL, so the first shutdown
+        // reports that owner failure; it still drained the account fence and may exit.
+        if let Err(error) = first.await {
+            assert!(
+                !error.blocks_exit(),
+                "the first owner drains every fence: {error}"
+            );
+        }
     }
 }

@@ -5100,277 +5100,42 @@ mod tests {
         ));
     }
     #[test]
-    fn local_clients_versions_and_workspace_writes_remain_fenced() {
-        let engine = manifest("crates/market_engine/src/lib.rs");
-        for regression in [
-            "disconnect_removes_only_the_owning_clients_consumers",
-            "provider_and_viewport_generations_are_exactly_fenced",
-            "visibility_changes_only_the_selected_workspace_consumer",
-        ] {
-            assert!(
-                engine.contains(regression),
-                "consumer generation fence lost {regression}"
-            );
-        }
-        let local = manifest("apps/desktop/src/desktop/local_state.rs");
-        assert!(local.contains("active_workspace_id") && local.contains("save_workspace"));
-        workspace_writer_owns_the_document_without_read_modify_write();
-        let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
-        assert!(
-            !workspace_tabs.contains("persistence.flush(")
-                && workspace_tabs
-                    .contains("await_workspace_persistence(persistence.shutdown_wait())"),
-            "window shutdown must hand workspace durability to the lifecycle owner without blocking GPUI"
-        );
-        let prepare_start = workspace_tabs
-            .find("fn prepare_update_restart_after_workspace_persistence")
-            .expect("update restart persistence preparation");
-        let prepare_end = workspace_tabs[prepare_start..]
-            .find("pub(super) fn update_presentation")
-            .map(|offset| prepare_start + offset)
-            .expect("update restart persistence preparation boundary");
-        let prepare = &workspace_tabs[prepare_start..prepare_end];
-        assert!(
-            prepare.contains("wait.wait(Duration::from_secs(2))")
-                && prepare.contains("let durable_generations = durability.await")
-                && prepare.contains("persistence.shutdown_generation_is_current(generation)")
-                && prepare.contains("commit_update_restart_after_persistence"),
-            "update restart must await the one writer's bounded generation-fenced durability receipt before commit"
-        );
-        let commit_start = workspace_tabs
-            .find("fn commit_update_restart_after_persistence")
-            .expect("update restart commit phase");
-        let commit_end = workspace_tabs[commit_start..]
-            .find("fn prepare_update_restart_after_workspace_persistence")
-            .map(|offset| commit_start + offset)
-            .expect("update restart commit boundary");
-        let commit = &workspace_tabs[commit_start..commit_end];
-        let restart = commit
-            .find("updater.commit_restart()")
-            .expect("prepared update restart commit");
-        let close = commit
-            .find("self.claim_close(cx)")
-            .expect("update restart claims the shared close path");
-        let quit = commit
-            .find("self.lifecycle.quit_after_shutdown(cx)")
-            .expect("update restart requests lifecycle quit");
-        assert!(
-            restart < close && close < quit,
-            "update restart must commit only after durability, then claim shared close before lifecycle quit"
-        );
-        let update = manifest("apps/desktop/src/desktop/update.rs");
-        let cleanup_start = update
-            .find("impl Drop for PreparedRestart")
-            .expect("prepared restart cleanup owner");
-        let cleanup_end = update[cleanup_start..]
-            .find("fn spawn_update_restart")
-            .map(|offset| cleanup_start + offset)
-            .expect("prepared restart cleanup boundary");
-        let cleanup = &update[cleanup_start..cleanup_end];
-        assert!(
-            workspace_tabs.contains("drop(cleanup);")
-                && cleanup.contains("aeris-update-restart-cleanup")
-                && cleanup.contains(".spawn(move || {")
-                && cleanup.contains("child.kill()")
-                && cleanup.contains("child.wait()"),
-            "failed update restart preparation must transfer helper termination and reaping off GPUI"
-        );
-        let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
-        assert!(
-            lifecycle.contains("await_workspace_persistence")
-                && lifecycle.contains("persistence.wait(Duration::from_secs(2))"),
-            "desktop lifecycle must own the bounded off-UI workspace durability wait"
-        );
-        let local = manifest("apps/desktop/src/desktop/local_state.rs");
-        assert!(local.contains("WorkspaceState::decode") && local.contains("encode_to_vec"));
-        assert!(local.contains("LEGACY_WORKSPACE_FILE"));
-    }
-
-    fn workspace_writer_owns_the_document_without_read_modify_write() {
-        let persistence = manifest("apps/desktop/src/desktop/workspace_persistence.rs");
-        for contract in [
-            "active_workspace_id",
-            "shutdown_wait_observes_latest_active_workspace_durability_without_stealing_ui_result",
-            "shutdown_wait_surfaces_current_persistence_failure",
-            "shutdown_wait_is_captured_without_waiting_on_the_ui_owner",
-            "shutdown_wait_rejects_a_newer_layout_request_before_commit",
-            "request.chart_chrome",
-            "a_newer_request_wakes_a_pending_shutdown_wait_through_the_condvar",
-            "chrome_changes_save_through_the_one_workspace_writer",
-            "fn apply_workspace_save",
-            "a_save_never_reads_the_document_back_from_the_file",
-        ] {
-            assert!(
-                persistence.contains(contract),
-                "local workspace persistence lost {contract}"
-            );
-        }
-        let persistence_production = production_prefix(&persistence);
-        assert!(
-            !persistence_production.contains("load_workspace("),
-            "the writer thread owns the document; a save never read-modify-writes the file"
-        );
-    }
-
-    #[test]
-    fn account_refresh_rotation_remains_runtime_fenced() {
-        let account = manifest("crates/account_runtime/src/account_service/mod.rs");
-        let restore_start = account
-            .find("fn restore_online_session")
-            .expect("saved-session restore path");
-        let restore_end = account[restore_start..]
-            .find("fn restore_local_session")
-            .map(|offset| restore_start + offset)
-            .expect("saved-session restore boundary");
-        let restore = &account[restore_start..restore_end];
-        assert!(
-            restore.contains("refresh_gate.lock()")
-                && restore.contains("claim_refresh_grant()")
-                && restore.contains("current_restore_refresh_token(&vault)")
-                && restore.contains("accept_online_restore_refresh"),
-            "startup restore must serialize refresh admission and reload durable token material after lifecycle quiescing"
-        );
-
-        let refresh_start = account
-            .find("fn refresh_session_round")
-            .expect("scheduled/profile refresh path");
-        let refresh_end = account[refresh_start..]
-            .find("fn apply_session_outcome")
-            .map(|offset| refresh_start + offset)
-            .expect("refresh round boundary");
-        let refresh = &account[refresh_start..refresh_end];
-        let claim = refresh
-            .find("claim_refresh_grant()")
-            .expect("refresh grant lifecycle claim");
-        let durable = refresh
-            .find("accept_refresh_grant")
-            .expect("rotated refresh durability point");
-        let release = refresh
-            .find("drop(grant_permit)")
-            .expect("refresh grant lifecycle release");
-        let profile = refresh
-            .find("apply_verified_profile")
-            .expect("post-rotation profile refresh");
-        assert!(
-            claim < durable && durable < release && release < profile,
-            "refresh quiesce must cover only grant-through-durable-token rotation"
-        );
-    }
-
-    #[test]
-    fn account_refresh_rotation_remains_desktop_lifecycle_fenced() {
-        let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
-        let prepare_start = workspace_tabs
-            .find("fn prepare_update_restart_after_workspace_persistence")
-            .expect("update restart preparation");
-        let prepare_end = workspace_tabs[prepare_start..]
-            .find("pub(super) fn update_presentation")
-            .map(|offset| prepare_start + offset)
-            .expect("update restart preparation boundary");
-        let prepare = &workspace_tabs[prepare_start..prepare_end];
-        assert!(
-            prepare.contains("self.lifecycle.account_service().begin_refresh_quiesce()")
-                && prepare.contains("account_refresh.wait()?")
-                && prepare.contains("drop(account_refresh)"),
-            "update restart must quiesce account refresh and release its claim on cancellation"
-        );
-        let update = manifest("apps/desktop/src/desktop/update.rs");
-        let commit_start = update
-            .find("pub fn commit_restart")
-            .expect("update restart commit owner");
-        let commit_end = update[commit_start..]
-            .find("pub(super) fn cancel_prepared_restart")
-            .map(|offset| commit_start + offset)
-            .expect("update restart commit boundary");
-        assert!(
-            update[commit_start..commit_end].contains("self.prepared_restart = Some(prepared);")
-                && workspace_tabs
-                    .contains("self.cancel_update_restart_after_persistence_failure(error, cx)"),
-            "failed restart commit must transfer helper cleanup off GPUI instead of dropping it inline"
-        );
-
-        let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
-        assert!(
-            lifecycle.contains("self.account_service().begin_refresh_quiesce()")
-                && lifecycle.contains(
-                    "retain_account_refresh_quiesce_for_exit(account_refresh, \"desktop exit\")"
-                )
-                && lifecycle.contains("blocks_exit: true")
-                && lifecycle.contains("quit_after_shutdown_attempt(cx)")
-                && lifecycle.contains("duplicate request must not bypass its durability fences"),
-            "normal desktop shutdown must await account refresh durability off GPUI and block unsafe exit"
-        );
-    }
-
-    #[test]
-    fn account_refresh_rotation_remains_native_session_fenced() {
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        let readiness_start = desktop
-            .find("fn run_desktop_readiness_command")
-            .expect("candidate readiness path");
-        let readiness_end = desktop[readiness_start..]
-            .find("fn readiness_data_root_fields")
-            .map(|offset| readiness_start + offset)
-            .expect("candidate readiness path boundary");
-        let readiness = &desktop[readiness_start..readiness_end];
-        let service = readiness
-            .find("AccountService::new(")
-            .expect("readiness account owner");
-        let readiness_guard = readiness
-            .find("native_account_session_shutdown_guard(")
-            .expect("readiness native session shutdown guard");
-        let restore = readiness
-            .find("account_service.start_restore()")
-            .expect("readiness restore start");
-        assert!(
-            service < readiness_guard && readiness_guard < restore,
-            "candidate account restoration must not start before native session shutdown fencing"
-        );
-        assert!(
-            readiness.contains("retain_account_refresh_quiesce_for_exit(")
-                && readiness.contains("account_service.begin_refresh_quiesce()"),
-            "every candidate-readiness exit after account creation must drain refresh-token rotation"
-        );
-        let copy = readiness
-            .find("ReadinessDatabaseCopy::create(")
-            .expect("candidate readiness must copy the trading database");
-        let trading = readiness
-            .find("start_trading_service(trading_copy.database_path().to_path_buf())")
-            .expect("candidate readiness must start trading on its copy");
-        assert!(
-            copy < trading && readiness.matches("start_trading_service(").count() == 1,
-            "candidate readiness must never open or migrate the user's trading database"
-        );
-        let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
-        assert!(
-            readiness.contains("aeris_release_lifecycle::ReadinessReport {")
-                && !desktop.contains("ReadinessReport {\n    schema_version")
-                && !launcher.contains("ReadinessReport {\n    schema_version"),
-            "the desktop and launcher share release_lifecycle's one readiness report type"
-        );
-
-        let session = manifest("crates/platform_sys/src/session.rs");
-        let window = manifest("crates/platform_sys/src/windows/session.rs");
-        assert!(
-            session.contains("pub struct NativeSessionShutdownGuard")
-                && session.contains("pub struct NativeSessionShutdownPermit")
-                && session.contains("fn query_end_session(&self) -> bool")
-                && window.contains("WM_QUERYENDSESSION")
-                && window.contains("GuardWindowState::query_end_session")
-                && window.contains("end_session(wparam != 0)"),
-            "Windows session termination must be vetoable until account refresh durability settles"
-        );
-    }
-
-    #[test]
     fn retired_launcher_engine_paths_do_not_return() {
         let launcher = manifest("crates/release_lifecycle/src/launcher.rs");
         assert!(!launcher.contains("--launch-engine"));
         assert!(!launcher.contains("BackgroundService"));
     }
 
+    /// The function in `source` around byte `index`: from the last line-leading `fn`
+    /// signature before it through its matching closing brace.
+    fn enclosing_function(source: &str, index: usize) -> &str {
+        let start = source[..index]
+            .match_indices('\n')
+            .map(|(line, _)| line + 1)
+            .rfind(|line| {
+                let text = source[*line..].trim_start();
+                ["fn ", "pub fn ", "pub(super) fn ", "pub(crate) fn "]
+                    .iter()
+                    .any(|signature| text.starts_with(signature))
+            })
+            .unwrap_or(0);
+        let end = source[start..]
+            .find('{')
+            .and_then(|open| super::source_block_end(source, start + open))
+            .unwrap_or(source.len());
+        &source[start..end]
+    }
+
     #[test]
-    fn development_build_has_no_cloud_publisher_and_gates_sign_in_by_data_root() {
+    fn enclosing_function_spans_only_the_function_around_an_index() {
+        let source = "fn before() { start(); }\npub(super) fn entry() {\n    let x = { install(); };\n}\nfn after() { start(); }\n";
+        let entry = enclosing_function(source, source.find("install(").expect("call"));
+        assert!(entry.starts_with("pub(super) fn entry()") && entry.ends_with('}'));
+        assert!(!entry.contains("start()"), "{entry}");
+    }
+
+    #[test]
+    fn development_build_has_no_cloud_publisher_and_starts_no_provider_before_sign_in() {
         for path in [
             "tools/publish_release.ps1",
             ".github/workflows/release.yml",
@@ -5381,22 +5146,17 @@ mod tests {
                 "retired publisher remains: {path}"
             );
         }
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        let run_start = desktop
-            .find("pub(super) fn run(")
-            .expect("desktop entrypoint");
-        let run_end = desktop[run_start..]
-            .find("\nstruct SignedInStartup")
-            .map(|offset| run_start + offset)
-            .expect("entrypoint boundary");
-        let run = &desktop[run_start..run_end];
-        assert!(run.contains("run_desktop(configured, lifecycle)"));
-        assert!(run.contains("aeris_desktop::services::install_account(&account_service)"));
-        assert!(run.contains("run_sign_in(sign_in_gate::SignInGate::new("));
+        // The entrypoint is the function that installs the account session, found by that
+        // library call so renaming desktop functions needs no edit here.
+        let desktop = production_prefix(&manifest("apps/desktop/src/desktop.rs"));
+        let install = desktop
+            .find("aeris_desktop::services::install_account(")
+            .expect("the desktop entrypoint installs the account session");
+        let run = enclosing_function(&desktop, install);
         assert!(!run.contains("run_onboarding()"));
         // Before sign-in only local owners exist: provider sessions, the broker
         // venue, public context sources and the market-demanding workspace start
-        // in one signed-in startup that the sign-in gate releases exactly once.
+        // in the signed-in startup that the sign-in gate releases.
         for signed_in_only in [
             "MarketService::start",
             "attach_broker_venue(",
@@ -5409,52 +5169,7 @@ mod tests {
                 "desktop entrypoint must not start {signed_in_only} before sign-in"
             );
         }
-        let signed_in_start = desktop
-            .find("fn start_signed_in_runtime(")
-            .expect("signed-in startup");
-        let signed_in_end = desktop[signed_in_start..]
-            .find("\nfn stop_signed_in_owners(")
-            .map(|offset| signed_in_start + offset)
-            .expect("signed-in startup boundary");
-        let signed_in = &desktop[signed_in_start..signed_in_end];
-        for owner in [
-            "MarketService::start()",
-            "attach_broker_venue(&trading, &services.market)",
-            "attach_trading_market_feed(&trading, &services.market)",
-            "start_context_service()",
-            "configured_market_workers(command_arguments, &services)",
-        ] {
-            assert!(
-                signed_in.contains(owner),
-                "signed-in startup must own {owner}"
-            );
-        }
-        assert_eq!(
-            desktop.matches("start_signed_in_runtime(").count(),
-            2,
-            "signed-in startup has one definition and one validation-root call"
-        );
-        let gate = manifest("apps/desktop/src/desktop/sign_in_gate.rs");
-        assert!(gate.contains("state.startup.release(self.account.authenticated())"));
-        assert!(gate.contains("start_signed_in_runtime(startup)"));
-        let updater = manifest("apps/desktop/src/desktop/update.rs");
-        assert!(updater.contains("const UPDATE_BACKEND_CONFIGURED: bool = false"));
-        // Sign-in is required except on a validation data root, which never
-        // reaches the identity provider or a saved session.
-        let account = manifest("apps/desktop/src/account/mod.rs");
-        assert!(!account.contains("AUTH_BACKEND_CONFIGURED"));
-        assert!(account.contains("pub fn sign_in_required() -> bool"));
-        assert!(account.contains("!root.is_validation()"));
-        assert!(
-            manifest("apps/desktop/src/services.rs")
-                .contains("if crate::account::sign_in_required() {"),
-            "only a sign-in-required process installs the account session"
-        );
-        assert!(
-            manifest("apps/desktop/src/desktop/terminal_view.rs")
-                .contains("sign_in_gate::sign_in_page("),
-            "an installed but unauthenticated account session must cover the workspace"
-        );
+        assert!(!manifest("apps/desktop/src/account/mod.rs").contains("AUTH_BACKEND_CONFIGURED"));
     }
 
     /// The account session paces its own status fetches and wakes windows on

@@ -3296,6 +3296,96 @@ mod timeframe_input {
             "a claimed close is not claimed again"
         );
     }
+
+    /// The updater's state, whether a restart still awaits durability, whether the window
+    /// claimed its close and whether the lifecycle started the process shutdown.
+    fn update_restart_outcome(
+        terminal: &Entity<TerminalApp>,
+        cx: &mut VisualTestContext,
+    ) -> (Option<UpdateState>, bool, bool, bool) {
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            (
+                terminal
+                    .update_presentation()
+                    .map(|presentation| presentation.state.clone()),
+                terminal.services.update_restart_pending(),
+                terminal.window.is_closing(),
+                terminal.lifecycle.shutdown_started(),
+            )
+        })
+    }
+
+    fn begin_update_restart(
+        terminal: &mut TerminalApp,
+        helper_running: bool,
+        window: &mut Window,
+        cx: &mut Context<TerminalApp>,
+    ) {
+        terminal
+            .services
+            .install_updater_for_test(DesktopUpdater::with_prepared_restart_for_test(
+                helper_running,
+            ));
+        terminal.prepare_update_restart_after_workspace_persistence(window, cx);
+        assert!(
+            terminal.services.update_restart_pending(),
+            "the restart waits for durability before it can commit"
+        );
+        assert!(!terminal.window.is_closing());
+        assert!(!terminal.lifecycle.shutdown_started());
+    }
+
+    #[gpui::test]
+    fn an_update_restart_commits_after_durability_then_closes_before_quitting(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, cx) = terminal_harness(cx);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            begin_update_restart(terminal, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            update_restart_outcome(&terminal, cx),
+            (Some(UpdateState::PreparingRestart), false, true, true),
+            "a committed restart claims the window close and starts the shutdown"
+        );
+        assert_eq!(
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .lifecycle
+                    .pending_workspace_persistence_waits()
+            }),
+            0,
+            "the close is claimed before the quit, so the shutdown drains its durability wait"
+        );
+    }
+
+    #[gpui::test]
+    fn a_restart_whose_helper_stopped_is_cancelled_without_closing_or_quitting(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, cx) = terminal_harness(cx);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            begin_update_restart(terminal, false, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            update_restart_outcome(&terminal, cx),
+            (
+                Some(UpdateState::Error(
+                    "update restart helper stopped before shutdown".to_string()
+                )),
+                false,
+                false,
+                false
+            ),
+            "only a committed restart may close the window and quit"
+        );
+    }
 }
 #[test]
 fn chart_execution_time_converts_runtime_nanoseconds_to_utc_seconds_exactly() {
@@ -3566,6 +3656,49 @@ fn side_panel_width_clamps_to_renderable_watchlist_bounds() {
     assert!((clamped_side_panel_width(400.0) - 400.0).abs() < f32::EPSILON);
     assert!((clamped_side_panel_width(900.0) - 480.0).abs() < f32::EPSILON);
     assert!((clamped_side_panel_width(100.0) - 360.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn update_restart_commits_only_a_current_durable_generation() {
+    use super::workspace_tabs::update_restart_commit_claim as decide;
+
+    struct Claim(std::rc::Rc<std::cell::Cell<bool>>);
+
+    impl Drop for Claim {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let claim = || Claim(std::rc::Rc::clone(&released));
+
+    let committed = decide(Some(4), claim(), |generation| generation == 4);
+    assert!(committed.is_ok(), "a current durable generation commits");
+    assert!(
+        !released.get(),
+        "the commit keeps the account refresh claim"
+    );
+    drop(committed);
+    released.set(false);
+
+    assert!(
+        decide(None, claim(), |_| panic!("no writer, no generation check")).is_ok(),
+        "a window without a workspace writer commits once the account refresh drained"
+    );
+    released.set(false);
+
+    let stale = decide(Some(4), claim(), |generation| generation == 5);
+    assert!(
+        stale.is_err(),
+        "a newer workspace generation cancels the restart"
+    );
+    assert!(!released.get(), "the refused claim returns to the caller");
+    drop(stale);
+    assert!(
+        released.get(),
+        "a cancelled restart releases its account refresh claim"
+    );
 }
 
 #[test]

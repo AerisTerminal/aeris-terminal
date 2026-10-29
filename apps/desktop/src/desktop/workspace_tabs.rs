@@ -17,6 +17,21 @@ pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize
     true
 }
 
+/// Whether a prepared update restart whose durability wait settled may commit: only when the
+/// window has no workspace writer or the writer still holds the durable generation. A
+/// refused restart hands back its account refresh claim for release.
+pub(super) fn update_restart_commit_claim<Q>(
+    workspace_generation: Option<u64>,
+    account_refresh: Q,
+    generation_is_current: impl FnOnce(u64) -> bool,
+) -> Result<Q, Q> {
+    if workspace_generation.is_none_or(generation_is_current) {
+        Ok(account_refresh)
+    } else {
+        Err(account_refresh)
+    }
+}
+
 fn start_market_summary(
     factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
     workspace_id: u64,
@@ -1964,7 +1979,7 @@ impl TerminalApp {
         drop(account_refresh);
     }
 
-    fn prepare_update_restart_after_workspace_persistence(
+    pub(super) fn prepare_update_restart_after_workspace_persistence(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1993,31 +2008,27 @@ impl TerminalApp {
         cx.spawn_in(window, async move |terminal, cx| {
             let durable_generations = durability.await;
             let update = terminal.update_in(cx, |terminal, _, terminal_cx| {
-                match durable_generations {
-                    Ok((workspace_generation, account_refresh)) => {
+                let decision = durable_generations.map(|(workspace_generation, account_refresh)| {
+                    update_restart_commit_claim(workspace_generation, account_refresh, |generation| {
                         // The workspace writer owns chrome too, so its one generation fence
                         // covers both.
-                        let workspace_current = workspace_generation.is_none_or(|generation| {
-                            terminal
-                                .saved
-                                .writer()
-                                .is_none_or(|persistence| {
-                                    persistence.shutdown_generation_is_current(generation)
-                                })
-                        });
-                        if workspace_current {
-                            terminal.commit_update_restart_after_persistence(
-                                account_refresh,
-                                terminal_cx,
-                            );
-                        } else {
-                            drop(account_refresh);
-                            terminal.cancel_update_restart_after_persistence_failure(
-                                "desktop state changed while update restart was preparing; retry the update"
-                                    .to_string(),
-                                terminal_cx,
-                            );
-                        }
+                        terminal.saved.writer().is_none_or(|persistence| {
+                            persistence.shutdown_generation_is_current(generation)
+                        })
+                    })
+                });
+                match decision {
+                    Ok(Ok(account_refresh)) => {
+                        terminal
+                            .commit_update_restart_after_persistence(account_refresh, terminal_cx);
+                    }
+                    Ok(Err(account_refresh)) => {
+                        drop(account_refresh);
+                        terminal.cancel_update_restart_after_persistence_failure(
+                            "desktop state changed while update restart was preparing; retry the update"
+                                .to_string(),
+                            terminal_cx,
+                        );
                     }
                     Err(error) => {
                         terminal

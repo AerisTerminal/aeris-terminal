@@ -296,6 +296,35 @@ impl DesktopUpdater {
         self.prepared_restart.take()
     }
 
+    /// An updater holding a prepared restart whose helper either still waits for the
+    /// commit line or has already exited.
+    #[cfg(test)]
+    pub(super) fn with_prepared_restart_for_test(helper_running: bool) -> Self {
+        let mut helper = tests::commit_receiver_child();
+        if !helper_running {
+            drop(helper.stdin.take());
+            helper.wait().expect("restart helper fixture exits");
+        }
+        let (requests, _request_rx) = mpsc::sync_channel(1);
+        let (_result_tx, results) = mpsc::sync_channel(1);
+        Self {
+            requests,
+            results,
+            presentation: UpdatePresentation {
+                system_version: "Windows".to_string(),
+                state: UpdateState::PreparingRestart,
+            },
+            request_pending: false,
+            prepared_restart: Some(PreparedRestart {
+                child: Some(helper),
+                slot: None,
+                committed: false,
+            }),
+            next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+            check_retry_delay: CHECK_RETRY_INITIAL,
+        }
+    }
+
     fn request_periodic_check_if_due(&mut self, now: Instant) -> bool {
         if self.request_pending
             || self.prepared_restart.is_some()
@@ -1066,7 +1095,7 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn commit_receiver_child() -> Child {
+    pub(super) fn commit_receiver_child() -> Child {
         Command::new("powershell.exe")
             .args([
                 "-NoProfile",
@@ -1081,7 +1110,7 @@ mod tests {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn commit_receiver_child() -> Child {
+    pub(super) fn commit_receiver_child() -> Child {
         Command::new("sh")
             .args([
                 "-c",
@@ -1395,6 +1424,60 @@ mod tests {
         }
         assert!(!SLOT.load(Ordering::Acquire));
         assert!(RestartSlot::claim(&SLOT).is_ok());
+        SLOT.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn dropping_a_running_uncommitted_restart_reaps_the_helper_before_releasing_its_slot() {
+        static SLOT: AtomicBool = AtomicBool::new(false);
+        SLOT.store(false, Ordering::Release);
+        let prepared = PreparedRestart {
+            child: Some(commit_receiver_child()),
+            slot: Some(RestartSlot::claim(&SLOT).expect("slot claims")),
+            committed: false,
+        };
+
+        // The drop hands termination and reaping to the cleanup worker; the slot is
+        // released only once that worker has reaped the still-running helper.
+        drop(prepared);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while SLOT.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the cleanup worker must terminate and reap the helper"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(RestartSlot::claim(&SLOT).is_ok());
+        SLOT.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn a_committed_restart_leaves_its_helper_running_and_keeps_its_slot() {
+        static SLOT: AtomicBool = AtomicBool::new(false);
+        SLOT.store(false, Ordering::Release);
+        let mut prepared = PreparedRestart {
+            child: Some(commit_receiver_child()),
+            slot: Some(RestartSlot::claim(&SLOT).expect("slot claims")),
+            committed: false,
+        };
+        prepared
+            .commit()
+            .expect("running helper accepts the commit");
+        let mut helper = prepared.child.take().expect("helper handle");
+        drop(prepared);
+
+        assert!(
+            helper
+                .wait()
+                .expect("helper exits after the commit")
+                .success(),
+            "the helper received the exact commit line and was not killed"
+        );
+        assert!(
+            SLOT.load(Ordering::Acquire),
+            "a committed restart keeps the single-flight slot until process exit"
+        );
         SLOT.store(false, Ordering::Release);
     }
 
