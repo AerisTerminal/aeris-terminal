@@ -47,7 +47,7 @@ fn main() {
     }
 }
 
-/// The first, quoted family of a CSS font stack such as `"Inter", sans-serif`.
+/// The first, quoted family of a CSS font stack such as `"DM Sans", sans-serif`.
 fn primary_family<'a>(stack: &'a str, property: &str) -> Result<&'a str, String> {
     stack
         .strip_prefix('"')
@@ -76,12 +76,6 @@ fn compile_tokens() -> Result<(), String> {
         &mut output,
         "FONT_FAMILY",
         primary_family(&stack, "font-sans")?,
-    );
-    let mono_stack = resolve(&root, "font-mono")?;
-    emit_string(
-        &mut output,
-        "FONT_MONO_FAMILY",
-        primary_family(&mono_stack, "font-mono")?,
     );
     emit_u16(
         &mut output,

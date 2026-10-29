@@ -348,7 +348,6 @@ fn time_sales_row(
         .flex()
         .gap_2()
         .items_center()
-        .font_family(aeris_design_system::platform_mono_font_family())
         .font_features(platform_tabular_numerals())
         .text_xs()
         .text_color(gpui_color(tone))

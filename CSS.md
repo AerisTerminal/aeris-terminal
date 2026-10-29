@@ -67,16 +67,13 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   when there is no room.
 - Focus is one style everywhere: the control's 1px border turns `ring-primary` (no
   thicker ring, glow or background change).
-- Typography uses the bundled Inter faces (Regular 400, Medium 500, Bold 700) for platform text and
-  the bundled Faculty Glyphic Regular face only for brand/display text. The normal platform weight
-  (`--font-weight-normal`) is Regular 400; emphasis and strong text use Bold 700. Changing numbers use Inter's
-  tabular figures (`tnum`). Geist Mono (Regular, Medium, Bold) is bundled as `--font-mono`
-  (`platform_mono_font_family()`) for numbers in data panels only: order book rows, time and sales
-  rows, position/order/trade values and screener numeric columns. Headers and labels stay Inter.
-  Its 0.600em digits are narrower than Inter's 0.648em tabular digits, so the existing column widths
-  hold. There is no HK Grotesk dependency. The CSS
-  `--font-sans` and native `platform_font_family()` both resolve to Inter; keep the web mirror in
-  sync.
+- Typography uses the bundled DM Sans faces (Regular 400, Medium 500, Bold 700) for all platform
+  text, numbers included, and the bundled Faculty Glyphic Regular face only for brand/display text.
+  The normal platform weight (`--font-weight-normal`) is Regular 400; emphasis and strong text use
+  Bold 700. Changing numbers and data-panel rows (order book, time and sales, positions, orders,
+  trades, screener) use DM Sans tabular figures (`tnum`) so digits keep one width. There is no
+  separate mono platform face and no HK Grotesk dependency. The CSS `--font-sans` and native
+  `platform_font_family()` both resolve to DM Sans; keep the web mirror in sync.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
 

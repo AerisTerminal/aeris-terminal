@@ -968,7 +968,6 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
             .child(
                 value
                     .text_sm()
-                    .font_family(aeris_design_system::platform_mono_font_family())
                     .font_weight(platform_font_weight(TypographyRole::Emphasis))
                     .font_features(platform_tabular_numerals()),
             )
@@ -1388,17 +1387,17 @@ fn trade_history_row(
             theme,
         ))
         .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(side_color)))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             TRADE_HISTORY_QUANTITY_WIDTH,
             trade_history_text(quantity),
             theme,
         ))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             TRADE_HISTORY_PRICE_WIDTH,
             trade_history_text(entry_price),
             theme,
         ))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             TRADE_HISTORY_PRICE_WIDTH,
             trade_history_text(exit_price),
             theme,
@@ -1523,22 +1522,22 @@ fn position_row(
             theme,
         ))
         .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(side_color)))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             TRADE_HISTORY_QUANTITY_WIDTH,
             trade_history_decimal(position.quantity),
             theme,
         ))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             POSITION_PRICE_WIDTH,
             price(position.entry_price),
             theme,
         ))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             POSITION_PRICE_WIDTH,
             price(position.stop_loss),
             theme,
         ))
-        .child(numeric_data_cell(
+        .child(numeric_cell(
             POSITION_PRICE_WIDTH,
             price(position.take_profit),
             theme,
@@ -1635,7 +1634,7 @@ fn trade_history_pnl_cell(
     currency: &str,
     theme: &AerisTheme,
 ) -> Div {
-    numeric_data_cell(
+    numeric_cell(
         TRADE_HISTORY_PNL_WIDTH,
         trade_history_pnl_value(pnl, currency, theme),
         theme,
@@ -1724,17 +1723,6 @@ fn numeric_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Di
     table_cell(width, theme)
         .justify_end()
         .child(div().min_w_0().truncate().child(content))
-}
-
-/// A numeric row value in the platform mono face; column headers keep `numeric_cell`.
-fn numeric_data_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Div {
-    numeric_cell(
-        width,
-        div()
-            .font_family(aeris_design_system::platform_mono_font_family())
-            .child(content),
-        theme,
-    )
 }
 
 /// A row's last cell carries no divider.

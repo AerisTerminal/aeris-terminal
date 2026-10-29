@@ -30,18 +30,18 @@ const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
-/// Inter faces at the weights `platform.css` uses for normal, emphasis and strong text.
+/// DM Sans faces at the weights `platform.css` uses for normal, emphasis and strong text.
 const PLATFORM_FONTS: [(&[u8], u16); 3] = [
     (
-        include_bytes!("../../../ui/design_system/assets/fonts/inter_regular.ttf"),
+        include_bytes!("../../../ui/design_system/assets/fonts/dm_sans_regular.ttf"),
         400,
     ),
     (
-        include_bytes!("../../../ui/design_system/assets/fonts/inter_medium.ttf"),
+        include_bytes!("../../../ui/design_system/assets/fonts/dm_sans_medium.ttf"),
         500,
     ),
     (
-        include_bytes!("../../../ui/design_system/assets/fonts/inter_bold.ttf"),
+        include_bytes!("../../../ui/design_system/assets/fonts/dm_sans_bold.ttf"),
         700,
     ),
 ];
@@ -283,7 +283,7 @@ fn browser_platform_styles() -> &'static str {
 fn browser_font_faces() -> String {
     PLATFORM_FONTS
         .iter()
-        .map(|&(face, weight)| ("Inter", face, weight))
+        .map(|&(face, weight)| ("DM Sans", face, weight))
         .chain([("Faculty Glyphic", BRAND_FONT, 400)])
         .map(|(family, face, weight)| {
             let face = STANDARD.encode(face);
@@ -528,7 +528,7 @@ mod tests {
         assert!(response.contains("var(--primary)"));
         assert!(!response.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
-        assert!(response.contains("font-family:\"Inter\""));
+        assert!(response.contains("font-family:\"DM Sans\""));
         for weight in ["400", "500", "700"] {
             assert!(response.contains(&format!("font-weight:{weight};font-display:swap")));
         }

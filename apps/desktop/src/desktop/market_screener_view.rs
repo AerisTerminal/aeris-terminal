@@ -87,11 +87,6 @@ fn column_cell(spec: ColumnSpec, theme: &AerisTheme) -> Div {
     }
 }
 
-/// A row's numeric value cell, set in the platform mono face.
-fn numeric_column_cell(spec: ColumnSpec, theme: &AerisTheme) -> Div {
-    column_cell(spec, theme).font_family(aeris_design_system::platform_mono_font_family())
-}
-
 /// The table container's corner radius less its border, so square-cornered table chrome
 /// can be rounded to sit inside the border instead of over it.
 fn table_inner_radius(theme: &AerisTheme) -> Pixels {
@@ -445,7 +440,6 @@ fn table_row(
         })
         .child(
             rank_cell(theme)
-                .font_family(aeris_design_system::platform_mono_font_family())
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
                 .child((index + 1).to_string()),
@@ -466,16 +460,16 @@ fn table_row(
                 )
                 .children(kind),
         )
-        .child(numeric_column_cell(COLUMNS[1], theme).child(row.price.clone()))
+        .child(column_cell(COLUMNS[1], theme).child(row.price.clone()))
         .child(
-            numeric_column_cell(COLUMNS[2], theme)
+            column_cell(COLUMNS[2], theme)
                 .text_color(direction_color(row.change_direction, theme))
                 .child(row.change.clone()),
         )
-        .child(numeric_column_cell(COLUMNS[3], theme).child(row.volume.clone()))
-        .child(numeric_column_cell(COLUMNS[4], theme).child(row.open_interest.clone()))
+        .child(column_cell(COLUMNS[3], theme).child(row.volume.clone()))
+        .child(column_cell(COLUMNS[4], theme).child(row.open_interest.clone()))
         .child(
-            numeric_column_cell(COLUMNS[5], theme)
+            column_cell(COLUMNS[5], theme)
                 .text_color(direction_color(row.funding_direction, theme))
                 .child(row.funding.clone()),
         )
