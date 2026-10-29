@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-82 of 90 items are fully done (2026-10-29).
+84 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -40,12 +40,12 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M4 trading core | 9 / 10 | 1 (GUI check) |
 | M5 trading engine | 11 / 12 | 1 (GUI check) |
 | M6 desktop bridge | 13 / 13 | 0 |
-| M7 desktop structure | 8 / 12 | 4 (GUI checks and the idle CPU measurement) |
+| M7 desktop structure | 10 / 12 | 2 (GUI checks) |
 | M8 lifecycle and trim | 10 / 12 | 2 (code complete; GUI checks) |
 
 Every open item has its code landed and waits only on the checks listed on its line: guarded GUI
-checks on an isolated root with no other Aeris desktop running, the M7.6 idle CPU measurement, and
-the maintainer-only sign-in and macOS checks. The M6, M7 and M8 full gates and CI closeouts are
+checks on an isolated root with no other Aeris desktop running and the maintainer-only sign-in
+and macOS checks. The M6, M7 and M8 full gates and CI closeouts are
 recorded.
 
 ## 3. Work items
@@ -298,7 +298,7 @@ only on the guarded GUI checks on their lines.
     with two tabs). + created a tab from the layout picker, the layout menu's Rename renamed it,
     dragging it left reordered the tabs with the selection kept, its X closed it, a symbol search
     for XRP switched the pane on Enter, and Ctrl+K opened the command palette. Part of UI-07.
-- [ ] M7.6 Dirty-source `FrameScheduler`
+- [x] M7.6 Dirty-source `FrameScheduler`
   - Landed: `desktop/frame_scheduler.rs` replaces `frame_wakes.rs`. Its `DirtySet` holds one
     bit per `AppSource` (summaries, screener, trading, notices, persistence receipts, account,
     updater) and the marked panes, keyed by surface entity, and wakes the one listener that
@@ -326,8 +326,21 @@ only on the guarded GUI checks on their lines.
     after setup, an over-budget pane draining on the next frame, a deferred registration and a
     refused automatic removal each retrying on the timer alone, and an idle pane arming no
     study retry.
-  - Left: record idle CPU for 1, 4 and 16 panes, before and after. Closes UI-16.
-- [ ] M7.7 Versioned, checksummed workspace container
+  - Measured (2026-10-29, Windows release builds from before `ffbca44f` and of `d494c5dc`,
+    each on a fresh validation root with 1, 4 or 16 live Hyperliquid chart panes, 60 s after a
+    20 s settle, no input during any window, two alternating rounds). Idle CPU in percent of one
+    core:
+
+    | Panes | Before (r1, r2) | After (r1, r2) |
+    |---|---|---|
+    | 1 | 3.18, 5.08 | 3.39, 5.31 |
+    | 4 | 5.86, 7.94 | 4.71, 6.33 |
+    | 16 | 9.24, 11.43 | 9.11, 10.39 |
+
+    Four panes drop by about a fifth in both rounds and 16 panes slightly; one pane is unchanged
+    within noise. The remaining idle cost is the live market feed redrawing charts, not the
+    deleted timer. Closes UI-16.
+- [x] M7.7 Versioned, checksummed workspace container
   - Landed: `platform_runtime::DurableContainer` (`durable_container.rs`) is the one container,
     built on `platform_sys`'s `StagedFile` rather than a second `DurableFile` writer. Its
     envelope is `magic | envelope_version u16 | schema_version u32 | len u64 | sha256 | payload`
@@ -363,7 +376,9 @@ only on the guarded GUI checks on their lines.
     only the backup existed and every later launch restored from it again and repeated the
     notice. A fallback restore now rewrites the recovered copy as the primary
     (`a_corrupt_workspace_with_a_backup_reports_the_quarantined_copy` reopens it as `Restored`).
-  - Left: relaunch the truncated-workspace check on a build with the fix.
+  - Verified on a release build of `8f4d4dc7` (2026-10-29): a primary truncated to half opened
+    the saved layout from the backup with the notice and was rewritten at once; the next launch
+    opened the same layout with no notice and no restore in the log.
 - [x] M7.8 Writer-owned workspace document and migration chain
   - Landed: `RestoreOutcome` (`Fresh`, `Restored`, `RestoredFromFallback`, `Migrated`,
     `NewerVersion`, `Defaulted`) in `desktop/local_state.rs`; `DurableContainer` carries the
