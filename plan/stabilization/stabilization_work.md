@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-63 of 90 items are fully done (2026-10-29).
+64 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -38,7 +38,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M2 market foundations | 10 / 10 | 0 |
 | M3 market lifecycle | 12 / 12 | 0 |
 | M4 trading core | 9 / 10 | 1 (GUI check) |
-| M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
+| M5 trading engine | 8 / 12 | 4 (GUI checks) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 2 / 12 | 10 (GUI checks and remaining work) |
 | M8 lifecycle and trim | 8 / 12 | 4 (code complete; GUI, VM and process checks) |
@@ -125,10 +125,11 @@ every open item now has its code landed and waits only on the checks listed on i
 - [ ] M5.10 Persisted risk session with rollover (f81bcb53)
   - Left: guarded GUI check that a bracket order no longer produces a risk warning.
 - [x] M5.11 Change-driven, bounded trading publication with paged history (1cecfa4b)
-- [ ] M5.12 Live paper-trading probe on Hyperliquid (a0f2b730)
-  - Left: archived clean-HEAD runs of the no-fees case and both negative cases (no quote,
-    disconnect). Only the positive run is recorded (22/22 at the M6.11 head). The broker demo probe
-    is superseded; its broker was removed.
+- [x] M5.12 Live paper-trading probe on Hyperliquid (a0f2b730; clean-HEAD runs at 7fcb3a07, archived
+  outside the repo in `C:\Users\devraj\aeris-evidence\m5.12-7fcb3a07\`: fees and no-fees runs
+  22/22 each, both rejecting the disconnected SOL order and showing restart differences [];
+  no-quote run rejects as QuoteUnavailable and exits non-zero by design. The broker demo probe is
+  superseded; its broker was removed.)
 
 ### M6 desktop bridge
 
