@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-65 of 90 items are fully done (2026-10-29).
+68 of 90 items are fully done (2026-10-29).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -39,7 +39,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M3 market lifecycle | 12 / 12 | 0 |
 | M4 trading core | 9 / 10 | 1 (GUI check) |
 | M5 trading engine | 8 / 12 | 4 (GUI checks) |
-| M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
+| M6 desktop bridge | 9 / 13 | 4 (code complete; GUI checks) |
 | M7 desktop structure | 2 / 12 | 10 (GUI checks and remaining work) |
 | M8 lifecycle and trim | 9 / 12 | 3 (code complete; GUI and install checks) |
 
@@ -149,30 +149,36 @@ every open item now has its code landed and waits only on the checks listed on i
       chosen within 5 s.
     - UI-04's picker part closes with them.
 - [x] M6.6 Desktop bridge message model collapsed (5a6da58c)
-- [ ] M6.7 Runtime descriptors drive provider identity (42d99d1e)
-  - Left: guarded GUI check VAL-DSK-114. On a fresh root, the symbol button and the legend show
-    BTC-USDC and the descriptor's provider name, and both follow a switch to ETH-USDC within 5 s.
+- [x] M6.7 Runtime descriptors drive provider identity (42d99d1e)
+  - Verified: guarded GUI check VAL-DSK-114 (2026-10-29, release build of df4ef296 on this PC,
+    validation root, evidence outside the repo in `C:\Users\devraj\aeris-evidence\gui\`). On a fresh root the symbol button and the legend
+    showed BTC-USDC and Hyperliquid, and both followed a switch to ETH-USDC within 1 s.
     Closes MD-10.
-- [ ] M6.8 Typed provider and risk events; default workspace (d1218cae)
-  - Left: guarded GUI checks for the VAL-DSK-026 GUI clause and VAL-CROSS-001.
-    - VAL-DSK-026: a fresh root shows one tab and one pane on BTC-USDC with live candles within
-      15 s.
-    - VAL-CROSS-001: a fresh first run reaches a live default chart with no broker venue session.
-- [ ] M6.9 Descriptor-driven provider connect, login and symbol menu (4ef50ef0)
-  - Left: guarded GUI check VAL-DSK-029.
-    - The connect list shows one row per published descriptor, and the vault login form renders.
-    - Cancel makes no sign-in attempt and writes no vault entry.
-    - The symbol menu lists only symbol-browser descriptors.
+- [x] M6.8 Typed provider and risk events; default workspace (d1218cae)
+  - Verified: guarded GUI checks (2026-10-29, same build and evidence as M6.7).
+    - VAL-DSK-026: the fresh root showed one tab and one pane on BTC-USDC 1m with live candles
+      at 15 s.
+    - VAL-CROSS-001: the fresh first run reached the live default chart, and the log reported
+      the broker venue idle with no saved Rithmic login (no venue session).
+- [x] M6.9 Descriptor-driven provider connect, login and symbol menu (4ef50ef0)
+  - Verified: guarded GUI check VAL-DSK-029 (2026-10-29, same build and evidence as M6.7).
+    - The connect list showed one row per published descriptor (Rithmic, Hyperliquid), and the
+      Rithmic vault login form rendered Server, System, User ID and Password.
+    - Typing a probe user and password, then Cancel, returned to Not connected; the Aeris and
+      Rithmic `cmdkey` entries were unchanged.
+    - The symbol menu listed only Hyperliquid, the one symbol-browser descriptor.
     - UI-03 closes with this item and M6.7.
 - [ ] M6.10 One workspace `TradingStore` fed by the change stream (bf626069)
-  - Left: guarded GUI checks VAL-DSK-034 and VAL-DSK-035.
-    - VAL-DSK-034: one Buy gives one fill toast and a position row within 3 s, with no second toast.
-    - VAL-DSK-035: a 10,001-order fixture shows trade history within 10 s.
+  - Verified: VAL-DSK-034 (2026-10-29, same build and evidence as M6.7). One chart Buy of
+    ETH-USDC on a new practice account gave one fill toast and a Long 1.00 position row by
+    1.5 s, and no second toast by 8 s.
+  - Left: guarded GUI check VAL-DSK-035, a 10,001-order fixture showing trade history within 10 s.
 - [ ] M6.11 Revisioned chart intents; snapshots confined to tests (a36f225f)
-  - Left: guarded GUI checks VAL-DSK-037, VAL-CROSS-015 and VAL-CROSS-016.
-    - VAL-DSK-037: flatten works with the order book off.
-    - VAL-CROSS-015: flatten-all closes BTC and ETH, including the instrument with no chart.
-    - VAL-CROSS-016: a switch storm ends on SOL with order lines only on SOL.
+  - Verified: VAL-DSK-037 and VAL-CROSS-015 (2026-10-29, same build and evidence as M6.7).
+    With the order book off, long BTC (charted) and long ETH (no chart) positions were both
+    closed by Flatten account (Ctrl+Shift+F, confirmed).
+  - Left: guarded GUI check VAL-CROSS-016, a switch storm ending on SOL with order lines only on
+    SOL.
     - Also record VAL-DSK-110 as passed; its tests exist.
     - Closes TR-10 and UI-10.
   - Fix found in the VAL-CROSS-015 run: after the flatten, the ETH fill toast read the raw
