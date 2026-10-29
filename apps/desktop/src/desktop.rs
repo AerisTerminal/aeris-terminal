@@ -5869,19 +5869,47 @@ fn stop_partial_startup(
     }
 }
 
-fn fatal_startup(account_service: &aeris_account_runtime::AccountService, message: &str) -> ! {
+fn with_diagnostics_location(message: &str) -> String {
     let diagnostics_log_path = aeris_platform_runtime::native_data_root().map_or_else(
         |_| std::path::PathBuf::from("aeris.log"),
         |root| root.join("logs").join("aeris.log"),
     );
-    let detail = format!(
+    format!(
         "{message}\n\nDiagnostics were written to:\n{}",
         diagnostics_log_path.display()
-    );
+    )
+}
+
+fn fatal_startup(account_service: &aeris_account_runtime::AccountService, message: &str) -> ! {
+    let detail = with_diagnostics_location(message);
     if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &detail) {
         diagnostic!("Aeris startup error dialog could not open: {error}");
     }
     exit_after_account_refresh_quiesce(account_service, 1);
+}
+
+fn quit_without_window(reason: &str, lifecycle: &DesktopLifecycle, cx: &mut App) {
+    let dialog = report_window_unavailable(&reason, cx);
+    let lifecycle = lifecycle.clone();
+    cx.spawn(async move |cx| {
+        dialog.await;
+        cx.update(|cx| lifecycle.quit_after_shutdown(cx));
+    })
+    .detach();
+}
+
+/// Tells the user that no window could open. A process without a window would keep
+/// running unseen and hold the instance lock, so every caller quits once the
+/// dialog task completes.
+pub(super) fn report_window_unavailable(error: &impl std::fmt::Display, cx: &App) -> Task<()> {
+    let detail = with_diagnostics_location(&format!(
+        "Aeris could not open its window: {error}.\n\nUpdating the graphics driver usually fixes this. Start Aeris again afterwards."
+    ));
+    cx.background_executor().spawn(async move {
+        if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &detail) {
+            diagnostic!("Aeris window failure dialog could not open: {error}");
+        }
+    })
 }
 
 fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
@@ -5950,6 +5978,75 @@ fn mount_desktop(
         diagnostic!("Aeris keyboard shortcuts are invalid: {error}");
         return None;
     }
+    register_quit_hooks(&lifecycle, cx);
+    let failure_lifecycle = lifecycle.clone();
+    let mut existing_root = None;
+    let mut window_failure = None;
+    match layout {
+        DesktopLayout::Windows => {
+            for (window_index, (bootstrap, market_worker)) in market_workers.into_iter().enumerate()
+            {
+                let window_lifecycle = lifecycle.clone();
+                let window_factory = workspace_factory.clone();
+                let build = move |window: &mut Window, cx: &mut App| {
+                    terminal_root(
+                        bootstrap,
+                        market_worker,
+                        window_factory,
+                        &window_lifecycle,
+                        chart_chrome,
+                        window,
+                        cx,
+                    )
+                };
+                if let Some(window) = existing_window.take() {
+                    existing_root = Some(build(window, cx));
+                } else {
+                    let options = desktop_window_options(window_index, cx);
+                    if let Err(error) = cx.open_window(options, build) {
+                        diagnostic!("Aeris terminal window could not open: {error}");
+                        window_failure.get_or_insert_with(|| error.to_string());
+                    }
+                }
+            }
+        }
+        DesktopLayout::WorkspaceTabs => {
+            let Some(workspace_factory) = workspace_factory else {
+                diagnostic!("Aeris workspace factory is unavailable");
+                quit_without_window("the workspace could not be prepared", &lifecycle, cx);
+                return None;
+            };
+            let build = move |window: &mut Window, cx: &mut App| {
+                workspace_tabs_root(
+                    workspace_panes,
+                    WorkspaceTabsRestore {
+                        state: &restored_workspace,
+                        notice: workspace_notice,
+                        restore_outcome,
+                    },
+                    workspace_factory,
+                    &lifecycle,
+                    chart_chrome,
+                    window,
+                    cx,
+                )
+            };
+            if let Some(window) = existing_window {
+                existing_root = Some(build(window, cx));
+            } else {
+                let options = desktop_window_options(0, cx);
+                if let Err(error) = cx.open_window(options, build) {
+                    diagnostic!("Aeris workspace window could not open: {error}");
+                    window_failure = Some(error.to_string());
+                }
+            }
+        }
+    }
+    finish_mount(window_failure.as_deref(), &failure_lifecycle, cx);
+    existing_root
+}
+
+fn register_quit_hooks(lifecycle: &DesktopLifecycle, cx: &mut App) {
     let quit_lifecycle = lifecycle.clone();
     cx.on_app_quit(move |cx| {
         let quit = quit_lifecycle.begin_quit(cx);
@@ -5974,69 +6071,16 @@ fn mount_desktop(
         }
     })
     .detach();
-    let mut existing_root = None;
-    match layout {
-        DesktopLayout::Windows => {
-            for (window_index, (bootstrap, market_worker)) in market_workers.into_iter().enumerate()
-            {
-                let window_lifecycle = lifecycle.clone();
-                let window_factory = workspace_factory.clone();
-                let build = move |window: &mut Window, cx: &mut App| {
-                    terminal_root(
-                        bootstrap,
-                        market_worker,
-                        window_factory,
-                        &window_lifecycle,
-                        chart_chrome,
-                        window,
-                        cx,
-                    )
-                };
-                if let Some(window) = existing_window.take() {
-                    existing_root = Some(build(window, cx));
-                } else {
-                    let options = desktop_window_options(window_index, cx);
-                    if let Err(error) = cx.open_window(options, build) {
-                        diagnostic!("Aeris terminal window could not open: {error}");
-                    }
-                }
-            }
-        }
-        DesktopLayout::WorkspaceTabs => {
-            let Some(workspace_factory) = workspace_factory else {
-                diagnostic!("Aeris workspace factory is unavailable");
-                return None;
-            };
-            let build = move |window: &mut Window, cx: &mut App| {
-                workspace_tabs_root(
-                    workspace_panes,
-                    WorkspaceTabsRestore {
-                        state: &restored_workspace,
-                        notice: workspace_notice,
-                        restore_outcome,
-                    },
-                    workspace_factory,
-                    &lifecycle,
-                    chart_chrome,
-                    window,
-                    cx,
-                )
-            };
-            if let Some(window) = existing_window {
-                existing_root = Some(build(window, cx));
-            } else {
-                let options = desktop_window_options(0, cx);
-                if let Err(error) = cx.open_window(options, build) {
-                    diagnostic!("Aeris workspace window could not open: {error}");
-                }
-            }
-        }
+}
+
+fn finish_mount(window_failure: Option<&str>, lifecycle: &DesktopLifecycle, cx: &mut App) {
+    if cx.windows().is_empty() {
+        let reason = window_failure.unwrap_or("no window was created");
+        quit_without_window(reason, lifecycle, cx);
+        return;
     }
     cx.activate(true);
-    if !cx.windows().is_empty() {
-        update::record_startup_complete(cx);
-    }
-    existing_root
+    update::record_startup_complete(cx);
 }
 
 /// The GPUI action a key binding dispatches for a command. Commands without one run only from

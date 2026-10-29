@@ -115,6 +115,12 @@ jobs:
             Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
             exit 1
           }
+          # A window that cannot open shows a blocking dialog, so a live process alone is not a pass.
+          if (Select-String -Path "$log.err" -Pattern 'window could not open' -Quiet) {
+            Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
+            Stop-Process -Id $process.Id -Force
+            throw 'Aeris Terminal could not open its window'
+          }
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height

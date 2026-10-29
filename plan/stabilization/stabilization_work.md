@@ -660,6 +660,11 @@ still wait on the GUI checks and the remaining work on their lines.
     no installer carries it, so it exited with 0xC0000135 before any window on a PC without the
     Visual C++ Redistributable. `.cargo/config.toml` links the C runtime statically for Windows
     MSVC targets; the release desktop imports no CRT DLL (dumpbin) and starts in the sandbox.
+  - Fix found in the same sandbox, whose virtual GPU cannot create the DirectX renderer: when no
+    window opened (workspace, terminal or sign-in), the process kept running unseen and held the
+    instance lock. It now shows "Aeris could not open its window" with the log location (off the
+    UI thread) and quits after the dialog; seen in the sandbox, it exited 0.9 s after OK. The
+    Windows preview smoke fails when its launch log says a window could not open.
   - Left: the manual install and uninstall on a Windows VM (F17), checking the prompt and that
     data is kept by default and removed only when ticked. Not run; maintainer-only.
 - [x] M8.7 Release packager and end-to-end lifecycle harness

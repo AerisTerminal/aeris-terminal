@@ -375,9 +375,16 @@ pub(super) fn open_sign_in_window(gate: SignInGate, cx: &mut App) {
     });
     if let Err(error) = opened {
         diagnostic!("Aeris sign-in window could not open: {error}");
-        if let Some(shutdown) = close_gate(&gate, cx) {
-            quit_after(shutdown, cx);
-        }
+        let dialog = super::report_window_unavailable(&error, cx);
+        let shutdown = close_gate(&gate, cx);
+        cx.spawn(async move |cx| {
+            dialog.await;
+            if let Some(shutdown) = shutdown {
+                shutdown.await;
+            }
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
         return;
     }
     cx.activate(true);

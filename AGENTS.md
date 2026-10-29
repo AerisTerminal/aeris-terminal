@@ -747,7 +747,8 @@ when a lane's `rithmic_kit` input is set does it unpack the kit's `proto` folder
 after the build and fails if the kit was not compiled in. The Windows lane packages the release binary
 with Inno Setup from `apps/desktop/packaging/windows/aeris_terminal.iss` (a per-user installer that
 installs the desktop directly, shares the lifecycle installer's AppId and folder, and never deletes
-user data on uninstall) and smoke-tests a silent install, launch and uninstall; the macOS lane
+user data on uninstall) and smoke-tests a silent install, launch and uninstall (a launch whose
+window could not open fails it); the macOS lane
 smoke-launches the app bundle and ships a disk image with an Applications link. Both keep their
 output only as a 14-day workflow artifact.
 `tools/naming_check` enforces this shape across every workflow.
