@@ -112,6 +112,11 @@ recorded.
 - [x] M5.2 One admission validator for simulated and broker routes (9b49f28e)
 - [x] M5.3 Bid/ask fill rules, stop and stop-limit triggering (140a8b3d)
 - [ ] M5.4 DAY expiry at session close or 00:00 UTC; GTC keeps working (05cc55bf)
+  - Fix found by the GUI check: no desktop surface showed a practice order's expiry (only a
+    broker expiry toasted, and an ended order had already left the open orders, so its
+    toast could not name it). A practice expiry now toasts "Buy 0.1 SOL-USDC expired" over
+    the owner's detail and the account, with the order taken from the previous view;
+    practice cancels stay silent.
   - Left: guarded GUI check that an expired DAY order shows the Expired status.
 - [x] M5.5 One order-group model with bracket migration (064ca1e4)
 - [x] M5.6 Superseded protection layers deleted (71f36340)

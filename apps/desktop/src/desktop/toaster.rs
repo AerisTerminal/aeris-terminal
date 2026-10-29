@@ -832,41 +832,31 @@ impl Toaster {
                         fill_notice_text(fill, &snapshot.instruments, &snapshot.accounts);
                     self.push_fill(host, fill.side, title, description, now);
                 }
-                trading_store::TradingAnnouncement::Order(event) => {
+                trading_store::TradingAnnouncement::Order { event, order } => {
                     if now_unix_nanos.saturating_sub(event.event_unix_nanos) > NEWS_FRESHNESS_NANOS
                     {
                         continue;
                     }
-                    let (tone, title, description) = order_warning_notice(
-                        event,
-                        &snapshot.orders,
-                        &snapshot.instruments,
-                        &snapshot.accounts,
-                    )
-                    .or_else(|| {
-                        order_end_notice(
-                            event,
-                            &snapshot.orders,
-                            &snapshot.instruments,
-                            &snapshot.accounts,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        let (title, tone) = match event.reason {
-                            Some(aeris_trading::OrderEventReason::ProtectionNotPlaced) => {
-                                ("Protection not placed", ToastTone::Loss)
-                            }
-                            Some(aeris_trading::OrderEventReason::KillSwitch) => {
-                                ("Risk lock", ToastTone::Warning)
-                            }
-                            _ => ("Order rejected", ToastTone::Loss),
-                        };
-                        (
-                            tone,
-                            title.to_string(),
-                            event.detail.clone().unwrap_or_default(),
-                        )
-                    });
+                    let order = order.as_deref();
+                    let (tone, title, description) =
+                        order_warning_notice(event, order, &snapshot.accounts)
+                            .or_else(|| order_end_notice(event, order, &snapshot.accounts))
+                            .unwrap_or_else(|| {
+                                let (title, tone) = match event.reason {
+                                    Some(aeris_trading::OrderEventReason::ProtectionNotPlaced) => {
+                                        ("Protection not placed", ToastTone::Loss)
+                                    }
+                                    Some(aeris_trading::OrderEventReason::KillSwitch) => {
+                                        ("Risk lock", ToastTone::Warning)
+                                    }
+                                    _ => ("Order rejected", ToastTone::Loss),
+                                };
+                                (
+                                    tone,
+                                    title.to_string(),
+                                    event.detail.clone().unwrap_or_default(),
+                                )
+                            });
                     if event.reason == Some(aeris_trading::OrderEventReason::RiskWarning) {
                         self.post_notice(host, risk_warning_user_notice(event, description), now);
                     } else {
@@ -1106,18 +1096,32 @@ fn fill_notice_text(
 }
 
 /// "Broker cancelled Buy 1 ESZ5" over the broker's reason and the account, for a broker order
-/// the broker cancelled, expired or refused on its own; `None` for every other event,
-/// including the cancels Aeris requested.
+/// the broker cancelled, expired or refused on its own; "Buy 1 ESZ5 expired" over the owner's
+/// detail and the account, for a practice order whose time in force ended; `None` for every
+/// other event, including the cancels Aeris requested.
 fn order_end_notice(
     event: &aeris_trading::OrderEvent,
-    orders: &[aeris_trading::Order],
-    instruments: &[aeris_trading_runtime::TradingInstrument],
+    order: Option<&trading_store::AnnouncedOrder>,
     accounts: &[aeris_trading::TradingAccount],
 ) -> Option<(ToastTone, String, String)> {
-    if event.provenance.venue_id != aeris_trading::venue::BROKER_VENUE_ID
-        || event.reason == Some(aeris_trading::OrderEventReason::UserCancel)
-    {
+    if event.reason == Some(aeris_trading::OrderEventReason::UserCancel) {
         return None;
+    }
+    let placed = order.map(|order| &order.order);
+    if event.provenance.venue_id != aeris_trading::venue::BROKER_VENUE_ID {
+        if event.kind != aeris_trading::OrderEventKind::Expired {
+            return None;
+        }
+        let title = order.map_or_else(
+            || "Order expired".to_string(),
+            |order| format!("{} expired", order_label(order)),
+        );
+        let reason = event.detail.as_deref().unwrap_or("Its time in force ended");
+        return Some((
+            ToastTone::Warning,
+            title,
+            with_account(reason, placed, accounts),
+        ));
     }
     let (verb, tone) = match event.kind {
         aeris_trading::OrderEventKind::Cancelled => ("cancelled", ToastTone::Warning),
@@ -1125,10 +1129,9 @@ fn order_end_notice(
         aeris_trading::OrderEventKind::Rejected => ("rejected", ToastTone::Loss),
         _ => return None,
     };
-    let order = orders.iter().find(|order| order.id == event.order_id);
     let title = order.map_or_else(
         || format!("Broker {verb} an order"),
-        |order| format!("Broker {verb} {}", order_label(order, instruments)),
+        |order| format!("Broker {verb} {}", order_label(order)),
     );
     // The owner stores the bare state name when the broker gave no explanation.
     let reason = event
@@ -1136,15 +1139,14 @@ fn order_end_notice(
         .as_deref()
         .filter(|detail| *detail != verb && *detail != "cancel rejected")
         .unwrap_or("The broker gave no reason");
-    Some((tone, title, with_account(reason, order, accounts)))
+    Some((tone, title, with_account(reason, placed, accounts)))
 }
 
 /// "Risk warning on Buy 1 ESZ5" over the owner's warnings and the account, for an order the
 /// trading owner accepted with risk warnings on any venue; `None` for every other event.
 fn order_warning_notice(
     event: &aeris_trading::OrderEvent,
-    orders: &[aeris_trading::Order],
-    instruments: &[aeris_trading_runtime::TradingInstrument],
+    order: Option<&trading_store::AnnouncedOrder>,
     accounts: &[aeris_trading::TradingAccount],
 ) -> Option<(ToastTone, String, String)> {
     if event.kind != aeris_trading::OrderEventKind::Accepted
@@ -1153,30 +1155,31 @@ fn order_warning_notice(
         return None;
     }
     let warnings = event.detail.as_deref()?;
-    let order = orders.iter().find(|order| order.id == event.order_id);
     let title = order.map_or_else(
         || "Risk warning".to_string(),
-        |order| format!("Risk warning on {}", order_label(order, instruments)),
+        |order| format!("Risk warning on {}", order_label(order)),
     );
     Some((
         ToastTone::Warning,
         title,
-        with_account(&capitalized(warnings), order, accounts),
+        with_account(
+            &capitalized(warnings),
+            order.map(|order| &order.order),
+            accounts,
+        ),
     ))
 }
 
 /// "Buy 1 ESZ5": the order's side, quantity and display symbol.
-fn order_label(
-    order: &aeris_trading::Order,
-    instruments: &[aeris_trading_runtime::TradingInstrument],
-) -> String {
+fn order_label(announced: &trading_store::AnnouncedOrder) -> String {
+    let order = &announced.order;
     let side = match order.side {
         aeris_trading::OrderSide::Buy => "Buy",
         aeris_trading::OrderSide::Sell => "Sell",
     };
-    let symbol = instruments
-        .iter()
-        .find(|instrument| instrument.instrument_id == order.instrument_id)
+    let symbol = announced
+        .instrument
+        .as_ref()
         .map_or(order.instrument_id.as_str(), |instrument| {
             instrument.contract.provenance.display_symbol.as_str()
         });
@@ -1891,7 +1894,7 @@ mod tests {
         );
         assert_eq!(first.len(), 1);
         assert_eq!(
-            order_end_notice(first[0], &[], &[], &[]),
+            order_end_notice(first[0], None, &[]),
             Some((
                 ToastTone::Loss,
                 "Broker rejected an order".to_string(),
@@ -1943,7 +1946,7 @@ mod tests {
     #[test]
     fn a_risk_warned_acceptance_is_announced_with_its_warnings() {
         use aeris_trading::{OrderEventKind as Kind, OrderEventReason as Reason};
-        let notice = |event: &aeris_trading::OrderEvent| order_warning_notice(event, &[], &[], &[]);
+        let notice = |event: &aeris_trading::OrderEvent| order_warning_notice(event, None, &[]);
         assert_eq!(
             notice(&order_event(
                 Kind::Accepted,
@@ -1994,7 +1997,7 @@ mod tests {
     fn only_orders_the_broker_ended_itself_are_announced_with_its_reason() {
         use aeris_trading::{OrderEventKind as Kind, OrderEventReason as Reason};
         let broker = aeris_trading::venue::BROKER_VENUE_ID;
-        let notice = |event: &aeris_trading::OrderEvent| order_end_notice(event, &[], &[], &[]);
+        let notice = |event: &aeris_trading::OrderEvent| order_end_notice(event, None, &[]);
         assert_eq!(
             notice(&order_event(
                 Kind::Cancelled,
@@ -2038,6 +2041,81 @@ mod tests {
         assert_eq!(
             notice(&order_event(Kind::Accepted, None, broker, "accepted")),
             None
+        );
+    }
+
+    fn practice_order() -> trading_store::AnnouncedOrder {
+        let point = |units, scale| aeris_trading::FixedPoint::try_new(units, scale).expect("point");
+        trading_store::AnnouncedOrder {
+            order: aeris_trading::Order {
+                id: aeris_trading::OrderId::try_new("order-1").expect("order id"),
+                client_order_id: aeris_trading::ClientOrderId::try_new("client-1")
+                    .expect("client order id"),
+                account_id: aeris_trading::TradingAccountId::try_new("account").expect("account"),
+                instrument_id: aeris_instruments::InstrumentId::try_new("SOL-USDC")
+                    .expect("instrument"),
+                side: aeris_trading::OrderSide::Buy,
+                order_type: aeris_trading::OrderType::Limit,
+                time_in_force: aeris_trading::TimeInForce::Day,
+                quantity: point(1, 1),
+                filled_quantity: point(0, 1),
+                limit_price: Some(point(18_000, 2)),
+                stop_price: None,
+                status: aeris_trading::OrderStatus::Working,
+                submitted_unix_nanos: NOW_UNIX,
+                revision: 1,
+                accepted_unix_nanos: NOW_UNIX,
+                updated_unix_nanos: NOW_UNIX,
+                eligible_after_unix_nanos: NOW_UNIX,
+                triggered_unix_nanos: None,
+                expires_at_unix_nanos: Some(NOW_UNIX),
+                terminal_unix_nanos: None,
+                provenance: order_event(
+                    aeris_trading::OrderEventKind::Accepted,
+                    None,
+                    "aeris-sim",
+                    "accepted",
+                )
+                .provenance,
+            },
+            instrument: None,
+        }
+    }
+
+    #[test]
+    fn a_practice_order_whose_time_in_force_ended_is_announced() {
+        use aeris_trading::{OrderEventKind as Kind, OrderEventReason as Reason};
+        let expired = order_event(Kind::Expired, None, "aeris-sim", "DAY session ended");
+        assert_eq!(
+            order_end_notice(&expired, None, &[]),
+            Some((
+                ToastTone::Warning,
+                "Order expired".to_string(),
+                "DAY session ended".to_string()
+            ))
+        );
+        let order = practice_order();
+        assert_eq!(
+            order_end_notice(&expired, Some(&order), &[]),
+            Some((
+                ToastTone::Warning,
+                "Buy 0.1 SOL-USDC expired".to_string(),
+                "DAY session ended".to_string()
+            ))
+        );
+        assert_eq!(
+            order_end_notice(
+                &order_event(
+                    Kind::Cancelled,
+                    Some(Reason::Cascade),
+                    "aeris-sim",
+                    "cancelled"
+                ),
+                Some(&order),
+                &[]
+            ),
+            None,
+            "a practice group cancel is not news"
         );
     }
 

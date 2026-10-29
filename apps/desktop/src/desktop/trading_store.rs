@@ -7,7 +7,9 @@ use aeris_instruments::InstrumentId;
 use aeris_trading::{
     Fill, Order, OrderEvent, OrderEventKind, OrderEventReason, OrderId, TradingAccountId,
 };
-use aeris_trading_runtime::{SubscriptionUpdate, TradingSubscription, WorkingSet};
+use aeris_trading_runtime::{
+    SubscriptionUpdate, TradingInstrument, TradingSubscription, WorkingSet,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,7 +21,18 @@ const MAXIMUM_ANNOUNCED_TRADING_IDS: usize = 2_048;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum TradingAnnouncement {
     Fill(Fill),
-    Order(OrderEvent),
+    Order {
+        event: OrderEvent,
+        /// The event's order, taken from the previous view when the event ended it and it
+        /// left the published open orders.
+        order: Option<Box<AnnouncedOrder>>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct AnnouncedOrder {
+    pub(super) order: Order,
+    pub(super) instrument: Option<TradingInstrument>,
 }
 
 #[cfg(test)]
@@ -55,6 +68,26 @@ fn account_rows_changed<T: PartialEq>(
         .iter()
         .filter(|row| owner(row) == account)
         .ne(next.iter().filter(|row| owner(row) == account))
+}
+
+/// An ended order is no longer an open order in the view that ends it, so the
+/// previous view still names it.
+fn announced_order(
+    id: &OrderId,
+    next: &WorkingSet,
+    previous: Option<&WorkingSet>,
+) -> Option<Box<AnnouncedOrder>> {
+    std::iter::once(next).chain(previous).find_map(|set| {
+        let order = set.orders.iter().find(|order| &order.id == id)?;
+        Some(Box::new(AnnouncedOrder {
+            order: order.clone(),
+            instrument: set
+                .instruments
+                .iter()
+                .find(|instrument| instrument.instrument_id == order.instrument_id)
+                .cloned(),
+        }))
+    })
 }
 
 fn published_accounts(set: &WorkingSet) -> BTreeSet<TradingAccountId> {
@@ -481,18 +514,19 @@ impl TradingStore {
                 || event.reason == Some(OrderEventReason::ProtectionNotPlaced)
                 || event.reason == Some(OrderEventReason::KillSwitch)
                 || event.kind == OrderEventKind::Rejected
+                || event.kind == OrderEventKind::Expired
                 || (event.provenance.venue_id == aeris_trading::venue::BROKER_VENUE_ID
-                    && matches!(
-                        event.kind,
-                        OrderEventKind::Cancelled | OrderEventKind::Expired
-                    )
+                    && event.kind == OrderEventKind::Cancelled
                     && event.reason != Some(OrderEventReason::UserCancel));
             if relevant
                 && self.remember_announcement(format!("event:{}", event.id.as_str()))
                 && had_current
             {
-                self.announcements
-                    .push(TradingAnnouncement::Order(event.clone()));
+                let order = announced_order(&event.order_id, next, self.current.as_ref());
+                self.announcements.push(TradingAnnouncement::Order {
+                    event: event.clone(),
+                    order,
+                });
             }
         }
     }
@@ -888,7 +922,7 @@ mod tests {
         assert_eq!(notices.len(), 1);
         assert!(matches!(
             &notices[0],
-            TradingAnnouncement::Order(event)
+            TradingAnnouncement::Order { event, .. }
                 if event.id.as_str() == "event-0"
                     && event.reason == Some(OrderEventReason::RiskWarning)
         ));
@@ -904,6 +938,54 @@ mod tests {
         assert!(store.slot.lock().expect("slot").offer(publication));
         store.drain().expect("replay");
         assert_eq!(store.take_announcements(), []);
+    }
+
+    #[test]
+    fn a_practice_expiry_is_announced_with_the_order_it_ended() {
+        use aeris_trading::{OrderEventId, OrderEventKind, OrderEventReason};
+        let (mut initial, account, _, _) = indexed_fixture();
+        initial.event.revision = 2;
+        initial.event.working_set.revision = 2;
+        let mut ended = initial.clone();
+        ended.event.revision = 3;
+        ended.event.working_set.revision = 3;
+        ended
+            .event
+            .working_set
+            .orders
+            .retain(|order| order.id.as_str() != "first");
+        let mut expired = ended.event.working_set.order_events[0].clone();
+        expired.id = OrderEventId::try_new("event-expired").expect("event");
+        expired.kind = OrderEventKind::Expired;
+        expired.detail = Some("DAY session ended".into());
+        let mut cascade = ended.event.working_set.order_events[1].clone();
+        cascade.id = OrderEventId::try_new("event-cascade").expect("event");
+        cascade.kind = OrderEventKind::Cancelled;
+        cascade.reason = Some(OrderEventReason::Cascade);
+        ended
+            .event
+            .working_set
+            .order_events
+            .splice(0..0, [expired, cascade]);
+        let mut store = TradingStore::default();
+        assert!(store.slot.lock().expect("slot").offer(initial));
+        store.drain().expect("initial");
+        assert_eq!(store.take_announcements(), []);
+        assert!(store.slot.lock().expect("slot").offer(ended));
+        store.drain().expect("expiry");
+        let announcements = store.take_announcements();
+        assert_eq!(
+            announcements.len(),
+            1,
+            "a practice cancel stays silent: {announcements:?}"
+        );
+        assert!(matches!(
+            &announcements[0],
+            TradingAnnouncement::Order { event, order: Some(order) }
+                if event.kind == OrderEventKind::Expired
+                    && order.order.id.as_str() == "first"
+                    && order.order.account_id == account
+        ));
     }
 
     #[test]
