@@ -786,7 +786,9 @@ rewrites `/downloads/latest.json`, which `https://aeristerminal.com/download/` r
 names carry only the product and the workspace version (`[workspace.package] version`, semantic
 versioning from 1.0.0); never put a provider name or "preview" in them. CI never holds AWS
 credentials; publication runs on the maintainer's machine. Builds are ad-hoc signed on macOS and
-unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch.
+unsigned on Windows, so Gatekeeper and SmartScreen warn on first launch. Windows builds link the C
+runtime statically through `.cargo/config.toml`, so the shipped executables start on a clean Windows
+without the Visual C++ Redistributable; no installer carries `VCRUNTIME140.dll`.
 
 When the maintainer says "release the new version", run this whole path without asking again:
 confirm `main` is clean and pushed; bump `[workspace.package] version` (minor when the release adds a

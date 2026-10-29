@@ -656,6 +656,10 @@ still wait on the GUI checks and the remaining work on their lines.
     install-delete, Run value, close-resource and pending-uninstall lines are deleted, and the
     script requires Inno Setup 6.6 or newer. A lifecycle test covers the kept data; naming_check
     checks the choice and rejects Axiusflow in the script. The script compiles with Inno Setup 6.7.
+  - Fix found on a clean Windows (Windows Sandbox): the desktop imported `VCRUNTIME140.dll` and
+    no installer carries it, so it exited with 0xC0000135 before any window on a PC without the
+    Visual C++ Redistributable. `.cargo/config.toml` links the C runtime statically for Windows
+    MSVC targets; the release desktop imports no CRT DLL (dumpbin) and starts in the sandbox.
   - Left: the manual install and uninstall on a Windows VM (F17), checking the prompt and that
     data is kept by default and removed only when ticked. Not run; maintainer-only.
 - [x] M8.7 Release packager and end-to-end lifecycle harness
