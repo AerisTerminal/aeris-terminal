@@ -244,6 +244,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: Architecture rules were encoded as string matches against implementation text, so every refactor must edit the checker.
 - Fix: Keep structural checks that are robust (crate dependency direction via `cargo metadata`, forbidden crate names, file naming, forbidden imports by path). Replace text pins of function bodies with behavior tests in the owning crates. Delete assertions that require dormant code. Make the markdown inventory recursive.
 - Verification: `naming_check` under about 800 lines; a pure rename refactor in `desktop.rs` does not require editing `naming_check`.
+- Status (2026-10-28, M8.12): fixed. The source-text pins are deleted or replaced by behavior tests in the launcher, desktop and owning runtimes (stabilization D28), the kept rules reject only retired or forbidden shapes, the markdown inventory is recursive, and the binary runs in both CI jobs. Renaming four `desktop.rs` functions needed no naming_check edit. The checker is 6,647 lines because D28 keeps every structural rule (crate graph, allowlists, workflow shape, ratchets), so the 800-line estimate is superseded.
 
 ### PL-09 CI is manual-only
 
@@ -272,6 +273,7 @@ live_market_gate) plus one misnamed non-atomic one (trading exports).
 - Root cause: Planning moved into the repository despite the rule; the root markdown check does not recurse.
 - Fix: Move `plan/` out of the repository (issue tracker or wiki) or update the rule deliberately; rename `Readme` to `README.md`; prune `.gitignore`.
 - Verification: `git ls-files plan` empty; recursive markdown inventory in `naming_check` passes.
+- Status (2026-10-28, M8.12): fixed by updating the rule deliberately (stabilization M-D10 and D28). `plan/stabilization/` and `plan/longterm_plan/` are the two sanctioned planning directories in AGENTS.md, `Readme` is `README.md`, the stale `.gitignore` entries are gone (M8.11), and the recursive markdown inventory passes.
 
 ### PL-12 Vendored `gpui_base` is unlinted and oversized
 

@@ -24,7 +24,33 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "third_party",
     "tmp",
 ];
-const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md", "themes.md"];
+/// The only Markdown outside the sanctioned planning directories, each with its reason.
+const MARKDOWN_FILES: &[(&str, &str)] = &[
+    ("README.md", "the repository overview"),
+    ("AGENTS.md", "the contributor and architecture rules"),
+    ("CSS.md", "the Theme System CSS and its usage rules"),
+    ("themes.md", "the palette source of the theme presets"),
+    (
+        "apps/desktop/assets/aeris_assets/USAGE.md",
+        "brand asset usage rules kept beside the assets",
+    ),
+    (
+        "crates/study_sdk/readme.md",
+        "the Study SDK author guide for its published facade",
+    ),
+    (
+        "third_party/gpui_base/README.md",
+        "the pinned upstream component base notice",
+    ),
+    (
+        "third_party/gpui_base/src/input/README.md",
+        "pinned upstream input notes",
+    ),
+    (
+        "third_party/gpui_base/src/input/base/display_map/README.md",
+        "pinned upstream display map notes",
+    ),
+];
 
 /// The sole provider identity exception maps published logo keys to bundled artwork.
 /// Every other desktop production source must remain provider-neutral.
@@ -445,7 +471,6 @@ const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     "Cargo.lock",
     "Cargo.toml",
     "Dockerfile",
-    "Readme",
     "rust-toolchain.toml",
 ];
 /// Legal and OS-owned filenames must keep their exact spelling, but only at these paths.
@@ -1393,7 +1418,9 @@ fn is_valid_file_name(name: &OsStr, relative: &Path) -> bool {
     let name = name.to_string_lossy();
     if name.starts_with('.')
         || PLATFORM_FILE_EXCEPTIONS.contains(&name.as_ref())
-        || REPOSITORY_MARKDOWN_FILES.contains(&name.as_ref())
+        || MARKDOWN_FILES
+            .iter()
+            .any(|(path, _)| relative == Path::new(path))
         || PLATFORM_PATH_EXCEPTIONS
             .iter()
             .any(|exception| relative == Path::new(exception))
@@ -4132,7 +4159,7 @@ mod tests {
         let mut scripts = Vec::new();
         collect_tool_scripts(&repository_root().join("tools"), &mut scripts);
         assert!(!scripts.is_empty(), "tools/ keeps its setup scripts");
-        let mut references = manifest("Readme");
+        let mut references = manifest("README.md");
         references.push_str(&manifest("AGENTS.md"));
         for entry in fs::read_dir(repository_root().join(".github/workflows"))
             .expect("workflow directory is readable")
@@ -4143,7 +4170,7 @@ mod tests {
         assert_eq!(
             unreferenced_tool_scripts(&scripts, &references),
             Vec::<&str>::new(),
-            "every tools/ script outside a Cargo package must be named by a workflow, the Readme or AGENTS.md"
+            "every tools/ script outside a Cargo package must be named by a workflow, README.md or AGENTS.md"
         );
     }
 
@@ -4159,22 +4186,102 @@ mod tests {
             Vec::<&str>::new()
         );
     }
+    /// Planning Markdown lives only under these directories.
+    const MARKDOWN_DIRECTORIES: &[&str] = &["plan/stabilization/", "plan/longterm_plan/"];
+
+    /// Every Markdown file under `directory`, including vendored and asset trees; only
+    /// build output, dot directories and the external proto kit junction are skipped.
+    fn collect_markdown(directory: &Path, files: &mut Vec<String>) {
+        for entry in fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        {
+            let path = entry.expect("repository entry is readable").path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() {
+                if !(name.starts_with('.')
+                    || matches!(
+                        name.as_ref(),
+                        "target" | "node_modules" | "tmp" | "rithmic_proto_kit"
+                    ))
+                {
+                    collect_markdown(&path, files);
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            {
+                files.push(relative_string(&path));
+            }
+        }
+    }
+
+    /// Markdown outside the exact inventory and the planning directories, and inventory
+    /// entries or planning directories that no longer hold a file.
+    fn markdown_inventory_violations(found: &[String]) -> Vec<String> {
+        let mut violations = found
+            .iter()
+            .filter(|path| {
+                !super::MARKDOWN_FILES
+                    .iter()
+                    .any(|(allowed, _)| path.as_str() == *allowed)
+                    && !MARKDOWN_DIRECTORIES
+                        .iter()
+                        .any(|directory| path.starts_with(directory))
+            })
+            .map(|path| format!("{path} is not in the Markdown inventory"))
+            .collect::<Vec<_>>();
+        for (allowed, _) in super::MARKDOWN_FILES {
+            if !found.iter().any(|path| path == allowed) {
+                violations.push(format!("stale Markdown inventory entry {allowed}"));
+            }
+        }
+        for directory in MARKDOWN_DIRECTORIES {
+            if !found.iter().any(|path| path.starts_with(directory)) {
+                violations.push(format!("stale Markdown directory {directory}"));
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn markdown_inventory_rule_accepts_and_rejects_fixtures() {
+        let mut inventory = super::MARKDOWN_FILES
+            .iter()
+            .map(|(path, _)| (*path).to_string())
+            .chain([
+                "plan/stabilization/reports/01_market_data.md".to_string(),
+                "plan/longterm_plan/pricing_strategy.md".to_string(),
+            ])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            markdown_inventory_violations(&inventory),
+            Vec::<String>::new()
+        );
+        for added in [
+            "crates/market_runtime/README.md",
+            "plan/notes.md",
+            "docs/architecture.md",
+        ] {
+            let mut drifted = inventory.clone();
+            drifted.push(added.to_string());
+            assert!(
+                !markdown_inventory_violations(&drifted).is_empty(),
+                "{added}"
+            );
+        }
+        inventory.retain(|path| path != "CSS.md");
+        assert!(
+            !markdown_inventory_violations(&inventory).is_empty(),
+            "a removed inventory file is stale"
+        );
+    }
+
     #[test]
     fn repository_markdown_inventory_is_exact() {
-        let actual = fs::read_dir(repository_root())
-            .expect("repository root is readable")
-            .filter_map(|entry| {
-                let path = entry.expect("repository entry is readable").path();
-                (path.extension().is_some_and(|extension| extension == "md"))
-                    .then(|| path.file_name().expect("Markdown has a name").to_owned())
-            })
-            .collect::<BTreeSet<_>>();
-        let expected = super::REPOSITORY_MARKDOWN_FILES
-            .iter()
-            .copied()
-            .map(std::ffi::OsString::from)
-            .collect();
-        assert_eq!(actual, expected, "repository Markdown inventory drifted");
+        let mut found = Vec::new();
+        collect_markdown(repository_root(), &mut found);
+        let violations = markdown_inventory_violations(&found);
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
     }
 
     #[test]

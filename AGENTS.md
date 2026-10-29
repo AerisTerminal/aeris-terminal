@@ -817,7 +817,7 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
   A count above its ratchet fails; a change that lowers a count lowers the ratchet in the same
   commit; an unlisted package is held at zero, so new crates start with typed errors.
 - Keep file/directory names snake_case.
-- Every file under `tools/` outside its Cargo packages is named by a workflow, the `Readme` or this
+- Every file under `tools/` outside its Cargo packages is named by a workflow, `README.md` or this
   file; `every_tool_script_is_referenced_by_ci_or_the_docs` in `tools/naming_check` enforces it.
   Delete a script that loses its last reference instead of keeping it.
 - Desktop modules live where their `mod` declaration resolves: the library's modules directly
@@ -827,10 +827,14 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
 - Fix Clippy findings rather than adding broad lint suppression.
 - Do not create planning documents, architecture diaries, nested agent files, or duplicate README files.
   Durable architecture rules belong in code/tests/`tools/naming_check`; implementation notes belong near
-  the code they describe.
-- `plan/stabilization/` is the one sanctioned exception to the rule above: it holds the stabilization
-  tracking document `stabilization_work.md` and the audit/design report copies under
-  `plan/stabilization/reports/` (redacted; the repo is public). Every stabilization commit updates its
+  the code they describe. `repository_markdown_inventory_is_exact` walks the whole tree (vendored and
+  asset folders included) and allows only the reasoned `MARKDOWN_FILES` in `tools/naming_check`
+  (`README.md`, this file, `CSS.md`, `themes.md`, the brand-asset `USAGE.md`, the Study SDK guide and
+  the pinned `gpui_base` notes) plus the two planning directories below; a stale entry fails too.
+- `plan/longterm_plan/` (the long-term product plans) and `plan/stabilization/` are the two sanctioned
+  exceptions to the rule above. `plan/stabilization/` holds the stabilization tracking document
+  `stabilization_work.md` and the audit/design report copies under `plan/stabilization/reports/`
+  (redacted; the repo is public). Every stabilization commit updates its
   item's line in `plan/stabilization/stabilization_work.md` in the same commit. A box is checked only
   when the item's code has landed and every validation its spec requires (tests, probes, guarded GUI
   checks) has passed; until then the line says exactly what is left. Git history is the progress log.

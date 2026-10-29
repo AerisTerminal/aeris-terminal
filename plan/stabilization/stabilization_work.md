@@ -30,7 +30,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 
 ## 2. Status
 
-58 of 90 items are fully done (2026-10-28).
+62 of 90 items are fully done (2026-10-28).
 
 | Milestone | Done | Left |
 |---|---|---|
@@ -41,7 +41,7 @@ the old progress log are in Git: `git show 34698887:plan/stabilization/stabiliza
 | M5 trading engine | 7 / 12 | 5 (GUI checks and probe evidence) |
 | M6 desktop bridge | 6 / 13 | 7 (code complete; GUI checks) |
 | M7 desktop structure | 1 / 12 | 11 (GUI checks and remaining work) |
-| M8 lifecycle and trim | 4 / 12 | 8 |
+| M8 lifecycle and trim | 8 / 12 | 4 (code complete; GUI, VM and process checks) |
 
 Every open M4-M6 item has its code landed and waits only on the checks listed on its line. Most are
 guarded GUI checks; one guarded GUI pass on an isolated root, with no other Aeris desktop running,
@@ -757,7 +757,7 @@ still wait on the GUI checks and the remaining work on their lines.
     unsafe allowlist.
   - Left: GUI text-input check (symbol search, order ticket) on Windows and macOS.
     Not run. Closes PL-10, PL-12 and PL-19.
-- [ ] M8.12 Structural naming_check and final docs
+- [x] M8.12 Structural naming_check and final docs
   - Landed: the update-restart handshake is a `RestartHandshake` seam, and launcher tests prove a
     failed verification sends no READY, a missing COMMIT installs nothing, and every check runs
     before READY. The text pin `update_restart_verifies_everything_before_ready` and the
@@ -785,9 +785,14 @@ still wait on the GUI checks and the remaining work on their lines.
     The extracted readiness seams carry the existing `String` errors, so the desktop ratchet
     rises once from 229 to 233. Not covered by a test: the GPUI wiring that queues the writer's
     receipt when a tabs window closes, and the signed-out workspace rendering the sign-in gate.
-  - Left: structural checks with a recursive markdown inventory, with text pins replaced by
-    behavior tests.
-  - Finalize `Readme` and `AGENTS.md`, and close out this tracker. Closes PL-08.
+  - Landed: `Readme` is `README.md` (mandatory sign-in, validation mode, the full crate layout with
+    `platform_sys`, `release_lifecycle` and `gpui_base`, the naming_check command and the CI kit
+    note). `repository_markdown_inventory_is_exact` walks the whole tree, vendored and asset
+    folders included, and allows only the reasoned `MARKDOWN_FILES` plus `plan/stabilization/`
+    and `plan/longterm_plan/`; an unlisted file or a stale entry fails. AGENTS.md states both
+    planning directories, the inventory and every rule above. Closes PL-08 and PL-11 (README and
+    `.gitignore` part). naming_check is 6,647 lines: D28 keeps every structural rule, so the
+    audit's 800-line estimate does not apply.
 
 ## 4. Decisions
 
