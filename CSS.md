@@ -118,8 +118,8 @@ keeps the shared neutral row fills and colours only its label and glyph: `text-d
 Pass glyphs through `leading_icon` so the row colours them.
 
 **`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer. Sizes `Sm` (420), `Md` (480), `Lg`
-(560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
-committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Primary`.
+(560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (a `Secondary` Cancel first, then
+the committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Primary`.
 
 **`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: tabs side by side
 (`gap-4`) over a 1px `border` baseline, with no track fill; each tab has no fill, a transparent 2px

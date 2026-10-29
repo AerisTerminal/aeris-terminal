@@ -1303,7 +1303,7 @@ fn select_control(
     let toggle = ui.surface.clone();
     let toggle_menu = menu.to_string();
     let trigger = Button::new(id, theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Secondary)
         .trigger()
         .full_width()
         .open(open)
@@ -1458,7 +1458,7 @@ fn color_control(
     let toggle_target = target.clone();
     let mut control = div().relative().flex_none().flex().child(
         Button::new(id, theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .open(open_picker.is_some())
             .aria_label(label)
             .leading(color_swatch_dot(&shown, theme))
@@ -1538,7 +1538,7 @@ fn font_toggle(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> Button {
     let update = ui.surface.clone();
     let name = property.name.clone();
     Button::new(("drawing_setting_font_toggle", ui.slot(property)), theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Secondary)
         .selected(on)
         .aria_label(property.label.clone())
         .tooltip(TooltipSpec::new(property.label.clone(), theme).show_delay(TOOLTIP_OPEN_DELAY))
@@ -1973,7 +1973,7 @@ pub(super) fn drawing_settings_dialog_layer(
         .children(rows)
         .action(
             Button::new("drawing_settings_cancel", theme)
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Secondary)
                 .label("Cancel")
                 .on_click(move |_, window, cx| {
                     cancel.update(cx, |surface, surface_cx| {

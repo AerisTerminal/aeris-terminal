@@ -412,7 +412,7 @@ pub(super) fn big_trades_dialog_layer(
     )
     .action(
         Button::new("big_trades_cancel", theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_big_trades_dialog);

@@ -162,7 +162,7 @@ pub(super) fn compact_menu_add_button(
     theme: &AerisTheme,
 ) -> Button {
     Button::new(id, theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Secondary)
         .button_size(ButtonSize::Sm)
         .icon(header_icon(HugeIcon::Add))
         .aria_label("Add")

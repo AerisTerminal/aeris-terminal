@@ -975,7 +975,7 @@ impl TerminalApp {
         )
         .action(
             Button::new("layout_close_cancel", &theme)
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Secondary)
                 .label("Cancel")
                 .on_press(move |_, window, cx| {
                     cancel.update(cx, |terminal, cx| terminal.cancel_layout_modal(window, cx));

@@ -517,7 +517,7 @@ impl RenderOnce for ConfirmationDialog {
         .children(self.children)
         .action(
             Button::new("confirmation_dialog_cancel", &theme)
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Secondary)
                 .label("Cancel")
                 .on_click(move |_, window, cx| cancel(window, cx)),
         )
@@ -550,7 +550,7 @@ mod tests {
                     .title("Delete")
                     .action(
                         Button::new("cancel", &self.0)
-                            .variant(ButtonVariant::Outline)
+                            .variant(ButtonVariant::Secondary)
                             .label("Cancel")
                             .on_click(|_, _, _| {})
                             .debug_selector(|| "footer_cancel".into()),

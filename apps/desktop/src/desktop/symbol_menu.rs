@@ -159,7 +159,7 @@ pub(super) fn instrument_dialog_content(
                 menu.child(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_provider", theme)
-                            .variant(ButtonVariant::Outline)
+                            .variant(ButtonVariant::Secondary)
                             .label(format!("Connect {provider_name} in Accounts"))
                             .on_click(move |_, window, cx| {
                                 accounts.update(cx, |surface, surface_cx| {

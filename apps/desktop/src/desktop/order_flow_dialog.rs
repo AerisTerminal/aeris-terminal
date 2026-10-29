@@ -906,7 +906,7 @@ pub(super) fn order_flow_dialog_layer(
     )
     .action(
         Button::new("order_flow_cancel", theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_order_flow_dialog);

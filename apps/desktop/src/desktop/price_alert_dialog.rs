@@ -379,7 +379,7 @@ fn dropdown_trigger(
 ) -> Button {
     let toggle = app.clone();
     Button::new(id, theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Secondary)
         .button_size(ButtonSize::Lg)
         .trigger()
         .full_width()
@@ -691,7 +691,7 @@ pub(super) fn price_alert_dialog_layer(
     .child(price_alert_dialog_body(app, dialog, &existing, theme))
     .action(
         Button::new("price_alert_cancel", theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
