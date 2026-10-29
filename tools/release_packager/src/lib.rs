@@ -4,9 +4,11 @@
 //! points the stable channel at a packaged release once its setup program sits beside it, and
 //! [`inno_setup_arguments`] are the Inno Setup defines that build that setup program.
 //!
-//! Nothing here publishes. Uploading the output tree is a separate step the maintainer runs.
+//! Releases are signed by a [`ReleaseSigner`]: a local key file or an AWS KMS key. Nothing
+//! here publishes. Uploading the output tree is a separate step the maintainer runs.
 
 mod block_plan;
+mod signer;
 
 use std::{
     fs::{self, File},
@@ -20,14 +22,16 @@ use aeris_release_lifecycle::{
     RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_FILENAME, RELEASE_MANIFEST_SCHEMA_VERSION,
     ROLLBACK_COMPATIBILITY_FILENAME, ReleaseChannelPointer, ReleaseFile, ReleaseFileRole,
     ReleaseInstallerMetadata, ReleaseManifest, ReleasePolicy, RollbackCompatibilityMetadata,
-    RolloutMetadata, SignedReleaseManifest, channel_pointer_path, installer_filename,
-    release_directory_path, sign_block_plan, sign_release_manifest, valid_release_identity,
-    validate_release_channel, verify_release_file, verify_release_manifest,
+    RolloutMetadata, SignedReleaseManifest, UnsignedBlockPlan, UnsignedReleaseManifest,
+    channel_pointer_path, installer_filename, release_directory_path, valid_release_identity,
+    validate_release_channel, verify_block_plan, verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
+
+pub use signer::{KmsKey, ReleaseSigner, SignerError};
 
 const MAXIMUM_SIGNING_KEY_FILE_BYTES: u64 = 256;
 const MAXIMUM_METADATA_FILE_BYTES: u64 = 1024 * 1024;
@@ -51,32 +55,35 @@ pub fn launcher_file_name() -> String {
 ///
 /// # Errors
 /// Returns why the file is not a usable signing key.
-pub fn read_signing_key(path: &Path) -> Result<SigningKey, String> {
+pub fn read_signing_key(path: &Path) -> Result<SigningKey, SignerError> {
     let metadata = fs::symlink_metadata(path)
-        .map_err(|_| "the signing key file is unavailable".to_string())?;
+        .map_err(|_| SignerError::new("the signing key file is unavailable"))?;
     if !metadata.is_file() || metadata.len() > MAXIMUM_SIGNING_KEY_FILE_BYTES {
-        return Err("the signing key file is not a small regular file".to_string());
+        return Err(SignerError::new(
+            "the signing key file is not a small regular file",
+        ));
     }
     let text = Zeroizing::new(
-        fs::read_to_string(path).map_err(|_| "the signing key file is unreadable".to_string())?,
+        fs::read_to_string(path)
+            .map_err(|_| SignerError::new("the signing key file is unreadable"))?,
     );
     let seed = Zeroizing::new(
         URL_SAFE_NO_PAD
             .decode(text.trim_end_matches(['\r', '\n']))
-            .map_err(|_| "the signing key is not unpadded base64url".to_string())?,
+            .map_err(|_| SignerError::new("the signing key is not unpadded base64url"))?,
     );
     let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
         seed.as_slice()
             .try_into()
-            .map_err(|_| "the signing key is not a 32-byte Ed25519 seed".to_string())?,
+            .map_err(|_| SignerError::new("the signing key is not a 32-byte Ed25519 seed"))?,
     );
     Ok(SigningKey::from_bytes(&seed))
 }
 
 /// The verifying key a release build embeds as `AERIS_RELEASE_VERIFYING_KEY`.
 #[must_use]
-pub fn verifying_key_text(key: &SigningKey) -> String {
-    URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())
+pub fn verifying_key_text(key: &VerifyingKey) -> String {
+    URL_SAFE_NO_PAD.encode(key.as_bytes())
 }
 
 /// One release to package for this platform and architecture.
@@ -127,7 +134,7 @@ pub enum BlockPlanSummary {
 /// Returns why the release could not be packaged.
 pub fn package_release(
     request: &ReleaseRequest<'_>,
-    key: &SigningKey,
+    signer: &ReleaseSigner,
 ) -> Result<PackagedRelease, String> {
     validate_base_url(request.base_url)?;
     if !valid_release_identity(request.release_identity) {
@@ -157,7 +164,7 @@ pub fn package_release(
     fs::create_dir_all(&directory)
         .map_err(|_| format!("{} could not be created", directory.display()))?;
     let release_url = format!("{}/{relative}", request.base_url);
-    match package_into(&directory, &release_url, request, key) {
+    match package_into(&directory, &release_url, request, signer) {
         Ok((manifest, block_plan)) => Ok(PackagedRelease {
             directory,
             manifest,
@@ -177,7 +184,7 @@ fn package_into(
     directory: &Path,
     release_url: &str,
     request: &ReleaseRequest<'_>,
-    key: &SigningKey,
+    key: &ReleaseSigner,
 ) -> Result<(SignedReleaseManifest, BlockPlanSummary), String> {
     let desktop = desktop_file_name();
     let executables = [desktop.clone(), launcher_file_name()];
@@ -229,8 +236,12 @@ fn package_into(
         files,
         rollout: request.rollout.clone(),
     };
-    let signed = sign_release_manifest(manifest, key)
+    let unsigned = UnsignedReleaseManifest::new(manifest)
         .map_err(|error| format!("the release manifest was refused: {error}"))?;
+    let manifest_signature = key
+        .sign(unsigned.signing_message())
+        .map_err(|error| format!("the release manifest could not be signed: {error}"))?;
+    let signed = unsigned.with_signature(&manifest_signature);
     // Package only what this platform's launcher accepts.
     verify_release_manifest(
         &signed,
@@ -251,7 +262,7 @@ fn write_block_plan(
     previous: &Path,
     directory: &Path,
     target: &SignedReleaseManifest,
-    key: &SigningKey,
+    key: &ReleaseSigner,
 ) -> Result<BlockPlanSummary, String> {
     let source: SignedReleaseManifest = read_json(&previous.join(RELEASE_MANIFEST_FILENAME))?;
     verify_release_manifest(&source, &key.verifying_key(), &ReleasePolicy::native(0))
@@ -275,8 +286,21 @@ fn write_block_plan(
         files: plan.files.len(),
         download_blocks: plan.files.iter().map(block_plan::download_blocks).sum(),
     };
-    let signed = sign_block_plan(plan, source.manifest(), target.manifest(), key)
+    let unsigned = UnsignedBlockPlan::new(plan, source.manifest(), target.manifest())
         .map_err(|error| format!("the block plan was refused: {error}"))?;
+    let plan_signature = key
+        .sign(unsigned.signing_message())
+        .map_err(|error| format!("the block plan could not be signed: {error}"))?;
+    let signed = unsigned
+        .with_signature(&plan_signature)
+        .map_err(|error| format!("the block plan was refused: {error}"))?;
+    verify_block_plan(
+        &signed,
+        source.manifest(),
+        target.manifest(),
+        &key.verifying_key(),
+    )
+    .map_err(|error| format!("the signed block plan does not verify: {error}"))?;
     write_json(&directory.join(BLOCK_PLAN_FILENAME), &signed)?;
     Ok(summary)
 }
@@ -503,7 +527,7 @@ mod tests {
         let key = read_signing_key(&path).expect("key loads");
         assert_eq!(key.to_bytes(), seed);
         assert_eq!(
-            verifying_key_text(&key),
+            verifying_key_text(&key.verifying_key()),
             URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&seed).verifying_key().as_bytes())
         );
         for invalid in [
@@ -515,7 +539,7 @@ mod tests {
             let Err(error) = read_signing_key(&path) else {
                 panic!("invalid key accepted");
             };
-            assert!(!error.contains(&URL_SAFE_NO_PAD.encode(seed)));
+            assert!(!error.to_string().contains(&URL_SAFE_NO_PAD.encode(seed)));
         }
         fs::remove_dir_all(directory).expect("remove key directory");
     }

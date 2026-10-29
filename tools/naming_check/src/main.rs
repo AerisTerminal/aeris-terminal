@@ -3067,16 +3067,24 @@ mod tests {
         for (owner, signer) in [
             (
                 "crates/release_lifecycle/src/lifecycle.rs",
-                "sign_release_manifest",
+                "fn sign_release_manifest(",
+            ),
+            (
+                "crates/release_lifecycle/src/lifecycle.rs",
+                "struct UnsignedReleaseManifest {",
             ),
             (
                 "crates/release_lifecycle/src/release_delivery.rs",
-                "sign_block_plan",
+                "fn sign_block_plan(",
+            ),
+            (
+                "crates/release_lifecycle/src/release_delivery.rs",
+                "struct UnsignedBlockPlan {",
             ),
         ] {
             assert!(
                 manifest(owner).contains(&format!(
-                    "#[cfg(any(test, feature = \"producer\"))]\npub fn {signer}("
+                    "#[cfg(any(test, feature = \"producer\"))]\npub {signer}"
                 )),
                 "{signer} must compile only for tests or the producer feature"
             );
@@ -5308,8 +5316,64 @@ mod tests {
         }
     }
 
+    /// The packager's only process is the AWS CLI's `kms` command in `signer.rs`; it never
+    /// runs another program or an upload or CDN command. Returns one label per violation.
+    fn packager_process_violations(relative: &str, source: &str) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        let spawns = source.contains("Command::new(") || source.contains("process::Command");
+        if relative != "tools/release_packager/src/signer.rs" {
+            if spawns {
+                violations.push("only the packager's signer.rs may run a process");
+            }
+            return violations;
+        }
+        if source.matches("Command::new(").count()
+            != source.matches("Command::new(\"aws\")").count()
+        {
+            violations.push("signer.rs may run only the AWS CLI");
+        }
+        if spawns && !source.contains(".arg(\"kms\")") {
+            violations.push("signer.rs runs only aws kms");
+        }
+        for publishing in ["\"s3\"", "\"s3api\"", "\"cloudfront\"", "\"put-object\""] {
+            if source.contains(publishing) {
+                violations.push("the packager publishes nothing");
+            }
+        }
+        violations
+    }
+
     #[test]
-    fn release_packager_signs_only_with_a_key_file_and_publishes_nothing() {
+    fn packager_process_rule_allows_only_the_kms_signer() {
+        let signer = "tools/release_packager/src/signer.rs";
+        let kms = "let output = Command::new(\"aws\")\n.arg(\"kms\")\n.args(arguments);";
+        assert_eq!(packager_process_violations(signer, kms), [] as [&str; 0]);
+        assert_eq!(
+            packager_process_violations("tools/release_packager/src/lib.rs", "fn plain() {}"),
+            [] as [&str; 0]
+        );
+        assert_eq!(
+            packager_process_violations("tools/release_packager/src/lib.rs", kms),
+            ["only the packager's signer.rs may run a process"]
+        );
+        assert_eq!(
+            packager_process_violations(
+                signer,
+                "Command::new(\"aws\").arg(\"kms\"); Command::new(\"curl\");"
+            ),
+            ["signer.rs may run only the AWS CLI"]
+        );
+        assert_eq!(
+            packager_process_violations(signer, "Command::new(\"aws\").arg(\"s3\");"),
+            [
+                "signer.rs runs only aws kms",
+                "the packager publishes nothing"
+            ]
+        );
+    }
+
+    #[test]
+    fn release_packager_signs_through_a_key_file_or_kms_and_publishes_nothing() {
         let packager = manifest("tools/release_packager/Cargo.toml");
         for network in ["ureq", "reqwest", "tungstenite", "rustls"] {
             assert!(
@@ -5332,6 +5396,11 @@ mod tests {
             assert!(
                 !constructs_key || relative == "tools/release_packager/src/lib.rs",
                 "{relative} must obtain the signing key through read_signing_key"
+            );
+            assert_eq!(
+                packager_process_violations(&relative, &source),
+                [] as [&str; 0],
+                "{relative}"
             );
         }
     }

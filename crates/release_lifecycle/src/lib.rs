@@ -22,8 +22,6 @@ pub use launcher::{
     ReleaseOrigin, run_launcher, run_native_launcher, valid_release_identity,
     validate_release_channel,
 };
-#[cfg(any(test, feature = "producer"))]
-pub use lifecycle::sign_release_manifest;
 #[cfg(target_os = "windows")]
 pub use lifecycle::verify_windows_publisher_signature;
 pub use lifecycle::{
@@ -35,6 +33,8 @@ pub use lifecycle::{
     SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
     native_installation_inventory, verify_release_file, verify_release_manifest,
 };
+#[cfg(any(test, feature = "producer"))]
+pub use lifecycle::{UnsignedReleaseManifest, sign_release_manifest};
 pub use origin_layout::{
     RELEASE_CHANNEL, RELEASE_MANIFEST_FILENAME, channel_pointer_path, installer_filename,
     release_directory_path,
@@ -48,14 +48,14 @@ pub use readiness::{
     ReadinessReport, ServiceReadiness, ServiceStarted, VALIDATION_VAULT_NAMESPACE,
 };
 pub use release_config::{ReleaseConfig, release_config};
-#[cfg(any(test, feature = "producer"))]
-pub use release_delivery::sign_block_plan;
 pub use release_delivery::{
     BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_FILENAME, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor,
     BlockFilePlan, BlockPlan, MAXIMUM_BLOCK_PLAN_BLOCKS, MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS,
     MAXIMUM_BLOCK_PLAN_FILES, MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, ReleaseDeliveryError,
     SignedBlockPlan, decode_and_verify_block_plan, validate_block_plan_binding, verify_block_plan,
 };
+#[cfg(any(test, feature = "producer"))]
+pub use release_delivery::{UnsignedBlockPlan, sign_block_plan};
 pub use release_identity::{ReleaseIdentity, current_release_identity};
 pub use release_source::{ArtifactBody, ReleaseSource, ReleaseSourceError};
 pub use rollout::rollout_eligible;

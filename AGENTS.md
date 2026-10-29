@@ -242,7 +242,9 @@ violations and missing verification explicitly, and never describe them as satis
   only through the `ReleaseSource` seam (`HttpsReleaseSource` in production); `platform_runtime`
   carries none of it and no `ed25519-dalek`,
   `same-file` or `sysinfo`. Only the desktop and `tools/release_packager` may depend on
-  it. The manifest and block-plan signers compile only under `cfg(test)` or its `producer` feature,
+  it. The manifest and block-plan signers and their `UnsignedReleaseManifest` and `UnsignedBlockPlan`
+  (which hold the exact signing message until a signature is attached) compile only under
+  `cfg(test)` or its `producer` feature,
   which only `tools/release_packager` and the crate's own dev-dependency (for the launcher tests)
   enable. `platform_runtime::data_root` owns the owned-root safety check and legacy data-root
   migration that the lifecycle reuses. The launcher parses its command before loading the release
@@ -274,9 +276,13 @@ violations and missing verification explicitly, and never describe them as satis
 - `tools/release_packager` (`aeris_release_packager`) packages one signed release into an
   origin-shaped output tree (payload executables, rollback-compatibility data, signed manifest and,
   against a predecessor, a signed block plan), writes the channel pointer and prints the Inno Setup
-  defines. It reads the Ed25519 signing key only from a key file through `read_signing_key`
-  (zeroized), never the environment, standard input or the command line, has no network dependency
-  and publishes nothing; `tools/naming_check` enforces this. The rollback-compatibility data
+  defines. It signs through one `ReleaseSigner`: an Ed25519 key read only from a key file through
+  `read_signing_key` (zeroized), never the environment, standard input or the command line, or
+  the AWS KMS key named by `--kms-key <key ARN>` (`alias/aeris-release-signing` in the website's
+  `AerisReleases` stack), whose private half never leaves KMS. Its only process is `aws kms`
+  (`get-public-key`, `sign` with `ED25519_SHA_512` over the raw message) in `signer.rs`, and
+  every KMS signature is verified against the key before use. It has no network dependency and
+  publishes nothing; `tools/naming_check` enforces this. The rollback-compatibility data
   records the payload's `max_store_schema` (`aeris_trading_runtime::SCHEMA_VERSION`). Before a
   crash rollback the launcher reads the live trading store's `user_version` from its SQLite header
   (a write-ahead log holding frames counts as the failed release's schema) and leaves the failed
@@ -772,9 +778,10 @@ new copy under `target/`, and GPUI debug builds have grown it past 70 GB in a fe
 Do not publish, install, or point clients at the former Axiusflow endpoint, and the retired
 publication workflow must not be restored. The launcher and desktop update-restart handshake uses
 the `AERIS_UPDATE_RESTART_READY_V1` and `AERIS_UPDATE_RESTART_COMMIT_V1` lines from
-`aeris_release_lifecycle`, and block plans sign under `AERIS_RELEASE_BLOCK_PLAN_V1`. Release
-manifests ship their exact bytes, signed under `AERIS_RELEASE_MANIFEST_V1`, and are verified
-before any field is read; a manifest's `minimum_launcher_protocol` is checked against
+`aeris_release_lifecycle`. Block plans sign `AERIS_RELEASE_BLOCK_PLAN_V2\0` followed by the
+SHA-256 of the plan's JSON. Release manifests ship their exact bytes and sign
+`AERIS_RELEASE_MANIFEST_V2\0` followed by the SHA-256 of those bytes, so every signed message
+fits a KMS raw-message signature; they are verified before any field is read; a manifest's `minimum_launcher_protocol` is checked against
 `LAUNCHER_PROTOCOL_VERSION`, never the product version. A failed block-plan delivery returns a
 typed `BlockDeliveryError` and is logged before the launcher falls back to full downloads;
 `tools/naming_check` rejects any `AXIUSFLOW` token in Rust sources under `apps/` and `crates/`. Releases reach users through the website download page:

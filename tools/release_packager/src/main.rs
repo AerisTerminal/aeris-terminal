@@ -1,6 +1,7 @@
 //! `aeris_release_packager` packages one signed release, points the stable channel at a
-//! packaged release, or prints the verifying key of a signing key file. It writes only below
-//! `--output` and publishes nothing.
+//! packaged release, or prints the verifying key of a signing key. The key is a key file or an
+//! AWS KMS key that signs through the AWS CLI. It writes only below `--output` and publishes
+//! nothing.
 
 use std::{
     collections::BTreeMap,
@@ -12,19 +13,21 @@ use std::{
 
 use aeris_release_lifecycle::RolloutMetadata;
 use aeris_release_packager::{
-    BlockPlanSummary, ChannelRequest, InnoSetupRequest, ReleaseRequest, inno_setup_arguments,
-    package_release, read_signing_key, verifying_key_text, write_channel_pointer,
+    BlockPlanSummary, ChannelRequest, InnoSetupRequest, KmsKey, ReleaseRequest, ReleaseSigner,
+    inno_setup_arguments, package_release, read_signing_key, verifying_key_text,
+    write_channel_pointer,
 };
 
 const USAGE: &str = "usage:
-  aeris_release_packager release --signing-key <file> --payload <dir> --output <dir>
+  aeris_release_packager release (--signing-key <file> | --kms-key <key arn>)
+      --payload <dir> --output <dir>
       --base-url <https-url> --release-identity <id> --generation <n>
       [--previous <release dir>] [--rollout-cohort <name>] [--rollout-percentage <0-100>]
       [--inno-script <aeris_setup.iss> --icon <aeris.ico> --version <version>]
   aeris_release_packager channel --output <dir> --base-url <https-url>
       --release-identity <id> --generation <n> --version <version>
       --published-at <YYYY-MM-DDTHH:MM:SSZ>
-  aeris_release_packager verifying-key --signing-key <file>";
+  aeris_release_packager verifying-key (--signing-key <file> | --kms-key <key arn>)";
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1)) {
@@ -46,6 +49,7 @@ fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<serde_json::Valu
             arguments,
             &[
                 "--signing-key",
+                "--kms-key",
                 "--payload",
                 "--output",
                 "--base-url",
@@ -71,16 +75,31 @@ fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<serde_json::Valu
             ],
         )?),
         Some("verifying-key") => {
-            let mut options = Options::parse(arguments, &["--signing-key"])?;
-            let key = read_signing_key(&options.path("--signing-key")?)?;
-            Ok(serde_json::json!({ "verifying_key": verifying_key_text(&key) }))
+            let mut options = Options::parse(arguments, &["--signing-key", "--kms-key"])?;
+            let signer = signer(&mut options)?;
+            Ok(serde_json::json!({ "verifying_key": verifying_key_text(&signer.verifying_key()) }))
         }
         _ => Err(USAGE.to_string()),
     }
 }
 
+fn signer(options: &mut Options) -> Result<ReleaseSigner, String> {
+    match (
+        options.optional_path("--signing-key")?,
+        options.optional_text("--kms-key")?,
+    ) {
+        (Some(path), None) => read_signing_key(&path)
+            .map(ReleaseSigner::KeyFile)
+            .map_err(|error| error.to_string()),
+        (None, Some(arn)) => KmsKey::open(&arn)
+            .map(ReleaseSigner::Kms)
+            .map_err(|error| error.to_string()),
+        _ => Err("give exactly one of --signing-key and --kms-key".to_string()),
+    }
+}
+
 fn release(mut options: Options) -> Result<serde_json::Value, String> {
-    let key = read_signing_key(&options.path("--signing-key")?)?;
+    let signer = signer(&mut options)?;
     let payload = options.path("--payload")?;
     let output = options.path("--output")?;
     let base_url = options.text("--base-url")?;
@@ -116,7 +135,7 @@ fn release(mut options: Options) -> Result<serde_json::Value, String> {
             max_store_schema: aeris_trading_runtime::SCHEMA_VERSION,
             previous: previous.as_deref(),
         },
-        &key,
+        &signer,
     )?;
     let block_plan = match packaged.block_plan {
         BlockPlanSummary::NotRequested => serde_json::json!("not_requested"),

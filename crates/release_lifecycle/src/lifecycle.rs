@@ -43,8 +43,10 @@ const MAXIMUM_ORPHAN_BATCHES: usize = 8;
 // in the 1 MiB signed-manifest file and launcher channel-pointer bounds.
 const MAXIMUM_MANIFEST_BYTES: usize = 512 * 1024;
 const MAXIMUM_SIGNED_MANIFEST_FILE_BYTES: u64 = 1024 * 1024;
-// Changing this prefix invalidates every published manifest signature.
-const RELEASE_MANIFEST_SIGNING_DOMAIN: &[u8] = b"AERIS_RELEASE_MANIFEST_V1\0";
+// Changing this prefix invalidates every published manifest signature. The signed message is
+// this prefix and the SHA-256 of the manifest bytes, so it stays far below the 4 KB message
+// bound of a cloud key service.
+const RELEASE_MANIFEST_SIGNING_DOMAIN: &[u8] = b"AERIS_RELEASE_MANIFEST_V2\0";
 const MAXIMUM_ROLLBACK_COMPATIBILITY_BYTES: u64 = 1024;
 const MAXIMUM_RELEASE_FILES: usize = 256;
 const MAXIMUM_OWNED_ROOTS: usize = 64;
@@ -98,9 +100,9 @@ pub struct ReleaseManifest {
 /// The exact signed manifest bytes, their Ed25519 signature and the manifest
 /// they decode to.
 ///
-/// The signature covers `AERIS_RELEASE_MANIFEST_V1\0` followed by the raw
-/// bytes, never a re-serialization, so a serde or field-order change cannot
-/// alter what was signed. The bytes decode with `deny_unknown_fields`, and the
+/// The signature covers `AERIS_RELEASE_MANIFEST_V2\0` followed by the SHA-256
+/// of the raw bytes, never a re-serialization, so a serde or field-order change
+/// cannot alter what was signed. The bytes decode with `deny_unknown_fields`, and the
 /// fields are private so the decoded manifest always matches the bytes. No
 /// field is trusted until [`verify_release_manifest`] has checked the
 /// signature.
@@ -380,7 +382,49 @@ impl From<DataRootError> for LifecycleError {
     }
 }
 
-/// Signs one validated manifest. The signing key stays in release packaging.
+/// One validated manifest, serialized once, waiting for the Ed25519 signature of
+/// [`Self::signing_message`] from whichever signer holds the release key.
+#[cfg(any(test, feature = "producer"))]
+pub struct UnsignedReleaseManifest {
+    manifest: ReleaseManifest,
+    manifest_bytes: Vec<u8>,
+    message: Vec<u8>,
+}
+
+#[cfg(any(test, feature = "producer"))]
+impl UnsignedReleaseManifest {
+    /// # Errors
+    /// Returns an error if the manifest cannot be validated or serialized.
+    pub fn new(manifest: ReleaseManifest) -> Result<Self, LifecycleError> {
+        validate_manifest_shape(&manifest)?;
+        let manifest_bytes =
+            serde_json::to_vec(&manifest).map_err(|_| LifecycleError::InvalidManifest)?;
+        let message = manifest_signing_message(&manifest_bytes)?;
+        Ok(Self {
+            manifest,
+            manifest_bytes,
+            message,
+        })
+    }
+
+    #[must_use]
+    pub fn signing_message(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// The signed manifest. Nothing checks the signature here; a publisher verifies the
+    /// result with [`verify_release_manifest`] exactly as a launcher does.
+    #[must_use]
+    pub fn with_signature(self, signature: &Signature) -> SignedReleaseManifest {
+        SignedReleaseManifest {
+            manifest: self.manifest,
+            manifest_bytes: self.manifest_bytes,
+            signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        }
+    }
+}
+
+/// Signs one validated manifest with a local key.
 ///
 /// # Errors
 /// Returns an error if the manifest cannot be validated or serialized.
@@ -389,15 +433,9 @@ pub fn sign_release_manifest(
     manifest: ReleaseManifest,
     key: &SigningKey,
 ) -> Result<SignedReleaseManifest, LifecycleError> {
-    validate_manifest_shape(&manifest)?;
-    let manifest_bytes =
-        serde_json::to_vec(&manifest).map_err(|_| LifecycleError::InvalidManifest)?;
-    let message = manifest_signing_message(&manifest_bytes)?;
-    Ok(SignedReleaseManifest {
-        manifest,
-        manifest_bytes,
-        signature: URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
-    })
+    let unsigned = UnsignedReleaseManifest::new(manifest)?;
+    let signature = key.sign(unsigned.signing_message());
+    Ok(unsigned.with_signature(&signature))
 }
 
 /// Verifies the signature over the exact manifest bytes first, then the
@@ -446,10 +484,9 @@ fn manifest_signing_message(manifest_bytes: &[u8]) -> Result<Vec<u8>, LifecycleE
     if manifest_bytes.is_empty() || manifest_bytes.len() > MAXIMUM_MANIFEST_BYTES {
         return Err(LifecycleError::InvalidManifest);
     }
-    let mut message =
-        Vec::with_capacity(RELEASE_MANIFEST_SIGNING_DOMAIN.len() + manifest_bytes.len());
+    let mut message = Vec::with_capacity(RELEASE_MANIFEST_SIGNING_DOMAIN.len() + 32);
     message.extend_from_slice(RELEASE_MANIFEST_SIGNING_DOMAIN);
-    message.extend_from_slice(manifest_bytes);
+    message.extend_from_slice(&Sha256::digest(manifest_bytes));
     Ok(message)
 }
 
@@ -2814,13 +2851,19 @@ mod tests {
             r#""sha256":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE","executable":true}],"#,
             r#""rollout":{"cohort":"all","percentage":100}}"#
         );
-        const SIGNATURE: &str = "4iuCXDOHwRSBEEBGMQp4d_oobnv9YQG6FD_zJz84e7r12DbZ-qraF1e7EKRKa9U3A7_IjPUnl-5xZ1JvZS-wBw";
+        const SIGNATURE: &str = "bVNeORWM8P2PNFmfKysRPtSfaFGvG852pEYasRXun5U1D9dDrVtOpnF2skdoCq1L33F9CaDWQCNWiIdmEc18CQ";
         assert_eq!(
             RELEASE_MANIFEST_SIGNING_DOMAIN,
-            b"AERIS_RELEASE_MANIFEST_V1\0"
+            b"AERIS_RELEASE_MANIFEST_V2\0"
         );
         let key = SigningKey::from_bytes(&[7; 32]);
         let message = manifest_signing_message(MANIFEST.as_bytes()).expect("bounded manifest");
+        let mut expected = RELEASE_MANIFEST_SIGNING_DOMAIN.to_vec();
+        expected.extend_from_slice(&Sha256::digest(MANIFEST.as_bytes()));
+        assert_eq!(
+            message, expected,
+            "the message is the domain and the bytes' SHA-256"
+        );
         assert_eq!(
             URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
             SIGNATURE

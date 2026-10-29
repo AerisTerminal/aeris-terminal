@@ -28,8 +28,9 @@ use aeris_release_lifecycle::{
     trading_database_path,
 };
 use aeris_release_packager::{
-    BlockPlanSummary, ChannelRequest, PackagedRelease, ReleaseRequest, desktop_file_name,
-    launcher_file_name, package_release, read_signing_key, write_channel_pointer,
+    BlockPlanSummary, ChannelRequest, PackagedRelease, ReleaseRequest, ReleaseSigner,
+    desktop_file_name, launcher_file_name, package_release, read_signing_key,
+    write_channel_pointer,
 };
 use aeris_trading_runtime::{
     ExecutionPolicy, TradingRetention, TradingService, TradingServiceConfig, clock::SystemClock,
@@ -396,7 +397,7 @@ impl Lifecycle {
                 max_store_schema,
                 previous,
             },
-            &read_signing_key(&self.key_file).expect("signing key"),
+            &ReleaseSigner::KeyFile(read_signing_key(&self.key_file).expect("signing key")),
         )
         .expect("release packages")
     }

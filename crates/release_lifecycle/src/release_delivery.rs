@@ -18,6 +18,7 @@ use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 #[cfg(any(test, feature = "producer"))]
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::ReleaseManifest;
 
@@ -36,8 +37,10 @@ pub const MAXIMUM_BLOCK_PLAN_BLOCKS: usize = 4096;
 /// Maximum number of network range requests a valid plan may require.
 pub const MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS: usize = 256;
 
-// Changing this prefix invalidates every published block-plan signature.
-const BLOCK_PLAN_SIGNING_DOMAIN: &[u8] = b"AERIS_RELEASE_BLOCK_PLAN_V1\0";
+// Changing this prefix invalidates every published block-plan signature. The signed message is
+// this prefix and the SHA-256 of the plan's JSON, because a plan can exceed the 4 KB message
+// bound of a cloud key service.
+const BLOCK_PLAN_SIGNING_DOMAIN: &[u8] = b"AERIS_RELEASE_BLOCK_PLAN_V2\0";
 
 /// One independently signed reconstruction plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -107,12 +110,59 @@ impl fmt::Display for ReleaseDeliveryError {
 
 impl Error for ReleaseDeliveryError {}
 
-/// Validates source/target binding and signs one bounded block plan.
-///
-/// The source and target manifests are expected to have already crossed the
-/// normal release-manifest trust boundary. Requiring them here prevents a
-/// publisher from signing a plan whose duplicated identity, size, or file hash
-/// metadata does not exactly match those manifests.
+/// One validated block plan waiting for the Ed25519 signature of
+/// [`Self::signing_message`] from whichever signer holds the release key.
+#[cfg(any(test, feature = "producer"))]
+pub struct UnsignedBlockPlan {
+    plan: BlockPlan,
+    message: Vec<u8>,
+}
+
+#[cfg(any(test, feature = "producer"))]
+impl UnsignedBlockPlan {
+    /// Validates the plan's binding to its source and target releases.
+    ///
+    /// The source and target manifests are expected to have already crossed the
+    /// normal release-manifest trust boundary. Requiring them here prevents a
+    /// publisher from signing a plan whose duplicated identity, size, or file hash
+    /// metadata does not exactly match those manifests.
+    ///
+    /// # Errors
+    /// Returns an error for malformed/bounds-violating plans or source/target mismatches.
+    pub fn new(
+        plan: BlockPlan,
+        source: &ReleaseManifest,
+        target: &ReleaseManifest,
+    ) -> Result<Self, ReleaseDeliveryError> {
+        validate_block_plan_binding(&plan, source, target)?;
+        let message = block_plan_signing_message(&plan)?;
+        Ok(Self { plan, message })
+    }
+
+    #[must_use]
+    pub fn signing_message(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// The signed plan. Nothing checks the signature here; a publisher verifies the result
+    /// with [`verify_block_plan`] exactly as a launcher does.
+    ///
+    /// # Errors
+    /// Returns an error if the encoded signed envelope exceeds the metadata bound.
+    pub fn with_signature(
+        self,
+        signature: &Signature,
+    ) -> Result<SignedBlockPlan, ReleaseDeliveryError> {
+        let signed = SignedBlockPlan {
+            plan: self.plan,
+            signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        };
+        validate_signed_size(&signed)?;
+        Ok(signed)
+    }
+}
+
+/// Validates source/target binding and signs one bounded block plan with a local key.
 ///
 /// # Errors
 /// Returns an error for malformed/bounds-violating plans, source/target
@@ -124,14 +174,9 @@ pub fn sign_block_plan(
     target: &ReleaseManifest,
     key: &SigningKey,
 ) -> Result<SignedBlockPlan, ReleaseDeliveryError> {
-    validate_block_plan_binding(&plan, source, target)?;
-    let canonical = canonical_block_plan(&plan)?;
-    let signed = SignedBlockPlan {
-        plan,
-        signature: URL_SAFE_NO_PAD.encode(key.sign(&canonical).to_bytes()),
-    };
-    validate_signed_size(&signed)?;
-    Ok(signed)
+    let unsigned = UnsignedBlockPlan::new(plan, source, target)?;
+    let signature = key.sign(unsigned.signing_message());
+    unsigned.with_signature(&signature)
 }
 
 /// Verifies the plan signature, bounds, and exact source/target manifest binding.
@@ -147,13 +192,13 @@ pub fn verify_block_plan(
 ) -> Result<(), ReleaseDeliveryError> {
     validate_plan_shape(&signed.plan)?;
     validate_signed_size(signed)?;
-    let canonical = canonical_block_plan(&signed.plan)?;
+    let message = block_plan_signing_message(&signed.plan)?;
     let bytes = URL_SAFE_NO_PAD
         .decode(&signed.signature)
         .map_err(|_| ReleaseDeliveryError::InvalidSignature)?;
     let signature =
         Signature::from_slice(&bytes).map_err(|_| ReleaseDeliveryError::InvalidSignature)?;
-    key.verify(&canonical, &signature)
+    key.verify(&message, &signature)
         .map_err(|_| ReleaseDeliveryError::InvalidSignature)?;
     validate_manifest_binding(&signed.plan, source, target)
 }
@@ -271,7 +316,7 @@ fn validate_plan_shape(plan: &BlockPlan) -> Result<(), ReleaseDeliveryError> {
             return Err(ReleaseDeliveryError::InvalidPlan);
         }
     }
-    canonical_block_plan(plan).map(|_| ())
+    block_plan_signing_message(plan).map(|_| ())
 }
 
 fn validate_manifest_binding(
@@ -309,19 +354,15 @@ fn validate_manifest_binding(
     Ok(())
 }
 
-fn canonical_block_plan(plan: &BlockPlan) -> Result<Vec<u8>, ReleaseDeliveryError> {
+fn block_plan_signing_message(plan: &BlockPlan) -> Result<Vec<u8>, ReleaseDeliveryError> {
     let encoded = serde_json::to_vec(plan).map_err(|_| ReleaseDeliveryError::InvalidPlan)?;
-    let capacity = BLOCK_PLAN_SIGNING_DOMAIN
-        .len()
-        .checked_add(encoded.len())
-        .ok_or(ReleaseDeliveryError::InvalidPlan)?;
-    if capacity > MAXIMUM_SIGNED_BLOCK_PLAN_BYTES {
+    if encoded.len() > MAXIMUM_SIGNED_BLOCK_PLAN_BYTES {
         return Err(ReleaseDeliveryError::InvalidPlan);
     }
-    let mut canonical = Vec::with_capacity(capacity);
-    canonical.extend_from_slice(BLOCK_PLAN_SIGNING_DOMAIN);
-    canonical.extend_from_slice(&encoded);
-    Ok(canonical)
+    let mut message = Vec::with_capacity(BLOCK_PLAN_SIGNING_DOMAIN.len() + 32);
+    message.extend_from_slice(BLOCK_PLAN_SIGNING_DOMAIN);
+    message.extend_from_slice(&Sha256::digest(&encoded));
+    Ok(message)
 }
 
 fn validate_signed_size(signed: &SignedBlockPlan) -> Result<(), ReleaseDeliveryError> {
@@ -358,7 +399,6 @@ fn safe_relative_path(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::{RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFile, ReleaseFileRole, RolloutMetadata};
-    use sha2::{Digest as _, Sha256};
 
     fn digest(byte: u8) -> String {
         URL_SAFE_NO_PAD.encode([byte; 32])
@@ -556,14 +596,20 @@ mod tests {
 
     #[test]
     fn signing_domain_is_distinct_from_plain_plan_json() {
-        assert_eq!(BLOCK_PLAN_SIGNING_DOMAIN, b"AERIS_RELEASE_BLOCK_PLAN_V1\0");
+        assert_eq!(BLOCK_PLAN_SIGNING_DOMAIN, b"AERIS_RELEASE_BLOCK_PLAN_V2\0");
         let size = BLOCK_PLAN_BLOCK_BYTES + 3;
         let source = manifest("source-release", 7, size, 1);
         let target = manifest("target-release", 8, size, 2);
         let key = SigningKey::from_bytes(&[9; 32]);
         let plan = plan(&source, &target);
+        let plan_json = serde_json::to_vec(&plan).expect("plan JSON");
+        let unsigned =
+            UnsignedBlockPlan::new(plan.clone(), &source, &target).expect("plan validates");
+        let mut expected = BLOCK_PLAN_SIGNING_DOMAIN.to_vec();
+        expected.extend_from_slice(&Sha256::digest(&plan_json));
+        assert_eq!(unsigned.signing_message(), expected.as_slice());
         let signed = sign_block_plan(plan.clone(), &source, &target, &key).expect("plan signs");
-        let plain_json_signature = key.sign(&serde_json::to_vec(&plan).expect("plan JSON"));
+        let plain_json_signature = key.sign(&plan_json);
         assert_ne!(
             URL_SAFE_NO_PAD.encode(plain_json_signature.to_bytes()),
             signed.signature
