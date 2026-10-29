@@ -354,9 +354,16 @@ only on the guarded GUI checks on their lines.
     checksum and partial-magic rejection, an oversized chrome file loading defaults with a
     diagnostic, and that released payloads never start with the magic. The naming_check rule
     `workspace_and_chart_chrome_persist_through_the_durable_container` is new.
-  - Left: GUI check with a truncated workspace file in a validation folder (the layout is
-    restored from the backup); not run here. An envelope schema newer than 1 is rejected
-    and quarantined like corruption until M7.8 adds `NewerVersion` read-only handling.
+  - Verified: guarded GUI check (2026-10-29, release build of `ed93b752`, a real workspace
+    with its primary truncated to half). Aeris opened the saved layout from the backup with the
+    "Workspace restored from a backup" notice and moved the truncated file to
+    `workspace-state.pb.corrupt-1`. An envelope schema newer than the build's is handled as
+    `NewerVersion` by M7.8.
+  - Fix found in that check: the recovered layout was not written back, so after a clean exit
+    only the backup existed and every later launch restored from it again and repeated the
+    notice. A fallback restore now rewrites the recovered copy as the primary
+    (`a_corrupt_workspace_with_a_backup_reports_the_quarantined_copy` reopens it as `Restored`).
+  - Left: relaunch the truncated-workspace check on a build with the fix.
 - [x] M7.8 Writer-owned workspace document and migration chain
   - Landed: `RestoreOutcome` (`Fresh`, `Restored`, `RestoredFromFallback`, `Migrated`,
     `NewerVersion`, `Defaulted`) in `desktop/local_state.rs`; `DurableContainer` carries the

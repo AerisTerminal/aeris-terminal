@@ -135,6 +135,11 @@ fn restore_workspace_result(path: &Path) -> Result<RestoredWorkspace, String> {
             DurableSource::Primary if from == CURRENT_WORKSPACE_SCHEMA => RestoreOutcome::Restored,
             DurableSource::Primary => RestoreOutcome::Migrated { from },
             DurableSource::Staged(_) | DurableSource::Backup => {
+                // Without a rewrite the primary stays missing until the user's next edit, and
+                // every launch until then restores the fallback again and repeats its notice.
+                if let Err(error) = save_workspace_to_path(&workspace, path) {
+                    diagnostic!("Aeris workspace recovered copy could not be persisted: {error}");
+                }
                 RestoreOutcome::RestoredFromFallback {
                     quarantined: load
                         .rejected
@@ -1710,7 +1715,11 @@ mod tests {
             backup.is_file(),
             "loading must not rotate or remove the backup"
         );
-        assert!(!path.exists(), "the corrupt primary is moved aside");
+        assert_eq!(
+            load_workspace_fixture(&path),
+            Ok(sanitize_workspace(previous.clone())),
+            "the corrupt primary is moved aside and the recovered backup becomes the primary"
+        );
         assert_eq!(
             std::fs::read(workspace_container(&path).quarantine_path(1))
                 .expect("quarantined primary"),
@@ -1814,6 +1823,13 @@ mod tests {
         assert_eq!(quarantined, workspace_container(&path).quarantine_path(1));
         assert!(quarantined.is_file());
         assert_eq!(restored.workspace.workspace_revision, 41);
+        let reopened = restore_workspace(&path);
+        assert_eq!(
+            reopened.outcome,
+            RestoreOutcome::Restored,
+            "the recovered copy is the primary again, so the next launch restores it cleanly"
+        );
+        assert_eq!(reopened.workspace.workspace_revision, 41);
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace cleanup");
     }
