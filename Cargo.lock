@@ -115,11 +115,11 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aeris_account"
-version = "1.2.0"
+version = "1.3.0"
 
 [[package]]
 name = "aeris_account_runtime"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_account",
  "aeris_observability",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_application"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_instruments",
  "aeris_market_data",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_chart_integration"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_application",
  "aeris_charts_engine",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_context_runtime"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_platform_runtime",
  "chrono",
@@ -242,18 +242,18 @@ dependencies = [
 
 [[package]]
 name = "aeris_contracts"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "prost",
 ]
 
 [[package]]
 name = "aeris_design_system"
-version = "1.2.0"
+version = "1.3.0"
 
 [[package]]
 name = "aeris_desktop"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_account_runtime",
  "aeris_application",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_hyperliquid_market_adapter"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_market_data",
  "aeris_platform_runtime",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_instruments"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -308,11 +308,11 @@ dependencies = [
 
 [[package]]
 name = "aeris_market_data"
-version = "1.2.0"
+version = "1.3.0"
 
 [[package]]
 name = "aeris_market_engine"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_instruments",
  "aeris_market_data",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_market_runtime"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_contracts",
  "aeris_hyperliquid_market_adapter",
@@ -343,11 +343,11 @@ dependencies = [
 
 [[package]]
 name = "aeris_naming_check"
-version = "1.2.0"
+version = "1.3.0"
 
 [[package]]
 name = "aeris_observability"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_platform_sys",
  "chrono",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_platform_runtime"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_observability",
  "aeris_platform_sys",
@@ -375,14 +375,14 @@ dependencies = [
 
 [[package]]
 name = "aeris_platform_sys"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "aeris_probes"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_instruments",
  "aeris_market_data",
@@ -398,11 +398,11 @@ dependencies = [
 
 [[package]]
 name = "aeris_provider_history"
-version = "1.2.0"
+version = "1.3.0"
 
 [[package]]
 name = "aeris_release_lifecycle"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_observability",
  "aeris_platform_runtime",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_release_packager"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_platform_runtime",
  "aeris_release_lifecycle",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_rithmic_protocol_adapter"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_instruments",
  "aeris_market_data",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_study_sdk"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_charts_indicators",
  "aeris_market_data",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "aeris_terminal_ui"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_design_system",
  "aeris_instruments",
@@ -480,14 +480,14 @@ dependencies = [
 
 [[package]]
 name = "aeris_trading"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_instruments",
 ]
 
 [[package]]
 name = "aeris_trading_runtime"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aeris_instruments",
  "aeris_observability",
