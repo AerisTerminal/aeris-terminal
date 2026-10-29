@@ -338,8 +338,7 @@ only on the guarded GUI checks on their lines.
     | 16 | 9.24, 11.43 | 9.11, 10.39 |
 
     Four panes drop by about a fifth in both rounds and 16 panes slightly; one pane is unchanged
-    within noise. The remaining idle cost is the live market feed redrawing charts, not the
-    deleted timer. Closes UI-16.
+    within noise. Closes UI-16.
 - [x] M7.7 Versioned, checksummed workspace container
   - Landed: `platform_runtime::DurableContainer` (`durable_container.rs`) is the one container,
     built on `platform_sys`'s `StagedFile` rather than a second `DurableFile` writer. Its
