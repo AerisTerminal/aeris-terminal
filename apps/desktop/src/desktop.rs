@@ -2851,8 +2851,6 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                         app.pending_study_remove_request = Some(study_id);
                     }
                 }
-                // The chart repaints its own replay steps, and the toolbar reads the replay
-                // state as it renders; only a menu left open needs the surface.
                 ChartHostEvent::ReplayChanged => {
                     app.observe_bar_replay_change(cx);
                     return;
@@ -2921,7 +2919,7 @@ struct HeaderState {
     account_label: Option<String>,
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
-    bar_replay_on: bool,
+    bar_replay: bar_replay::BarReplayHeader,
     controls: HeaderControls,
     chart_link_group: u8,
     connection_state: FeedConnectionState,

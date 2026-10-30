@@ -42,13 +42,25 @@ impl toaster::ToastHost for PaneWindow {
 
 impl Render for PaneWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let replay_toolbar =
-            bar_replay::bar_replay_toolbar(&self.pane, self.pane.read(cx), &AerisTheme::dark(), cx);
+        let pane = self.pane.read(cx);
+        let replay_controls = bar_replay::bar_replay_header_controls(
+            &self.pane,
+            pane.bar_replay_header(cx),
+            pane.chart.is_some(),
+            &AerisTheme::dark(),
+        );
         div()
             .relative()
             .size_full()
-            .children(self.pane.read(cx).chart.clone())
-            .children(replay_toolbar)
+            .children(pane.chart.clone())
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .h(px(32.0))
+                    .child(replay_controls),
+            )
             .children(toaster::toast_stack(&toaster::ToastLayer {
                 host: &cx.entity(),
                 toaster: &self.toaster,
@@ -467,9 +479,9 @@ fn pane_harness_chart_buy_intent_fills_through_owner_and_projects_position(
     std::fs::remove_dir_all(root).expect("remove test root");
 }
 
-/// Bar replay through the real pane: the header toggle arms the trim cursor, a GPUI click on the
-/// chart chooses the start bar, the toolbar drives a step, and the chart's own order entry stays
-/// paused until replay exits.
+/// Bar replay through the real pane: the header scissor arms and cancels the trim cursor, a GPUI
+/// click on the chart chooses the start bar, the header controls drive a step, and the chart's
+/// own order entry stays paused until replay exits.
 #[gpui::test]
 fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut TestAppContext) {
     use aeris_chart_integration::ChartReplayPhase;
@@ -502,14 +514,21 @@ fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut 
         assert!(!pane.bar_replay_on(cx));
     });
 
-    harness.pane.update(cx, WorkspaceSurface::toggle_bar_replay);
-    cx.run_until_parked();
+    click_debug_selector(cx, "bar_replay_toggle");
     let (state, _) = bar_replay_chart_state(&harness.pane, cx);
     assert_eq!(
         state.phase,
         ChartReplayPhase::Selecting,
-        "the header toggle arms the trim cursor"
+        "the scissor arms the trim cursor"
     );
+    click_debug_selector(cx, "bar_replay_toggle");
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(
+        state.phase,
+        ChartReplayPhase::Off,
+        "the scissor cancels an armed trim cursor"
+    );
+    click_debug_selector(cx, "bar_replay_toggle");
     let (width, height) = cx.read(|cx| {
         let pane = harness.pane.read(cx);
         pane.chart
@@ -520,8 +539,8 @@ fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut 
     });
     cx.update(|window, _| window.refresh());
     assert!(
-        cx.debug_bounds("bar_replay_toolbar").is_some(),
-        "the selection hint is painted over the chart"
+        cx.debug_bounds("bar_replay_forward").is_none(),
+        "transport controls wait for a start bar"
     );
 
     cx.simulate_click(
@@ -543,7 +562,7 @@ fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut 
     let (state, _) = bar_replay_chart_state(&harness.pane, cx);
     assert!(
         state.clock_micros.expect("replay clock") > start,
-        "the toolbar steps the replay forward"
+        "the header steps the replay forward"
     );
 
     click_debug_selector(cx, "chart_trade_buy");
@@ -559,7 +578,8 @@ fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut 
     assert_eq!(state.phase, ChartReplayPhase::Off);
     assert_eq!(state.clock_micros, None, "exit shows all data again");
     cx.update(|window, _| window.refresh());
-    assert!(cx.debug_bounds("bar_replay_toolbar").is_none());
+    assert!(cx.debug_bounds("bar_replay_forward").is_none());
+    assert!(cx.debug_bounds("bar_replay_toggle").is_some());
     owner
         .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
         .expect("owner stopped");

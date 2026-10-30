@@ -1,8 +1,8 @@
-//! Bar replay controls: the header's Replay toggle and the toolbar over a replaying chart.
-//! Aeris Charts owns the replay mode (trim cursor, start click, stepping, playback cadence and
-//! the Shift+arrow keys); these controls only send its commands and show its state. While a
-//! chart replays history, its own order entry is paused so a chart showing the past never
-//! places an order at today's prices.
+//! Bar replay controls in the workspace header, for the active chart. Aeris Charts owns the
+//! replay mode (trim cursor, start click, stepping, playback cadence and the Shift+arrow keys);
+//! these controls only send its commands and show its state. While a chart replays history,
+//! its own order entry is paused so a chart showing the past never places an order at today's
+//! prices.
 
 use super::*;
 use aeris_chart_integration::{
@@ -21,16 +21,21 @@ const REPLAY_INTERVALS: [(i64, &str); 5] = [
     (14_400, "4 hours"),
 ];
 const REPLAY_MENU_WIDTH: f32 = 140.0;
-/// Keeps the toolbar clear of the chart's time axis.
-const REPLAY_TOOLBAR_BOTTOM_INSET: f32 = 44.0;
-const REPLAY_CLOCK_MIN_WIDTH: f32 = 132.0;
 const REPLAY_NOTICE_LIFETIME: Duration = Duration::from_secs(6);
 
-/// The replay toolbar menu a surface has open.
+/// The replay menu a surface has open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BarReplayMenu {
     Speed,
     Step,
+}
+
+/// What the header shows for the active chart's bar replay.
+pub(super) struct BarReplayHeader {
+    /// `None` while the pane has no chart.
+    state: Option<ChartReplayState>,
+    clock: Option<String>,
+    menu: Option<BarReplayMenu>,
 }
 
 impl WorkspaceSurface {
@@ -41,14 +46,20 @@ impl WorkspaceSurface {
             .is_some_and(|chart| chart.read(cx).bar_replay_on())
     }
 
-    /// The header toggle: arms the trim cursor, or leaves replay when it is on.
+    pub(super) fn bar_replay_header(&self, cx: &App) -> BarReplayHeader {
+        let chart = self.chart.as_ref().map(|chart| chart.read(cx));
+        BarReplayHeader {
+            state: chart.map(AerisChartView::bar_replay_state),
+            clock: chart.and_then(AerisChartView::bar_replay_clock_label),
+            menu: self.bar_replay_menu,
+        }
+    }
+
+    /// The scissor button: arms the trim cursor, cancels an armed one, or re-selects the
+    /// start bar of a running replay.
     pub(super) fn toggle_bar_replay(&mut self, cx: &mut Context<Self>) {
-        let command = if self.bar_replay_on(cx) {
-            ChartReplayCommand::Exit
-        } else {
-            ChartReplayCommand::SelectStart
-        };
-        self.run_bar_replay(command, cx);
+        let phase = self.bar_replay_header(cx).phase();
+        self.run_bar_replay(scissor_command(phase), cx);
     }
 
     pub(super) fn run_bar_replay(&mut self, command: ChartReplayCommand, cx: &mut Context<Self>) {
@@ -68,13 +79,13 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// A replay change from the chart; a menu left open when replay ends would reopen with the
-    /// next replay.
+    /// A replay change from the chart. The header shows the replay clock and transport state,
+    /// and a menu left open when replay ends would reopen with the next replay.
     pub(super) fn observe_bar_replay_change(&mut self, cx: &mut Context<Self>) {
-        if self.bar_replay_menu.is_some() && !self.bar_replay_on(cx) {
+        if !self.bar_replay_on(cx) {
             self.bar_replay_menu = None;
-            cx.notify();
         }
+        cx.notify();
     }
 
     fn toggle_bar_replay_menu(&mut self, menu: BarReplayMenu, cx: &mut Context<Self>) {
@@ -86,6 +97,30 @@ impl WorkspaceSurface {
         if self.bar_replay_menu.take().is_some() {
             cx.notify();
         }
+    }
+}
+
+impl BarReplayHeader {
+    fn phase(&self) -> ChartReplayPhase {
+        self.state
+            .map_or(ChartReplayPhase::Off, |state| state.phase)
+    }
+}
+
+const fn scissor_command(phase: ChartReplayPhase) -> ChartReplayCommand {
+    match phase {
+        ChartReplayPhase::Selecting => ChartReplayCommand::CancelSelection,
+        ChartReplayPhase::Off | ChartReplayPhase::Paused | ChartReplayPhase::Playing => {
+            ChartReplayCommand::SelectStart
+        }
+    }
+}
+
+const fn scissor_tooltip(phase: ChartReplayPhase) -> &'static str {
+    match phase {
+        ChartReplayPhase::Off => "Bar replay",
+        ChartReplayPhase::Selecting => "Cancel start bar selection (Esc)",
+        ChartReplayPhase::Paused | ChartReplayPhase::Playing => "Select a new start bar",
     }
 }
 
@@ -106,25 +141,53 @@ fn post_bar_replay_unavailable_notice(cx: &mut Context<WorkspaceSurface>) {
     }));
 }
 
-/// The header's Replay toggle for the active chart.
-pub(super) fn bar_replay_header_control(
-    app: Entity<WorkspaceSurface>,
-    on: bool,
+/// The header's replay group: the scissor button, then the selection hint or, once a start
+/// bar is chosen, the transport, speed, step, clock, real time and exit controls.
+pub(super) fn bar_replay_header_controls(
+    surface: &Entity<WorkspaceSurface>,
+    header: BarReplayHeader,
     chart_ready: bool,
     theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let tooltip = if on { "Exit bar replay" } else { "Bar replay" };
-    Button::new("bar_replay_toggle", theme)
-        .variant(ButtonVariant::Ghost)
-        .button_size(ButtonSize::Lg)
+) -> Stateful<Div> {
+    let phase = header.phase();
+    let BarReplayHeader { state, clock, menu } = header;
+    let on = phase != ChartReplayPhase::Off;
+    let tooltip = scissor_tooltip(phase);
+    let scissor_surface = surface.clone();
+    let scissor = replay_button("bar_replay_toggle", tooltip, theme)
         .icon(header_icon(HugeIcon::Scissor))
-        .aria_label(tooltip)
-        .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
         .selected(on)
         .disabled(!on && !chart_ready)
         .on_click(move |_, _, cx| {
-            app.update(cx, WorkspaceSurface::toggle_bar_replay);
-        })
+            scissor_surface.update(cx, WorkspaceSurface::toggle_bar_replay);
+        });
+    let group = div()
+        .id("bar_replay_controls")
+        .debug_selector(|| "bar_replay_controls".into())
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(scissor);
+    match state {
+        Some(state) if matches!(phase, ChartReplayPhase::Paused | ChartReplayPhase::Playing) => {
+            group
+                .children(transport_controls(surface, &state, theme))
+                .child(speed_menu(surface, state.speed, menu, theme))
+                .child(step_menu(surface, state.step, menu, theme))
+                .children(realtime_controls(surface, clock, theme))
+        }
+        _ if phase == ChartReplayPhase::Selecting => group.child(
+            div()
+                .px_1()
+                .text_sm()
+                .whitespace_nowrap()
+                .text_color(gpui_color(theme.colors.text_secondary))
+                .child("Click a bar to start replay"),
+        ),
+        _ => group,
+    }
 }
 
 fn speed_label(speed: f64) -> String {
@@ -154,7 +217,7 @@ fn replay_button(id: &'static str, label: &'static str, theme: &AerisTheme) -> B
     Button::new(id, theme)
         .debug_selector(|| id.into())
         .variant(ButtonVariant::Ghost)
-        .button_size(ButtonSize::Default)
+        .button_size(ButtonSize::Lg)
         .aria_label(label)
         .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
 }
@@ -181,13 +244,13 @@ fn replay_menu_panel(id: &'static str, theme: &AerisTheme) -> MenuPanel {
     MenuPanel::new(
         id,
         MenuPlacement::Anchored {
-            side: MenuSide::Above,
+            side: MenuSide::Below,
             align: MenuAlign::Start,
         },
         theme,
     )
     .width(px(REPLAY_MENU_WIDTH))
-    .animate_from(PopupAnimationOrigin::BOTTOM_LEFT)
+    .animate_from(PopupAnimationOrigin::TOP_LEFT)
 }
 
 fn replay_menu_row(
@@ -208,7 +271,7 @@ fn replay_menu_row(
         })
 }
 
-/// A toolbar trigger and, while open, its menu above it.
+/// A header trigger and, while open, its menu below it.
 fn replay_menu(
     surface: &Entity<WorkspaceSurface>,
     menu: BarReplayMenu,
@@ -250,86 +313,6 @@ fn separator(theme: &AerisTheme) -> Div {
         .bg(gpui_color(theme.colors.border_secondary))
 }
 
-/// The replay toolbar of a pane whose chart is replaying, centered above its time axis.
-pub(super) fn bar_replay_toolbar(
-    surface_entity: &Entity<WorkspaceSurface>,
-    surface: &WorkspaceSurface,
-    theme: &AerisTheme,
-    cx: &App,
-) -> Option<AnyElement> {
-    let chart = surface.chart.as_ref()?.read(cx);
-    let state = chart.bar_replay_state();
-    if state.phase == ChartReplayPhase::Off {
-        return None;
-    }
-    let controls = if state.phase == ChartReplayPhase::Selecting {
-        selecting_controls(surface_entity, theme)
-    } else {
-        replay_controls(
-            surface_entity,
-            &state,
-            chart.bar_replay_clock_label(),
-            surface.bar_replay_menu,
-            theme,
-        )
-    };
-    let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
-    let panel = popover_surface(div().id("bar_replay_toolbar"), theme, radius)
-        .debug_selector(|| "bar_replay_toolbar".into())
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .p_1()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .children(controls);
-    Some(
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom(px(REPLAY_TOOLBAR_BOTTOM_INSET))
-            .flex()
-            .justify_center()
-            .child(panel)
-            .into_any_element(),
-    )
-}
-
-fn selecting_controls(surface: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> Vec<AnyElement> {
-    vec![
-        div()
-            .px_2()
-            .text_sm()
-            .text_color(gpui_color(theme.colors.text_secondary))
-            .child("Click a bar to start replay. Esc cancels.")
-            .into_any_element(),
-        command_button(
-            surface,
-            "bar_replay_cancel",
-            HugeIcon::Close,
-            "Cancel bar replay",
-            ChartReplayCommand::CancelSelection,
-            theme,
-        )
-        .into_any_element(),
-    ]
-}
-
-fn replay_controls(
-    surface: &Entity<WorkspaceSurface>,
-    state: &ChartReplayState,
-    clock: Option<String>,
-    open: Option<BarReplayMenu>,
-    theme: &AerisTheme,
-) -> Vec<AnyElement> {
-    let mut controls = transport_controls(surface, state, theme);
-    controls.push(speed_menu(surface, state.speed, open, theme).into_any_element());
-    controls.push(step_menu(surface, state.step, open, theme).into_any_element());
-    controls.extend(realtime_controls(surface, clock, theme));
-    controls
-}
-
 fn transport_controls(
     surface: &Entity<WorkspaceSurface>,
     state: &ChartReplayState,
@@ -342,16 +325,6 @@ fn transport_controls(
         (HugeIcon::Play, "Play (Shift+Down)")
     };
     vec![
-        command_button(
-            surface,
-            "bar_replay_select",
-            HugeIcon::Scissor,
-            "Select a new start bar",
-            ChartReplayCommand::SelectStart,
-            theme,
-        )
-        .into_any_element(),
-        separator(theme).into_any_element(),
         command_button(
             surface,
             "bar_replay_back",
@@ -462,22 +435,19 @@ fn realtime_controls(
 ) -> Vec<AnyElement> {
     let realtime = surface.clone();
     vec![
-        separator(theme).into_any_element(),
         div()
-            .min_w(px(REPLAY_CLOCK_MIN_WIDTH))
             .px_1()
             .text_sm()
-            .text_center()
+            .whitespace_nowrap()
             .text_color(gpui_color(theme.colors.text_secondary))
             .child(clock.unwrap_or_default())
             .into_any_element(),
-        separator(theme).into_any_element(),
         replay_button(
             "bar_replay_realtime",
-            "Leave replay and show all data",
+            "Jump to real time and leave replay",
             theme,
         )
-        .label("Jump to real time")
+        .label("Real time")
         .on_click(move |_, _, cx| {
             realtime.update(cx, |surface, surface_cx| {
                 surface.run_bar_replay(ChartReplayCommand::JumpToRealtime, surface_cx);
@@ -493,8 +463,10 @@ fn realtime_controls(
             theme,
         )
         .into_any_element(),
+        separator(theme).into_any_element(),
     ]
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +488,25 @@ mod tests {
         for speed in REPLAY_SPEEDS {
             assert!((0.1..=10.0).contains(&speed), "{speed}");
         }
+    }
+
+    #[test]
+    fn the_scissor_starts_cancels_or_reselects_by_phase() {
+        assert_eq!(
+            scissor_command(ChartReplayPhase::Off),
+            ChartReplayCommand::SelectStart
+        );
+        assert_eq!(
+            scissor_command(ChartReplayPhase::Selecting),
+            ChartReplayCommand::CancelSelection
+        );
+        assert_eq!(
+            scissor_command(ChartReplayPhase::Paused),
+            ChartReplayCommand::SelectStart
+        );
+        assert_eq!(
+            scissor_command(ChartReplayPhase::Playing),
+            ChartReplayCommand::SelectStart
+        );
     }
 }
