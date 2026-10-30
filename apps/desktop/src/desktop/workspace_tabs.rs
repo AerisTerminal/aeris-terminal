@@ -282,7 +282,7 @@ impl TerminalApp {
                 download_offer,
                 Instant::now(),
             ),
-            market_watch: MarketWatch::restore(init.watchlist_entries),
+            market_watch: MarketWatch::restore(init.watchlist_entries, cx.focus_handle()),
             saved: SavedWorkspace::new(
                 workspace_persistence,
                 restored,
@@ -494,6 +494,7 @@ impl TerminalApp {
             rows: self.watchlist_rows(cx),
             drag: self.market_watch.drag().cloned(),
             scroll: self.market_watch.scroll().clone(),
+            focus: self.market_watch.focus().clone(),
             flags: self.market_watch.flags_view(),
         }
     }
@@ -780,6 +781,7 @@ impl TerminalApp {
         }
         self.window.chrome_focus().is_focused(window)
             || self.tabs.active().focus.is_focused(window)
+            || self.market_watch.focus().is_focused(window)
             || self
                 .active_surface()
                 .read(cx)
@@ -842,8 +844,46 @@ impl TerminalApp {
         self.window.track_window_fullscreen(window.is_fullscreen());
     }
 
-    /// Shows the next or previous watchlist symbol on the active chart.
+    /// Space and Shift+Space: the next or previous watchlist symbol on the active chart,
+    /// wrapping at both ends.
     fn step_watchlist(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.show_watchlist_step(watchlist_step, forward, cx);
+    }
+
+    /// Up and Down while the watchlist table holds keyboard focus step the active chart through
+    /// the visible rows, stopping at either end. Returns whether the key was the watchlist's; a
+    /// held key acts once, like Space, so holding it never streams symbol switches.
+    fn watchlist_arrow_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let forward = match event.keystroke.key.as_str() {
+            "down" => true,
+            "up" => false,
+            _ => return false,
+        };
+        if event.keystroke.modifiers.modified()
+            || !self.market_watch.arrow_keys_step_rows(window)
+            || !self.active_surface().read(cx).chart_shortcuts_unblocked()
+        {
+            return false;
+        }
+        if !event.is_held {
+            self.show_watchlist_step(watchlist_arrow_step, forward, cx);
+        }
+        true
+    }
+
+    /// Shows the visible row `step` picks from the active chart's row on the active chart and
+    /// scrolls that row into view.
+    fn show_watchlist_step(
+        &mut self,
+        step: fn(Option<usize>, usize, bool) -> Option<usize>,
+        forward: bool,
+        cx: &mut Context<Self>,
+    ) {
         let visible = self.market_watch.visible_indices();
         let entries = self.market_watch.entries();
         let current = {
@@ -858,14 +898,16 @@ impl TerminalApp {
                     .position(|&index| entries[index].is(&active.provider, &active.instrument_id))
             })
         };
-        let Some(instrument) = watchlist_step(current, visible.len(), forward)
-            .and_then(|row| visible.get(row))
-            .and_then(|&index| entries.get(index))
-            .map(|entry| entry.instrument.clone())
-        else {
+        let Some((row, instrument)) = step(current, visible.len(), forward).and_then(|row| {
+            let entry = entries.get(*visible.get(row)?)?;
+            Some((row, entry.instrument.clone()))
+        }) else {
             return;
         };
+        // The table body's children are its visible rows in order.
+        self.market_watch.scroll().scroll_to_item(row);
         self.select_watchlist_instrument(&instrument, cx);
+        cx.notify();
     }
 
     pub(super) fn select_watchlist_instrument(
@@ -3461,7 +3503,9 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if self.apply_chart_shortcut(event, window, cx) {
+        if self.watchlist_arrow_key_down(event, window, cx)
+            || self.apply_chart_shortcut(event, window, cx)
+        {
             window.prevent_default();
             cx.stop_propagation();
             return;

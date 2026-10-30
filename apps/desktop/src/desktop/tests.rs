@@ -28,7 +28,7 @@ use super::{
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
     timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
-    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    watchlist_arrow_step, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_maximize_transition, workspace_split_ratio,
 };
 #[cfg(feature = "diagnostics")]
@@ -1411,7 +1411,25 @@ mod timeframe_input {
         product: InstallProviderInstrument,
         messages: aeris_desktop::market_worker::MarketProjectionReceiver,
     ) -> (Entity<TerminalApp>, &mut VisualTestContext) {
-        let (commands, _requests) = mpsc::sync_channel(64);
+        let (terminal, _requests, cx) =
+            terminal_harness_with_requests(cx, lifecycle, factory, product, messages);
+        (terminal, cx)
+    }
+
+    /// A terminal whose one pane drains `messages` and whose market commands, such as its
+    /// symbol selections, stay readable.
+    fn terminal_harness_with_requests(
+        cx: &mut TestAppContext,
+        lifecycle: DesktopLifecycle,
+        factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+        product: InstallProviderInstrument,
+        messages: aeris_desktop::market_worker::MarketProjectionReceiver,
+    ) -> (
+        Entity<TerminalApp>,
+        mpsc::Receiver<MarketWorkerCommand>,
+        &mut VisualTestContext,
+    ) {
+        let (commands, requests) = mpsc::sync_channel(64);
         let (_, shutdown) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(
             commands,
@@ -1443,7 +1461,7 @@ mod timeframe_input {
         });
         let terminal = cx.read(|cx| view.read(cx).0.clone());
         cx.run_until_parked();
-        (terminal, cx)
+        (terminal, requests, cx)
     }
 
     fn frames_idle(terminal: &Entity<TerminalApp>, cx: &VisualTestContext) -> bool {
@@ -1531,6 +1549,258 @@ mod timeframe_input {
         );
     }
 
+    /// A terminal showing the fixture instrument, whose watchlist lists it beside `others`
+    /// copies of it and shows in the active pane, with the selection requests it sends.
+    fn watchlist_terminal(
+        cx: &mut TestAppContext,
+        rows: impl Fn(&InstallProviderInstrument) -> Vec<WorkspaceWatchlistEntryState>,
+    ) -> (
+        Entity<TerminalApp>,
+        mpsc::Receiver<MarketWorkerCommand>,
+        &mut VisualTestContext,
+    ) {
+        let product = local_state::fixture_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
+        let entries = rows(&product);
+        let (terminal, requests, cx) = terminal_harness_with_requests(
+            cx,
+            DesktopLifecycle::new_for_test(),
+            None,
+            product,
+            messages,
+        );
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.market_watch = MarketWatch::restore(entries, cx.focus_handle());
+            });
+            surface.update(cx, |surface, cx| {
+                surface.set_side_panel_visible(SidePanel::Watchlist, true, cx);
+            });
+        });
+        cx.run_until_parked();
+        requests.try_iter().for_each(drop);
+        (terminal, requests, cx)
+    }
+
+    fn watchlist_copy(
+        product: &InstallProviderInstrument,
+        symbol: &str,
+    ) -> InstallProviderInstrument {
+        let mut copy = product.clone();
+        copy.instrument_id = format!("{}-{symbol}", product.instrument_id);
+        copy.display_symbol = symbol.to_string();
+        copy
+    }
+
+    fn watchlist_entry(
+        instrument: InstallProviderInstrument,
+        flag: &str,
+    ) -> WorkspaceWatchlistEntryState {
+        WorkspaceWatchlistEntryState {
+            instrument: Some(instrument),
+            flag_color: flag.to_string(),
+        }
+    }
+
+    /// The instruments the requested chart selections asked for, oldest first.
+    fn selected_instruments(requests: &mpsc::Receiver<MarketWorkerCommand>) -> Vec<String> {
+        requests
+            .try_iter()
+            .filter_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.product.instrument_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn focus_watchlist(terminal: &Entity<TerminalApp>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            terminal
+                .read(cx)
+                .market_watch
+                .focus()
+                .clone()
+                .focus(window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn watchlist_up_and_down_step_the_chart_through_the_shown_rows(cx: &mut TestAppContext) {
+        let flag = "#F23645";
+        let (terminal, requests, cx) = watchlist_terminal(cx, |product| {
+            vec![
+                watchlist_entry(product.clone(), flag),
+                watchlist_entry(watchlist_copy(product, "HIDDEN"), ""),
+                watchlist_entry(watchlist_copy(product, "SECOND"), flag),
+                watchlist_entry(watchlist_copy(product, "LAST"), flag),
+            ]
+        });
+        let (second, last) = cx.read(|cx| {
+            let entries = terminal.read(cx).market_watch.entries();
+            (
+                entries[2].instrument.instrument_id.clone(),
+                entries[3].instrument.instrument_id.clone(),
+            )
+        });
+        let first = cx.read(|cx| {
+            terminal.read(cx).market_watch.entries()[0]
+                .instrument
+                .instrument_id
+                .clone()
+        });
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.set_watchlist_flag_filter(Some(flag.to_string()), cx);
+            });
+        });
+        focus_watchlist(&terminal, cx);
+        assert!(
+            cx.update(|window, cx| terminal.read(cx).workspace_keyboard_focused(window, cx)),
+            "the focused list still lets workspace shortcuts act"
+        );
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_instruments(&requests),
+            [second.as_str()],
+            "Down shows the next shown row, skipping the row the filter hides"
+        );
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("down").expect("key"),
+            is_held: true,
+            prefer_character_input: false,
+        });
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "a held key acts once"
+        );
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected_instruments(&requests), [last.as_str()]);
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "Down stops at the last row"
+        );
+        cx.simulate_keystrokes("up up");
+        assert_eq!(selected_instruments(&requests), [second, first]);
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "Up stops at the first row"
+        );
+        cx.simulate_keystrokes("shift-space");
+        assert_eq!(
+            selected_instruments(&requests),
+            [last],
+            "Shift+Space still wraps from the focused list"
+        );
+    }
+
+    #[gpui::test]
+    fn watchlist_arrows_belong_to_the_list_only_while_it_holds_focus(cx: &mut TestAppContext) {
+        let (terminal, requests, cx) = watchlist_terminal(cx, |product| {
+            vec![
+                watchlist_entry(product.clone(), ""),
+                watchlist_entry(watchlist_copy(product, "SECOND"), ""),
+            ]
+        });
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| surface.focus_keyboard(window, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "the focused chart keeps its arrow keys"
+        );
+
+        focus_watchlist(&terminal, cx);
+        cx.simulate_keystrokes("shift-down");
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "a modified arrow is not a row step"
+        );
+
+        let (provider, id) = cx.read(|cx| {
+            let instrument = &terminal.read(cx).market_watch.entries()[1].instrument;
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            )
+        });
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.toggle_watchlist_flag_picker(&provider, &id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        focus_watchlist(&terminal, cx);
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "the open flag picker keeps the list from stepping"
+        );
+        let input = cx.read(|cx| {
+            terminal
+                .read(cx)
+                .market_watch
+                .flags_view()
+                .picker
+                .expect("flag picker")
+                .input
+        });
+        cx.update(|_, cx| terminal.update(cx, TerminalApp::close_watchlist_flag_picker));
+        cx.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_instruments(&requests),
+            Vec::<String>::new(),
+            "a text field keeps its arrow keys"
+        );
+
+        focus_watchlist(&terminal, cx);
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected_instruments(&requests), [id]);
+    }
+
+    #[gpui::test]
+    fn a_watchlist_step_scrolls_its_row_into_view(cx: &mut TestAppContext) {
+        let (terminal, requests, cx) = watchlist_terminal(cx, |product| {
+            (0..local_state::MAXIMUM_WATCHLIST_ENTRIES)
+                .map(|row| watchlist_entry(watchlist_copy(product, &format!("ROW{row}")), ""))
+                .collect()
+        });
+        let scroll = cx.read(|cx| terminal.read(cx).market_watch.scroll().clone());
+        assert_eq!(f32::from(scroll.offset().y), 0.0);
+
+        focus_watchlist(&terminal, cx);
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        cx.update(Window::simulate_next_frame);
+        assert_eq!(
+            selected_instruments(&requests).len(),
+            1,
+            "a chart symbol the list lacks steps up to the last row"
+        );
+        assert!(
+            f32::from(scroll.offset().y) < 0.0,
+            "the last row scrolls into view"
+        );
+    }
+
     #[gpui::test]
     fn watchlist_flags_set_recolor_filter_and_clear(cx: &mut TestAppContext) {
         let (terminal, cx) = terminal_harness(cx);
@@ -1542,17 +1812,21 @@ mod timeframe_input {
         second.instrument_id = format!("{}-second", first.instrument_id);
         second.display_symbol = "SECOND".to_string();
         cx.update(|_, cx| {
+            let focus = cx.focus_handle();
             terminal.update(cx, |terminal, _| {
-                terminal.market_watch = MarketWatch::restore(vec![
-                    WorkspaceWatchlistEntryState {
-                        instrument: Some(first.clone()),
-                        flag_color: String::new(),
-                    },
-                    WorkspaceWatchlistEntryState {
-                        instrument: Some(second.clone()),
-                        flag_color: String::new(),
-                    },
-                ]);
+                terminal.market_watch = MarketWatch::restore(
+                    vec![
+                        WorkspaceWatchlistEntryState {
+                            instrument: Some(first.clone()),
+                            flag_color: String::new(),
+                        },
+                        WorkspaceWatchlistEntryState {
+                            instrument: Some(second.clone()),
+                            flag_color: String::new(),
+                        },
+                    ],
+                    focus,
+                );
             });
         });
         let (provider, id) = (first.provider.clone(), first.instrument_id.clone());
@@ -3608,6 +3882,17 @@ fn watchlist_steps_wrap_and_start_from_the_ends() {
     assert_eq!(watchlist_step(None, 3, true), Some(0));
     assert_eq!(watchlist_step(None, 3, false), Some(2));
     assert_eq!(watchlist_step(None, 0, true), None);
+}
+
+#[test]
+fn watchlist_arrow_steps_stop_at_the_ends() {
+    assert_eq!(watchlist_arrow_step(Some(0), 3, true), Some(1));
+    assert_eq!(watchlist_arrow_step(Some(2), 3, true), None);
+    assert_eq!(watchlist_arrow_step(Some(1), 3, false), Some(0));
+    assert_eq!(watchlist_arrow_step(Some(0), 3, false), None);
+    assert_eq!(watchlist_arrow_step(None, 3, true), Some(0));
+    assert_eq!(watchlist_arrow_step(None, 3, false), Some(2));
+    assert_eq!(watchlist_arrow_step(None, 0, true), None);
 }
 
 #[test]

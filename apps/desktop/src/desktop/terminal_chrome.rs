@@ -34,6 +34,25 @@ pub(super) fn watchlist_step(current: Option<usize>, len: usize, forward: bool) 
     })
 }
 
+/// The watchlist row an Up or Down press lands on: the neighboring row, stopping at either end
+/// instead of wrapping. A chart showing a symbol that is not in the watchlist starts from the
+/// first row going down and the last going up.
+pub(super) fn watchlist_arrow_step(
+    current: Option<usize>,
+    len: usize,
+    forward: bool,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match (current, forward) {
+        (Some(index), true) => Some(index + 1).filter(|next| *next < len),
+        (Some(index), false) => index.checked_sub(1),
+        (None, true) => Some(0),
+        (None, false) => Some(len - 1),
+    }
+}
+
 pub(super) fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCommand> {
     if key.eq_ignore_ascii_case("escape") && is_fullscreen {
         return Some(WindowCommand::ToggleFullscreen);

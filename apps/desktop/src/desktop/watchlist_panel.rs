@@ -20,6 +20,7 @@ pub(super) struct WatchlistPanelState {
     pub(super) rows: Vec<WatchlistRow>,
     pub(super) drag: Option<WatchlistDragState>,
     pub(super) scroll: ScrollHandle,
+    pub(super) focus: FocusHandle,
     pub(super) flags: WatchlistFlagsView,
 }
 
@@ -42,6 +43,7 @@ pub(super) fn watchlist_side_panel(
         rows,
         drag,
         scroll,
+        focus,
         flags,
     } = watchlist;
     div()
@@ -66,6 +68,7 @@ pub(super) fn watchlist_side_panel(
             drag.as_ref(),
             &flags,
             &scroll,
+            &focus,
             theme,
         ))
 }
@@ -88,6 +91,7 @@ fn watchlist_table(
     watchlist_drag: Option<&WatchlistDragState>,
     flags: &WatchlistFlagsView,
     watchlist_scroll: &ScrollHandle,
+    focus: &FocusHandle,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -134,6 +138,8 @@ fn watchlist_table(
         .flex_col()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
+        // A press in the table focuses it, so Up and Down step its rows rather than the chart.
+        .track_focus(focus)
         .child(watchlist_columns(theme))
         .child(
             body.id("watchlist_body")

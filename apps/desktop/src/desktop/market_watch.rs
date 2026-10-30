@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui::ScrollHandle;
+use gpui::{FocusHandle, ScrollHandle, Window};
 
 use super::local_state::MAXIMUM_WATCHLIST_ENTRIES;
 use super::watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistFlagsView};
@@ -63,13 +63,15 @@ pub(super) struct MarketWatch {
     flags: WatchlistFlagState,
     drag: Option<WatchlistDragState>,
     scroll: ScrollHandle,
+    /// The table's keyboard focus, which a press inside the table takes.
+    focus: FocusHandle,
     /// The day summary of every listed instrument and of every tab's shown instrument.
     summaries: BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
 }
 
 impl MarketWatch {
     /// Restores the saved rows, dropping rows without an instrument and invalid flag colors.
-    pub(super) fn restore(entries: Vec<WorkspaceWatchlistEntryState>) -> Self {
+    pub(super) fn restore(entries: Vec<WorkspaceWatchlistEntryState>, focus: FocusHandle) -> Self {
         Self {
             entries: entries
                 .into_iter()
@@ -83,6 +85,7 @@ impl MarketWatch {
             flags: WatchlistFlagState::default(),
             drag: None,
             scroll: ScrollHandle::new(),
+            focus,
             summaries: BTreeMap::new(),
         }
     }
@@ -130,6 +133,16 @@ impl MarketWatch {
 
     pub(super) const fn scroll(&self) -> &ScrollHandle {
         &self.scroll
+    }
+
+    pub(super) const fn focus(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    /// Whether Up and Down step the rows: the table itself holds keyboard focus (not a field
+    /// inside it) and neither the flag picker nor the flag filter menu is open.
+    pub(super) fn arrow_keys_step_rows(&self, window: &Window) -> bool {
+        self.focus.is_focused(window) && self.flags.picker.is_none() && !self.flags.filter_menu_open
     }
 
     /// Lists the instrument unflagged; refused when it is listed already or the list is full.
@@ -390,8 +403,8 @@ mod tests {
         instrument
     }
 
-    fn listed(ids: &[&str]) -> MarketWatch {
-        let mut watch = MarketWatch::restore(Vec::new());
+    fn listed(cx: &mut gpui::TestAppContext, ids: &[&str]) -> MarketWatch {
+        let mut watch = MarketWatch::restore(Vec::new(), cx.update(|cx| cx.focus_handle()));
         for id in ids {
             assert!(watch.add(instrument(id)));
         }
@@ -406,31 +419,37 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn restore_drops_rows_without_an_instrument_and_normalizes_flags() {
-        let watch = MarketWatch::restore(vec![
-            WorkspaceWatchlistEntryState {
-                instrument: Some(instrument("a")),
-                flag_color: "#f23645".to_string(),
-            },
-            WorkspaceWatchlistEntryState {
-                instrument: None,
-                flag_color: String::new(),
-            },
-            WorkspaceWatchlistEntryState {
-                instrument: Some(instrument("b")),
-                flag_color: "not a color".to_string(),
-            },
-        ]);
+    #[gpui::test]
+    fn restore_drops_rows_without_an_instrument_and_normalizes_flags(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let focus = cx.update(|cx| cx.focus_handle());
+        let watch = MarketWatch::restore(
+            vec![
+                WorkspaceWatchlistEntryState {
+                    instrument: Some(instrument("a")),
+                    flag_color: "#f23645".to_string(),
+                },
+                WorkspaceWatchlistEntryState {
+                    instrument: None,
+                    flag_color: String::new(),
+                },
+                WorkspaceWatchlistEntryState {
+                    instrument: Some(instrument("b")),
+                    flag_color: "not a color".to_string(),
+                },
+            ],
+            focus,
+        );
         assert_eq!(ids(&watch), ["a", "b"]);
         let durable = watch.durable_entries();
         assert_eq!(durable[0].flag_color, "#F23645");
         assert_eq!(durable[1].flag_color, "", "an invalid flag is dropped");
     }
 
-    #[test]
-    fn add_refuses_duplicates_and_a_full_list() {
-        let mut watch = listed(&["a"]);
+    #[gpui::test]
+    fn add_refuses_duplicates_and_a_full_list(cx: &mut gpui::TestAppContext) {
+        let mut watch = listed(cx, &["a"]);
         assert!(
             !watch.add(instrument("a")),
             "a listed instrument is not added twice"
@@ -445,9 +464,9 @@ mod tests {
         assert_eq!(watch.entries().len(), MAXIMUM_WATCHLIST_ENTRIES);
     }
 
-    #[test]
-    fn clearing_or_removing_the_last_filtered_flag_ends_the_filter() {
-        let mut watch = listed(&["a", "b"]);
+    #[gpui::test]
+    fn clearing_or_removing_the_last_filtered_flag_ends_the_filter(cx: &mut gpui::TestAppContext) {
+        let mut watch = listed(cx, &["a", "b"]);
         let provider = watch.entries()[0].instrument.provider.clone();
         assert_eq!(
             watch.press_flag(&provider, "a", "#335CFF".to_string()),
@@ -476,9 +495,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_drag_reorders_only_its_own_row() {
-        let mut watch = listed(&["a", "b", "c"]);
+    #[gpui::test]
+    fn a_drag_reorders_only_its_own_row(cx: &mut gpui::TestAppContext) {
+        let mut watch = listed(cx, &["a", "b", "c"]);
         let provider = watch.entries()[0].instrument.provider.clone();
         assert!(!watch.begin_drag(&provider, "missing", 0.0));
         assert!(watch.begin_drag(&provider, "a", 0.0));
@@ -500,9 +519,9 @@ mod tests {
         assert!(!watch.end_drag());
     }
 
-    #[test]
-    fn stale_summaries_are_taken_out() {
-        let mut watch = listed(&[]);
+    #[gpui::test]
+    fn stale_summaries_are_taken_out(cx: &mut gpui::TestAppContext) {
+        let mut watch = listed(cx, &[]);
         for id in ["a", "b"] {
             let instrument = instrument(id);
             watch.summaries_mut().insert(

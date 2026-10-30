@@ -286,7 +286,7 @@ use terminal_chrome::{
 use terminal_chrome::{
     WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, chrome_tooltip, exchange_mark,
     fullscreen_escape_command, header_icon, mark_tile, series_glyph, terminal_header,
-    watchlist_step, workspace_title_bar,
+    watchlist_arrow_step, watchlist_step, workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, restored_workspace_tab,
