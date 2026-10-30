@@ -72,6 +72,9 @@ impl AerisChartView {
                 }
                 ChartInputEvent::IndicatorRemoved(binding) => self.indicator_removed(binding),
                 ChartInputEvent::PanesResized => self.remember_pane_heights(),
+                ChartInputEvent::ReplayChanged => {
+                    host_events.push(ChartHostEvent::ReplayChanged);
+                }
             }
         }
         host_events
@@ -109,11 +112,17 @@ impl AerisChartView {
     /// Common tail of every listener: process engine requests, emit host requests, schedule
     /// deferred engine work, and repaint.
     pub(super) fn after_input(&mut self, cx: &mut Context<Self>) {
+        self.emit_input_events(cx);
+        self.schedule_input_wake(cx);
+        cx.notify();
+    }
+
+    /// Emits the host requests the engine queued, including those a frame's input tick raised
+    /// (bar replay playback steps happen there, with no listener to carry them).
+    pub(super) fn emit_input_events(&mut self, cx: &mut Context<Self>) {
         for event in self.process_input_events() {
             cx.emit(event);
         }
-        self.schedule_input_wake(cx);
-        cx.notify();
     }
 
     /// Replaces the pending wake with one at the engine's next input deadline, if any.

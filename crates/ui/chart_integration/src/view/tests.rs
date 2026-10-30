@@ -6503,3 +6503,138 @@ fn context_menu_input_emits_exactly_one_host_event(cx: &mut gpui::TestAppContext
         ChartHostEvent::ContextMenu(request) if request.kind == ChartContextKind::Pane
     ));
 }
+
+/// Pane coordinates of the bar `back` places before the newest price bar.
+fn bar_before_newest(chart: &AerisChartView, back: usize) -> (f64, f64) {
+    let points = chart.engine.series_data(0);
+    let point = &points[points.len() - 1 - back];
+    let x = chart
+        .engine
+        .time_to_coordinate(point.time.to_f64().expect("bar time"))
+        .expect("the bar is on the time scale");
+    (x, chart.engine.pane_h / 2.0)
+}
+
+fn replay_change_count(events: &[ChartHostEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, ChartHostEvent::ReplayChanged))
+        .count()
+}
+
+#[gpui::test]
+fn bar_replay_trims_at_the_clicked_bar_then_steps_and_exits(cx: &mut gpui::TestAppContext) {
+    use aeris_charts_engine::ReplayPhase;
+
+    let chart = cx.new(|_| interactive_chart());
+    let (events, _subscription) = record_host_events(&chart, cx);
+    chart.update(cx, |chart, chart_cx| {
+        assert!(!chart.bar_replay_on());
+        chart
+            .apply_bar_replay(ChartReplayCommand::SelectStart, chart_cx)
+            .expect("a chart with bars starts replay selection");
+        assert_eq!(chart.bar_replay_state().phase, ReplayPhase::Selecting);
+        assert!(chart.bar_replay_on());
+        assert_eq!(chart.bar_replay_clock_label(), None);
+
+        let (x, y) = bar_before_newest(chart, 10);
+        hover(chart, x, y);
+        assert_eq!(cursor(chart), ChartCursor::Trim);
+        assert_eq!(chart.cursor_style(), CursorStyle::IBeam);
+        click(chart, x, y);
+        let trimmed = chart.bar_replay_state();
+        assert_eq!(trimmed.phase, ReplayPhase::Paused);
+        assert!(trimmed.can_step_forward && trimmed.can_step_back);
+        let start = trimmed
+            .clock_micros
+            .expect("the trim sets the replay clock");
+        assert!(chart.bar_replay_clock_label().is_some());
+
+        chart
+            .apply_bar_replay(ChartReplayCommand::StepForward, chart_cx)
+            .expect("replay steps forward");
+        let forward = chart.bar_replay_state().clock_micros.expect("clock");
+        assert!(forward > start, "a step forward reveals the next bar");
+        chart
+            .apply_bar_replay(ChartReplayCommand::StepBack, chart_cx)
+            .expect("replay steps back");
+        assert_eq!(chart.bar_replay_state().clock_micros, Some(start));
+
+        chart
+            .apply_bar_replay(ChartReplayCommand::Exit, chart_cx)
+            .expect("replay exits");
+        let exited = chart.bar_replay_state();
+        assert_eq!(exited.phase, ReplayPhase::Off);
+        assert_eq!(exited.clock_micros, None, "exit shows all data again");
+    });
+    cx.run_until_parked();
+
+    assert!(
+        replay_change_count(&events.borrow()) >= 4,
+        "every toolbar command reports its replay change to the host"
+    );
+}
+
+#[gpui::test]
+fn bar_replay_rejects_commands_that_need_a_start_bar(cx: &mut gpui::TestAppContext) {
+    let chart = cx.new(|_| interactive_chart());
+    chart.update(cx, |chart, chart_cx| {
+        assert!(
+            chart
+                .apply_bar_replay(ChartReplayCommand::TogglePlay, chart_cx)
+                .is_err()
+        );
+        assert!(
+            chart
+                .apply_bar_replay(ChartReplayCommand::SetSpeed(0.0), chart_cx)
+                .is_err()
+        );
+        assert!(!chart.bar_replay_on());
+    });
+}
+
+#[gpui::test]
+fn bar_replay_playback_steps_reach_the_host_from_the_frame_tick(cx: &mut gpui::TestAppContext) {
+    use aeris_charts_engine::ReplayPhase;
+
+    let chart = cx.new(|_| interactive_chart());
+    let (events, _subscription) = record_host_events(&chart, cx);
+    let start = chart.update(cx, |chart, chart_cx| {
+        chart
+            .apply_bar_replay(ChartReplayCommand::SelectStart, chart_cx)
+            .expect("replay selection");
+        let (x, y) = bar_before_newest(chart, 10);
+        click(chart, x, y);
+        chart
+            .apply_bar_replay(ChartReplayCommand::SetSpeed(2.0), chart_cx)
+            .expect("speed in range");
+        chart
+            .apply_bar_replay(ChartReplayCommand::TogglePlay, chart_cx)
+            .expect("replay plays from its start bar");
+        assert_eq!(chart.bar_replay_state().phase, ReplayPhase::Playing);
+        assert!(
+            chart.input.wake_delay(&chart.engine).is_some(),
+            "playback asks the host for a wake"
+        );
+        chart.bar_replay_state().clock_micros.expect("clock")
+    });
+    cx.run_until_parked();
+    let before = replay_change_count(&events.borrow());
+
+    chart.update(cx, |chart, chart_cx| {
+        // The first tick anchors the cadence; one interval later the frame tick steps.
+        chart.engine.input_tick(1_000.0);
+        chart.engine.input_tick(1_600.0);
+        chart.emit_input_events(chart_cx);
+        let playing = chart.bar_replay_state();
+        assert!(playing.clock_micros.expect("clock") > start);
+        assert_eq!(playing.phase, ReplayPhase::Playing);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        replay_change_count(&events.borrow()),
+        before + 1,
+        "a playback step raised in the frame tick reaches the host"
+    );
+}

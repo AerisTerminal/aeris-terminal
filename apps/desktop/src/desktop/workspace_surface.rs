@@ -185,6 +185,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chart_pane_controller,
         persistence: init.persistence,
         observed_chart: ObservedChart::default(),
+        bar_replay_menu: None,
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
         pending_settings_request: None,

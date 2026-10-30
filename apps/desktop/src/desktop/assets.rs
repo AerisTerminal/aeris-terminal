@@ -68,10 +68,15 @@ pub enum UiIcon {
     /// The filled flag drawn flush with the left of its box, for the watchlist row edge;
     /// buttons and menus use the centered `FlagFilled`.
     FlagEdge,
+    Scissor,
+    Play,
+    Pause,
+    Next,
+    Previous,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 59] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -126,6 +131,11 @@ impl UiIcon {
         Self::Flag,
         Self::FlagFilled,
         Self::FlagEdge,
+        Self::Scissor,
+        Self::Play,
+        Self::Pause,
+        Self::Next,
+        Self::Previous,
     ];
 
     #[must_use]
@@ -185,6 +195,11 @@ impl UiIcon {
             Self::Flag => "flag.svg",
             Self::FlagFilled => "flag-filled.svg",
             Self::FlagEdge => "flag-edge.svg",
+            Self::Scissor => "scissor.svg",
+            Self::Play => "play.svg",
+            Self::Pause => "pause.svg",
+            Self::Next => "next.svg",
+            Self::Previous => "previous.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -616,6 +631,11 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "unlock.svg" => include_bytes!("../../assets/icons/ui/unlock.svg"),
         "more.svg" => include_bytes!("../../assets/icons/ui/more.svg"),
         "template.svg" => include_bytes!("../../assets/icons/ui/template.svg"),
+        "scissor.svg" => include_bytes!("../../assets/icons/ui/scissor.svg"),
+        "play.svg" => include_bytes!("../../assets/icons/ui/play.svg"),
+        "pause.svg" => include_bytes!("../../assets/icons/ui/pause.svg"),
+        "next.svg" => include_bytes!("../../assets/icons/ui/next.svg"),
+        "previous.svg" => include_bytes!("../../assets/icons/ui/previous.svg"),
         _ => return None,
     })
 }

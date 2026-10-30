@@ -320,6 +320,7 @@ pub(super) fn workspace_pane_element(
     let indicator_settings_dialog = pane_settings_dialog(&pane.surface, surface, theme, cx);
     let quantity_menu =
         super::order_quantity::order_quantity_menu_layer(&pane.surface, surface, theme);
+    let replay_toolbar = super::bar_replay::bar_replay_toolbar(&pane.surface, surface, theme, cx);
     let workspace_id = workspace.id;
     let select_terminal = terminal.clone();
     let context_terminal = terminal.clone();
@@ -385,6 +386,7 @@ pub(super) fn workspace_pane_element(
             cx.stop_propagation();
         })
         .child(content)
+        .children(replay_toolbar)
         .children(quantity_menu)
         .children(indicator_settings_dialog)
         .into_any_element()

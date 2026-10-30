@@ -42,10 +42,13 @@ impl toaster::ToastHost for PaneWindow {
 
 impl Render for PaneWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let replay_toolbar =
+            bar_replay::bar_replay_toolbar(&self.pane, self.pane.read(cx), &AerisTheme::dark(), cx);
         div()
             .relative()
             .size_full()
             .children(self.pane.read(cx).chart.clone())
+            .children(replay_toolbar)
             .children(toaster::toast_stack(&toaster::ToastLayer {
                 host: &cx.entity(),
                 toaster: &self.toaster,
@@ -462,6 +465,124 @@ fn pane_harness_chart_buy_intent_fills_through_owner_and_projects_position(
         .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
         .expect("owner stopped");
     std::fs::remove_dir_all(root).expect("remove test root");
+}
+
+/// Bar replay through the real pane: the header toggle arms the trim cursor, a GPUI click on the
+/// chart chooses the start bar, the toolbar drives a step, and the chart's own order entry stays
+/// paused until replay exits.
+#[gpui::test]
+fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut TestAppContext) {
+    use aeris_chart_integration::ChartReplayPhase;
+
+    let (owner, root, account, _, instrument, _) =
+        trading_store::real_owner_fill_fixture_for("hyperliquid");
+    let subscription = owner.subscribe().expect("owner subscription");
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.instrument_id = instrument.as_str().into();
+    product.price_scale = 2;
+    product.quantity_scale = 0;
+    product.price_increment = Some(1);
+    let (mut harness, cx) = PaneHarness::open_with_product_and_owner(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product,
+        ChartInterval::Minute1,
+        Some(owner.clone()),
+        cx,
+    );
+    harness.publish_snapshot(120, cx);
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(
+            pane.trading_pnl.order_entry.selected_account_id.as_ref(),
+            Some(&account)
+        );
+        assert!(!pane.bar_replay_on(cx));
+    });
+
+    harness.pane.update(cx, WorkspaceSurface::toggle_bar_replay);
+    cx.run_until_parked();
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(
+        state.phase,
+        ChartReplayPhase::Selecting,
+        "the header toggle arms the trim cursor"
+    );
+    let (width, height) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        pane.chart
+            .as_ref()
+            .expect("chart")
+            .read(cx)
+            .rendered_viewport_size()
+    });
+    cx.update(|window, _| window.refresh());
+    assert!(
+        cx.debug_bounds("bar_replay_toolbar").is_some(),
+        "the selection hint is painted over the chart"
+    );
+
+    cx.simulate_click(
+        gpui::point(px(width * 0.5), px(height * 0.4)),
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let (state, clock_label) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(
+        state.phase,
+        ChartReplayPhase::Paused,
+        "the click trims the chart"
+    );
+    assert!(state.can_step_forward, "history after the trim is hidden");
+    assert!(clock_label.is_some());
+    let start = state.clock_micros.expect("replay clock");
+
+    click_debug_selector(cx, "bar_replay_forward");
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert!(
+        state.clock_micros.expect("replay clock") > start,
+        "the toolbar steps the replay forward"
+    );
+
+    click_debug_selector(cx, "chart_trade_buy");
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(300))
+            .is_none(),
+        "a replaying chart places no order"
+    );
+
+    click_debug_selector(cx, "bar_replay_exit");
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(state.phase, ChartReplayPhase::Off);
+    assert_eq!(state.clock_micros, None, "exit shows all data again");
+    cx.update(|window, _| window.refresh());
+    assert!(cx.debug_bounds("bar_replay_toolbar").is_none());
+    owner
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+        .expect("owner stopped");
+    std::fs::remove_dir_all(root).expect("remove test root");
+}
+
+fn bar_replay_chart_state(
+    pane: &Entity<WorkspaceSurface>,
+    cx: &mut VisualTestContext,
+) -> (aeris_chart_integration::ChartReplayState, Option<String>) {
+    cx.read(|cx| {
+        let chart = pane.read(cx).chart.as_ref().expect("chart").read(cx);
+        (chart.bar_replay_state(), chart.bar_replay_clock_label())
+    })
+}
+
+fn click_debug_selector(cx: &mut VisualTestContext, selector: &'static str) {
+    cx.update(|window, _| window.refresh());
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is painted"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
 }
 
 /// A fractional crypto size typed into the ticket reaches the owner as the exact

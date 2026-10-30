@@ -587,6 +587,12 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
+        .child(super::bar_replay::bar_replay_header_control(
+            app.clone(),
+            state.bar_replay_on,
+            state.controls.enabled(HeaderControls::CHART_TYPE),
+            &state.theme,
+        ))
         .child(link_toggle);
     let accounts = accounts_selector(app.clone(), state.account_label, &state.theme);
     let time_zone = time_zone_selector(

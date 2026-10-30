@@ -2674,6 +2674,7 @@ impl Render for AerisChartView {
                             if chart.rebuild(width, height, scale_factor, mutation, window) {
                                 chart_cx.notify();
                             }
+                            chart.emit_input_events(chart_cx);
                             // The frame's input tick can arm a new deadline (the text caret
                             // blink does); without a wake for it the caret never toggles.
                             if chart.input_wake.is_none() {
@@ -2704,6 +2705,8 @@ mod drawings;
 pub use drawings::{
     ChartDrawingAnchorError, ChartDrawingAnchorText, ChartDrawingSettings, drawing_color_hex,
 };
+mod bar_replay;
+pub use bar_replay::{ChartReplayCommand, ChartReplayError, ChartReplayState};
 mod builtin_indicators;
 pub use builtin_indicators::BuiltinIndicator;
 mod export;

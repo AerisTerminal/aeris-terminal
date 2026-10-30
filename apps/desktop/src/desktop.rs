@@ -11,6 +11,7 @@ use app_notices::AppNotices;
 mod app_services;
 use app_services::AppServices;
 mod assets;
+mod bar_replay;
 mod big_trades_dialog;
 mod bottom_panel;
 mod chart_context_menus;
@@ -926,6 +927,7 @@ struct WorkspaceSurface {
     chart_pane_controller: chart_pane_controller::ChartPaneController,
     persistence: pane_persistence::PanePersistence,
     observed_chart: ObservedChart,
+    bar_replay_menu: Option<bar_replay::BarReplayMenu>,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
     pending_settings_request: Option<LegendSettingsRequest>,
@@ -1952,6 +1954,7 @@ enum ChartIntentRejection {
     InvalidPrice,
     InvalidQuantity,
     PlannedLegKept,
+    ReplayActive,
     Unsupported,
 }
 
@@ -1967,6 +1970,9 @@ impl ChartIntentRejection {
             Self::InvalidQuantity => "That size isn't valid for this instrument.",
             Self::PlannedLegKept => {
                 "A pending bracket keeps its stop and target. Drag them, or cancel the entry."
+            }
+            Self::ReplayActive => {
+                "New orders are paused on this chart during bar replay. Exit replay to trade here."
             }
             Self::Unsupported => "That chart action isn't available for this order.",
         }
@@ -2536,6 +2542,25 @@ fn dispatch_chart_trading_intent(
         );
         return;
     }
+    // A replaying chart shows past prices, so it places nothing new; managing live orders
+    // and positions stays available.
+    if chart.read(cx).bar_replay_on()
+        && matches!(
+            action,
+            ChartTradingIntentAction::PlaceBracketOrder
+                | ChartTradingIntentAction::CreateStopLoss
+                | ChartTradingIntentAction::CreateTakeProfit
+        )
+    {
+        reject_chart_intent(
+            &chart,
+            sequence,
+            ChartIntentRejection::ReplayActive,
+            app,
+            cx,
+        );
+        return;
+    }
     if action == ChartTradingIntentAction::ClosePosition {
         dispatch_chart_close_position(chart, intent, app, cx);
         return;
@@ -2826,6 +2851,12 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                         app.pending_study_remove_request = Some(study_id);
                     }
                 }
+                // The chart repaints its own replay steps, and the toolbar reads the replay
+                // state as it renders; only a menu left open needs the surface.
+                ChartHostEvent::ReplayChanged => {
+                    app.observe_bar_replay_change(cx);
+                    return;
+                }
             }
             cx.notify();
         })
@@ -2890,6 +2921,7 @@ struct HeaderState {
     account_label: Option<String>,
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
+    bar_replay_on: bool,
     controls: HeaderControls,
     chart_link_group: u8,
     connection_state: FeedConnectionState,

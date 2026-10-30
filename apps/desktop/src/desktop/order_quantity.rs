@@ -299,9 +299,11 @@ impl Render for ChartTradeBar {
             .selected_account_id
             .as_ref()
             .map(|id| id.as_str().to_string());
+        // A replaying chart shows past prices, so its bar places no order at today's.
         let ready = product.is_some()
             && account.is_some()
-            && state.selected_account_lock_reason(cx).is_none();
+            && state.selected_account_lock_reason(cx).is_none()
+            && !state.bar_replay_on(cx);
         let order = MarketOrderTarget {
             surface: surface.clone(),
             product,

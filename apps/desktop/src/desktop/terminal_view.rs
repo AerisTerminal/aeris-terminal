@@ -42,6 +42,7 @@ fn active_header_state(
             series: workspace.chart_pane_controller.selection_in_progress(),
         },
         drawing_history: workspace.drawing_history_state(cx),
+        bar_replay_on: workspace.bar_replay_on(cx),
         controls: HeaderControls::from_state(
             workspace.symbol_entry.input().is_some()
                 || workspace.symbol_entry.browser().has_results(),

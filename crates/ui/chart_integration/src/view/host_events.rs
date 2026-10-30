@@ -30,6 +30,9 @@ pub enum ChartHostEvent {
     Settings(ChartSettingsRequest),
     /// The user removed a runtime-managed study, by its runtime study identity.
     RemoveStudy(u64),
+    /// Bar replay's phase, clock, speed or step changed; read it through
+    /// [`AerisChartView::bar_replay_state`].
+    ReplayChanged,
 }
 
 /// The outcome of deleting the selected chart object.
