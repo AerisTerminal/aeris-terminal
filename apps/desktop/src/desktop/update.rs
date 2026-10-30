@@ -32,6 +32,12 @@ const MAXIMUM_CHECK_OUTPUT_BYTES: usize = 16 * 1024;
 const RESTART_CHILD_STABILITY_WINDOW: Duration = Duration::from_millis(150);
 const MAXIMUM_RESTART_ACK_BYTES: usize = 128;
 const MAXIMUM_LAUNCHER_BYTES: u64 = 64 * 1024 * 1024;
+/// After an update the launcher promotes the new release's launcher to the stable path only
+/// once this desktop records its startup marker (it waits up to 60 seconds for the marker and
+/// 10 seconds for the previous launcher to exit), so the first check of a freshly updated
+/// desktop can still find the previous launcher. The check waits this long for the promotion.
+const LAUNCHER_PROMOTION_WAIT: Duration = Duration::from_mins(2);
+const LAUNCHER_PROMOTION_POLL: Duration = Duration::from_secs(1);
 use aeris_release_lifecycle::{
     UPDATE_RESTART_COMMIT, UPDATE_RESTART_READY, UPDATE_RESTART_VERIFICATION_TIMEOUT,
 };
@@ -465,10 +471,30 @@ fn stable_launcher() -> Result<PathBuf, String> {
             release.install_generation, release.release_identity
         ))
         .join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
-    if !launcher_is_trusted(&launcher, &signed_launcher)? {
+    if !await_launcher_promotion(LAUNCHER_PROMOTION_WAIT, LAUNCHER_PROMOTION_POLL, || {
+        launcher_is_trusted(&launcher, &signed_launcher)
+    })? {
         return Err("installed Aeris launcher is not the active signed launcher".to_string());
     }
     Ok(launcher)
+}
+
+/// Polls `trusted` until it holds or `wait` has passed; an error ends the wait at once.
+fn await_launcher_promotion<E>(
+    wait: Duration,
+    poll: Duration,
+    mut trusted: impl FnMut() -> Result<bool, E>,
+) -> Result<bool, E> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if trusted()? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(poll);
+    }
 }
 
 fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result<bool, String> {
@@ -1052,10 +1078,10 @@ mod tests {
     use super::{
         CHECK_RETRY_INITIAL, CHECK_RETRY_MAXIMUM, ChildCleanup, DesktopUpdater,
         LauncherUpdateCheck, PERIODIC_CHECK_INTERVAL, PreparedRestart, RestartSlot,
-        UpdatePresentation, UpdateRequest, UpdateResult, UpdateState, claim_restart_slot,
-        launcher_files_match, launcher_is_trusted_with, launcher_promotion_applies,
-        release_restart_slot, send_restart_commit, terminate_and_reap, validate_launcher_report,
-        validate_restart_acknowledgement, wait_for_restart_ready,
+        UpdatePresentation, UpdateRequest, UpdateResult, UpdateState, await_launcher_promotion,
+        claim_restart_slot, launcher_files_match, launcher_is_trusted_with,
+        launcher_promotion_applies, release_restart_slot, send_restart_commit, terminate_and_reap,
+        validate_launcher_report, validate_restart_acknowledgement, wait_for_restart_ready,
     };
 
     #[test]
@@ -1627,6 +1653,48 @@ mod tests {
         fs::write(&stable, b"changed-launcher").expect("stable fixture mutates");
         assert!(!launcher_files_match(&stable, &active).expect("mismatch compares"));
         fs::remove_dir_all(base).expect("temporary base removes");
+    }
+
+    #[test]
+    fn the_update_check_waits_for_the_launcher_promotion() {
+        let mut checks = 0;
+        let promoted = await_launcher_promotion(
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || -> Result<bool, ()> {
+                checks += 1;
+                Ok(checks == 3)
+            },
+        );
+        assert_eq!(promoted, Ok(true));
+        assert_eq!(checks, 3);
+    }
+
+    #[test]
+    fn the_launcher_promotion_wait_is_bounded() {
+        let started = Instant::now();
+        let promoted = await_launcher_promotion(
+            Duration::from_millis(30),
+            Duration::from_millis(1),
+            || -> Result<bool, ()> { Ok(false) },
+        );
+        assert_eq!(promoted, Ok(false));
+        assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[test]
+    fn a_launcher_verification_error_ends_the_promotion_wait() {
+        let mut checks = 0;
+        let promoted = await_launcher_promotion(
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || -> Result<bool, &str> {
+                checks += 1;
+                Err("unverifiable")
+            },
+        );
+        assert_eq!(promoted, Err("unverifiable"));
+        assert_eq!(checks, 1);
     }
 
     #[test]
