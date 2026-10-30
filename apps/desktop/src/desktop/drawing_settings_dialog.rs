@@ -10,7 +10,7 @@ use super::*;
 use aeris_chart_integration::{
     ChartDrawingIntervalUnit, ChartDrawingIntervalVisibility, ChartDrawingLevel,
     ChartDrawingProperty, ChartDrawingPropertyGroup as Group, ChartDrawingPropertyType as Type,
-    ChartDrawingSettings, MAX_DRAWING_LEVELS,
+    ChartDrawingSettings, MAX_DRAWING_LEVELS, normalize_chart_drawing_text,
 };
 use chart_context_menus::{clamp_floating_panel_origin, color_swatch_dot};
 use drawing_context_toolbar::{choice_glyph, width_choices, width_glyph, width_label};
@@ -309,14 +309,6 @@ fn font_size_choices(property: &ChartDrawingProperty) -> impl Iterator<Item = f6
     })
 }
 
-/// Drawing text is one line, as the chart's own text editor keeps it: line breaks and other
-/// control characters become spaces.
-fn single_line(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
-
 fn unit_checked(
     visibility: &ChartDrawingIntervalVisibility,
     unit: ChartDrawingIntervalUnit,
@@ -366,7 +358,8 @@ fn watch_input(
     })
 }
 
-/// The drawing's text field. Enter does not break the line, since drawing text is one line.
+/// The drawing's text field. Shift+Enter breaks the line and Enter submits, as in the chart's
+/// own text editor.
 fn text_body_input(
     text: &str,
     subscriptions: &mut Vec<gpui::Subscription>,
@@ -390,7 +383,7 @@ fn text_body_input(
                 return;
             }
             let typed = input.read(cx).value().to_string();
-            let text = single_line(&typed);
+            let text = normalize_chart_drawing_text(&typed);
             if text != typed {
                 input.update(cx, |input, input_cx| {
                     input.set_value(text.clone(), window, input_cx);
@@ -2083,9 +2076,12 @@ mod tests {
     }
 
     #[test]
-    fn drawing_text_stays_on_one_line() {
-        assert_eq!(single_line("Break\nout\r\tnow"), "Break out  now");
-        assert_eq!(single_line("plain"), "plain");
+    fn drawing_text_keeps_line_breaks_as_the_chart_stores_them() {
+        assert_eq!(
+            normalize_chart_drawing_text("Break\nout\r\n\tnow"),
+            "Break\nout\n now"
+        );
+        assert_eq!(normalize_chart_drawing_text("plain"), "plain");
     }
 
     #[test]

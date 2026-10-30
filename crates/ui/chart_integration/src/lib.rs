@@ -48,6 +48,7 @@ pub use aeris_charts_engine::{
     DrawingPropertySchema as ChartDrawingPropertySchema,
     DrawingPropertyType as ChartDrawingPropertyType, MAX_DRAWING_LEVELS, MAX_DRAWING_NAME_BYTES,
     MAX_DRAWING_TEMPLATE_BYTES, MAX_DRAWING_TEMPLATES,
+    normalize_drawing_text as normalize_chart_drawing_text,
 };
 /// The keys a focused chart consumes; desktop shortcuts must stay off them.
 pub use aeris_charts_render_gpui::input::chart_keystrokes;
