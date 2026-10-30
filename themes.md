@@ -90,10 +90,10 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #089981;
-  --positive-subtle: #dcf5f0;
-  --negative: #f7525f;
-  --negative-subtle: #ffe2e2;
+  --positive: #3fb950;
+  --positive-subtle: #e8f7ea;
+  --negative: #f85149;
+  --negative-subtle: #fee1e0;
   --warning: #ff6900;
   --warning-subtle: #ffedd4;
   --indigo: #615fff;
@@ -169,8 +169,8 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   --bullish: var(--positive);
   --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
+  --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
 }
 
 .dark {
@@ -206,10 +206,10 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   --icon-active: #fafafa;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #089981;
-  --positive-subtle: #193c37;
-  --negative: #f7525f;
-  --negative-subtle: #532b2e;
+  --positive: #98c379;
+  --positive-subtle: #3c4933;
+  --negative: #e06c75;
+  --negative-subtle: #533133;
   --warning: #ff6900;
   --warning-subtle: #7e2a0c;
   --indigo: #615fff;
@@ -278,8 +278,8 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   --bullish: var(--positive);
   --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
+  --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
 }
 
 /* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
@@ -339,10 +339,10 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #089981;
-  --positive-subtle: #dcf5f0;
-  --negative: #f7525f;
-  --negative-subtle: #ffe2e2;
+  --positive: #3fb950;
+  --positive-subtle: #e8f7ea;
+  --negative: #f85149;
+  --negative-subtle: #fee1e0;
   --warning: #ff6900;
   --warning-subtle: #ffedd4;
   --indigo: #615fff;
@@ -418,8 +418,8 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --bullish: var(--positive);
   --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
+  --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
 }
 
 [data-theme="high-contrast"].dark {
@@ -455,10 +455,10 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --icon-active: #ededed;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #089981;
-  --positive-subtle: #193c37;
-  --negative: #f7525f;
-  --negative-subtle: #532b2e;
+  --positive: #98c379;
+  --positive-subtle: #3c4933;
+  --negative: #e06c75;
+  --negative-subtle: #533133;
   --warning: #ff6900;
   --warning-subtle: #7e2a0c;
   --indigo: #615fff;
@@ -527,8 +527,8 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --bullish: var(--positive);
   --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
+  --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
 }
 ```
 

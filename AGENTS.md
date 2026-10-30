@@ -338,7 +338,7 @@ violations and missing verification explicitly, and never describe them as satis
   before the sanitizer on every load and is persisted at the first current-schema write,
   which preserves the pre-migration payload as `workspace-state.pb.pre-v3` exactly once (the
   one raw `fs::write` allowlist entry in `local_state.rs`) and keeps the frame file. The
-  final chain step folds the legacy chart-chrome `key=value` file into the document's
+  schema 4 step folds the legacy chart-chrome `key=value` file into the document's
   `chart_chrome` section: the file is read once through `DurableContainer::inspect` (never
   quarantined, moved or rewritten, and left in place afterwards), a missing or unusable file
   leaves the section at its defaults, and a document that already has chrome keeps it. An
@@ -718,7 +718,9 @@ declared once in their own `:root` block and the build rejects them in `.dark` a
 `rgb`/`rgba`/`hsl`/`hsla`/`from_rgb8`/`from_rgba8` constructors in production `apps/desktop`,
 `chart_integration` and `terminal_ui` source; files compiled only through a `#[cfg(test)]` module
 declaration are outside the scan. Its only counted exceptions are the color picker's spectrum stops
-and the legacy series fallbacks that layout restore recognizes.
+and the retired Aeris Charts colors the workspace migration chain recognizes: the legacy series
+fallbacks (schema 3) and the former market up/down pair with its tints (schema 5), which then
+follow the theme.
 
 `CSS.md` holds the exact theme CSS from the Theme System and the rules for using it. Read it before
 any UI work and always follow it: every color, radius and border width comes from a token, never a

@@ -354,6 +354,29 @@ impl AerisChartView {
         self.volume.as_ref().map(|volume| volume.settings.clone())
     }
 
+    /// The colors volume draws where its settings leave a color unset: the chart's painted up
+    /// and down colors at the Aeris Charts volume tint, and the default line color.
+    #[must_use]
+    pub fn volume_default_colors(&self) -> VolumeDefaultColors {
+        let layout = &self.engine.options.get().layout;
+        let tinted = |css: &str, compiled: Color| {
+            Color::parse_css(css).map_or(compiled, |color| {
+                Color::rgba(color.r(), color.g(), color.b(), compiled.a())
+            })
+        };
+        VolumeDefaultColors {
+            up: chart_color_hex(tinted(
+                &layout.bullish_color,
+                aeris_charts_engine::DEFAULT_VOLUME_UP_COLOR,
+            )),
+            down: chart_color_hex(tinted(
+                &layout.bearish_color,
+                aeris_charts_engine::DEFAULT_VOLUME_DOWN_COLOR,
+            )),
+            average: chart_color_hex(aeris_charts_engine::DEFAULT_LINE_COLOR),
+        }
+    }
+
     /// Rebuilds the volume indicator from new settings, keeping whether it is shown. Returns
     /// whether the chart changed: `false` when volume is not on the chart, the settings are
     /// unchanged, or Aeris Charts rejects them.

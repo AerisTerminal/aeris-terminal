@@ -23,7 +23,7 @@ fn color_control(
     named: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let value = target.color(&dialog.draft);
+    let value = target.color(dialog);
     let open_picker = dialog
         .color_picker
         .as_ref()

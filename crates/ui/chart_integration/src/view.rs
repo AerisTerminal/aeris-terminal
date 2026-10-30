@@ -653,28 +653,35 @@ impl VolumeSettings {
 
     /// The rising-bar column color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
     #[must_use]
-    pub fn effective_up_color(&self) -> String {
-        self.up_color
-            .clone()
-            .unwrap_or_else(|| chart_color_hex(aeris_charts_engine::DEFAULT_VOLUME_UP_COLOR))
+    pub fn effective_up_color(&self, defaults: &VolumeDefaultColors) -> String {
+        self.up_color.clone().unwrap_or_else(|| defaults.up.clone())
     }
 
     /// The falling-bar column color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
     #[must_use]
-    pub fn effective_down_color(&self) -> String {
+    pub fn effective_down_color(&self, defaults: &VolumeDefaultColors) -> String {
         self.down_color
             .clone()
-            .unwrap_or_else(|| chart_color_hex(aeris_charts_engine::DEFAULT_VOLUME_DOWN_COLOR))
+            .unwrap_or_else(|| defaults.down.clone())
     }
 
     /// The moving-average line color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
     #[must_use]
-    pub fn effective_average_color(&self) -> String {
+    pub fn effective_average_color(&self, defaults: &VolumeDefaultColors) -> String {
         self.average
             .color
             .clone()
-            .unwrap_or_else(|| chart_color_hex(aeris_charts_engine::DEFAULT_LINE_COLOR))
+            .unwrap_or_else(|| defaults.average.clone())
     }
+}
+
+/// The colors the volume indicator draws where its settings leave a color unset, as
+/// `#RRGGBB` or `#RRGGBBAA` for the color picker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeDefaultColors {
+    pub up: String,
+    pub down: String,
+    pub average: String,
 }
 
 /// A chart color as `#RRGGBB`, or `#RRGGBBAA` when it is translucent.

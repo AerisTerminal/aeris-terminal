@@ -5,11 +5,11 @@
 //! release wrote a bare protobuf file, which predates the envelope, so a bare document's
 //! schema is its payload revision; the legacy `workspace-state.frame` is schema 0. Each step
 //! is a pure function on the document, later steps only append, and a step never edits an
-//! earlier one; the final step needs the legacy chart-chrome file, so it takes that file's
+//! earlier one; the schema 4 step needs the legacy chart-chrome file, so it takes that file's
 //! payload as input and `local_state` reads it at the chain boundary. `local_state`'s
 //! sanitize pass stays the last step after the chain.
 
-use aeris_chart_integration::{AerisChartTheme, ChartIndicator, ChartThemeColors};
+use aeris_chart_integration::{AerisChartTheme, ChartColor, ChartIndicator, ChartThemeColors};
 use aeris_contracts::{
     WorkspaceChartAppearanceState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspacePaneState, WorkspaceState,
@@ -33,7 +33,17 @@ use super::workspace_surface::{
 ///   plainly without re-deriving either.
 /// - 4: chart chrome preferences fold from the legacy chart-chrome `key=value` file into the
 ///   document; the old file is never written again and stays in place.
-pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 4;
+/// - 5: chart colors still holding the retired Aeris Charts market palette follow the
+///   theme's current up and down colors.
+pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 5;
+
+/// The schema whose step folds the legacy chart-chrome file into the document.
+const CHART_CHROME_FOLD_SCHEMA: u32 = 4;
+
+/// Whether the chain from `from` folds the legacy chart-chrome file, so the caller reads it.
+pub(super) const fn folds_legacy_chart_chrome(from: u32) -> bool {
+    from < CHART_CHROME_FOLD_SCHEMA
+}
 
 pub(super) const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
 
@@ -127,8 +137,11 @@ pub(super) fn migrate_workspace(
     if from < 3 {
         migrate_2_to_3(&mut workspace);
     }
-    if from < 4 {
+    if folds_legacy_chart_chrome(from) {
         fold_chart_chrome(&mut workspace, legacy_chrome);
+    }
+    if from < 5 {
+        follow_current_market_palette(&mut workspace);
     }
     workspace.schema_revision = CURRENT_WORKSPACE_SCHEMA;
     workspace
@@ -299,6 +312,98 @@ fn canonical_series_color(color: &str, legacy: bool) -> String {
         THEME_APPEARANCE_COLOR.to_string()
     } else {
         color.to_string()
+    }
+}
+
+/// The market up colors Aeris Charts painted in both themes through schema 4: the up color,
+/// its half-alpha volume tint and its light and dark subtle tints.
+const RETIRED_MARKET_UP_COLORS: [&str; 4] = ["#089981", "#08998180", "#dcf5f0", "#193c37"];
+/// The matching retired market down colors.
+const RETIRED_MARKET_DOWN_COLORS: [&str; 4] = ["#f7525f", "#f7525f80", "#ffe2e2", "#532b2e"];
+
+/// Whether `color` is one of `retired`, in any CSS spelling; an alpha within one step of a
+/// retired one matches the rounding of a fractional `rgba()` alpha.
+fn retired_market_color(color: &str, retired: &[&str]) -> bool {
+    let Some(color) = ChartColor::parse_css(color) else {
+        return false;
+    };
+    retired
+        .iter()
+        .filter_map(|retired| ChartColor::parse_css(retired))
+        .any(|retired| {
+            (retired.r(), retired.g(), retired.b()) == (color.r(), color.g(), color.b())
+                && retired.a().abs_diff(color.a()) <= 1
+        })
+}
+
+/// `color` replaced by `follow` when it holds a retired market color of its direction.
+fn follow_retired(color: &mut String, retired: &[&str], follow: &str) {
+    if retired_market_color(color, retired) {
+        *color = follow.to_string();
+    }
+}
+
+/// Step 4 to 5: Aeris Charts replaced its market up/down pair. Every chart color that still
+/// holds the former pair (or a tint derived from it) recorded that era's default rather than
+/// a pick, so it follows the theme again: appearance roles take the theme marker, and
+/// indicator colors whose empty value follows the chart's up and down colors are cleared.
+/// Any other color is the user's and survives.
+fn follow_current_market_palette(workspace: &mut WorkspaceState) {
+    let (up, down) = (
+        &RETIRED_MARKET_UP_COLORS[..],
+        &RETIRED_MARKET_DOWN_COLORS[..],
+    );
+    for pane in workspace_panes(workspace) {
+        let Some(chart) = pane.chart.as_mut() else {
+            continue;
+        };
+        if let Some(appearance) = chart.appearance.as_mut() {
+            follow_current_market_appearance(appearance);
+        }
+        for volume in chart
+            .indicators
+            .iter_mut()
+            .filter_map(|indicator| indicator.volume.as_mut())
+        {
+            follow_retired(&mut volume.up_color, up, "");
+            follow_retired(&mut volume.down_color, down, "");
+        }
+        let Some(order_flow) = chart.order_flow.as_mut() else {
+            continue;
+        };
+        if let Some(delta) = order_flow.cumulative_delta.as_mut() {
+            follow_retired(&mut delta.up_color, up, "");
+            follow_retired(&mut delta.down_color, down, "");
+        }
+        if let Some(book) = order_flow.order_book_depth_options.as_mut() {
+            follow_retired(&mut book.bid_color, up, "");
+            follow_retired(&mut book.ask_color, down, "");
+        }
+    }
+    for template in &mut workspace.chart_settings_templates {
+        if let Some(appearance) = template.appearance.as_mut() {
+            follow_current_market_appearance(appearance);
+        }
+    }
+}
+
+/// The candle, wick, border and baseline roles that default to the market up or down color.
+fn follow_current_market_appearance(appearance: &mut WorkspaceChartAppearanceState) {
+    for color in [
+        &mut appearance.up_color,
+        &mut appearance.wick_up_color,
+        &mut appearance.border_up_color,
+        &mut appearance.baseline_top_color,
+    ] {
+        follow_retired(color, &RETIRED_MARKET_UP_COLORS, THEME_APPEARANCE_COLOR);
+    }
+    for color in [
+        &mut appearance.down_color,
+        &mut appearance.wick_down_color,
+        &mut appearance.border_down_color,
+        &mut appearance.baseline_bottom_color,
+    ] {
+        follow_retired(color, &RETIRED_MARKET_DOWN_COLORS, THEME_APPEARANCE_COLOR);
     }
 }
 
@@ -505,7 +610,9 @@ mod tests {
             );
         }
 
-        let migrated = migrate_workspace(second, 2, None);
+        // Only the schema 3 step is under test: schema 5 retires the former market pair.
+        let mut migrated = second;
+        migrate_2_to_3(&mut migrated);
         let appearance = migrated.workspace_tabs[0].panes[0]
             .chart
             .as_ref()
@@ -517,6 +624,161 @@ mod tests {
         );
         assert_eq!(appearance.area_top_color, "#089981");
         assert_eq!(appearance.baseline_bottom_color, "#F7525F");
+    }
+
+    /// A schema 4 document whose open tab, saved layout and template hold the retired market
+    /// pair in several spellings beside custom picks.
+    fn schema_4_retired_market_palette_workspace() -> WorkspaceState {
+        let appearance = WorkspaceChartAppearanceState {
+            up_color: "#089981".to_string(),
+            down_color: "#F7525F".to_string(),
+            wick_up_color: "rgb(8, 153, 129)".to_string(),
+            wick_down_color: THEME_APPEARANCE_COLOR.to_string(),
+            border_up_color: "#abc123".to_string(),
+            border_down_color: "#089981".to_string(),
+            baseline_top_color: "#dcf5f0".to_string(),
+            baseline_bottom_color: "#532b2e".to_string(),
+            area_top_color: "#089981".to_string(),
+            area_bottom_color: "#00000000".to_string(),
+            ..WorkspaceChartAppearanceState::default()
+        };
+        let chart = WorkspaceChartState {
+            appearance: Some(appearance.clone()),
+            indicators: vec![aeris_contracts::WorkspaceChartIndicatorState {
+                kind: ChartIndicator::Volume.identifier().to_string(),
+                visible: true,
+                volume: Some(aeris_contracts::WorkspaceVolumeSettingsState {
+                    up_color: "#08998180".to_string(),
+                    down_color: "rgba(247, 82, 95, 0.5)".to_string(),
+                    average_color: "#089981".to_string(),
+                    average_length: 20,
+                    ..aeris_contracts::WorkspaceVolumeSettingsState::default()
+                }),
+            }],
+            order_flow: Some(aeris_contracts::WorkspaceOrderFlowSettingsState {
+                cumulative_delta: Some(aeris_contracts::WorkspaceCumulativeDeltaState {
+                    up_color: "#089981".to_string(),
+                    down_color: "#123456".to_string(),
+                    ..aeris_contracts::WorkspaceCumulativeDeltaState::default()
+                }),
+                delta_histogram: Some(aeris_contracts::WorkspaceDeltaHistogramState {
+                    up_color: "#089981".to_string(),
+                    down_color: String::new(),
+                }),
+                order_book_depth_options: Some(aeris_contracts::WorkspaceOrderBookDepthState {
+                    bid_color: "#089981".to_string(),
+                    ask_color: "#F7525F80".to_string(),
+                    ..aeris_contracts::WorkspaceOrderBookDepthState::default()
+                }),
+                ..aeris_contracts::WorkspaceOrderFlowSettingsState::default()
+            }),
+            ..WorkspaceChartState::default()
+        };
+        let mut workspace = workspace_with_chart(chart);
+        workspace.schema_revision = 4;
+        workspace.saved_layouts = vec![aeris_contracts::WorkspaceSavedLayoutState {
+            layout_id: 1,
+            tab: Some(workspace.workspace_tabs[0].clone()),
+            ..aeris_contracts::WorkspaceSavedLayoutState::default()
+        }];
+        workspace.chart_settings_templates =
+            vec![aeris_contracts::WorkspaceChartSettingsTemplateState {
+                name: "template".to_string(),
+                appearance: Some(appearance),
+                ..Default::default()
+            }];
+        workspace
+    }
+
+    fn assert_follows_the_current_market_palette(chart: WorkspaceChartState) {
+        let theme = THEME_APPEARANCE_COLOR;
+        let appearance = chart.appearance.expect("migrated appearance");
+        assert_eq!(appearance.up_color, theme);
+        assert_eq!(
+            appearance.down_color, theme,
+            "any spelling of the retired pair"
+        );
+        assert_eq!(appearance.wick_up_color, theme);
+        assert_eq!(appearance.wick_down_color, theme);
+        assert_eq!(
+            appearance.border_up_color, "#abc123",
+            "a custom pick survives"
+        );
+        assert_eq!(
+            appearance.border_down_color, "#089981",
+            "the retired up color in a down role was the user's pick"
+        );
+        assert_eq!(
+            appearance.baseline_top_color, theme,
+            "a retired subtle tint"
+        );
+        assert_eq!(appearance.baseline_bottom_color, theme);
+        assert_eq!(
+            appearance.area_top_color, "#089981",
+            "area colors default to the line color, so the pair was picked there"
+        );
+        let volume = chart.indicators[0].volume.clone().expect("volume settings");
+        assert_eq!(
+            volume.up_color, "",
+            "the retired volume tint follows the chart"
+        );
+        assert_eq!(
+            volume.down_color, "",
+            "an rgba() spelling of the volume tint"
+        );
+        assert_eq!(
+            volume.average_color, "#089981",
+            "the average defaults to a line color"
+        );
+        let order_flow = chart.order_flow.expect("order flow");
+        let delta = order_flow.cumulative_delta.expect("CVD settings");
+        assert_eq!(delta.up_color, "");
+        assert_eq!(delta.down_color, "#123456");
+        assert_eq!(
+            order_flow.delta_histogram.expect("delta settings").up_color,
+            "#089981",
+            "delta columns default to the order-flow colors, so the pair was picked there"
+        );
+        let book = order_flow
+            .order_book_depth_options
+            .expect("order book settings");
+        assert_eq!((book.bid_color.as_str(), book.ask_color.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn schema_4_retired_market_colors_follow_the_theme_and_picks_survive() {
+        let mut migrated = migrate_workspace(schema_4_retired_market_palette_workspace(), 4, None);
+
+        let saved_chart = migrated.saved_layouts[0]
+            .tab
+            .as_ref()
+            .map(|tab| tab.panes[0].chart.clone().expect("saved chart"))
+            .expect("saved layout tab");
+        assert_follows_the_current_market_palette(
+            migrated.workspace_tabs[0].panes[0]
+                .chart
+                .clone()
+                .expect("migrated chart"),
+        );
+        assert_follows_the_current_market_palette(saved_chart);
+        let theme = THEME_APPEARANCE_COLOR;
+        let template = migrated.chart_settings_templates[0]
+            .appearance
+            .as_ref()
+            .expect("template appearance");
+        assert_eq!(template.up_color, theme);
+        assert_eq!(template.border_up_color, "#abc123");
+
+        // A color picked after the migration is the user's, even when it is the retired one.
+        if let Some(appearance) = migrated.workspace_tabs[0].panes[0]
+            .chart
+            .as_mut()
+            .and_then(|chart| chart.appearance.as_mut())
+        {
+            appearance.up_color = "#089981".to_string();
+        }
+        let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA, None);
+        assert_eq!(again, migrated, "a current document is never re-migrated");
     }
 
     #[test]

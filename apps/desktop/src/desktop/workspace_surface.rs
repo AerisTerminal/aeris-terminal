@@ -7465,11 +7465,10 @@ impl WorkspaceSurface {
 
     /// Opens the chart's volume settings; every valid edit previews on the chart.
     pub(super) fn open_volume_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(settings) = self
-            .chart
-            .as_ref()
-            .map(|chart| chart.read(cx).volume_settings())
-        else {
+        let Some((settings, defaults)) = self.chart.as_ref().map(|chart| {
+            let chart = chart.read(cx);
+            (chart.volume_settings(), chart.volume_default_colors())
+        }) else {
             return;
         };
         let Some(settings) = settings else {
@@ -7496,6 +7495,7 @@ impl WorkspaceSurface {
             IndicatorSettingsDialog::Volume(VolumeDialogState {
                 original: settings.clone(),
                 draft: settings,
+                defaults,
                 average_length,
                 color_picker: None,
                 menu: None,
@@ -7624,7 +7624,7 @@ impl WorkspaceSurface {
         {
             dialog.color_picker = None;
         } else {
-            let current = target.color(&dialog.draft);
+            let current = target.color(dialog);
             let input = cx.new(|input_cx| InputState::new(window, input_cx));
             input.update(cx, |input, input_cx| {
                 input.set_value(current.to_ascii_uppercase(), window, input_cx);

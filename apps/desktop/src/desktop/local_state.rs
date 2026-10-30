@@ -258,7 +258,9 @@ fn migrate_restored_workspace(
     from: u32,
     workspace_path: &Path,
 ) -> WorkspaceState {
-    let legacy_chrome = if from < CURRENT_WORKSPACE_SCHEMA && workspace.chart_chrome.is_none() {
+    let legacy_chrome = if workspace_migrations::folds_legacy_chart_chrome(from)
+        && workspace.chart_chrome.is_none()
+    {
         workspace_migrations::legacy_chart_chrome_payload(workspace_path)
     } else {
         None

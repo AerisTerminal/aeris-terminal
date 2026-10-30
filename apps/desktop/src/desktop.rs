@@ -113,7 +113,7 @@ use aeris_chart_integration::{
     MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError,
     OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
     PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings,
-    VolumePlacement, VolumeSettings, chart_color_hex,
+    VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource};
 use aeris_contracts::{
@@ -1115,6 +1115,8 @@ enum IndicatorSettingsDialog {
 struct VolumeDialogState {
     original: VolumeSettings,
     draft: VolumeSettings,
+    /// The colors the chart draws for colors the draft leaves unset.
+    defaults: VolumeDefaultColors,
     average_length: Entity<InputState>,
     color_picker: Option<DialogColorPickerState<VolumeColorTarget>>,
     /// The setting whose dropdown is open.
@@ -1140,12 +1142,13 @@ impl VolumeColorTarget {
         }
     }
 
-    /// The color as drawn for `settings`.
-    fn color(self, settings: &VolumeSettings) -> String {
+    /// The color the dialog's draft draws.
+    fn color(self, dialog: &VolumeDialogState) -> String {
+        let (settings, defaults) = (&dialog.draft, &dialog.defaults);
         match self {
-            Self::Up => settings.effective_up_color(),
-            Self::Down => settings.effective_down_color(),
-            Self::Average => settings.effective_average_color(),
+            Self::Up => settings.effective_up_color(defaults),
+            Self::Down => settings.effective_down_color(defaults),
+            Self::Average => settings.effective_average_color(defaults),
         }
     }
 }

@@ -662,16 +662,16 @@ mod tests {
         assert_eq!(dark.primary, light.primary);
         assert_eq!(light.warning, ThemeColor::from_rgb8(255, 105, 0));
         assert_eq!(dark.warning, light.warning);
-        assert_eq!(light.positive, ThemeColor::from_rgb8(8, 153, 129));
-        assert_eq!(dark.positive, light.positive);
+        assert_eq!(light.positive, ThemeColor::from_rgb8(63, 185, 80));
+        assert_eq!(dark.positive, ThemeColor::from_rgb8(152, 195, 121));
         assert_eq!(
             light.primary_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(light.bullish, ThemeColor::from_rgb8(8, 153, 129));
-        assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
-        assert_eq!(dark.bullish, light.bullish);
-        assert_eq!(dark.bearish, light.bearish);
+        assert_eq!(light.bullish, ThemeColor::from_rgb8(63, 185, 80));
+        assert_eq!(light.bearish, ThemeColor::from_rgb8(248, 81, 73));
+        assert_eq!(dark.bullish, ThemeColor::from_rgb8(152, 195, 121));
+        assert_eq!(dark.bearish, ThemeColor::from_rgb8(224, 108, 117));
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
@@ -684,7 +684,8 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
         assert_eq!(token_source(&dark_tokens, "danger"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "warning"), "#ff6900");
-        assert_eq!(token_source(&dark_tokens, "positive"), "#089981");
+        assert_eq!(token_source(&dark_tokens, "positive"), "#98c379");
+        assert_eq!(token_source(&light_tokens, "negative"), "#f85149");
         assert_eq!(token_source(&dark_tokens, "primary"), "#006EDD");
         assert_eq!(token_source(&light_tokens, "button-fill"), "#0a0a0af2");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#fafafad9");
@@ -908,19 +909,19 @@ mod tests {
     fn big_trade_bubbles_are_translucent_chart_direction_colors() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(8, 153, 129, 89));
-        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(247, 82, 95, 89));
-        assert_eq!(dark.buy_bubble, light.buy_bubble);
-        assert_eq!(dark.sell_bubble, light.sell_bubble);
-        assert_eq!(light.buy_bubble.css_rgba(), "rgba(8, 153, 129, 0.3490)");
-        assert_eq!(light.bearish.css_rgba(), "rgba(247, 82, 95, 1.0000)");
+        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(63, 185, 80, 89));
+        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(248, 81, 73, 89));
+        assert_eq!(dark.buy_bubble, ThemeColor::from_rgba8(152, 195, 121, 89));
+        assert_eq!(dark.sell_bubble, ThemeColor::from_rgba8(224, 108, 117, 89));
+        assert_eq!(light.buy_bubble.css_rgba(), "rgba(63, 185, 80, 0.3490)");
+        assert_eq!(light.bearish.css_rgba(), "rgba(248, 81, 73, 1.0000)");
         assert_eq!(
             token_source(&AerisTheme::light().color_tokens(), "buy-bubble"),
-            "color-mix(in srgb, #089981 35%, transparent)"
+            "color-mix(in srgb, var(--positive) 35%, transparent)"
         );
         assert_eq!(
             token_source(&AerisTheme::dark().color_tokens(), "sell-bubble"),
-            "color-mix(in srgb, #f7525f 35%, transparent)"
+            "color-mix(in srgb, var(--negative) 35%, transparent)"
         );
     }
 
@@ -1000,12 +1001,12 @@ mod tests {
         let dark = AerisTheme::dark().colors;
         assert_eq!(light.text_positive, light.positive);
         assert_eq!(dark.text_positive, dark.positive);
-        assert_eq!(light.text_negative, ThemeColor::from_rgb8(247, 82, 95));
-        assert_eq!(dark.text_negative, light.text_negative);
-        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(220, 245, 240));
-        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(25, 60, 55));
-        assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(255, 226, 226));
-        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(83, 43, 46));
+        assert_eq!(light.text_negative, ThemeColor::from_rgb8(248, 81, 73));
+        assert_eq!(dark.text_negative, ThemeColor::from_rgb8(224, 108, 117));
+        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(232, 247, 234));
+        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(60, 73, 51));
+        assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(254, 225, 224));
+        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(83, 49, 51));
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
@@ -1017,10 +1018,10 @@ mod tests {
             token_source(&light_tokens, "text-negative"),
             "var(--negative)"
         );
-        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dcf5f0");
-        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#193c37");
-        assert_eq!(token_source(&light_tokens, "negative-subtle"), "#ffe2e2");
-        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#532b2e");
+        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#e8f7ea");
+        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#3c4933");
+        assert_eq!(token_source(&light_tokens, "negative-subtle"), "#fee1e0");
+        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#533133");
     }
 
     #[test]
@@ -1091,6 +1092,19 @@ mod tests {
             token_source(&high_contrast.color_tokens(), "border-secondary"),
             "#404040"
         );
+        // The default theme paints the Aeris Charts market pair in both modes.
+        let high_contrast_light = AerisTheme::resolve(ThemePreset::HighContrast, ThemeMode::Light);
+        for (theme, engine) in [
+            (high_contrast, AerisTheme::dark()),
+            (high_contrast_light, AerisTheme::light()),
+        ] {
+            assert_eq!(theme.colors.bullish, engine.colors.bullish);
+            assert_eq!(theme.colors.bearish, engine.colors.bearish);
+            assert_eq!(theme.colors.positive_subtle, engine.colors.positive_subtle);
+            assert_eq!(theme.colors.negative_subtle, engine.colors.negative_subtle);
+            assert_eq!(theme.colors.buy_bubble, engine.colors.buy_bubble);
+            assert_eq!(theme.colors.sell_bubble, engine.colors.sell_bubble);
+        }
         let tokyo = AerisTheme::resolve(ThemePreset::TokyoNight, ThemeMode::Dark);
         assert_eq!(
             tokyo.colors.surface,
@@ -1238,8 +1252,12 @@ mod tests {
         assert!(css.contains("/* Chart */"));
         assert!(css.contains("--bullish: var(--positive);"));
         assert!(css.contains("--bearish: var(--negative);"));
-        assert!(css.contains("--buy-bubble: color-mix(in srgb, #089981 35%, transparent);"));
-        assert!(css.contains("--sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);"));
+        assert!(
+            css.contains("--buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);")
+        );
+        assert!(
+            css.contains("--sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);")
+        );
         assert_eq!(platform_font_family(), "DM Sans");
         assert_eq!(platform_font_stack(), "\"DM Sans\", sans-serif");
 

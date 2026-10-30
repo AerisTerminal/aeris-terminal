@@ -531,9 +531,10 @@ const COLOR_LITERAL_ALLOWLIST: &[(&str, usize, &str)] = &[
     ),
     (
         "apps/desktop/src/desktop/workspace_migrations.rs",
-        3,
-        "Aeris Charts fallbacks that layouts written before color provenance pinned; the \
-         schema 3 migration recognizes them, they are never painted",
+        11,
+        "retired Aeris Charts colors the migration chain recognizes and never paints: the \
+         fallbacks layouts pinned before color provenance (schema 3) and the former market \
+         up/down pair with its tints (schema 5)",
     ),
 ];
 
