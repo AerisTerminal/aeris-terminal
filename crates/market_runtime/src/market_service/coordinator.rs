@@ -6311,6 +6311,168 @@ mod tests {
         ));
     }
 
+    /// A Hyperliquid chart whose socket is still connecting: the demand has
+    /// requested covering history, but no live session is online yet.
+    fn connecting_hyperliquid_chart() -> (
+        Coordinator<'static>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        ConsumerId,
+        BarSeriesKey,
+    ) {
+        let mut coordinator = coordinator();
+        let (history_sender, history_receiver) = std::sync::mpsc::sync_channel(4);
+        coordinator.providers.records.insert(
+            "hyperliquid",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
+                history: Box::leak(Box::new(history_sender)),
+                lifecycle: None,
+                hyperliquid: None,
+                rithmic: None,
+                catalog: None,
+            },
+        );
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Connecting(1),
+        ));
+        coordinator
+            .install_provider_instrument(&hyperliquid_instrument())
+            .expect("Hyperliquid instrument installs");
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let selected = hyperliquid_series();
+        demand_series(&mut coordinator, consumer, 1, &selected);
+        (coordinator, history_receiver, consumer, selected)
+    }
+
+    fn forming_minute_bar(minute: i64, source_sequence: u64, close: i64) -> MarketBar {
+        MarketBar {
+            source_sequence,
+            exchange_timestamp_seconds: minute * 60,
+            exchange_timestamp_unix_nanos: minute * 60 * 1_000_000_000,
+            open: 100,
+            high: close.max(100),
+            low: close.min(100),
+            close,
+            volume: 1,
+        }
+    }
+
+    /// Completes the chart's covering request with three closed minutes and
+    /// the provider's open fourth minute, then runs the turn's live publication.
+    fn complete_hyperliquid_history_with_forming(
+        coordinator: &mut Coordinator<'_>,
+        history: &std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+    ) {
+        let request = history
+            .try_recv()
+            .expect("the demand requests covering history");
+        coordinator.history_completed(
+            &request.ticket,
+            request.provider_generation,
+            request.range,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: minute_bars(0, 3),
+                forming: Some(FormingBar {
+                    bar: forming_minute_bar(3, 4, 102),
+                    trades: None,
+                }),
+                handoff_boundary_unix_nanos: None,
+                backwards_exhausted: false,
+            }),
+        );
+        coordinator.publish_lifecycle_live();
+    }
+
+    fn drain_series_publications(
+        coordinator: &mut Coordinator<'_>,
+        consumer: ConsumerId,
+    ) -> Vec<MarketRuntimeEvent> {
+        coordinator
+            .events
+            .get_mut(&consumer)
+            .expect("consumer outbox")
+            .series
+            .drain(..)
+            .collect()
+    }
+
+    /// The chart opens on a covering snapshot of the closed minutes followed,
+    /// in the same publication, by the provider's forming minute.
+    fn assert_opens_with_forming_bar(events: &[MarketRuntimeEvent], close: i64) {
+        assert!(
+            matches!(
+                events,
+                [
+                    MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                    MarketRuntimeEvent::SeriesUpdate(update),
+                ] if snapshot.snapshot.bars.len() == 3
+                    && update.forming
+                    && update.bar.exchange_timestamp_unix_nanos == 3 * 60 * 1_000_000_000
+                    && update.bar.source_sequence == 4
+                    && update.bar.close == close
+            ),
+            "the first publication must carry the forming candle: {events:?}"
+        );
+    }
+
+    #[test]
+    fn hyperliquid_history_before_online_opens_with_its_forming_candle() {
+        let (mut coordinator, history, consumer, _) = connecting_hyperliquid_chart();
+        complete_hyperliquid_history_with_forming(&mut coordinator, &history);
+        assert_opens_with_forming_bar(&drain_series_publications(&mut coordinator, consumer), 102);
+
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Connected(1),
+        ));
+        coordinator.publish_lifecycle_live();
+        assert!(
+            drain_series_publications(&mut coordinator, consumer).is_empty(),
+            "going online must not republish the forming candle"
+        );
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Candle(
+                1,
+                "BTC".into(),
+                "1m".into(),
+                aeris_hyperliquid_market_adapter::HyperliquidLiveCandle {
+                    open_nanos: 3 * 60 * 1_000_000_000,
+                    open: 100,
+                    high: 104,
+                    low: 100,
+                    close: 104,
+                    volume: 2,
+                },
+            ),
+        ));
+        coordinator.publish_lifecycle_live();
+        assert!(
+            matches!(
+                drain_series_publications(&mut coordinator, consumer).as_slice(),
+                [MarketRuntimeEvent::SeriesUpdate(update)]
+                    if update.forming
+                        && update.bar.source_sequence == 4
+                        && update.bar.close == 104
+            ),
+            "a live candle revises the one canonical forming bar in place"
+        );
+    }
+
+    #[test]
+    fn hyperliquid_history_after_online_opens_with_its_forming_candle() {
+        let (mut coordinator, history, consumer, _) = connecting_hyperliquid_chart();
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Connected(1),
+        ));
+        complete_hyperliquid_history_with_forming(&mut coordinator, &history);
+        assert_opens_with_forming_bar(&drain_series_publications(&mut coordinator, consumer), 102);
+    }
+
     #[test]
     fn scripted_candle_publication_reports_seed_live_and_reconnect_in_order() {
         use super::super::clock::{Clock, ScriptedClock};

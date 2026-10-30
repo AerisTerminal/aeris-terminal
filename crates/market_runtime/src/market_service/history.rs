@@ -1242,6 +1242,7 @@ impl Coordinator<'_> {
         } else {
             CompletedHistoryInstall::Initial
         };
+        let seeds_live = install.reseeds_live();
         if self
             .install_completed_history(ticket, generation, prepared.snapshot, install)
             .is_none()
@@ -1277,6 +1278,9 @@ impl Coordinator<'_> {
             );
         }
         self.execute_studies_after_history_install(series, repaired_timestamp_span);
+        if seeds_live {
+            self.publish_seeded_handoff(series);
+        }
         if let Some(coverage) = self.history.coverage_mut(series, ticket.provider) {
             coverage.confirmed_empty = None;
             if range.is_none() {

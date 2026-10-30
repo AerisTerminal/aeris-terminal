@@ -17,6 +17,15 @@ pub(super) struct Boundary {
 
 impl Boundary {
     pub(super) fn new() -> Self {
+        Self::start(true)
+    }
+
+    /// A provider session that has begun connecting but has not come online.
+    pub(super) fn connecting() -> Self {
+        Self::start(false)
+    }
+
+    fn start(online: bool) -> Self {
         let clock = std::sync::Arc::new(super::super::super::clock::ScriptedClock::new(
             1_800_000_000_000_000_000,
         ));
@@ -37,7 +46,9 @@ impl Boundary {
             clock,
         };
         boundary.provider_event(RithmicRealtimeEvent::Connecting(1));
-        boundary.provider_event(RithmicRealtimeEvent::Connected(1));
+        if online {
+            boundary.provider_event(RithmicRealtimeEvent::Connected(1));
+        }
         boundary.install(instrument());
         let consumer = consumer(1);
         let (reply, received) = std::sync::mpsc::sync_channel(1);
@@ -276,6 +287,57 @@ impl Boundary {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
         self.command(Command::InstallProviderInstrument(instrument, reply));
         received.recv().expect("install reply").expect("instrument installs");
+    }
+}
+
+fn series_publications(events: Vec<MarketRuntimeEvent>) -> Vec<MarketRuntimeEvent> {
+    events.into_iter().filter(|event| matches!(
+        event,
+        MarketRuntimeEvent::SeriesSnapshot(_) | MarketRuntimeEvent::SeriesUpdate(_)
+    )).collect()
+}
+
+#[test]
+fn trade_built_chart_opens_with_its_forming_bar_whether_or_not_the_feed_is_online() {
+    for online in [false, true] {
+        let mut boundary = if online { Boundary::new() } else { Boundary::connecting() };
+        boundary.demand(boundary.series(), 1);
+        let request = boundary.history_request();
+        let mut forming = minute_bars(3, 1)[0];
+        forming.source_sequence = 4;
+        forming.close = 101;
+        boundary.complete(request, minute_bars(0, 3), Some(forming));
+        let opened = series_publications(boundary.events());
+        assert!(
+            matches!(opened.as_slice(), [
+                MarketRuntimeEvent::SeriesSnapshot(snapshot),
+                MarketRuntimeEvent::SeriesUpdate(update),
+            ] if snapshot.snapshot.bars.len() == 3
+                && update.forming
+                && update.bar.exchange_timestamp_unix_nanos == 3 * 60_000_000_000
+                && update.bar.source_sequence == 4
+                && update.bar.close == 101),
+            "online={online}: the first publication must carry the forming bar: {opened:?}"
+        );
+        if !online {
+            boundary.provider_event(RithmicRealtimeEvent::Connected(1));
+            assert!(
+                series_publications(boundary.events()).is_empty(),
+                "going online must not republish the forming bar"
+            );
+        }
+        let mut trade =
+            rithmic_trade_for_series(&boundary.series(), 1, 3 * 60_000_000_000 + 30_000_000_000);
+        trade.metadata.session_generation = 1;
+        boundary.provider_event(RithmicRealtimeEvent::Trade(1, trade));
+        let live = series_publications(boundary.events());
+        assert!(
+            matches!(live.as_slice(), [MarketRuntimeEvent::SeriesUpdate(update)]
+                if update.forming
+                    && update.bar.source_sequence == 4
+                    && update.operation == aeris_market_engine::SeriesTailOperation::Revise),
+            "online={online}: a live trade revises the one canonical forming bar: {live:?}"
+        );
     }
 }
 

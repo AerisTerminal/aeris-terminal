@@ -456,28 +456,41 @@ fn replay_gap_recovery() {
     );
 }
 
+/// Folds the newest covering snapshot and the tail updates after it into the
+/// consumer's view. A covering snapshot may still carry the forming tail the
+/// consumer was already shown; the reseed's own forming bar then appends after
+/// it, so the view is four contiguous completed periods and one forming bar.
 fn assert_contiguous_replay_history(events: &[MarketRuntimeEvent]) {
-    let completed = events
+    let start = events
         .iter()
-        .rev()
-        .find_map(|event| match event {
-            MarketRuntimeEvent::SeriesSnapshot(publication) => Some(&publication.snapshot),
-            _ => None,
-        })
+        .rposition(|event| matches!(event, MarketRuntimeEvent::SeriesSnapshot(_)))
         .expect("recovery publishes completed history");
-    assert_eq!(completed.bars.len(), 4);
+    let MarketRuntimeEvent::SeriesSnapshot(publication) = &events[start] else {
+        unreachable!("rposition matched a snapshot");
+    };
+    let mut view = publication.snapshot.bars.to_vec();
+    let mut forming = publication.snapshot.forming;
+    for event in &events[start + 1..] {
+        let MarketRuntimeEvent::SeriesUpdate(update) = event else {
+            continue;
+        };
+        match update.operation {
+            aeris_market_engine::SeriesTailOperation::Append => view.push(update.bar),
+            aeris_market_engine::SeriesTailOperation::Revise => {
+                *view.last_mut().expect("a revision follows a bar") = update.bar;
+            }
+        }
+        forming = update.forming;
+    }
+    assert!(forming, "the consumer view ends on one forming bar: {view:?}");
+    assert_eq!(view.len(), 5, "four completed periods and one forming bar");
     assert!(
-        !completed.forming,
-        "the completed snapshot has no forming tail"
-    );
-    assert!(
-        completed
-            .bars
-            .windows(2)
+        view.windows(2)
             .all(|pair| pair[1].exchange_timestamp_unix_nanos
                 - pair[0].exchange_timestamp_unix_nanos
-                == 60_000_000_000),
-        "completed history has zero interior gaps"
+                == 60_000_000_000
+                && pair[1].source_sequence > pair[0].source_sequence),
+        "the consumer view has zero interior gaps: {view:?}"
     );
 }
 
@@ -806,7 +819,8 @@ fn replay_history_exhaustion() {
             .coordinator
             .engine
             .series_snapshot(&series)
-            .is_some_and(|snapshot| snapshot.bars.len() == 3)
+            .is_some_and(|snapshot| snapshot.bars.len() == 4 && snapshot.forming),
+        "three completed periods and the seeded forming bar stay canonical"
     );
     assert!(matches!(
         harness

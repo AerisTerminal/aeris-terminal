@@ -1,8 +1,8 @@
 use super::super::history::tracker::HistoryTicket;
 use super::{CandleHandoffSeed, RecoveryReason, SeriesFailure, SeriesInput, SeriesLifecycle};
 use crate::market_service::{
-    BarSeriesKey, Coordinator, FailureStage, FormingBar, LiveModel, MarketStream, MarketTrade,
-    ProviderGeneration, ProviderHealth, TradeHandoffSeed, id,
+    BarSeriesKey, Coordinator, FailureStage, FormingBar, LiveModel, MarketBar, MarketStream,
+    MarketTrade, ProviderGeneration, ProviderHealth, TradeHandoffSeed, id,
 };
 use aeris_observability::diagnostic;
 
@@ -573,42 +573,82 @@ impl Coordinator<'_> {
             .iter()
             .filter_map(|series| {
                 let live = self.series.get_mut(series)?;
-                let trade_built = live.trade_model().is_some();
-                let update = if trade_built {
+                let tails = if live.trade_model().is_some() {
                     live.take_trade_publication()?
                 } else {
                     live.take_publication()?
                 };
-                let (price_scale, quantity_scale) = live
-                    .trade_model()
-                    .map_or((live.price_scale, live.quantity_scale), |model| {
-                        (model.price_scale, model.quantity_scale)
-                    });
-                Some((
-                    live.series.clone(),
-                    live.generation,
-                    price_scale,
-                    quantity_scale,
-                    update,
-                    trade_built,
-                ))
+                Some(LivePublication::of(live, tails))
             })
             .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, tails, trade_built) in ready {
-            let published =
-                self.install_live_tails(&series, generation, price_scale, quantity_scale, tails);
-            if let Err(error) = published {
-                diagnostic!("Aeris engine live publication failed: {error}");
-                self.recover_lifecycle_series(
-                    &series,
-                    generation,
-                    FailureStage::Publication,
-                    "Live publication requires covering history",
-                );
-            } else if trade_built && let Some(model) = self.series.trade_mut(&series) {
-                model.last_publication_at = self.clock.monotonic();
-            }
+        for publication in ready {
+            self.install_live_publication(publication);
         }
         self.collect_dirty_series();
+    }
+
+    /// Publishes the forming bar a covering-history seed left on the live
+    /// handoff right behind its covering snapshot, so a chart opens on its
+    /// current candle even while the live feed is still connecting.
+    pub(in crate::market_service) fn publish_seeded_handoff(&mut self, series: &BarSeriesKey) {
+        let Some(publication) = self.series.get_mut(series).and_then(|live| {
+            let tails = live.take_handoff_publication()?;
+            Some(LivePublication::of(live, tails))
+        }) else {
+            return;
+        };
+        self.install_live_publication(publication);
+    }
+
+    fn install_live_publication(&mut self, publication: LivePublication) {
+        let LivePublication {
+            series,
+            generation,
+            price_scale,
+            quantity_scale,
+            tails,
+            trade_built,
+        } = publication;
+        let published =
+            self.install_live_tails(&series, generation, price_scale, quantity_scale, tails);
+        if let Err(error) = published {
+            diagnostic!("Aeris engine live publication failed: {error}");
+            self.recover_lifecycle_series(
+                &series,
+                generation,
+                FailureStage::Publication,
+                "Live publication requires covering history",
+            );
+        } else if trade_built && let Some(model) = self.series.trade_mut(&series) {
+            model.last_publication_at = self.clock.monotonic();
+        }
+    }
+}
+
+/// One drained lifecycle tail with the precision and identity it installs under.
+struct LivePublication {
+    series: BarSeriesKey,
+    generation: ProviderGeneration,
+    price_scale: u8,
+    quantity_scale: u8,
+    tails: Vec<MarketBar>,
+    trade_built: bool,
+}
+
+impl LivePublication {
+    fn of(live: &SeriesLifecycle, tails: Vec<MarketBar>) -> Self {
+        let (price_scale, quantity_scale) = live
+            .trade_model()
+            .map_or((live.price_scale, live.quantity_scale), |model| {
+                (model.price_scale, model.quantity_scale)
+            });
+        Self {
+            series: live.series.clone(),
+            generation: live.generation,
+            price_scale,
+            quantity_scale,
+            tails,
+            trade_built: live.trade_model().is_some(),
+        }
     }
 }

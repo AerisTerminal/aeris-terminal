@@ -279,7 +279,14 @@ impl TradeModel {
     }
 
     pub(in crate::market_service) fn take_publication(&mut self) -> Option<Vec<MarketBar>> {
-        if !self.connected || !self.dirty {
+        if !self.connected {
+            return None;
+        }
+        self.drain_publication()
+    }
+
+    pub(in crate::market_service) fn drain_publication(&mut self) -> Option<Vec<MarketBar>> {
+        if !self.dirty {
             return None;
         }
         self.dirty = false;

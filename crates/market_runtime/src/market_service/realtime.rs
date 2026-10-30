@@ -591,12 +591,10 @@ impl SeriesLifecycle {
     }
 
     pub(super) fn take_publication(&mut self) -> Option<Vec<MarketBar>> {
-        if !self.connected || !self.history_ready() || !self.dirty {
+        if !self.connected {
             return None;
         }
-        let tails = self.pending_publications.drain(..).collect::<Vec<_>>();
-        self.dirty = false;
-        (!tails.is_empty()).then_some(tails)
+        self.take_handoff_publication()
     }
 
     pub(super) fn accept_bar(&mut self, bar: MarketBar) -> Result<(), String> {

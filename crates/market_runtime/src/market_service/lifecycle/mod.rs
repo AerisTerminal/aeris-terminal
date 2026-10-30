@@ -464,6 +464,26 @@ impl SeriesLifecycle {
         self.trade_model_mut()?.take_publication()
     }
 
+    /// Drains the tail a covering-history seed has just closed the seam with.
+    ///
+    /// Live input waits for the feed to come online, but the seeded forming
+    /// bar is history the provider already returned: the chart opens on it
+    /// together with the covering snapshot instead of after the socket.
+    pub(super) fn take_handoff_publication(&mut self) -> Option<Vec<MarketBar>> {
+        if !self.history_ready() {
+            return None;
+        }
+        if let Some(model) = self.trade_model_mut() {
+            return model.drain_publication();
+        }
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        let tails = self.pending_publications.drain(..).collect::<Vec<_>>();
+        (!tails.is_empty()).then_some(tails)
+    }
+
     fn mark_trade_progress(&mut self) {
         if self.history_ready() && self.trade_model().is_some_and(|model| model.dirty) {
             self.state = SeriesState::Live {
