@@ -73,10 +73,12 @@ pub enum UiIcon {
     Pause,
     Next,
     Previous,
+    CancelCircle,
+    JumpToEnd,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 61] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -136,6 +138,8 @@ impl UiIcon {
         Self::Pause,
         Self::Next,
         Self::Previous,
+        Self::CancelCircle,
+        Self::JumpToEnd,
     ];
 
     #[must_use]
@@ -200,6 +204,8 @@ impl UiIcon {
             Self::Pause => "pause.svg",
             Self::Next => "next.svg",
             Self::Previous => "previous.svg",
+            Self::CancelCircle => "cancel-circle.svg",
+            Self::JumpToEnd => "jump-to-end.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -636,6 +642,8 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "pause.svg" => include_bytes!("../../assets/icons/ui/pause.svg"),
         "next.svg" => include_bytes!("../../assets/icons/ui/next.svg"),
         "previous.svg" => include_bytes!("../../assets/icons/ui/previous.svg"),
+        "cancel-circle.svg" => include_bytes!("../../assets/icons/ui/cancel-circle.svg"),
+        "jump-to-end.svg" => include_bytes!("../../assets/icons/ui/jump-to-end.svg"),
         _ => return None,
     })
 }

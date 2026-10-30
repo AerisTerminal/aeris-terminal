@@ -480,8 +480,11 @@ pub(super) fn workspace_market_area(
         },
         theme,
     );
-    let context = workspace_context_panel(surface, active_surface, theme);
-    let center = workspace_center_column(grid, context, drawing_toolbar_collapsed, active_surface);
+    let below = [
+        super::bar_replay::bar_replay_panel(active_surface, theme, cx),
+        workspace_context_panel(surface, active_surface, theme),
+    ];
+    let center = workspace_center_column(grid, below, drawing_toolbar_collapsed, active_surface);
     div()
         .relative()
         .flex()
@@ -504,10 +507,11 @@ pub(super) fn workspace_market_area(
         .children(price_alert_dialog)
 }
 
-/// Chart grid plus the bottom context panel, inset past the drawing toolbar.
+/// Chart grid plus the panels docked below it (bar replay, then market context), inset past
+/// the drawing toolbar.
 fn workspace_center_column(
     grid: impl IntoElement,
-    context: Option<AnyElement>,
+    below: [Option<AnyElement>; 2],
     drawing_toolbar_collapsed: bool,
     active_surface: &Entity<WorkspaceSurface>,
 ) -> Div {
@@ -526,7 +530,7 @@ fn workspace_center_column(
             center.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
         })
         .child(grid)
-        .children(context)
+        .children(below.into_iter().flatten())
         .on_drag_move::<ContextPanelHeightDrag>(move |event, _, cx| {
             let bottom = f32::from(event.bounds.bottom());
             let available =

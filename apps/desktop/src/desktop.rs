@@ -2919,7 +2919,7 @@ struct HeaderState {
     account_label: Option<String>,
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
-    bar_replay: bar_replay::BarReplayHeader,
+    bar_replay_phase: aeris_chart_integration::ChartReplayPhase,
     controls: HeaderControls,
     chart_link_group: u8,
     connection_state: FeedConnectionState,

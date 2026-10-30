@@ -587,9 +587,9 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(super::bar_replay::bar_replay_header_controls(
+        .child(super::bar_replay::bar_replay_header_control(
             app,
-            state.bar_replay,
+            state.bar_replay_phase,
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
         ))
