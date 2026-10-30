@@ -7631,7 +7631,15 @@ mod tests {
     }
 
     fn watchdog_quote(sequence: u64) -> TopOfBookQuote {
-        let selected = instrument();
+        instrument_quote(&instrument(), sequence, 100)
+    }
+
+    fn instrument_quote(
+        selected: &InstallProviderInstrument,
+        sequence: u64,
+        bid: i64,
+    ) -> TopOfBookQuote {
+        let selected = selected.clone();
         TopOfBookQuote {
             metadata: EventMetadata {
                 provider_id: selected.provider,
@@ -7646,12 +7654,12 @@ mod tests {
                 },
             },
             bid: Some(aeris_market_data::QuoteLevel {
-                price: 100,
+                price: bid,
                 quantity: Some(2),
                 order_count: None,
             }),
             ask: Some(aeris_market_data::QuoteLevel {
-                price: 101,
+                price: bid + 1,
                 quantity: Some(2),
                 order_count: None,
             }),
@@ -7738,6 +7746,217 @@ mod tests {
             recovering(&coordinator),
             "the normal threshold applies again"
         );
+    }
+
+    /// A Hyperliquid candle chart on a scripted clock starting at `at`, online
+    /// and seeded from covering history, that has received no live candle.
+    fn quiet_hyperliquid_candle_chart(
+        at: &str,
+        installed: &InstallProviderInstrument,
+    ) -> (
+        Coordinator<'static>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        Arc<super::super::clock::ScriptedClock>,
+        BarSeriesKey,
+    ) {
+        use super::super::clock::{Clock, ScriptedClock};
+        use chrono::{DateTime, Utc};
+        let at = at
+            .parse::<DateTime<Utc>>()
+            .expect("UTC instant")
+            .timestamp_nanos_opt()
+            .expect("timestamp");
+        let clock = Arc::new(ScriptedClock::new(at));
+        let mut coordinator = coordinator();
+        coordinator.clock = Arc::clone(&clock) as Arc<dyn Clock>;
+        let (history_sender, history_receiver) = std::sync::mpsc::sync_channel(4);
+        coordinator.providers.records.insert(
+            "hyperliquid",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
+                history: Box::leak(Box::new(history_sender)),
+                lifecycle: None,
+                hyperliquid: None,
+                rithmic: None,
+                catalog: None,
+            },
+        );
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Connecting(1),
+        ));
+        coordinator
+            .install_provider_instrument(installed)
+            .expect("Hyperliquid instrument installs");
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let selected = BarSeriesKey {
+            provider_id: installed.provider.clone(),
+            instrument_id: installed.instrument_id.clone(),
+            entitlement_id: installed.entitlement_id.clone(),
+            period: BarPeriod::time(60).expect("minute"),
+            definition_version: 1,
+        };
+        demand_series(&mut coordinator, consumer, 1, &selected);
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Connected(1),
+        ));
+        complete_hyperliquid_history_with_forming(&mut coordinator, &history_receiver);
+        (coordinator, history_receiver, clock, selected)
+    }
+
+    fn candle_stall_recoveries(coordinator: &Coordinator<'_>, selected: &BarSeriesKey) -> u32 {
+        coordinator
+            .series
+            .candle(selected)
+            .expect("candle lifecycle")
+            .quiet_stall_recoveries
+    }
+
+    #[test]
+    fn watchdog_quiet_candle_series_defers_repeated_recoveries_until_a_candle() {
+        use super::super::watchdog::OPEN_STALL_THRESHOLD;
+        let (mut coordinator, history, clock, selected) =
+            quiet_hyperliquid_candle_chart("2026-08-17T14:00:00Z", &hyperliquid_instrument());
+        for (recoveries, silence) in [30, 60, 120, 240, 480, 480].into_iter().enumerate() {
+            clock.advance(Duration::from_secs(silence - 1));
+            coordinator.recover_stalled_live_series();
+            assert_no_history_request(
+                &history,
+                &format!("after {recoveries} quiet recoveries the series waits {silence}s"),
+            );
+            clock.advance(Duration::from_secs(1));
+            coordinator.recover_stalled_live_series();
+            // Panics unless this silence requested covering history again.
+            complete_hyperliquid_history_with_forming(&mut coordinator, &history);
+            assert_eq!(
+                candle_stall_recoveries(&coordinator, &selected),
+                u32::try_from(recoveries + 1).expect("small count"),
+            );
+        }
+        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+            HyperliquidRealtimeEvent::Candle(
+                1,
+                "BTC".into(),
+                "1m".into(),
+                aeris_hyperliquid_market_adapter::HyperliquidLiveCandle {
+                    open_nanos: 3 * 60 * 1_000_000_000,
+                    open: 100,
+                    high: 104,
+                    low: 100,
+                    close: 104,
+                    volume: 2,
+                },
+            ),
+        ));
+        assert_eq!(
+            candle_stall_recoveries(&coordinator, &selected),
+            0,
+            "a live candle restores the threshold"
+        );
+        clock.advance(
+            OPEN_STALL_THRESHOLD
+                .checked_sub(Duration::from_secs(1))
+                .expect("threshold exceeds a second"),
+        );
+        coordinator.recover_stalled_live_series();
+        assert_no_history_request(&history, "a live candle is progress");
+        clock.advance(Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert!(
+            history.try_recv().is_ok(),
+            "the normal threshold applies again"
+        );
+    }
+
+    #[test]
+    fn watchdog_quotes_do_not_defer_a_quiet_candle_series() {
+        use super::super::watchdog::OPEN_STALL_THRESHOLD;
+        let installed = hyperliquid_instrument();
+        let (mut coordinator, history, clock, selected) =
+            quiet_hyperliquid_candle_chart("2026-08-17T14:00:00Z", &installed);
+        coordinator
+            .order_books
+            .entry((selected.provider_id.clone(), selected.instrument_id.clone()))
+            .or_insert_with(|| ProviderOrderBook::new(installed.clone(), false));
+        let quote = |coordinator: &mut Coordinator<'_>, sequence: u64| {
+            coordinator.provider_quote(
+                "hyperliquid",
+                1,
+                &instrument_quote(
+                    &installed,
+                    sequence,
+                    100 + i64::try_from(sequence).expect("bid"),
+                ),
+            );
+        };
+        clock.advance(
+            OPEN_STALL_THRESHOLD
+                .checked_sub(Duration::from_secs(1))
+                .expect("threshold exceeds a second"),
+        );
+        quote(&mut coordinator, 1);
+        clock.advance(Duration::from_secs(1));
+        quote(&mut coordinator, 2);
+        assert!(
+            coordinator
+                .order_books
+                .get(&(selected.provider_id.clone(), selected.instrument_id.clone()))
+                .and_then(|book| book.quote_observed_at)
+                .is_some(),
+            "the book accepted the newer quotes"
+        );
+        coordinator.recover_stalled_live_series();
+        complete_hyperliquid_history_with_forming(&mut coordinator, &history);
+        clock.advance(
+            (2 * OPEN_STALL_THRESHOLD)
+                .checked_sub(Duration::from_secs(1))
+                .expect("threshold exceeds a second"),
+        );
+        quote(&mut coordinator, 3);
+        coordinator.recover_stalled_live_series();
+        assert_no_history_request(&history, "a second quiet stall waits twice as long");
+        assert_eq!(
+            candle_stall_recoveries(&coordinator, &selected),
+            1,
+            "a quote does not restore the threshold"
+        );
+        clock.advance(Duration::from_secs(1));
+        quote(&mut coordinator, 4);
+        coordinator.recover_stalled_live_series();
+        assert!(
+            history.try_recv().is_ok(),
+            "quotes never stand in for candles"
+        );
+    }
+
+    #[test]
+    fn watchdog_quiet_candle_series_never_recovers_once_its_market_closes() {
+        use super::super::watchdog::OPEN_STALL_THRESHOLD;
+        // Weekday contract hours: the market closes at Friday midnight UTC.
+        let mut installed = hyperliquid_instrument();
+        installed.contract_metadata = contract_hours_watchdog_fixture().contract_metadata;
+        let (mut coordinator, history, clock, selected) =
+            quiet_hyperliquid_candle_chart("2026-08-21T23:59:00Z", &installed);
+        clock.advance(OPEN_STALL_THRESHOLD);
+        coordinator.recover_stalled_live_series();
+        complete_hyperliquid_history_with_forming(&mut coordinator, &history);
+        assert_eq!(candle_stall_recoveries(&coordinator, &selected), 1);
+        for silence in [60, 120, 240, 480, 480, 3_600] {
+            clock.advance(Duration::from_secs(silence));
+            coordinator.recover_stalled_live_series();
+            assert_no_history_request(&history, &format!("closed after {silence}s of silence"));
+        }
+        assert!(matches!(
+            coordinator
+                .series
+                .candle(&selected)
+                .expect("candle lifecycle")
+                .state(),
+            SeriesState::Dormant { .. }
+        ));
     }
 
     fn scripted_watchdog_recovery(provider: &'static str, unknown: bool) {

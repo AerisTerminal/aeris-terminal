@@ -466,6 +466,7 @@ impl SeriesLifecycle {
         self.state = SeriesState::Requested { provider: None };
         self.epoch = None;
         self.dirty = false;
+        self.quiet_stall_recoveries = 0;
     }
 
     pub(super) fn coverage(&self) -> Option<(i64, i64)> {
@@ -598,6 +599,7 @@ impl SeriesLifecycle {
     }
 
     pub(super) fn accept_bar(&mut self, bar: MarketBar) -> Result<(), String> {
+        self.quiet_stall_recoveries = 0;
         if self.history_ready() {
             if self.ingest(bar)? {
                 self.dirty = true;
@@ -2153,25 +2155,18 @@ impl Coordinator<'_> {
             .collect::<Vec<_>>();
         let candidates = trade_candidates
             .into_iter()
-            .chain(
-                self.series
-                    .candle_iter()
-                    .filter(|(_, live)| {
-                        live.connected
-                            && live.history_ready()
-                            && live.last_progress().is_some_and(|last| {
-                                now.duration_since(last) >= super::watchdog::OPEN_STALL_THRESHOLD
-                            })
-                    })
-                    .map(|(series, live)| {
-                        (
-                            series.clone(),
-                            live.generation,
-                            live.last_progress().expect("filtered live state"),
-                            true,
-                        )
-                    }),
-            )
+            .chain(self.series.candle_iter().filter_map(|(series, live)| {
+                // Only a provider candle is progress: quotes do not
+                // defer the recovery, and each recovery that no candle
+                // followed defers the next one.
+                let progress = live.last_progress()?
+                    + super::watchdog::quiet_recovery_grace(live.quiet_stall_recoveries);
+                (live.connected
+                    && live.history_ready()
+                    && now.saturating_duration_since(progress)
+                        >= super::watchdog::OPEN_STALL_THRESHOLD)
+                    .then(|| (series.clone(), live.generation, progress, true))
+            }))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return;
@@ -2197,6 +2192,11 @@ impl Coordinator<'_> {
                         RecoveryReason::StalledWhileOpen,
                         "Live candle series stalled while the market was open",
                     );
+                    if let Some(live) = self.series.candle_mut(&series)
+                        && live.awaiting_history()
+                    {
+                        live.quiet_stall_recoveries = live.quiet_stall_recoveries.saturating_add(1);
+                    }
                 } else {
                     self.recover_lifecycle_series(
                         &series,
@@ -3593,6 +3593,28 @@ mod tests {
         assert!(live.history_ready());
         assert_eq!(live.bars.last().map(|bar| bar.close), Some(10_250));
         assert_eq!(live.forming.map(|forming| forming.bar.close), Some(10_300));
+    }
+
+    #[test]
+    fn candle_stall_backoff_restarts_with_a_live_candle_or_a_new_session() {
+        let series = BarSeriesKey {
+            provider_id: "hyperliquid".to_string(),
+            instrument_id: "instrument:hyperliquid:BTC".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+            period: BarPeriod::time(60).expect("time period"),
+            definition_version: 1,
+        };
+        let mut live = SeriesLifecycle::new(series, generation(), "BTC", "1m");
+        live.quiet_stall_recoveries = 3;
+        live.accept_bar(candle(120_000_000_000, 10_000, 10_400, 9_900, 10_250, 4))
+            .expect("candle buffers before history");
+        assert_eq!(live.quiet_stall_recoveries, 0, "a live candle is progress");
+        live.quiet_stall_recoveries = 3;
+        live.reset(generation());
+        assert_eq!(
+            live.quiet_stall_recoveries, 0,
+            "a new session starts unpenalized"
+        );
     }
 
     #[test]

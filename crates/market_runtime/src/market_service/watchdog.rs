@@ -8,12 +8,14 @@ use aeris_market_engine::ProviderHealth;
 pub(super) const OPEN_STALL_THRESHOLD: Duration = Duration::from_secs(30);
 /// Unknown calendars receive ten times the open-market grace period.
 pub(super) const UNKNOWN_STALL_THRESHOLD: Duration = Duration::from_secs(300);
-/// A quiet series' threshold doubles after each recovery no trade followed,
-/// at most this many times: one recovery per eight minutes on an open market.
+/// A quiet series' threshold doubles after each recovery that no trade or
+/// provider candle followed, at most this many times: one recovery per eight
+/// minutes on an open market.
 const MAXIMUM_QUIET_RECOVERY_DOUBLINGS: u32 = 4;
 
-/// The extra silence a trade-built series is allowed after `recoveries`
-/// consecutive stall recoveries that no trade followed.
+/// The extra silence a live series is allowed after `recoveries` consecutive
+/// stall recoveries that no trade (or, for a provider-candle series, no
+/// candle) followed.
 pub(super) fn quiet_recovery_grace(recoveries: u32) -> Duration {
     OPEN_STALL_THRESHOLD * ((1_u32 << recoveries.min(MAXIMUM_QUIET_RECOVERY_DOUBLINGS)) - 1)
 }

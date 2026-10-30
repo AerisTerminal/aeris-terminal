@@ -275,6 +275,9 @@ pub(super) struct SeriesLifecycle {
     pub(super) state: SeriesState,
     pub(super) epoch: Option<Epoch<ProviderTag>>,
     pub(super) stale_inputs: u64,
+    /// Stall recoveries since the last provider candle; the watchdog waits
+    /// longer after each. A trade-built series counts its own on the trade model.
+    pub(super) quiet_stall_recoveries: u32,
 }
 
 impl SeriesLifecycle {
@@ -518,6 +521,7 @@ impl SeriesLifecycle {
             state: SeriesState::Requested { provider: None },
             epoch: None,
             stale_inputs: 0,
+            quiet_stall_recoveries: 0,
         }
     }
 
