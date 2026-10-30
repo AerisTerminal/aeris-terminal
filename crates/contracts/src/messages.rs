@@ -264,11 +264,10 @@ pub struct WorkspaceChartSettingsTemplateState {
     /// for legacy templates.
     #[prost(bool, optional, tag = "6")]
     pub show_order_management_lines: Option<bool>,
-    /// Whether host-projected execution/fill markers are visible. Absent means visible for legacy
-    /// templates.
+    /// Whether host-projected execution/fill markers are visible. Absent means hidden.
     #[prost(bool, optional, tag = "7")]
     pub show_execution_marks: Option<bool>,
-    /// Whether order and position lines extend to the pane's left edge. Absent means enabled.
+    /// Whether order and position lines extend to the pane's left edge. Absent means disabled.
     #[prost(bool, optional, tag = "8")]
     pub extend_order_lines_left: Option<bool>,
     /// Which parts of the chart legend show. Absent in legacy templates means all shown.
@@ -376,10 +375,10 @@ pub struct WorkspaceChartState {
     /// Host-only chart trading presentation. Absent in legacy workspaces means visible.
     #[prost(bool, optional, tag = "17")]
     pub show_order_management_lines: Option<bool>,
-    /// Host-only execution/fill marker presentation. Absent in legacy workspaces means visible.
+    /// Host-only execution/fill marker presentation. Absent means hidden.
     #[prost(bool, optional, tag = "18")]
     pub show_execution_marks: Option<bool>,
-    /// Chart order and position line extension. Absent in legacy workspaces means enabled.
+    /// Chart order and position line extension. Absent means disabled.
     #[prost(bool, optional, tag = "19")]
     pub extend_order_lines_left: Option<bool>,
     /// Which parts of the chart legend show. Absent in legacy workspaces means all shown.

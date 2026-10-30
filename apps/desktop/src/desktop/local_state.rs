@@ -2371,6 +2371,66 @@ mod tests {
     }
 
     #[test]
+    fn schema_5_trading_overlays_turn_off_once_and_a_later_choice_persists() {
+        let path = temporary_workspace_path();
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("temporary workspace directory");
+        let mut released = workspace_with_revision(31);
+        released.schema_revision = 5;
+        released.workspace_tabs[0].panes[0].chart = Some(WorkspaceChartState {
+            show_execution_marks: Some(true),
+            extend_order_lines_left: Some(true),
+            ..round_trip_chart_state()
+        });
+        released.chart_settings_templates = vec![WorkspaceChartSettingsTemplateState {
+            show_execution_marks: Some(true),
+            extend_order_lines_left: Some(true),
+            ..chart_settings_template("Scalping")
+        }];
+        DurableContainer::new(path.clone(), MAXIMUM_WORKSPACE_FILE_BYTES, 5)
+            .write(5, &released.encode_to_vec())
+            .expect("schema 5 envelope writes");
+        let overlays = |workspace: &WorkspaceState| {
+            let chart = workspace.workspace_tabs[0].panes[0]
+                .chart
+                .as_ref()
+                .expect("pane chart");
+            let template = &workspace.chart_settings_templates[0];
+            [
+                chart.show_execution_marks,
+                chart.extend_order_lines_left,
+                template.show_execution_marks,
+                template.extend_order_lines_left,
+            ]
+        };
+
+        let mut migrated = load_workspace_fixture(&path).expect("schema 5 workspace migrates");
+        assert_eq!(
+            overlays(&migrated),
+            [Some(false); 4],
+            "the upgrade turns execution marks and extended order lines off"
+        );
+
+        let chart = migrated.workspace_tabs[0].panes[0]
+            .chart
+            .as_mut()
+            .expect("pane chart");
+        chart.show_execution_marks = Some(true);
+        chart.extend_order_lines_left = Some(true);
+        let template = &mut migrated.chart_settings_templates[0];
+        template.show_execution_marks = Some(true);
+        template.extend_order_lines_left = Some(true);
+        save_workspace_fixture(&migrated, &path).expect("re-enabled workspace saves");
+        let reloaded = load_workspace_fixture(&path).expect("current workspace reloads");
+        assert_eq!(
+            overlays(&reloaded),
+            [Some(true); 4],
+            "showing them again after the upgrade survives a reload"
+        );
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
     fn the_chrome_fold_reads_the_legacy_file_once_and_leaves_it_untouched() {
         let path = temporary_workspace_path();
         let parent = path.parent().expect("temporary workspace parent");

@@ -5248,8 +5248,8 @@ impl Default for ChartTradingVisibilitySettings {
     fn default() -> Self {
         Self {
             show_order_management_lines: true,
-            show_execution_marks: true,
-            extend_order_lines_left: true,
+            show_execution_marks: false,
+            extend_order_lines_left: false,
         }
     }
 }

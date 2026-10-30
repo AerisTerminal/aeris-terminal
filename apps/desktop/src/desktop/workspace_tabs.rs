@@ -1616,8 +1616,8 @@ impl TerminalApp {
         };
         let trading_visibility = ChartTradingVisibilitySettings {
             show_order_management_lines: template.show_order_management_lines.unwrap_or(true),
-            show_execution_marks: template.show_execution_marks.unwrap_or(true),
-            extend_order_lines_left: template.extend_order_lines_left.unwrap_or(true),
+            show_execution_marks: template.show_execution_marks.unwrap_or(false),
+            extend_order_lines_left: template.extend_order_lines_left.unwrap_or(false),
         };
         let legend = workspace_surface::restored_chart_legend(template.legend);
         surface.update(cx, |surface, surface_cx| {

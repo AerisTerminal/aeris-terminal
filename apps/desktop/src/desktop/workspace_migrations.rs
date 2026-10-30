@@ -35,7 +35,9 @@ use super::workspace_surface::{
 ///   document; the old file is never written again and stays in place.
 /// - 5: chart colors still holding the retired Aeris Charts market palette follow the
 ///   theme's current up and down colors.
-pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 5;
+/// - 6: execution marks and left-extended order lines start off; every chart and template
+///   turns both off once, and a later choice to show them persists.
+pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 6;
 
 /// The schema whose step folds the legacy chart-chrome file into the document.
 const CHART_CHROME_FOLD_SCHEMA: u32 = 4;
@@ -124,7 +126,7 @@ pub(super) fn raw_proto_document_schema(workspace: &WorkspaceState) -> Result<u3
 
 /// The ordered chain from `from` to the current schema, in memory; persisting the result is
 /// the caller's choice. `legacy_chrome` is the legacy chart-chrome file's payload when the
-/// caller read one; only the final step uses it.
+/// caller read one; only the schema 4 chart-chrome fold uses it.
 pub(super) fn migrate_workspace(
     mut workspace: WorkspaceState,
     from: u32,
@@ -142,6 +144,9 @@ pub(super) fn migrate_workspace(
     }
     if from < 5 {
         follow_current_market_palette(&mut workspace);
+    }
+    if from < 6 {
+        start_trading_overlays_off(&mut workspace);
     }
     workspace.schema_revision = CURRENT_WORKSPACE_SCHEMA;
     workspace
@@ -404,6 +409,21 @@ fn follow_current_market_appearance(appearance: &mut WorkspaceChartAppearanceSta
         &mut appearance.baseline_bottom_color,
     ] {
         follow_retired(color, &RETIRED_MARKET_DOWN_COLORS, THEME_APPEARANCE_COLOR);
+    }
+}
+
+/// Step 5 to 6: execution marks and left-extended order lines became opt-in. Through schema 5
+/// both started shown and every save recorded the current value, so a stored value cannot
+/// tell a choice from that default; every chart and template turns both off once. The order management lines keep
+/// their stored value.
+fn start_trading_overlays_off(workspace: &mut WorkspaceState) {
+    for chart in workspace_panes(workspace).filter_map(|pane| pane.chart.as_mut()) {
+        chart.show_execution_marks = Some(false);
+        chart.extend_order_lines_left = Some(false);
+    }
+    for template in &mut workspace.chart_settings_templates {
+        template.show_execution_marks = Some(false);
+        template.extend_order_lines_left = Some(false);
     }
 }
 
@@ -776,6 +796,61 @@ mod tests {
             .and_then(|chart| chart.appearance.as_mut())
         {
             appearance.up_color = "#089981".to_string();
+        }
+        let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA, None);
+        assert_eq!(again, migrated, "a current document is never re-migrated");
+    }
+
+    #[test]
+    fn schema_5_execution_marks_and_extended_order_lines_turn_off_once() {
+        let mut workspace = workspace_with_chart(WorkspaceChartState {
+            show_order_management_lines: Some(true),
+            show_execution_marks: Some(true),
+            extend_order_lines_left: Some(true),
+            ..WorkspaceChartState::default()
+        });
+        workspace.schema_revision = 5;
+        workspace.saved_layouts[0].tab = Some(workspace.workspace_tabs[0].clone());
+        workspace.chart_settings_templates =
+            vec![aeris_contracts::WorkspaceChartSettingsTemplateState {
+                name: "template".to_string(),
+                show_order_management_lines: Some(true),
+                show_execution_marks: Some(true),
+                extend_order_lines_left: Some(true),
+                ..Default::default()
+            }];
+
+        let mut migrated = migrate_workspace(workspace, 5, None);
+
+        let saved_chart = migrated.saved_layouts[0]
+            .tab
+            .as_ref()
+            .and_then(|tab| tab.panes[0].chart.clone())
+            .expect("saved layout chart");
+        for chart in [
+            migrated.workspace_tabs[0].panes[0]
+                .chart
+                .clone()
+                .expect("migrated chart"),
+            saved_chart,
+        ] {
+            assert_eq!(chart.show_execution_marks, Some(false));
+            assert_eq!(chart.extend_order_lines_left, Some(false));
+            assert_eq!(
+                chart.show_order_management_lines,
+                Some(true),
+                "order management lines keep their stored value"
+            );
+        }
+        let template = &migrated.chart_settings_templates[0];
+        assert_eq!(template.show_execution_marks, Some(false));
+        assert_eq!(template.extend_order_lines_left, Some(false));
+        assert_eq!(template.show_order_management_lines, Some(true));
+
+        // Showing them again after the migration is the user's choice and is never reverted.
+        if let Some(chart) = migrated.workspace_tabs[0].panes[0].chart.as_mut() {
+            chart.show_execution_marks = Some(true);
+            chart.extend_order_lines_left = Some(true);
         }
         let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA, None);
         assert_eq!(again, migrated, "a current document is never re-migrated");

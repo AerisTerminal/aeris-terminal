@@ -107,7 +107,16 @@ fn ema_studies_default_to_one_pixel_and_explicit_widths_are_kept() {
 }
 
 #[test]
-fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_restore() {
+fn chart_trading_visibility_shows_only_order_lines_by_default_and_explicit_choices_restore() {
+    assert_eq!(
+        ChartTradingVisibilitySettings::default(),
+        ChartTradingVisibilitySettings {
+            show_order_management_lines: true,
+            show_execution_marks: false,
+            extend_order_lines_left: false,
+        },
+        "execution marks and extended order lines start off"
+    );
     assert_eq!(
         restored_chart_trading_visibility(None),
         ChartTradingVisibilitySettings::default()
@@ -120,7 +129,7 @@ fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_rest
     let explicit = WorkspaceChartState {
         show_order_management_lines: Some(false),
         show_execution_marks: Some(true),
-        extend_order_lines_left: Some(false),
+        extend_order_lines_left: Some(true),
         ..WorkspaceChartState::default()
     };
     assert_eq!(
@@ -128,7 +137,7 @@ fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_rest
         ChartTradingVisibilitySettings {
             show_order_management_lines: false,
             show_execution_marks: true,
-            extend_order_lines_left: false,
+            extend_order_lines_left: true,
         }
     );
 }
@@ -1747,6 +1756,34 @@ mod instrument_drawings {
     fn saved(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> WorkspaceChartState {
         cx.read(|cx| surface.read(cx).workspace_chart_state(cx))
             .expect("loaded chart state")
+    }
+
+    #[gpui::test]
+    fn a_fresh_pane_starts_without_execution_marks_or_extended_order_lines(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
+        show(&surface, "A", cx);
+        let (visibility, extends_left) = cx.read(|cx| {
+            let surface = surface.read(cx);
+            (
+                surface.chart_trading_visibility,
+                surface
+                    .chart
+                    .as_ref()
+                    .map(|chart| chart.read(cx).order_lines_extend_left()),
+            )
+        });
+        assert_eq!(visibility, ChartTradingVisibilitySettings::default());
+        assert_eq!(
+            extends_left,
+            Some(false),
+            "the chart draws order lines from their price label, not the pane's left edge"
+        );
+        let state = saved(&surface, cx);
+        assert_eq!(state.show_order_management_lines, Some(true));
+        assert_eq!(state.show_execution_marks, Some(false));
+        assert_eq!(state.extend_order_lines_left, Some(false));
     }
 
     #[gpui::test]

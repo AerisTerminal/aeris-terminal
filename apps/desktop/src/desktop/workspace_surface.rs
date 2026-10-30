@@ -76,10 +76,10 @@ pub(super) fn restored_chart_trading_visibility(
             .unwrap_or(true),
         show_execution_marks: restored
             .and_then(|state| state.show_execution_marks)
-            .unwrap_or(true),
+            .unwrap_or(false),
         extend_order_lines_left: restored
             .and_then(|state| state.extend_order_lines_left)
-            .unwrap_or(true),
+            .unwrap_or(false),
     }
 }
 
@@ -1757,7 +1757,7 @@ impl PanePresentation {
         chart.update(cx, |chart, _| {
             let mut failed = chart.set_time_zone(&state.time_zone).is_err();
             failed |= chart
-                .set_order_lines_extend_left(state.extend_order_lines_left.unwrap_or(true))
+                .set_order_lines_extend_left(state.extend_order_lines_left.unwrap_or(false))
                 .is_err();
             if !self.has_saved_chart {
                 return failed;
