@@ -662,8 +662,10 @@ mod tests {
         assert_eq!(dark.primary, light.primary);
         assert_eq!(light.warning, ThemeColor::from_rgb8(255, 105, 0));
         assert_eq!(dark.warning, light.warning);
-        assert_eq!(light.positive, ThemeColor::from_rgb8(63, 185, 80));
-        assert_eq!(dark.positive, ThemeColor::from_rgb8(152, 195, 121));
+        assert_eq!(light.positive, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(dark.positive, light.positive);
+        assert_eq!(light.negative, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(dark.negative, light.negative);
         assert_eq!(
             light.primary_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
@@ -684,16 +686,17 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
         assert_eq!(token_source(&dark_tokens, "danger"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "warning"), "#ff6900");
-        assert_eq!(token_source(&dark_tokens, "positive"), "#98c379");
-        assert_eq!(token_source(&light_tokens, "negative"), "#f85149");
+        assert_eq!(token_source(&dark_tokens, "positive"), "#089981");
+        assert_eq!(token_source(&light_tokens, "negative"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "primary"), "#006EDD");
         assert_eq!(token_source(&light_tokens, "button-fill"), "#0a0a0af2");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#fafafad9");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
-        for tokens in [&light_tokens, &dark_tokens] {
-            assert_eq!(token_source(tokens, "bullish"), "var(--positive)");
-            assert_eq!(token_source(tokens, "bearish"), "var(--negative)");
-        }
+        // Candles keep their own pair instead of following the gain/loss tokens.
+        assert_eq!(token_source(&light_tokens, "bullish"), "#3fb950");
+        assert_eq!(token_source(&light_tokens, "bearish"), "#f85149");
+        assert_eq!(token_source(&dark_tokens, "bullish"), "#98c379");
+        assert_eq!(token_source(&dark_tokens, "bearish"), "#e06c75");
         assert_eq!(
             token_source(&light_tokens, "ring-primary"),
             "var(--primary)"
@@ -917,11 +920,11 @@ mod tests {
         assert_eq!(light.bearish.css_rgba(), "rgba(248, 81, 73, 1.0000)");
         assert_eq!(
             token_source(&AerisTheme::light().color_tokens(), "buy-bubble"),
-            "color-mix(in srgb, var(--positive) 35%, transparent)"
+            "color-mix(in srgb, var(--bullish) 35%, transparent)"
         );
         assert_eq!(
             token_source(&AerisTheme::dark().color_tokens(), "sell-bubble"),
-            "color-mix(in srgb, var(--negative) 35%, transparent)"
+            "color-mix(in srgb, var(--bearish) 35%, transparent)"
         );
     }
 
@@ -1001,12 +1004,12 @@ mod tests {
         let dark = AerisTheme::dark().colors;
         assert_eq!(light.text_positive, light.positive);
         assert_eq!(dark.text_positive, dark.positive);
-        assert_eq!(light.text_negative, ThemeColor::from_rgb8(248, 81, 73));
-        assert_eq!(dark.text_negative, ThemeColor::from_rgb8(224, 108, 117));
-        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(232, 247, 234));
-        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(60, 73, 51));
-        assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(254, 225, 224));
-        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(83, 49, 51));
+        assert_eq!(light.text_negative, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(dark.text_negative, light.text_negative);
+        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(220, 245, 240));
+        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(25, 60, 55));
+        assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(255, 226, 226));
+        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(83, 43, 46));
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
@@ -1018,10 +1021,10 @@ mod tests {
             token_source(&light_tokens, "text-negative"),
             "var(--negative)"
         );
-        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#e8f7ea");
-        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#3c4933");
-        assert_eq!(token_source(&light_tokens, "negative-subtle"), "#fee1e0");
-        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#533133");
+        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dcf5f0");
+        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#193c37");
+        assert_eq!(token_source(&light_tokens, "negative-subtle"), "#ffe2e2");
+        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#532b2e");
     }
 
     #[test]

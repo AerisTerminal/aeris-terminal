@@ -415,7 +415,8 @@ pub fn validate_callback_query(
 #[cfg(test)]
 mod tests {
     use super::{
-        LoopbackListener, callback_query_from_request, outcome_page, validate_callback_query,
+        LoopbackListener, browser_platform_styles, callback_query_from_request, outcome_page,
+        validate_callback_query,
     };
     use std::{
         io::{Read, Write},
@@ -526,7 +527,8 @@ mod tests {
         assert!(response.contains("--surface: #ffffff"));
         assert!(response.contains("--surface: #171717"));
         assert!(response.contains("var(--primary)"));
-        assert!(!response.contains("var(--bullish)"));
+        let page_rules = response.replace(browser_platform_styles(), "");
+        assert!(!page_rules.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
         assert!(response.contains("font-family:\"DM Sans\""));
         for weight in ["400", "500", "700"] {
@@ -638,6 +640,7 @@ mod tests {
         assert!(page.contains("classList.toggle('dark',d)"));
         assert!(page.contains("class=\"brand-mark\"><svg"));
         assert!(page.contains("var(--danger)"));
-        assert!(!page.contains("var(--bearish)"));
+        let page_rules = page.replace(browser_platform_styles(), "");
+        assert!(!page_rules.contains("var(--bearish)"));
     }
 }

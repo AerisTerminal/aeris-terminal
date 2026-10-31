@@ -204,10 +204,10 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #3fb950;
-  --positive-subtle: #e8f7ea;
-  --negative: #f85149;
-  --negative-subtle: #fee1e0;
+  --positive: #089981;
+  --positive-subtle: #dcf5f0;
+  --negative: #f7525f;
+  --negative-subtle: #ffe2e2;
   --warning: #ff6900;
   --warning-subtle: #ffedd4;
   --indigo: #615fff;
@@ -279,12 +279,13 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --radius-medium: 14px;
   --radius-large: 999px;
 
-  /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
+  /* Chart — green up / red down.
+     Kept separate from --positive / --negative so gain/loss text keeps the platform colours. */
+  --bullish: #3fb950;
+  --bearish: #f85149;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
+  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
 }
 
 .dark {
@@ -320,10 +321,10 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --icon-active: #fafafa;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #98c379;
-  --positive-subtle: #3c4933;
-  --negative: #e06c75;
-  --negative-subtle: #533133;
+  --positive: #089981;
+  --positive-subtle: #193c37;
+  --negative: #f7525f;
+  --negative-subtle: #532b2e;
   --warning: #ff6900;
   --warning-subtle: #7e2a0c;
   --indigo: #615fff;
@@ -388,12 +389,12 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   /* Focus */
   --ring-primary: var(--primary);
 
-  /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
+  /* Chart — green up / red down */
+  --bullish: #98c379;
+  --bearish: #e06c75;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
+  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
 }
 
 /* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
