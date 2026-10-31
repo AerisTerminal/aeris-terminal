@@ -76,6 +76,15 @@ fn main() {
         }
     };
     let release = aeris_release_lifecycle::current_release_identity();
+    aeris_observability::diagnostic!(
+        "Aeris desktop {} started: release={} install_generation={} platform={}-{} pid={}",
+        env!("CARGO_PKG_VERSION"),
+        release.release_identity,
+        release.install_generation,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::process::id()
+    );
     if let Err(error) = aeris_observability::install_panic_hook(
         &logs_directory,
         release.release_identity,

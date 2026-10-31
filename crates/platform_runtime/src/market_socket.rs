@@ -50,10 +50,44 @@ pub enum MarketSocketError {
     Handshake,
     Send,
     TimedOut,
-    Read,
+    Read(MarketSocketReadFailure),
     Binary,
     Pong,
     Closed,
+}
+
+/// Redacted cause of a broken socket read. It names the failure class only,
+/// never peer addresses or received bytes, so it is safe to log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketSocketReadFailure {
+    /// The peer ended the TCP stream without a WebSocket close frame.
+    ResetWithoutClose,
+    /// A received frame violated the WebSocket protocol.
+    Protocol,
+    /// A message or frame exceeded the configured size bound.
+    Oversized,
+    /// A text frame was not valid UTF-8.
+    InvalidText,
+    /// The TLS layer rejected the connection.
+    Tls,
+    /// The transport failed with this I/O error kind.
+    Io(std::io::ErrorKind),
+    /// Any other WebSocket library failure.
+    Other,
+}
+
+impl fmt::Display for MarketSocketReadFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResetWithoutClose => formatter.write_str("peer reset without a close frame"),
+            Self::Protocol => formatter.write_str("WebSocket protocol violation"),
+            Self::Oversized => formatter.write_str("message exceeded the size bound"),
+            Self::InvalidText => formatter.write_str("text frame was not UTF-8"),
+            Self::Tls => formatter.write_str("TLS failure"),
+            Self::Io(kind) => write!(formatter, "I/O error: {kind}"),
+            Self::Other => formatter.write_str("unclassified WebSocket failure"),
+        }
+    }
 }
 
 impl MarketSocketError {
@@ -66,7 +100,7 @@ impl MarketSocketError {
 
 impl fmt::Display for MarketSocketError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
+        let message = match self {
             Self::InvalidUrl => "market socket URL is invalid",
             Self::DeadlineOverflow => "market socket deadline overflowed",
             Self::Cancelled => "market socket cancelled",
@@ -77,11 +111,14 @@ impl fmt::Display for MarketSocketError {
             Self::Handshake => "market socket handshake failed",
             Self::Send => "market socket send failed",
             Self::TimedOut => "market socket read timed out",
-            Self::Read => "market socket read failed",
+            Self::Read(failure) => {
+                return write!(formatter, "market socket read failed: {failure}");
+            }
             Self::Binary => "market socket sent binary",
             Self::Pong => "market socket pong failed",
             Self::Closed => "market socket closed",
-        })
+        };
+        formatter.write_str(message)
     }
 }
 
@@ -293,7 +330,26 @@ fn map_read_error(error: tungstenite::Error) -> MarketSocketError {
         {
             MarketSocketError::Cancelled
         }
-        _ => MarketSocketError::Read,
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+            MarketSocketError::Closed
+        }
+        error => MarketSocketError::Read(read_failure(&error)),
+    }
+}
+
+fn read_failure(error: &tungstenite::Error) -> MarketSocketReadFailure {
+    match error {
+        tungstenite::Error::Io(error) => MarketSocketReadFailure::Io(error.kind()),
+        tungstenite::Error::Protocol(
+            tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        ) => MarketSocketReadFailure::ResetWithoutClose,
+        tungstenite::Error::Protocol(_) | tungstenite::Error::AttackAttempt => {
+            MarketSocketReadFailure::Protocol
+        }
+        tungstenite::Error::Capacity(_) => MarketSocketReadFailure::Oversized,
+        tungstenite::Error::Utf8(_) => MarketSocketReadFailure::InvalidText,
+        tungstenite::Error::Tls(_) => MarketSocketReadFailure::Tls,
+        _ => MarketSocketReadFailure::Other,
     }
 }
 
@@ -592,6 +648,61 @@ mod tests {
         assert!(error.is_read_timeout());
         release.send(()).expect("server released");
         server.join().expect("server finishes");
+    }
+
+    #[test]
+    fn peer_drop_without_close_reports_its_cause() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let address = listener.local_addr().expect("loopback address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client connects");
+            drop(tungstenite::accept(stream).expect("websocket handshake"));
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut socket, _) =
+            MarketSocket::connect(&format!("ws://{address}/"), Duration::from_secs(3), &stop)
+                .expect("client connects");
+        server.join().expect("server finishes");
+        let error = socket
+            .read_event(Instant::now() + Duration::from_secs(3))
+            .expect_err("dropped peer fails the read");
+        assert_eq!(
+            error,
+            MarketSocketError::Read(MarketSocketReadFailure::ResetWithoutClose)
+        );
+        assert_eq!(
+            error.to_string(),
+            "market socket read failed: peer reset without a close frame"
+        );
+    }
+
+    #[test]
+    fn read_failures_keep_their_redacted_cause() {
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "peer detail");
+        let error = map_read_error(tungstenite::Error::Io(reset));
+        assert_eq!(
+            error,
+            MarketSocketError::Read(MarketSocketReadFailure::Io(
+                std::io::ErrorKind::ConnectionReset
+            ))
+        );
+        assert_eq!(
+            error.to_string(),
+            "market socket read failed: I/O error: connection reset"
+        );
+        assert_eq!(
+            map_read_error(tungstenite::Error::Capacity(
+                tungstenite::error::CapacityError::MessageTooLong {
+                    size: 2,
+                    max_size: 1,
+                }
+            )),
+            MarketSocketError::Read(MarketSocketReadFailure::Oversized)
+        );
+        assert_eq!(
+            map_read_error(tungstenite::Error::ConnectionClosed),
+            MarketSocketError::Closed
+        );
     }
 
     #[test]

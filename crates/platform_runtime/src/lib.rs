@@ -54,7 +54,7 @@ pub use live_market_gate::{
 };
 pub use market_socket::{
     MAXIMUM_MARKET_SOCKET_MESSAGE_BYTES, MarketSocket, MarketSocketError, MarketSocketEvent,
-    MarketSocketShutdown,
+    MarketSocketReadFailure, MarketSocketShutdown,
 };
 pub use network_notifications::{
     NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,
