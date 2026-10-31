@@ -89,7 +89,8 @@ violations and missing verification explicitly, and never describe them as satis
   characterization tests may use only a `#[cfg(test)]` crate-private caller-priced seam.
 - Simulated order admission and fills use the trading owner's verified session and current-generation Live quote.
   Crypto quotes may be at most 10 seconds old and other classes at most 60 seconds old by default;
-  owner-local `eligible_after` fences resting orders after acceptance and across process restarts.
+  owner-local `eligible_after` fences resting orders after acceptance and across process restarts,
+  and the fence on a restored order never compares provider generations across processes.
 - Practice-account admission has its own 10,000-account bound; keep this value so stores
   written by released versions continue opening.
 - Recurring contract-hour session projection lives in `aeris_instruments::calendar::weekly_hours`;
@@ -177,7 +178,7 @@ violations and missing verification explicitly, and never describe them as satis
   no desktop provider logic may gain an exception. Replay conversion and chart legend projection
   use the bound instrument descriptor and published provider name.
   The bridge files `market_worker.rs`, `engine_market_worker.rs` and its `runtime.rs`
-  need no provider-identity exceptions after M6.7; the deleted connection shell
+  need no provider-identity exceptions; the deleted connection shell
   has no exception either. The final production exception is the logo mapping in `assets.rs`.
 - Provider attribution marks and About notice lines come from published presentation
   descriptors only while the matching provider session is held, including recovery.
@@ -391,8 +392,8 @@ violations and missing verification explicitly, and never describe them as satis
   unresolved contract (a fill or position the owner could not account, which also lowers the
   reconcile replay floor); cancels, exits and flatten stay allowed. Broker mirror order IDs come from
   the owner sequence, a fill before its ack binds the unbound order by client id, and a reverse sends
-  only its exit until the position is flat; a reverse still waiting at restart is dropped with a
-  recovery notice. Venue refusals arrive as `VenueUpdate::OperationFailed` and become bounded owner
+  only its exit until the position is flat; a reverse still waiting at restart is dropped with an
+  `InterruptedReverse` recovery notice. Venue refusals arrive as `VenueUpdate::OperationFailed` and become bounded owner
   `VenueNotice`s (32) shown on the desktop feedback line; every relay command has a 30-second
   deadline, and an unanswered command forces a reconcile.
   V30 indexes account, execution time and fill ID for read-only closed-trade
@@ -431,8 +432,9 @@ violations and missing verification explicitly, and never describe them as satis
   have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
   closed round trip carries its durable exit fill ID, distinct even for partial exits of
   one cycle; an open round trip has no exit fill ID. Active
-  bracket/protection views come from a live group-id index maintained with group transitions,
-  never a scan of terminal group history. Broker connection, risk profile/meter, session plan
+  bracket/protection views come from a live group-id index held in `StoredState`, changed
+  atomically with every owner group transition and seeded on recovery, never a scan of terminal
+  group or order history. Broker connection, risk profile/meter, session plan
   and market observation error projections remain owner-owned.
 - `TradingSnapshot`, `TradingService::snapshot`, its command and ledger construction are
   available only under `cfg(test)` or the explicit `trading_runtime/test-support` feature;
@@ -455,7 +457,9 @@ violations and missing verification explicitly, and never describe them as satis
   in idle regressions. Default production builds carry no history-read counter.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
-  legacy state, write installed-app identity, promote launchers, or run updates.
+  legacy state, write installed-app identity, promote launchers, or run updates. Every data root,
+  production included, has exactly one process owner, and vault namespaces are isolated per
+  validation root.
 
 Architecture assertions in `tools/naming_check` are authoritative when they are stricter than prose.
 Its source scans strip only balanced `#[cfg(test)]` module bodies, so production code after a test
@@ -478,7 +482,8 @@ the check.
   feature may enable it; `live_market_gate_stays_out_of_production_builds` enforces this.
 - The trading owner's quote-interest revision is durable store metadata: the market coordinator
   fences stale revisions for its whole lifetime, so a trading-owner restart must resume above the
-  fence, and a provider reconnect republishes trading sessions before its `Feed::Live`.
+  fence, and a provider reconnect republishes trading sessions before its `Feed::Live`. The trading
+  owner bounds ticket interest at 64 routes and its combined quote interest at 256.
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps use the injected
   `market_service::clock::Clock`; direct system time belongs only in `SystemClock`.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;
@@ -509,7 +514,17 @@ the check.
   explicit consumer demand (depth demand alone never subscribes it); the coordinator admits at most
   the provider's `maximum_order_level_instruments` and reports the rest as `BudgetExhausted` without
   evicting an admitted instrument. A gap or bound violation empties the bounded `MarketOrderLevelView`
-  until a covering provider image arrives, and order levels are never persisted.
+  until a covering provider image arrives, and order levels are never persisted. A duplicate or
+  unknown order ID or a provider refusal also empties the view. Views keep at most 32 prices per
+  side and 64 orders per price and are delivered only in-process inside the fenced order-book
+  snapshot. The desktop demands order levels only for a shown Queue column on the docked book;
+  provider caps are 8 instruments per session for Rithmic and 0 for Hyperliquid. A refused Rithmic
+  DBO snapshot never ends the session or publishes its image; it spends the bounded resnapshot
+  budget and then disables order-level depth for that session.
+- Rithmic clocks stay in their own fields: gateway `ssboe/usecs` only as `provider_unix_nanos`,
+  exchange `source_*` only as `exchange_unix_nanos`, and `jop_*` is never published. No clock
+  stands in for a missing one. Live trades meet history on
+  `QualifiedTimestamp::history_clock_unix_nanos`.
 - Trade-tape sweep classification lives in `market_runtime`
   (`market_service/trade_sweeps.rs`): it runs once per ingested trade (and on every retention
   eviction or session reset) over the trailing 512 retained prints with the 90th-percentile
@@ -532,6 +547,8 @@ the check.
 - Symbol search keeps one catalog-search slot per consumer and provider. The Rithmic catalog runs at
   most one search at a time, keeps only each consumer's latest queued search (rejecting the replaced one
   as superseded) and caches its product listing once per session generation (at most 128 products).
+  A search may carry an exchange filter that the coordinator validates; a replaced queued search is
+  rejected as `SupersededSearch` and a lost session as `DispatchUnavailable`.
 - Chart selections, including startup and restored instruments, resolve and install demand through
   the coordinator's `select_and_demand` command; desktop code never owns startup catalog resolution
   or interprets provider display text as a readiness signal.
@@ -547,7 +564,8 @@ the check.
 - Candle series control and the single forming bar belong to `market_service::lifecycle::SeriesLifecycles`.
   Retired candle handlers must not return, and lifecycle transitions use the injected clock rather than system time.
 - Stall recovery considers every live candle and trade series while its calendar is open;
-  closed sessions never recover for silence, and unknown sessions use a longer threshold.
+  closed sessions never recover for silence, and unknown sessions use a longer
+  300-second threshold.
   A trade-built series counts a newer quote on its instrument as progress; a provider-candle
   series counts only a live candle, never a quote. Either threshold doubles after each stall
   recovery that no trade (or, for a candle series, no candle) followed, up to eight minutes.
@@ -565,7 +583,8 @@ the check.
   storage is the credential boundary. The market runtime publishes provider-owned static login fields
   through `ConnectMethod::VaultCredentials` and exposes provider-id-keyed saved summary, sign-in,
   forget and server/system discovery; the Rithmic implementation alone verifies and writes its
-  native-vault entry. Submitted field values never derive `Debug`. Live/test provider sessions must
+  native-vault entry. Saved login summaries and server/system discovery never contain the user ID
+  or password, and submitted field values never derive `Debug`. Live/test provider sessions must
   respect provider concurrency limits.
 - Desktop connection rows come from `published_provider_descriptors()` exactly once per registered
   provider. `desktop/provider_login.rs` renders the published vault-login field schema and
@@ -771,7 +790,8 @@ installs the desktop directly, shares the lifecycle installer's AppId and folder
 user data on uninstall) and smoke-tests a silent install, launch and uninstall (a launch whose
 window could not open fails it); the macOS lane
 smoke-launches the app bundle and ships a disk image with an Applications link. Both keep their
-output only as a 14-day workflow artifact.
+output only as a 14-day workflow artifact. The `Live market gates` workflow stays
+`disabled_manually` in the repository's Actions settings; agents never change those settings.
 `tools/naming_check` enforces this shape across every workflow.
 
 ## Build output hygiene
@@ -821,8 +841,8 @@ immutable caching, so a version is never republished); commit `feat(release): re
 a release-record row naming the version and what it ships since the previous release; push;
 wait for CI on that commit; run both preview lanes; check their smoke tests and the Windows checksum;
 publish with `publish:desktop`; and confirm that `https://aeristerminal.com/downloads/latest.json` names
-the version and the public files hash to the built artifacts. The release-record table in
-`plan/stabilization/stabilization_work.md` is the release record.
+the version and the public files hash to the built artifacts. The table in the root
+`RELEASES.md` is the release record.
 
 The desktop starts its update client (`desktop/update.rs`) only in a release build, one that
 carries `release_config()`; development builds and the current preview-lane installers have
@@ -875,17 +895,11 @@ If something fails, the user sends back `~/Library/Application Support/Aeris/log
   Durable architecture rules belong in code/tests/`tools/naming_check`; implementation notes belong near
   the code they describe. `repository_markdown_inventory_is_exact` walks the whole tree (vendored and
   asset folders included) and allows only the reasoned `MARKDOWN_FILES` in `tools/naming_check`
-  (`README.md`, this file, `CSS.md`, `themes.md`, the brand-asset `USAGE.md`, the Study SDK guide and
-  the pinned `gpui_base` notes) plus the two planning directories below; a stale entry fails too.
-- `plan/longterm_plan/` (the long-term product plans) and `plan/stabilization/` are the two sanctioned
-  exceptions to the rule above. `plan/stabilization/` holds the stabilization tracking document
-  `stabilization_work.md` and the audit/design report copies under `plan/stabilization/reports/`
-  (redacted; the repo is public). Every stabilization commit updates its
-  item's line in `plan/stabilization/stabilization_work.md` in the same commit. A box is checked only
-  when the item's code has landed and every validation its spec requires (tests, probes, guarded GUI
-  checks) has passed; until then the line says exactly what is left. Git history is the progress log.
-  Stabilization work runs focused per-crate checks while iterating and the full workspace gate once
-  per milestone, before the milestone closeout; CI runs the full gate on every push.
+  (`README.md`, this file, `CSS.md`, `themes.md`, the release record `RELEASES.md`, the brand-asset
+  `USAGE.md`, the Study SDK guide and the pinned `gpui_base` notes) plus the one planning directory
+  below; a stale entry fails too.
+- `plan/longterm_plan/` (the long-term product plans and `known_gaps.md`, the open gaps and deferred
+  work) is the one sanctioned exception to the rule above.
 - Every commit that introduces or changes an architecture restriction (a `tools/naming_check` rule, a
   crate boundary, a writer or CI rule) must also update this `AGENTS.md` in the same commit, so the
   rule lives where future agents read it.

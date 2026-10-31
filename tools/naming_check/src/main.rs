@@ -30,6 +30,7 @@ const MARKDOWN_FILES: &[(&str, &str)] = &[
     ("AGENTS.md", "the contributor and architecture rules"),
     ("CSS.md", "the Theme System CSS and its usage rules"),
     ("themes.md", "the palette source of the theme presets"),
+    ("RELEASES.md", "the release record"),
     (
         "apps/desktop/assets/aeris_assets/USAGE.md",
         "brand asset usage rules kept beside the assets",
@@ -4196,7 +4197,7 @@ mod tests {
         );
     }
     /// Planning Markdown lives only under these directories.
-    const MARKDOWN_DIRECTORIES: &[&str] = &["plan/stabilization/", "plan/longterm_plan/"];
+    const MARKDOWN_DIRECTORIES: &[&str] = &["plan/longterm_plan/"];
 
     /// Every Markdown file under `directory`, including vendored and asset trees; only
     /// build output, dot directories and the external proto kit junction are skipped.
@@ -4257,10 +4258,7 @@ mod tests {
         let mut inventory = super::MARKDOWN_FILES
             .iter()
             .map(|(path, _)| (*path).to_string())
-            .chain([
-                "plan/stabilization/reports/01_market_data.md".to_string(),
-                "plan/longterm_plan/pricing_strategy.md".to_string(),
-            ])
+            .chain(["plan/longterm_plan/pricing_strategy.md".to_string()])
             .collect::<Vec<_>>();
         assert_eq!(
             markdown_inventory_violations(&inventory),
@@ -4269,6 +4267,7 @@ mod tests {
         for added in [
             "crates/market_runtime/README.md",
             "plan/notes.md",
+            "plan/stabilization/stabilization_work.md",
             "docs/architecture.md",
         ] {
             let mut drifted = inventory.clone();

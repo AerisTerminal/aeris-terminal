@@ -15,8 +15,8 @@ const CHICAGO_CLOSE_SECONDS: i64 = 17 * 3_600;
 /// The local-time-of-day boundary at which an account's risk session rolls over.
 ///
 /// The default is 00:00 UTC; accounts that trade futures conventionally configure the 17:00
-/// America/Chicago close. That per-account default is the Q8 assumption recorded in the
-/// stabilization plan and is applied by the desktop profile settings, not here.
+/// America/Chicago close. Choosing the boundary per account belongs to the desktop profile
+/// settings, not here.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RiskSessionBoundary {
     /// The session rolls at 00:00 UTC.
