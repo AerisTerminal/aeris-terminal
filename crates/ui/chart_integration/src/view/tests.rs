@@ -3515,8 +3515,8 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
     assert!(series.border_down_color.is_none());
 
     let dark_defaults = FinancialThemeColors::for_theme(ChartTheme::Dark);
-    assert_eq!(dark_defaults.bullish, "#98c379");
-    assert_eq!(dark_defaults.bearish, "#e06c75");
+    assert_eq!(dark_defaults.bullish, "#089981");
+    assert_eq!(dark_defaults.bearish, "#f7525f");
     let effective = dark.appearance_settings();
     assert_eq!(effective.up_color, AppearanceColor::Theme);
     assert_eq!(effective.down_color, AppearanceColor::Theme);
@@ -3545,18 +3545,18 @@ fn the_default_theme_and_volume_paint_the_current_market_pair() {
             high_contrast.theme_defaults().bullish.to_ascii_lowercase(),
             high_contrast.theme_defaults().bearish.to_ascii_lowercase()
         ),
-        ("#98c379".to_string(), "#e06c75".to_string()),
+        ("#089981".to_string(), "#f7525f".to_string()),
         "the default High Contrast theme paints the Aeris Charts dark pair"
     );
     let light_volume = light.volume_default_colors();
     assert_eq!(
         (light_volume.up.as_str(), light_volume.down.as_str()),
-        ("#3FB95080", "#F8514980")
+        ("#08998180", "#F7525F80")
     );
     let dark_volume = dark.volume_default_colors();
     assert_eq!(
         (dark_volume.up.as_str(), dark_volume.down.as_str()),
-        ("#98C37980", "#E06C7580")
+        ("#08998180", "#F7525F80")
     );
     assert_eq!(high_contrast.volume_default_colors(), dark_volume);
     let unset = VolumeSettings::default();

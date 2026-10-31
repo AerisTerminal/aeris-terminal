@@ -1,6 +1,6 @@
 # Theme presets
 
-Every Theme Studio theme in one place: the default Aeris theme plus eight presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines. Aeris and High Contrast also set their own candle colours (`--bullish` / `--bearish`) with a matching chart comment, while the other presets point them at `--positive` / `--negative`.
+Every Theme Studio theme in one place: the default Aeris theme plus eight presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines.
 
 ## How to use
 
@@ -50,7 +50,7 @@ Floating layers (menus, dialogs, tooltips) should read the popover tokens with a
 
 ## 1. Aeris (default)
 
-The default theme. It applies whenever no `data-theme` is set. Dark mode uses a `#171717` surface, not pure black, to keep light text from blooming. Menus, dialogs and tooltips sit on `--surface-popover` with a 1px `--border-popover` outer edge and a 1px `--border-popover-highlight` inner edge. Those three tokens are scoped to `:not([data-theme])`, so presets never inherit them. Candles are green up and red down: `#3fb950` / `#f85149` in light mode and `#98c379` / `#e06c75` in dark mode. They no longer follow `--positive` / `--negative`, so gain/loss text stays green and red.
+The default theme. It applies whenever no `data-theme` is set. Dark mode uses a `#171717` surface, not pure black, to keep light text from blooming. Menus, dialogs and tooltips sit on `--surface-popover` with a 1px `--border-popover` outer edge and a 1px `--border-popover-highlight` inner edge. Those three tokens are scoped to `:not([data-theme])`, so presets never inherit them.
 
 ```css
 :root {
@@ -165,13 +165,12 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   --radius-medium: 14px;
   --radius-large: 999px;
 
-  /* Chart — green up / red down.
-     Kept separate from --positive / --negative so gain/loss text keeps the platform colours. */
-  --bullish: #3fb950;
-  --bearish: #f85149;
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 
 .dark {
@@ -275,12 +274,12 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   /* Focus */
   --ring-primary: var(--primary);
 
-  /* Chart — green up / red down */
-  --bullish: #98c379;
-  --bearish: #e06c75;
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 
 /* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
@@ -300,7 +299,7 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
 
 ## 2. High Contrast
 
-The earlier Aeris palette, kept for people who prefer a pure black screen. Candles match Aeris: `#3fb950` / `#f85149` in light mode and `#98c379` / `#e06c75` in dark mode. Dark mode uses a `#000000` surface with a `#171717` secondary surface and solid `#2c2c2c` / `#404040` borders. Light mode matches Aeris with a stronger `--border-secondary` and hover / active fills. Like the other presets, it has no popover layer, so menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge.
+The earlier Aeris palette, kept for people who prefer a pure black screen. Dark mode uses a `#000000` surface with a `#171717` secondary surface and solid `#2c2c2c` / `#404040` borders. Light mode matches Aeris with a stronger `--border-secondary` and hover / active fills. Like the other presets, it has no popover layer, so menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge.
 
 ```css
 [data-theme="high-contrast"] {
@@ -415,13 +414,12 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Candl
   --radius-medium: 14px;
   --radius-large: 999px;
 
-  /* Chart — green up / red down, matching Aeris.
-     Kept separate from --positive / --negative so gain/loss text keeps the platform colours. */
-  --bullish: #3fb950;
-  --bearish: #f85149;
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 
 [data-theme="high-contrast"].dark {
@@ -525,12 +523,12 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Candl
   /* Focus */
   --ring-primary: var(--primary);
 
-  /* Chart — green up / red down, matching Aeris */
-  --bullish: #98c379;
-  --bearish: #e06c75;
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 ```
 

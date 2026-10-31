@@ -279,13 +279,12 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --radius-medium: 14px;
   --radius-large: 999px;
 
-  /* Chart — green up / red down.
-     Kept separate from --positive / --negative so gain/loss text keeps the platform colours. */
-  --bullish: #3fb950;
-  --bearish: #f85149;
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 
 .dark {
@@ -389,12 +388,12 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   /* Focus */
   --ring-primary: var(--primary);
 
-  /* Chart — green up / red down */
-  --bullish: #98c379;
-  --bearish: #e06c75;
+  /* Chart */
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, var(--bullish) 35%, transparent);
-  --sell-bubble: color-mix(in srgb, var(--bearish) 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 
 /* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:

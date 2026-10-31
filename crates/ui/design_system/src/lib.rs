@@ -670,10 +670,10 @@ mod tests {
             light.primary_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(light.bullish, ThemeColor::from_rgb8(63, 185, 80));
-        assert_eq!(light.bearish, ThemeColor::from_rgb8(248, 81, 73));
-        assert_eq!(dark.bullish, ThemeColor::from_rgb8(152, 195, 121));
-        assert_eq!(dark.bearish, ThemeColor::from_rgb8(224, 108, 117));
+        assert_eq!(light.bullish, light.positive);
+        assert_eq!(light.bearish, light.negative);
+        assert_eq!(dark.bullish, dark.positive);
+        assert_eq!(dark.bearish, dark.negative);
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
@@ -692,11 +692,10 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "button-fill"), "#0a0a0af2");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#fafafad9");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
-        // Candles keep their own pair instead of following the gain/loss tokens.
-        assert_eq!(token_source(&light_tokens, "bullish"), "#3fb950");
-        assert_eq!(token_source(&light_tokens, "bearish"), "#f85149");
-        assert_eq!(token_source(&dark_tokens, "bullish"), "#98c379");
-        assert_eq!(token_source(&dark_tokens, "bearish"), "#e06c75");
+        for tokens in [&light_tokens, &dark_tokens] {
+            assert_eq!(token_source(tokens, "bullish"), "var(--positive)");
+            assert_eq!(token_source(tokens, "bearish"), "var(--negative)");
+        }
         assert_eq!(
             token_source(&light_tokens, "ring-primary"),
             "var(--primary)"
@@ -912,19 +911,19 @@ mod tests {
     fn big_trade_bubbles_are_translucent_chart_direction_colors() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(63, 185, 80, 89));
-        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(248, 81, 73, 89));
-        assert_eq!(dark.buy_bubble, ThemeColor::from_rgba8(152, 195, 121, 89));
-        assert_eq!(dark.sell_bubble, ThemeColor::from_rgba8(224, 108, 117, 89));
-        assert_eq!(light.buy_bubble.css_rgba(), "rgba(63, 185, 80, 0.3490)");
-        assert_eq!(light.bearish.css_rgba(), "rgba(248, 81, 73, 1.0000)");
+        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(8, 153, 129, 89));
+        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(247, 82, 95, 89));
+        assert_eq!(dark.buy_bubble, light.buy_bubble);
+        assert_eq!(dark.sell_bubble, light.sell_bubble);
+        assert_eq!(light.buy_bubble.css_rgba(), "rgba(8, 153, 129, 0.3490)");
+        assert_eq!(light.bearish.css_rgba(), "rgba(247, 82, 95, 1.0000)");
         assert_eq!(
             token_source(&AerisTheme::light().color_tokens(), "buy-bubble"),
-            "color-mix(in srgb, var(--bullish) 35%, transparent)"
+            "color-mix(in srgb, #089981 35%, transparent)"
         );
         assert_eq!(
             token_source(&AerisTheme::dark().color_tokens(), "sell-bubble"),
-            "color-mix(in srgb, var(--bearish) 35%, transparent)"
+            "color-mix(in srgb, #f7525f 35%, transparent)"
         );
     }
 

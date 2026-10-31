@@ -507,8 +507,9 @@ pub struct DeltaHistogramSettings {
     pub down_color: Option<ChartColor>,
 }
 
-/// Durable order-book indicator settings. A color left at `None` follows the chart's up (bid)
-/// and down (ask) colors.
+/// Durable order-book indicator settings. A color left at `None` follows the platform
+/// `--book-bid-fill` (bid) and `--book-ask-fill` (ask) tokens, which already carry their mix
+/// strength, so the default opacity leaves them unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OrderBookDepthSettings {
     pub visible: bool,
@@ -544,7 +545,7 @@ impl Default for OrderBookDepthSettings {
             visible: true,
             levels_per_side: 40,
             max_width: 120,
-            opacity_percent: 50,
+            opacity_percent: 100,
             show_sizes: true,
             bid_color: None,
             ask_color: None,

@@ -2827,7 +2827,7 @@ mod timeframe_input {
             };
             assert_eq!(draft.levels_per_side.read(cx).value(), "40");
             assert_eq!(draft.max_width.read(cx).value(), "120");
-            assert_eq!(draft.opacity_percent.read(cx).value(), "50");
+            assert_eq!(draft.opacity_percent.read(cx).value(), "100");
             [
                 draft.levels_per_side.clone(),
                 draft.max_width.clone(),
@@ -2945,7 +2945,7 @@ mod timeframe_input {
             );
             assert_eq!(draft.levels_per_side.read(cx).value(), "40");
             assert_eq!(draft.max_width.read(cx).value(), "120");
-            assert_eq!(draft.opacity_percent.read(cx).value(), "50");
+            assert_eq!(draft.opacity_percent.read(cx).value(), "100");
         });
         assert_eq!(
             chart_order_flow(&surface, cx).order_book_depth,
