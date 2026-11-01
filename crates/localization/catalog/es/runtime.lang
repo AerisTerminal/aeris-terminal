@@ -1,0 +1,76 @@
+# Texto de mercado, cuenta y estudios publicado por el runtime: configuración de estudios
+# integrados, estadísticas de contexto oficiales y campos de inicio de sesión de proveedores.
+# El texto de los publicadores (configuración de estudios de terceros, títulos de publicaciones
+# oficiales y nombres de estadísticas) se muestra tal como se publica y nunca entra aquí.
+
+## Configuración de estudios integrados
+study_setting_period = Período
+study_setting_period_description = Número de barras de entrada usadas en el cálculo.
+study_setting_deviation = Desviación
+study_setting_deviation_description = Multiplicador de desviación estándar aplicado a las bandas.
+study_setting_fast_period = Período rápido
+study_setting_fast_period_description = Período de la EMA rápida.
+study_setting_slow_period = Período lento
+study_setting_slow_period_description = Período de la EMA lenta.
+study_setting_signal_period = Período de señal
+study_setting_signal_period_description = Período de la EMA de señal.
+study_setting_k_period = Período %K
+study_setting_k_period_description = Ventana de cálculo del oscilador rápido.
+study_setting_d_period = Período %D
+study_setting_d_period_description = Ventana de suavizado de la línea de señal.
+
+## Fuentes, eventos y estadísticas de contexto de mercado
+context_source_federal_reserve = Reserva Federal
+context_event_fomc_rate_decision = Decisión de tipos del FOMC y rueda de prensa
+context_event_eia_petroleum_status = Informe semanal de petróleo de la EIA
+context_metric_commercial_crude_stocks = Existencias comerciales de crudo
+context_metric_lower_48_gas_storage = Almacenamiento de gas natural en los 48 estados contiguos
+context_metric_ten_year_treasury_yield = Rendimiento del Tesoro a 10 años
+context_metric_trade_weighted_dollar = Índice del dólar estadounidense ponderado por comercio
+context_metric_consumer_price_index = Índice de precios al consumo
+context_metric_nonfarm_payrolls = Nóminas no agrícolas totales
+context_metric_wasde_corn_production = WASDE: producción de maíz de EE. UU.
+context_metric_wasde_corn_exports = WASDE: exportaciones de maíz de EE. UU.
+context_metric_wasde_corn_ending_stocks = WASDE: existencias finales de maíz de EE. UU.
+context_metric_weekly_export_sales = Ventas semanales de exportación de {commodity}
+context_unit_thousand_barrels = miles de barriles
+context_unit_billion_cubic_feet = miles de millones de pies cúbicos
+context_unit_percent = por ciento
+context_unit_index = índice
+context_unit_thousands_of_persons = miles de personas
+context_unit_million_bushels = millones de bushels
+context_unit_metric_tons = toneladas métricas
+context_region_conus_population_weighted = EE. UU. contiguo, ponderado por población
+context_cot_producer_merchant = Productor/comerciante
+context_cot_swap_dealer = Operador de swaps
+context_cot_managed_money = Dinero gestionado
+context_cot_other_reportable = Otros declarables
+
+## Campos de inicio de sesión del proveedor
+login_field_server = Servidor
+login_field_system = Sistema
+login_field_user_id = ID de usuario
+login_field_password = Contraseña
+## Detalles de la sesión de cuenta
+account_detail_signed_out = sesión cerrada
+account_detail_restoring_saved_sign_in = restaurando la sesión guardada
+account_detail_signed_in_verifying_saved_session = sesión iniciada; verificando la sesión guardada
+account_detail_signed_in = sesión iniciada
+account_detail_signed_in_offline_reconnecting = sesión iniciada sin conexión; reconectando
+account_detail_waiting_for_browser_authorization = esperando la autorización en el navegador
+account_detail_completing_sign_in = completando el inicio de sesión
+account_detail_sign_in_cancelled = inicio de sesión cancelado
+account_detail_sign_in_timed_out = el inicio de sesión agotó el tiempo; vuelva a intentarlo
+account_detail_sign_in_worker_could_not_start = no se pudo iniciar el proceso de inicio de sesión; vuelva a intentarlo
+account_detail_account_state_unavailable = el estado de la cuenta no está disponible
+account_detail_credential_storage_unavailable_sign_in_again = el almacén de credenciales no está disponible; inicie sesión de nuevo
+account_detail_credential_storage_unavailable_retry_sign_in = el almacén de credenciales no está disponible; vuelva a intentar iniciar sesión
+account_detail_saved_sign_in_expired = la sesión guardada caducó; inicie sesión de nuevo
+account_detail_sign_in_expired = la sesión caducó; inicie sesión de nuevo
+account_detail_saved_sign_in_retire_failed = no se pudo retirar la sesión guardada; el almacén de credenciales no está disponible; inicie sesión de nuevo
+account_detail_sign_in_expired_retire_failed = la sesión caducó, pero no se pudieron retirar las credenciales guardadas; inicie sesión de nuevo
+account_detail_sign_out_cleanup_attention = sesión cerrada; la limpieza de credenciales requiere atención
+account_detail_saved_sign_in_cleanup_unavailable = la limpieza de la sesión guardada no está disponible; vuelva a intentar iniciar sesión
+account_detail_restore_could_not_start = no se pudo iniciar la restauración de la sesión guardada; inicie sesión de nuevo
+account_detail_saved_sign_in_unverified_connection = no se pudo verificar la sesión guardada; compruebe su conexión e inicie sesión de nuevo
+account_detail_saved_sign_in_unverified = no se pudo verificar la sesión guardada; inicie sesión de nuevo

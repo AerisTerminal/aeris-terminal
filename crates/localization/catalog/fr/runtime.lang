@@ -1,0 +1,76 @@
+# Texte de marché, de compte et d'étude publié par le runtime : paramètres des études intégrées,
+# statistiques de contexte officielles et champs de connexion des fournisseurs. Le texte rédigé
+# par les éditeurs (paramètres d'études tierces, titres des publications officielles et noms de
+# statistiques) est affiché tel que publié et n'apparaît jamais ici.
+
+## Paramètres des études intégrées
+study_setting_period = Période
+study_setting_period_description = Nombre de barres d'entrée utilisées par le calcul.
+study_setting_deviation = Écart
+study_setting_deviation_description = Multiplicateur d'écart type appliqué aux bandes.
+study_setting_fast_period = Période rapide
+study_setting_fast_period_description = Période de l'EMA rapide.
+study_setting_slow_period = Période lente
+study_setting_slow_period_description = Période de l'EMA lente.
+study_setting_signal_period = Période du signal
+study_setting_signal_period_description = Période de l'EMA du signal.
+study_setting_k_period = Période %K
+study_setting_k_period_description = Fenêtre d'historique de l'oscillateur rapide.
+study_setting_d_period = Période %D
+study_setting_d_period_description = Fenêtre de lissage de la ligne de signal.
+
+## Sources, événements et statistiques du contexte de marché
+context_source_federal_reserve = Réserve fédérale
+context_event_fomc_rate_decision = Décision de taux du FOMC et conférence de presse
+context_event_eia_petroleum_status = Rapport hebdomadaire de l'EIA sur le pétrole
+context_metric_commercial_crude_stocks = Stocks commerciaux de pétrole brut
+context_metric_lower_48_gas_storage = Stockage de gaz naturel des 48 États contigus
+context_metric_ten_year_treasury_yield = Rendement du Trésor américain à 10 ans
+context_metric_trade_weighted_dollar = Indice du dollar américain pondéré par les échanges
+context_metric_consumer_price_index = Indice des prix à la consommation
+context_metric_nonfarm_payrolls = Emplois non agricoles totaux
+context_metric_wasde_corn_production = WASDE production de maïs des États-Unis
+context_metric_wasde_corn_exports = WASDE exportations de maïs des États-Unis
+context_metric_wasde_corn_ending_stocks = WASDE stocks de fin de maïs des États-Unis
+context_metric_weekly_export_sales = Ventes à l'exportation hebdomadaires : {commodity}
+context_unit_thousand_barrels = milliers de barils
+context_unit_billion_cubic_feet = milliards de pieds cubes
+context_unit_percent = pour cent
+context_unit_index = indice
+context_unit_thousands_of_persons = milliers de personnes
+context_unit_million_bushels = millions de boisseaux
+context_unit_metric_tons = tonnes métriques
+context_region_conus_population_weighted = CONUS pondéré par la population
+context_cot_producer_merchant = Producteurs/négociants
+context_cot_swap_dealer = Courtiers en swaps
+context_cot_managed_money = Gestion de fonds
+context_cot_other_reportable = Autres déclarants
+
+## Champs de connexion des fournisseurs
+login_field_server = Serveur
+login_field_system = Système
+login_field_user_id = Identifiant
+login_field_password = Mot de passe
+## Détails de la session du compte
+account_detail_signed_out = déconnecté
+account_detail_restoring_saved_sign_in = restauration de la connexion enregistrée
+account_detail_signed_in_verifying_saved_session = connecté ; vérification de la session enregistrée
+account_detail_signed_in = connecté
+account_detail_signed_in_offline_reconnecting = connecté hors ligne ; reconnexion
+account_detail_waiting_for_browser_authorization = en attente de l'autorisation dans le navigateur
+account_detail_completing_sign_in = finalisation de la connexion
+account_detail_sign_in_cancelled = connexion annulée
+account_detail_sign_in_timed_out = délai de connexion dépassé ; réessayez de vous connecter
+account_detail_sign_in_worker_could_not_start = le processus de connexion n'a pas pu démarrer ; réessayez de vous connecter
+account_detail_account_state_unavailable = l'état du compte est indisponible
+account_detail_credential_storage_unavailable_sign_in_again = le stockage des identifiants est indisponible ; reconnectez-vous
+account_detail_credential_storage_unavailable_retry_sign_in = le stockage des identifiants est indisponible ; réessayez de vous connecter
+account_detail_saved_sign_in_expired = la connexion enregistrée a expiré ; reconnectez-vous
+account_detail_sign_in_expired = la connexion a expiré ; reconnectez-vous
+account_detail_saved_sign_in_retire_failed = la connexion enregistrée n'a pas pu être retirée ; le stockage des identifiants est indisponible ; reconnectez-vous
+account_detail_sign_in_expired_retire_failed = la connexion a expiré mais les identifiants enregistrés n'ont pas pu être retirés ; reconnectez-vous
+account_detail_sign_out_cleanup_attention = déconnecté ; le nettoyage des identifiants requiert votre attention
+account_detail_saved_sign_in_cleanup_unavailable = le nettoyage de la connexion enregistrée est indisponible ; réessayez de vous connecter
+account_detail_restore_could_not_start = la restauration de la connexion enregistrée n'a pas pu démarrer ; reconnectez-vous
+account_detail_saved_sign_in_unverified_connection = la connexion enregistrée n'a pas pu être vérifiée ; vérifiez votre réseau et reconnectez-vous
+account_detail_saved_sign_in_unverified = la connexion enregistrée n'a pas pu être vérifiée ; reconnectez-vous

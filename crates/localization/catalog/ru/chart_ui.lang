@@ -162,11 +162,11 @@ session_plan_line = ПЛАН · {label}
 # Колонки, баннеры и метки ячеек стакана только для чтения.
 book_column_pnl = П/У
 book_column_bid = Бид
-book_column_sell = Продажа
+book_column_sell = Прод.
 book_column_price = Цена
-book_column_buy = Покупка
+book_column_buy = Пок.
 book_column_ask = Аск
-book_column_orders = Ордера
+book_column_orders = Орд.
 book_column_queue = Очередь
 book_offline = Стакан офлайн · нет подключения к интернету
 book_reconnecting = Стакан переподключается · ожидание нового снимка

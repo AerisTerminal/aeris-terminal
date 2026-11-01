@@ -1,0 +1,4 @@
+# Text shared by every surface.
+cancel = रद्द करें
+items[one] = {count} आइटम
+items[other] = {count} आइटम

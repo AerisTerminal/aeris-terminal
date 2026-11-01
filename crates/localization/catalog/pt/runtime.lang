@@ -1,0 +1,76 @@
+# Texto de mercado, conta e estudos publicado pelo runtime: configurações dos estudos integrados,
+# estatísticas oficiais de contexto e campos de login dos provedores. O texto de autoria do
+# publicador (configurações de estudos de terceiros, títulos de divulgações oficiais e nomes de estatísticas)
+# é exibido como publicado e nunca entra aqui.
+
+## Configurações dos estudos integrados
+study_setting_period = Período
+study_setting_period_description = Número de barras de entrada usadas no cálculo.
+study_setting_deviation = Desvio
+study_setting_deviation_description = Multiplicador do desvio padrão aplicado às bandas.
+study_setting_fast_period = Período rápido
+study_setting_fast_period_description = Período da EMA rápida.
+study_setting_slow_period = Período lento
+study_setting_slow_period_description = Período da EMA lenta.
+study_setting_signal_period = Período do sinal
+study_setting_signal_period_description = Período da EMA de sinal.
+study_setting_k_period = Período %K
+study_setting_k_period_description = Janela de retrospecto do oscilador rápido.
+study_setting_d_period = Período %D
+study_setting_d_period_description = Janela de suavização da linha de sinal.
+
+## Fontes, eventos e estatísticas de contexto de mercado
+context_source_federal_reserve = Federal Reserve
+context_event_fomc_rate_decision = Decisão de juros do FOMC e coletiva de imprensa
+context_event_eia_petroleum_status = Relatório semanal de petróleo da EIA
+context_metric_commercial_crude_stocks = Estoques comerciais de petróleo bruto
+context_metric_lower_48_gas_storage = Armazenamento de gás natural nos 48 estados contíguos
+context_metric_ten_year_treasury_yield = Rendimento do Treasury de 10 anos
+context_metric_trade_weighted_dollar = Índice do dólar americano ponderado pelo comércio
+context_metric_consumer_price_index = Índice de preços ao consumidor
+context_metric_nonfarm_payrolls = Total de empregos não agrícolas (payroll)
+context_metric_wasde_corn_production = WASDE: produção de milho dos EUA
+context_metric_wasde_corn_exports = WASDE: exportações de milho dos EUA
+context_metric_wasde_corn_ending_stocks = WASDE: estoques finais de milho dos EUA
+context_metric_weekly_export_sales = Vendas semanais de exportação de {commodity}
+context_unit_thousand_barrels = mil barris
+context_unit_billion_cubic_feet = bilhões de pés cúbicos
+context_unit_percent = por cento
+context_unit_index = índice
+context_unit_thousands_of_persons = milhares de pessoas
+context_unit_million_bushels = milhões de bushels
+context_unit_metric_tons = toneladas métricas
+context_region_conus_population_weighted = EUA contíguos, ponderado pela população
+context_cot_producer_merchant = Produtor/Comerciante
+context_cot_swap_dealer = Swap Dealer
+context_cot_managed_money = Managed Money
+context_cot_other_reportable = Outros reportáveis
+
+## Campos de login dos provedores
+login_field_server = Servidor
+login_field_system = Sistema
+login_field_user_id = ID de usuário
+login_field_password = Senha
+## Detalhes da sessão da conta
+account_detail_signed_out = desconectado
+account_detail_restoring_saved_sign_in = restaurando login salvo
+account_detail_signed_in_verifying_saved_session = conectado; verificando sessão salva
+account_detail_signed_in = conectado
+account_detail_signed_in_offline_reconnecting = conectado offline; reconectando
+account_detail_waiting_for_browser_authorization = aguardando autorização no navegador
+account_detail_completing_sign_in = concluindo login
+account_detail_sign_in_cancelled = login cancelado
+account_detail_sign_in_timed_out = o login expirou; tente entrar novamente
+account_detail_sign_in_worker_could_not_start = não foi possível iniciar o processo de login; tente entrar novamente
+account_detail_account_state_unavailable = o estado da conta não está disponível
+account_detail_credential_storage_unavailable_sign_in_again = o armazenamento de credenciais não está disponível; entre novamente
+account_detail_credential_storage_unavailable_retry_sign_in = o armazenamento de credenciais não está disponível; tente entrar novamente
+account_detail_saved_sign_in_expired = o login salvo expirou; entre novamente
+account_detail_sign_in_expired = o login expirou; entre novamente
+account_detail_saved_sign_in_retire_failed = não foi possível descartar o login salvo; o armazenamento de credenciais não está disponível; entre novamente
+account_detail_sign_in_expired_retire_failed = o login expirou, mas não foi possível descartar as credenciais salvas; entre novamente
+account_detail_sign_out_cleanup_attention = desconectado; a limpeza das credenciais requer atenção
+account_detail_saved_sign_in_cleanup_unavailable = a limpeza do login salvo não está disponível; tente entrar novamente
+account_detail_restore_could_not_start = não foi possível iniciar a restauração do login salvo; entre novamente
+account_detail_saved_sign_in_unverified_connection = não foi possível verificar o login salvo; verifique sua conexão e entre novamente
+account_detail_saved_sign_in_unverified = não foi possível verificar o login salvo; entre novamente

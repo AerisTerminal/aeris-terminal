@@ -1,0 +1,76 @@
+# Von der Laufzeit veröffentlichter Markt-, Konto- und Studientext: Einstellungen integrierter Studien,
+# offizielle Kontextstatistiken und Anmeldefelder der Anbieter. Von Herausgebern verfasster Text
+# (Einstellungen von Drittanbieter-Studien, offizielle Veröffentlichungstitel und Statistiknamen)
+# wird wie veröffentlicht angezeigt und gelangt nie hierher.
+
+## Einstellungen integrierter Studien
+study_setting_period = Periode
+study_setting_period_description = Anzahl der Eingabebalken, die die Berechnung verwendet.
+study_setting_deviation = Abweichung
+study_setting_deviation_description = Multiplikator der Standardabweichung für die Bänder.
+study_setting_fast_period = Schnelle Periode
+study_setting_fast_period_description = Periode der schnellen EMA.
+study_setting_slow_period = Langsame Periode
+study_setting_slow_period_description = Periode der langsamen EMA.
+study_setting_signal_period = Signalperiode
+study_setting_signal_period_description = Periode der Signal-EMA.
+study_setting_k_period = %K-Periode
+study_setting_k_period_description = Rückblickfenster des schnellen Oszillators.
+study_setting_d_period = %D-Periode
+study_setting_d_period_description = Glättungsfenster der Signallinie.
+
+## Marktkontext: Quellen, Ereignisse und Statistiken
+context_source_federal_reserve = Federal Reserve
+context_event_fomc_rate_decision = FOMC-Zinsentscheid und Pressekonferenz
+context_event_eia_petroleum_status = EIA Weekly Petroleum Status Report
+context_metric_commercial_crude_stocks = Kommerzielle Rohölbestände
+context_metric_lower_48_gas_storage = Erdgas-Arbeitsspeicher Lower 48
+context_metric_ten_year_treasury_yield = Rendite 10-jähriger US-Staatsanleihen
+context_metric_trade_weighted_dollar = Handelsgewichteter US-Dollar-Index
+context_metric_consumer_price_index = Verbraucherpreisindex
+context_metric_nonfarm_payrolls = Beschäftigte außerhalb der Landwirtschaft
+context_metric_wasde_corn_production = WASDE US-Maisproduktion
+context_metric_wasde_corn_exports = WASDE US-Maisexporte
+context_metric_wasde_corn_ending_stocks = WASDE US-Mais-Endbestände
+context_metric_weekly_export_sales = {commodity}: wöchentliche Exportverkäufe
+context_unit_thousand_barrels = Tausend Barrel
+context_unit_billion_cubic_feet = Milliarden Kubikfuß
+context_unit_percent = Prozent
+context_unit_index = Index
+context_unit_thousands_of_persons = Tausend Personen
+context_unit_million_bushels = Millionen Scheffel
+context_unit_metric_tons = Tonnen
+context_region_conus_population_weighted = CONUS, bevölkerungsgewichtet
+context_cot_producer_merchant = Produzenten/Händler
+context_cot_swap_dealer = Swap-Händler
+context_cot_managed_money = Managed Money
+context_cot_other_reportable = Sonstige Meldepflichtige
+
+## Anmeldefelder der Anbieter
+login_field_server = Server
+login_field_system = System
+login_field_user_id = Benutzer-ID
+login_field_password = Passwort
+## Details der Kontositzung
+account_detail_signed_out = abgemeldet
+account_detail_restoring_saved_sign_in = gespeicherte Anmeldung wird wiederhergestellt
+account_detail_signed_in_verifying_saved_session = angemeldet; gespeicherte Sitzung wird geprüft
+account_detail_signed_in = angemeldet
+account_detail_signed_in_offline_reconnecting = offline angemeldet; Verbindung wird wiederhergestellt
+account_detail_waiting_for_browser_authorization = warte auf Autorisierung im Browser
+account_detail_completing_sign_in = Anmeldung wird abgeschlossen
+account_detail_sign_in_cancelled = Anmeldung abgebrochen
+account_detail_sign_in_timed_out = Zeitüberschreitung bei der Anmeldung; erneut anmelden
+account_detail_sign_in_worker_could_not_start = Anmeldedienst konnte nicht starten; erneut anmelden
+account_detail_account_state_unavailable = Kontostatus ist nicht verfügbar
+account_detail_credential_storage_unavailable_sign_in_again = Anmeldedatenspeicher ist nicht verfügbar; bitte erneut anmelden
+account_detail_credential_storage_unavailable_retry_sign_in = Anmeldedatenspeicher ist nicht verfügbar; Anmeldung wiederholen
+account_detail_saved_sign_in_expired = gespeicherte Anmeldung abgelaufen; bitte erneut anmelden
+account_detail_sign_in_expired = Anmeldung abgelaufen; bitte erneut anmelden
+account_detail_saved_sign_in_retire_failed = gespeicherte Anmeldung konnte nicht entfernt werden; Anmeldedatenspeicher ist nicht verfügbar; bitte erneut anmelden
+account_detail_sign_in_expired_retire_failed = Anmeldung abgelaufen, gespeicherte Anmeldedaten konnten aber nicht entfernt werden; bitte erneut anmelden
+account_detail_sign_out_cleanup_attention = abgemeldet; Bereinigung der Anmeldedaten erfordert Aufmerksamkeit
+account_detail_saved_sign_in_cleanup_unavailable = Bereinigung der gespeicherten Anmeldung ist nicht verfügbar; Anmeldung wiederholen
+account_detail_restore_could_not_start = Wiederherstellung der gespeicherten Anmeldung konnte nicht starten; bitte erneut anmelden
+account_detail_saved_sign_in_unverified_connection = gespeicherte Anmeldung konnte nicht geprüft werden; prüfen Sie Ihre Verbindung und melden Sie sich erneut an
+account_detail_saved_sign_in_unverified = gespeicherte Anmeldung konnte nicht geprüft werden; bitte erneut anmelden

@@ -104,11 +104,13 @@ impl OrderBookRenderMetrics {
         self.maximum_nanos = self.maximum_nanos.max(elapsed_nanos);
     }
 }
+// The narrow columns hold an uppercase 11 px header; at 0.15 the longest
+// shipped translation (Spanish and Portuguese "COMPRA") still fits.
 const PNL_WIDTH: f32 = 0.10;
-const BOOK_WIDTH: f32 = 0.30;
-const TRADE_WIDTH: f32 = 0.10;
+const BOOK_WIDTH: f32 = 0.25;
+const TRADE_WIDTH: f32 = 0.15;
 const PRICE_WIDTH: f32 = 0.20;
-const ORDERS_WIDTH: f32 = 0.10;
+const ORDERS_WIDTH: f32 = 0.15;
 const QUEUE_WIDTH: f32 = 0.30;
 /// A queue cell lists at most this many leading orders; the rest show as a count.
 const MAXIMUM_QUEUE_CELL_ORDERS: usize = 12;
@@ -2585,7 +2587,7 @@ mod tests {
             .filter(|column| columns.is_visible(*column))
             .map(|column| columns.width(column))
             .sum::<f32>();
-        assert!((width - 1.0).abs() < f32::EPSILON);
+        assert!((width - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2611,7 +2613,7 @@ mod tests {
             .map(|column| columns.width(column))
             .sum::<f32>();
         assert!(
-            (width - 1.0).abs() < f32::EPSILON,
+            (width - 1.0).abs() < 1e-6,
             "a withdrawn column takes no width"
         );
         assert!(columns.offer_order_queues(true));

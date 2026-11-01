@@ -1,0 +1,190 @@
+# Surfaces du graphique : noms d'indicateurs, types de graphique, lignes et commandes de la
+# légende, tampons de dessin, export de capture et carnet d'ordres en lecture seule.
+
+# Noms du catalogue d'indicateurs historique.
+indicator_volume = Volume
+indicator_vwap = Prix moyen pondéré par le volume
+indicator_sma = Moyenne mobile simple
+indicator_ema = Moyenne mobile exponentielle
+indicator_wma = Moyenne mobile pondérée
+indicator_bollinger = Bandes de Bollinger
+indicator_rsi = Indice de force relative
+indicator_macd = MACD
+indicator_stochastic = Stochastique
+indicator_atr = Amplitude moyenne réelle
+indicator_volume_profile = Profil de volume (plage visible)
+
+# Noms des indicateurs intégrés d'Aeris Charts.
+indicator_dema = Moyenne mobile exponentielle double
+indicator_tema = Moyenne mobile exponentielle triple
+indicator_smma = Moyenne mobile lissée (RMA)
+indicator_hma = Moyenne mobile de Hull
+indicator_alma = Moyenne mobile d'Arnaud Legoux
+indicator_kama = Moyenne mobile adaptative de Kaufman
+indicator_mcginley = Dynamique de McGinley
+indicator_vwma = Moyenne mobile pondérée par le volume
+indicator_linear_regression = Canal de régression linéaire
+indicator_envelopes = Enveloppes de moyenne mobile
+indicator_donchian = Canaux de Donchian
+indicator_keltner = Canaux de Keltner
+indicator_atr_bands = Bandes ATR
+indicator_vwap_bands = Bandes VWAP
+indicator_parabolic_sar = SAR parabolique
+indicator_supertrend = SuperTrend
+indicator_ichimoku = Nuage d'Ichimoku
+indicator_zigzag = Zigzag
+indicator_pivot_standard = Points pivots standard
+indicator_pivot_fibonacci = Points pivots Fibonacci
+indicator_pivot_camarilla = Points pivots Camarilla
+indicator_pivot_woodie = Points pivots Woodie
+indicator_pivot_demark = Points pivots DeMark
+indicator_swing_points = Sommets et creux de swing
+indicator_session_levels = Plus haut et plus bas de la session
+indicator_previous_period_levels = Plus haut et plus bas de la veille
+indicator_opening_range = Plage d'ouverture
+indicator_aroon = Aroon
+indicator_awesome_oscillator = Awesome Oscillator
+indicator_dpo = Oscillateur de prix sans tendance
+indicator_chande_momentum = Oscillateur de momentum de Chande
+indicator_bollinger_metrics = %B et largeur de Bollinger
+indicator_standard_deviation = Écart type
+indicator_cci = Indice de canal des matières premières
+indicator_williams_r = Williams %R
+indicator_stochastic_rsi = RSI stochastique
+indicator_momentum = Momentum
+indicator_roc = Taux de variation
+indicator_adx_dmi = ADX et DMI
+indicator_choppiness = Indice de choppiness
+indicator_historical_volatility = Volatilité historique
+indicator_trix = TRIX
+indicator_kst = Know Sure Thing
+indicator_tsi = Indice de force réelle
+indicator_mass_index = Indice de masse
+indicator_vortex = Indicateur Vortex
+indicator_coppock = Courbe de Coppock
+indicator_fisher = Transformée de Fisher
+indicator_ultimate_oscillator = Oscillateur ultime
+indicator_obv = Volume équilibré (OBV)
+indicator_accumulation_distribution = Accumulation/Distribution
+indicator_price_volume_trend = Tendance prix-volume
+indicator_chaikin_oscillator = Oscillateur de Chaikin
+indicator_klinger = Oscillateur de Klinger
+indicator_relative_volume = Volume relatif
+indicator_volume_oscillator = Oscillateur de volume
+indicator_elder_force = Indice de force d'Elder
+indicator_ease_of_movement = Facilité de mouvement
+indicator_cmf = Flux monétaire de Chaikin
+indicator_mfi = Indice de flux monétaire
+
+# Résumés des paramètres d'indicateur affichés à côté des noms.
+params_volume = Volume haussier/baissier · moyenne mobile facultative
+params_session_anchored = Ancré à la session
+params_period_20 = Période 20
+params_period_20_deviation_2 = Période 20 · Écart 2
+params_bollinger = Période 14 · Écart 2
+params_period_14 = Période 14
+params_macd = Rapide 12 · Lente 26 · Signal 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = Lignes 48 · Zone de valeur 70%
+params_alma = Période 14 · Décalage 0.85 · Sigma 6
+params_kama = Période 10 · Rapide 2 · Lente 30
+params_envelopes = Période 14 · 2%
+params_multiplier_2 = Période 14 · Multiplicateur 2
+params_vwap_bands = Ancré à la session · 1 écart type
+params_multiplier_3 = Période 14 · Multiplicateur 3
+params_deviation_2_percent = Écart 2%
+params_standard = Paramètres standard
+params_prior_period_levels = Niveaux de la période précédente
+params_swing_points = Gauche 5 · Droite 5
+params_utc_sessions = Sessions UTC
+params_utc_days = Jours UTC
+params_opening_range = 30 minutes · sessions UTC
+params_stochastic_rsi = RSI 14 · Stochastique 14
+params_historical_volatility = Période 14 · 252 jours
+params_trix = Période 14 · Signal 9
+params_kst = ROC 10 · 15 · 20 · 30 · Signal 9
+params_tsi = Longue 25 · Courte 13 · Signal 13
+params_mass_index = EMA 9 · Somme 25
+params_coppock = Longue 14 · Courte 11 · Lissage 10
+params_ultimate_oscillator = Périodes 7 · 14 · 28
+params_cumulative = Cumulé
+params_chaikin_oscillator = Rapide 3 · Lente 10
+params_klinger = Rapide 34 · Lente 55 · Signal 13
+
+# Types de graphique.
+chart_type_candles = Bougies
+chart_type_hollow_candles = Bougies creuses
+chart_type_hollow_candles_bullish = Bougies creuses : haussières seulement
+chart_type_hollow_candles_bearish = Bougies creuses : baissières seulement
+chart_type_footprint = Footprint
+chart_type_bars = Barres
+chart_type_line = Ligne
+chart_type_line_with_markers = Ligne avec marqueurs
+chart_type_area = Aire
+chart_type_baseline = Ligne de base
+chart_type_brushable_area = Aire sélectionnable
+
+# Glyphes de l'outil de dessin tampon.
+stamp_check = Coche
+stamp_cross = Croix
+stamp_star = Étoile
+stamp_alert = Alerte
+stamp_info = Info
+stamp_question = Question
+stamp_bolt = Éclair
+stamp_target = Cible
+
+# Lignes de la légende du graphique et leurs commandes.
+legend_waiting_for_order_flow = En attente du flux d'ordres
+legend_volume_profile = Profil de volume
+legend_big_trades = Gros trades
+legend_order_book = Carnet d'ordres
+legend_depth_heatmap = Carte de chaleur de la profondeur
+legend_loading = Chargement
+legend_hide = Masquer
+legend_show = Afficher
+legend_settings = Paramètres
+legend_remove = Supprimer
+order_flow_cvd = CVD
+order_flow_delta = Delta
+
+# Erreurs de saisie d'ancre de dessin.
+drawing_anchor_price = Saisissez un prix sous forme de nombre
+drawing_anchor_time = Saisissez une heure au format AAAA-MM-JJ HH:MM
+drawing_anchor_rejected = Le graphique ne peut pas placer le point à cet endroit
+
+# Légende de l'export de capture du graphique.
+export_created_with = Créé avec Aeris
+
+# Titre de la ligne de prix du plan de session.
+session_plan_line = PLAN · {label}
+
+# Colonnes, bandeaux et marqueurs de cellule du carnet d'ordres en lecture seule.
+book_column_pnl = P/L
+book_column_bid = Bid
+book_column_sell = Vente
+book_column_price = Prix
+book_column_buy = Achat
+book_column_ask = Ask
+book_column_orders = Ordres
+book_column_queue = File
+book_offline = Carnet d'ordres hors ligne · internet déconnecté
+book_reconnecting = Carnet d'ordres en reconnexion · attente d'un nouvel instantané
+book_level_one_note = Niveau 1 · meilleurs bid/ask
+book_unavailable = Carnet d'ordres indisponible
+book_waiting_snapshot = En attente de l'instantané du carnet d'ordres
+book_loading = Chargement du carnet d'ordres…
+book_drag_buy = ACHAT
+book_drag_sell = VENTE
+book_position = POS {quantity}
+book_own_order = VOUS {quantity}
+queues_loading = Chargement des files d'ordres
+queues_recovering = Récupération des files d'ordres · attente d'une image complète des ordres
+queues_unavailable = Files d'ordres indisponibles pour ce marché
+queues_limit_reached = Limite de files d'ordres atteinte · fermez la colonne File sur un autre carnet
+book_stale = Carnet d'ordres obsolète · dernière séquence {watermark}
+book_recovering = Récupération du carnet d'ordres · {reason}
+recovery_awaiting_snapshot = attente d'un instantané
+recovery_sequence_gap = rupture de séquence
+recovery_crossed_book = carnet croisé
+recovery_invalid_update = mise à jour invalide

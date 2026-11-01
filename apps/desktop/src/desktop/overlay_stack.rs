@@ -27,8 +27,12 @@ impl OverlayKind {
 
 #[derive(Clone, Debug, PartialEq)]
 enum AppOverlay {
-    /// Anchored under the click point that opened it.
-    PlatformMenu(Point<Pixels>),
+    PlatformMenu {
+        /// The click point that opened it, which the panel stays anchored under.
+        anchor: Point<Pixels>,
+        /// The language dropdown inside the menu is open.
+        language_open: bool,
+    },
     /// Anchored under the click point that opened it.
     AppNavigation(Point<Pixels>),
     KeyboardShortcuts,
@@ -43,7 +47,7 @@ enum AppOverlay {
 impl AppOverlay {
     const fn kind(&self) -> OverlayKind {
         match self {
-            Self::PlatformMenu(_) => OverlayKind::PlatformMenu,
+            Self::PlatformMenu { .. } => OverlayKind::PlatformMenu,
             Self::AppNavigation(_) => OverlayKind::AppNavigation,
             Self::KeyboardShortcuts => OverlayKind::KeyboardShortcuts,
             Self::CommandPalette { .. } => OverlayKind::CommandPalette,
@@ -98,15 +102,41 @@ impl OverlayStack {
         if self.close(OverlayKind::PlatformMenu) {
             return false;
         }
-        self.open = Some(AppOverlay::PlatformMenu(anchor));
+        self.open = Some(AppOverlay::PlatformMenu {
+            anchor,
+            language_open: false,
+        });
         true
     }
 
     pub(super) const fn platform_menu_anchor(&self) -> Option<Point<Pixels>> {
         match self.open {
-            Some(AppOverlay::PlatformMenu(anchor)) => Some(anchor),
+            Some(AppOverlay::PlatformMenu { anchor, .. }) => Some(anchor),
             _ => None,
         }
+    }
+
+    /// Whether the profile menu is open with its language dropdown expanded.
+    pub(super) const fn platform_language_menu_open(&self) -> bool {
+        matches!(
+            self.open,
+            Some(AppOverlay::PlatformMenu {
+                language_open: true,
+                ..
+            })
+        )
+    }
+
+    /// Expands or collapses the profile menu's language dropdown, reporting whether it changed.
+    /// A closed profile menu has no dropdown to change.
+    pub(super) const fn set_platform_language_menu_open(&mut self, open: bool) -> bool {
+        if let Some(AppOverlay::PlatformMenu { language_open, .. }) = &mut self.open
+            && *language_open != open
+        {
+            *language_open = open;
+            return true;
+        }
+        false
     }
 
     /// Opens the page menu under `anchor`, or closes it when it is open. Reports whether it is
@@ -261,6 +291,30 @@ mod tests {
         assert!(!overlays.toggle_app_navigation(point(px(9.0), px(9.0))));
         assert_eq!(overlays.kind(), None);
         assert!(!overlays.close(OverlayKind::AppNavigation));
+    }
+
+    #[gpui::test]
+    fn the_language_dropdown_lives_and_closes_with_the_profile_menu(cx: &mut TestAppContext) {
+        let mut overlays = stack(cx);
+        assert!(
+            !overlays.set_platform_language_menu_open(true),
+            "a closed profile menu has no dropdown"
+        );
+        assert!(overlays.toggle_platform_menu(point(px(10.0), px(4.0))));
+        assert!(!overlays.platform_language_menu_open());
+        assert!(overlays.set_platform_language_menu_open(true));
+        assert!(!overlays.set_platform_language_menu_open(true));
+        assert!(overlays.platform_language_menu_open());
+        assert_eq!(
+            overlays.platform_menu_anchor(),
+            Some(point(px(10.0), px(4.0)))
+        );
+        assert!(!overlays.toggle_platform_menu(point(px(10.0), px(4.0))));
+        assert!(overlays.toggle_platform_menu(point(px(10.0), px(4.0))));
+        assert!(
+            !overlays.platform_language_menu_open(),
+            "a reopened profile menu starts with the dropdown collapsed"
+        );
     }
 
     #[test]

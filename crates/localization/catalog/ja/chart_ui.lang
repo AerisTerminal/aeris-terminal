@@ -1,0 +1,190 @@
+# チャート画面：インジケーター名、チャートタイプ、凡例の行と操作、描画スタンプ、
+# キャプチャの書き出し、読み取り専用の板。
+
+# 従来のインジケーターカタログ名。
+indicator_volume = 出来高
+indicator_vwap = 出来高加重平均価格（VWAP）
+indicator_sma = 単純移動平均線（SMA）
+indicator_ema = 指数平滑移動平均線（EMA）
+indicator_wma = 加重移動平均線（WMA）
+indicator_bollinger = ボリンジャーバンド
+indicator_rsi = 相対力指数（RSI）
+indicator_macd = MACD
+indicator_stochastic = ストキャスティクス
+indicator_atr = アベレージ・トゥルー・レンジ（ATR）
+indicator_volume_profile = 価格帯別出来高（表示範囲）
+
+# Aeris Charts の標準搭載インジケーター名。
+indicator_dema = 二重指数平滑移動平均線（DEMA）
+indicator_tema = 三重指数平滑移動平均線（TEMA）
+indicator_smma = 平滑移動平均線（RMA）
+indicator_hma = ハル移動平均線（HMA）
+indicator_alma = アルノー・ルグー移動平均線（ALMA）
+indicator_kama = カウフマン適応型移動平均線（KAMA）
+indicator_mcginley = マクギンリー・ダイナミック
+indicator_vwma = 出来高加重移動平均線（VWMA）
+indicator_linear_regression = 線形回帰チャネル
+indicator_envelopes = 移動平均エンベロープ
+indicator_donchian = ドンチャン・チャネル
+indicator_keltner = ケルトナー・チャネル
+indicator_atr_bands = ATR バンド
+indicator_vwap_bands = VWAP バンド
+indicator_parabolic_sar = パラボリック SAR
+indicator_supertrend = スーパートレンド
+indicator_ichimoku = 一目均衡表
+indicator_zigzag = ジグザグ
+indicator_pivot_standard = ピボットポイント（スタンダード）
+indicator_pivot_fibonacci = ピボットポイント（フィボナッチ）
+indicator_pivot_camarilla = ピボットポイント（カマリラ）
+indicator_pivot_woodie = ピボットポイント（ウッディ）
+indicator_pivot_demark = ピボットポイント（デマーク）
+indicator_swing_points = スイング高値・安値
+indicator_session_levels = セッション高値・安値
+indicator_previous_period_levels = 前日高値・安値
+indicator_opening_range = オープニングレンジ
+indicator_aroon = アルーン
+indicator_awesome_oscillator = オーサム・オシレーター
+indicator_dpo = トレンド除去価格オシレーター（DPO）
+indicator_chande_momentum = シャンデ・モメンタム・オシレーター
+indicator_bollinger_metrics = ボリンジャー %B・バンド幅
+indicator_standard_deviation = 標準偏差
+indicator_cci = 商品チャネル指数（CCI）
+indicator_williams_r = ウィリアムズ %R
+indicator_stochastic_rsi = ストキャスティクス RSI
+indicator_momentum = モメンタム
+indicator_roc = 変化率（ROC）
+indicator_adx_dmi = ADX・DMI
+indicator_choppiness = チョピネス・インデックス
+indicator_historical_volatility = ヒストリカル・ボラティリティ
+indicator_trix = TRIX
+indicator_kst = ノウ・シュア・シング（KST）
+indicator_tsi = トゥルー・ストレングス・インデックス（TSI）
+indicator_mass_index = マス・インデックス
+indicator_vortex = ボルテックス・インジケーター
+indicator_coppock = コポック・カーブ
+indicator_fisher = フィッシャー・トランスフォーム
+indicator_ultimate_oscillator = アルティメット・オシレーター
+indicator_obv = オン・バランス・ボリューム（OBV）
+indicator_accumulation_distribution = アキュムレーション・ディストリビューション
+indicator_price_volume_trend = プライス・ボリューム・トレンド
+indicator_chaikin_oscillator = チャイキン・オシレーター
+indicator_klinger = クリンガー・オシレーター
+indicator_relative_volume = 相対出来高
+indicator_volume_oscillator = ボリューム・オシレーター
+indicator_elder_force = エルダー・フォース・インデックス
+indicator_ease_of_movement = イーズ・オブ・ムーブメント
+indicator_cmf = チャイキン・マネーフロー（CMF）
+indicator_mfi = マネーフロー・インデックス（MFI）
+
+# 名称の横に表示するインジケーターのパラメーター概要。
+params_volume = 上昇・下落出来高 · 移動平均（任意）
+params_session_anchored = セッション起点
+params_period_20 = 期間 20
+params_period_20_deviation_2 = 期間 20 · 偏差 2
+params_bollinger = 期間 14 · 偏差 2
+params_period_14 = 期間 14
+params_macd = 短期 12 · 長期 26 · シグナル 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = 行数 48 · バリューエリア 70%
+params_alma = 期間 14 · オフセット 0.85 · シグマ 6
+params_kama = 期間 10 · 短期 2 · 長期 30
+params_envelopes = 期間 14 · 2%
+params_multiplier_2 = 期間 14 · 乗数 2
+params_vwap_bands = セッション起点 · 標準偏差 1
+params_multiplier_3 = 期間 14 · 乗数 3
+params_deviation_2_percent = 偏差 2%
+params_standard = 標準設定
+params_prior_period_levels = 前期間の水準
+params_swing_points = 左 5 · 右 5
+params_utc_sessions = UTC セッション
+params_utc_days = UTC 日
+params_opening_range = 30 分 · UTC セッション
+params_stochastic_rsi = RSI 14 · ストキャスティクス 14
+params_historical_volatility = 期間 14 · 252 日
+params_trix = 期間 14 · シグナル 9
+params_kst = ROC 10 · 15 · 20 · 30 · シグナル 9
+params_tsi = 長期 25 · 短期 13 · シグナル 13
+params_mass_index = EMA 9 · 合計 25
+params_coppock = 長期 14 · 短期 11 · 平滑化 10
+params_ultimate_oscillator = 期間 7 · 14 · 28
+params_cumulative = 累積
+params_chaikin_oscillator = 短期 3 · 長期 10
+params_klinger = 短期 34 · 長期 55 · シグナル 13
+
+# チャートタイプ。
+chart_type_candles = ローソク足
+chart_type_hollow_candles = 中空ローソク足
+chart_type_hollow_candles_bullish = 中空ローソク足：陽線のみ
+chart_type_hollow_candles_bearish = 中空ローソク足：陰線のみ
+chart_type_footprint = フットプリント
+chart_type_bars = バー
+chart_type_line = ライン
+chart_type_line_with_markers = マーカー付きライン
+chart_type_area = エリア
+chart_type_baseline = ベースライン
+chart_type_brushable_area = ブラシ対応エリア
+
+# アイコンスタンプ描画ツールの記号。
+stamp_check = チェックマーク
+stamp_cross = バツ印
+stamp_star = 星
+stamp_alert = 警告
+stamp_info = 情報
+stamp_question = 疑問符
+stamp_bolt = 稲妻
+stamp_target = ターゲット
+
+# チャートの凡例の行と行の操作。
+legend_waiting_for_order_flow = オーダーフローを待機中
+legend_volume_profile = 価格帯別出来高
+legend_big_trades = 大口約定
+legend_order_book = 板
+legend_depth_heatmap = 板ヒートマップ
+legend_loading = 読み込み中
+legend_hide = 非表示
+legend_show = 表示
+legend_settings = 設定
+legend_remove = 削除
+order_flow_cvd = CVD
+order_flow_delta = デルタ
+
+# 描画アンカーの入力エラー。
+drawing_anchor_price = 価格を数値で入力してください
+drawing_anchor_time = 時刻を YYYY-MM-DD HH:MM の形式で入力してください
+drawing_anchor_rejected = その位置にポイントを配置できません
+
+# チャートキャプチャ書き出し時のキャプション。
+export_created_with = Aeris で作成
+
+# セッションプランの価格ラインのタイトル。
+session_plan_line = プラン · {label}
+
+# 読み取り専用の板の列、バナー、セルのマーカー。
+book_column_pnl = 損益
+book_column_bid = 買気配
+book_column_sell = 売り
+book_column_price = 価格
+book_column_buy = 買い
+book_column_ask = 売気配
+book_column_orders = 注文
+book_column_queue = 待ち順位
+book_offline = 板はオフラインです · インターネット未接続
+book_reconnecting = 板を再接続中 · 最新のスナップショットを待機中
+book_level_one_note = レベル 1 · 最良気配
+book_unavailable = 板を利用できません
+book_waiting_snapshot = 板のスナップショットを待機中
+book_loading = 板を読み込み中…
+book_drag_buy = 買い
+book_drag_sell = 売り
+book_position = 建玉 {quantity}
+book_own_order = 自分 {quantity}
+queues_loading = 注文キューを読み込み中
+queues_recovering = 注文キューを復旧中 · 完全な注文イメージを待機中
+queues_unavailable = この市場では注文キューを利用できません
+queues_limit_reached = 注文キューの上限に達しました · 別の板の待ち順位列を閉じてください
+book_stale = 板の更新が停止しています · 最終シーケンス {watermark}
+book_recovering = 板を復旧中 · {reason}
+recovery_awaiting_snapshot = スナップショット待機中
+recovery_sequence_gap = シーケンスの欠落
+recovery_crossed_book = 気配の逆転
+recovery_invalid_update = 無効な更新

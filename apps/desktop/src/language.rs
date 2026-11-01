@@ -18,12 +18,16 @@ pub enum LanguagePreference {
 }
 
 impl LanguagePreference {
-    /// Every choice in picker order.
-    pub const ALL: [Self; 3] = [
-        Self::System,
-        Self::Pinned(Language::English),
-        Self::Pinned(Language::Russian),
-    ];
+    /// Every choice in picker order: the system, then each catalog language.
+    pub const ALL: [Self; 1 + Language::ALL.len()] = {
+        let mut all = [Self::System; 1 + Language::ALL.len()];
+        let mut index = 0;
+        while index < Language::ALL.len() {
+            all[index + 1] = Self::Pinned(Language::ALL[index]);
+            index += 1;
+        }
+        all
+    };
 
     /// The stable identifier stored in the workspace document.
     #[must_use]

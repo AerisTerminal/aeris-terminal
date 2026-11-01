@@ -121,7 +121,8 @@ impl RenderOnce for Switch {
 }
 
 /// A labelled setting row: the label and an optional muted description on the left, the switch
-/// on the right.
+/// on the right. The description wraps rather than truncating, because translations run longer
+/// than English.
 #[derive(IntoElement)]
 pub(crate) struct SwitchRow {
     switch: Switch,
@@ -183,7 +184,6 @@ impl RenderOnce for SwitchRow {
                     )
                     .children(self.description.map(|description| {
                         div()
-                            .truncate()
                             .text_xs()
                             .text_color(gpui_color(colors.text_muted))
                             .child(description)

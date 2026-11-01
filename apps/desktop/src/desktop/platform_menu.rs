@@ -46,12 +46,14 @@ const THEME_SECTION_HEIGHT: f32 = SECTION_TITLE_HEIGHT
     + PRESET_GRID_TOP
     + PRESET_GRID_HEIGHT
     + SECTION_BOTTOM_PADDING;
-const WINDOW_SETTING_HEIGHT: f32 = 40.0;
+/// A label line and up to two description lines, since translated descriptions wrap.
+const WINDOW_SETTING_HEIGHT: f32 = 64.0;
 const WINDOW_SECTION_HEIGHT: f32 =
     SECTION_TITLE_HEIGHT + 2.0 * WINDOW_SETTING_HEIGHT + SECTION_BOTTOM_PADDING;
-const LANGUAGE_ROW_HEIGHT: f32 = 28.0;
+/// The language dropdown trigger is a default-size button.
+const LANGUAGE_TRIGGER_HEIGHT: f32 = 28.0;
 const LANGUAGE_SECTION_HEIGHT: f32 =
-    SECTION_TITLE_HEIGHT + 3.0 * LANGUAGE_ROW_HEIGHT + SECTION_BOTTOM_PADDING;
+    SECTION_TITLE_HEIGHT + LANGUAGE_TRIGGER_HEIGHT + SECTION_BOTTOM_PADDING;
 const ABOUT_BRAND_HEIGHT: f32 = 40.0;
 const ABOUT_DETAIL_HEIGHT: f32 = 26.0;
 const ABOUT_UPDATE_HEIGHT: f32 = 44.0;
@@ -61,7 +63,6 @@ const ABOUT_NOTICES_HEIGHT: f32 = 200.0;
 const THEME_MODES: [ThemeMode; 2] = [ThemeMode::Light, ThemeMode::Dark];
 
 type ThemeSelect = Rc<dyn Fn(AerisTheme, &mut Window, &mut App)>;
-type LanguageSelect = Rc<dyn Fn(LanguagePreference, &mut Window, &mut App)>;
 type UpdateActivate = Rc<dyn Fn(UpdateAction, &mut Window, &mut App)>;
 type WindowToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
@@ -223,6 +224,7 @@ pub(super) struct PlatformMenuContent<'a> {
     pub(super) window_frame: chart_chrome::WindowFrame,
     pub(super) drawing_toolbar_visible: bool,
     pub(super) language: LanguagePreference,
+    pub(super) language_menu_open: bool,
     /// Notices appear under About only while their provider's session is held.
     pub(super) attribution: Option<aeris_market_runtime::ProviderAttribution>,
     pub(super) now_unix_seconds: i64,
@@ -246,6 +248,7 @@ pub(super) fn platform_menu_layer(
         window_frame,
         drawing_toolbar_visible,
         language,
+        language_menu_open,
         attribution,
         now_unix_seconds,
     } = content;
@@ -282,12 +285,6 @@ pub(super) fn platform_menu_layer(
         });
     });
     let (toggle_frameless, toggle_drawing_toolbar) = window_toggles(terminal);
-    let language_terminal = terminal.clone();
-    let select_language: LanguageSelect = Rc::new(move |preference, window, cx| {
-        language_terminal.update(cx, |terminal, terminal_cx| {
-            terminal.set_language_preference(preference, window, terminal_cx);
-        });
-    });
     let update_terminal = terminal.clone();
     let run_update: UpdateActivate = Rc::new(move |action, _, cx| {
         update_terminal.update(cx, |terminal, terminal_cx| match action {
@@ -325,7 +322,12 @@ pub(super) fn platform_menu_layer(
             theme,
         ))
         .separator()
-        .child(language_section(language, &select_language, theme))
+        .child(language_section(
+            terminal,
+            language,
+            language_menu_open,
+            theme,
+        ))
         .separator()
         .child(keyboard_shortcuts_row(terminal, theme))
         .separator()
@@ -996,88 +998,98 @@ fn window_switch(row: SwitchRow, on_toggle: &WindowToggle) -> Div {
     div()
         .h(px(WINDOW_SETTING_HEIGHT))
         .flex_none()
+        .flex()
+        .flex_col()
+        .justify_center()
         .child(row.on_change(move |enabled, _, window, cx| {
             on_toggle(enabled, window, cx);
         }))
 }
 
-const fn language_row_id(preference: LanguagePreference) -> &'static str {
-    match preference {
-        LanguagePreference::System => "platform_menu_language_system",
-        LanguagePreference::Pinned(aeris_localization::Language::English) => {
-            "platform_menu_language_english"
-        }
-        LanguagePreference::Pinned(aeris_localization::Language::Russian) => {
-            "platform_menu_language_russian"
-        }
-    }
-}
-
-/// Language section: one row per choice, marked while selected. Pinned languages show their
-/// own name, so a user who cannot read the current language still recognizes theirs.
+/// Language section: a dropdown of every choice with the current one marked. Pinned languages
+/// show their own name, so a user who cannot read the current language still recognizes theirs.
 fn language_section(
+    terminal: &Entity<TerminalApp>,
     language: LanguagePreference,
-    on_select: &LanguageSelect,
+    open: bool,
     theme: &AerisTheme,
 ) -> Div {
+    let toggle = terminal.clone();
+    let trigger = Button::new("platform_menu_language", theme)
+        .variant(ButtonVariant::Secondary)
+        .trigger()
+        .full_width()
+        .open(open)
+        .aria_label(tr!(menu::LANGUAGE))
+        .leading(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(gpui_color(theme.colors.text_default))
+                .child(language_choice_label(language)),
+        )
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.set_platform_language_menu_open(!open, terminal_cx);
+            });
+        });
+    let panel = open.then(|| {
+        MenuPanel::new(
+            "platform_menu_language_menu",
+            MenuPlacement::Anchored {
+                side: MenuSide::Below,
+                align: MenuAlign::Stretch,
+            },
+            theme,
+        )
+        .animate_from(PopupAnimationOrigin::TOP_LEFT)
+        .children(
+            LanguagePreference::ALL
+                .iter()
+                .enumerate()
+                .map(|(index, &preference)| {
+                    let pick = terminal.clone();
+                    MenuRow::compact(
+                        SharedString::from(format!("platform_menu_language_{index}")),
+                        language_choice_label(preference),
+                        theme,
+                    )
+                    .checked(preference == language)
+                    .on_click(move |_, window, cx| {
+                        pick.update(cx, |terminal, terminal_cx| {
+                            terminal.set_platform_language_menu_open(false, terminal_cx);
+                            terminal.set_language_preference(preference, window, terminal_cx);
+                        });
+                    })
+                }),
+        )
+    });
+    let dismiss = terminal.clone();
     section()
         .h(px(LANGUAGE_SECTION_HEIGHT))
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title(tr!(menu::LANGUAGE), theme))
-        .children(
-            LanguagePreference::ALL
-                .map(|preference| language_row(preference, language, on_select.clone(), theme)),
+        .child(
+            div().h(px(LANGUAGE_TRIGGER_HEIGHT)).flex_none().child(
+                MenuAnchor::new("platform_menu_language_anchor", trigger)
+                    .full_width()
+                    .menu(panel)
+                    .on_dismiss(move |_, cx| {
+                        dismiss.update(cx, |terminal, terminal_cx| {
+                            terminal.set_platform_language_menu_open(false, terminal_cx);
+                        });
+                    }),
+            ),
         )
 }
 
-fn language_row(
-    preference: LanguagePreference,
-    selected: LanguagePreference,
-    on_select: LanguageSelect,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let colors = theme.colors;
-    let is_selected = preference == selected;
-    let id = language_row_id(preference);
-    let label: &'static str = match preference {
+fn language_choice_label(preference: LanguagePreference) -> &'static str {
+    match preference {
         LanguagePreference::System => tr!(menu::LANGUAGE_SYSTEM),
         LanguagePreference::Pinned(language) => language.native_name(),
-    };
-    BaseButton::new(id)
-        .accessibility_label(label)
-        .group(id)
-        .w_full()
-        .cursor_pointer()
-        .on_click(move |_, window, cx| {
-            on_select(preference, window, cx);
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .h(px(LANGUAGE_ROW_HEIGHT))
-                .w_full()
-                .flex()
-                .items_center()
-                .px_2()
-                .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
-                .when(is_selected, |row| row.bg(gpui_color(colors.active_bg)))
-                .when(!is_selected, |row| {
-                    row.group_hover(id, |style| style.bg(gpui_color(colors.hover_bg)))
-                })
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(gpui_color(if is_selected {
-                            colors.text_default
-                        } else {
-                            colors.text_secondary
-                        }))
-                        .child(label),
-                ),
-        )
-        .into_any_element()
+    }
 }
 
 fn keyboard_shortcuts_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> AnyElement {

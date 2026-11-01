@@ -1,0 +1,190 @@
+# Chart surfaces: indicator names, chart types, legend rows and controls, drawing
+# stamps, capture export, and the read-only order book.
+
+# Legacy indicator catalog names.
+indicator_volume = वॉल्यूम
+indicator_vwap = वॉल्यूम वेटेड एवरेज प्राइस
+indicator_sma = सिंपल मूविंग एवरेज
+indicator_ema = एक्सपोनेंशियल मूविंग एवरेज
+indicator_wma = वेटेड मूविंग एवरेज
+indicator_bollinger = बोलिंजर बैंड
+indicator_rsi = रिलेटिव स्ट्रेंथ इंडेक्स
+indicator_macd = MACD
+indicator_stochastic = स्टोकेस्टिक
+indicator_atr = एवरेज ट्रू रेंज
+indicator_volume_profile = वॉल्यूम प्रोफ़ाइल (दिखाई देने वाली रेंज)
+
+# Aeris Charts built-in indicator names.
+indicator_dema = डबल एक्सपोनेंशियल मूविंग एवरेज
+indicator_tema = ट्रिपल एक्सपोनेंशियल मूविंग एवरेज
+indicator_smma = स्मूद्ड मूविंग एवरेज (RMA)
+indicator_hma = हल मूविंग एवरेज
+indicator_alma = आर्नो लेगू मूविंग एवरेज
+indicator_kama = कॉफ़मैन एडैप्टिव मूविंग एवरेज
+indicator_mcginley = मैकगिनले डायनेमिक
+indicator_vwma = वॉल्यूम वेटेड मूविंग एवरेज
+indicator_linear_regression = लीनियर रिग्रेशन चैनल
+indicator_envelopes = मूविंग एवरेज एनवेलप
+indicator_donchian = डॉनचियन चैनल
+indicator_keltner = केल्टनर चैनल
+indicator_atr_bands = ATR बैंड
+indicator_vwap_bands = VWAP बैंड
+indicator_parabolic_sar = पैराबोलिक SAR
+indicator_supertrend = SuperTrend
+indicator_ichimoku = इचिमोकू क्लाउड
+indicator_zigzag = ज़िगज़ैग
+indicator_pivot_standard = पिवट पॉइंट स्टैंडर्ड
+indicator_pivot_fibonacci = पिवट पॉइंट फ़िबोनाची
+indicator_pivot_camarilla = पिवट पॉइंट कैमरिला
+indicator_pivot_woodie = पिवट पॉइंट वुडी
+indicator_pivot_demark = पिवट पॉइंट डीमार्क
+indicator_swing_points = स्विंग हाई और लो
+indicator_session_levels = सेशन हाई और लो
+indicator_previous_period_levels = पिछले दिन का हाई और लो
+indicator_opening_range = ओपनिंग रेंज
+indicator_aroon = आरून
+indicator_awesome_oscillator = ऑसम ऑसिलेटर
+indicator_dpo = डीट्रेंडेड प्राइस ऑसिलेटर
+indicator_chande_momentum = शांडे मोमेंटम ऑसिलेटर
+indicator_bollinger_metrics = बोलिंजर %B और बैंडविड्थ
+indicator_standard_deviation = स्टैंडर्ड डेविएशन
+indicator_cci = कमोडिटी चैनल इंडेक्स
+indicator_williams_r = Williams %R
+indicator_stochastic_rsi = स्टोकेस्टिक RSI
+indicator_momentum = मोमेंटम
+indicator_roc = रेट ऑफ़ चेंज
+indicator_adx_dmi = ADX और DMI
+indicator_choppiness = चॉपीनेस इंडेक्स
+indicator_historical_volatility = हिस्टोरिकल वोलैटिलिटी
+indicator_trix = TRIX
+indicator_kst = Know Sure Thing
+indicator_tsi = ट्रू स्ट्रेंथ इंडेक्स
+indicator_mass_index = मास इंडेक्स
+indicator_vortex = वोर्टेक्स इंडिकेटर
+indicator_coppock = कॉपॉक कर्व
+indicator_fisher = फ़िशर ट्रांसफ़ॉर्म
+indicator_ultimate_oscillator = अल्टीमेट ऑसिलेटर
+indicator_obv = ऑन बैलेंस वॉल्यूम
+indicator_accumulation_distribution = एक्यूम्यूलेशन/डिस्ट्रीब्यूशन
+indicator_price_volume_trend = प्राइस वॉल्यूम ट्रेंड
+indicator_chaikin_oscillator = चाइकिन ऑसिलेटर
+indicator_klinger = क्लिंगर ऑसिलेटर
+indicator_relative_volume = रिलेटिव वॉल्यूम
+indicator_volume_oscillator = वॉल्यूम ऑसिलेटर
+indicator_elder_force = एल्डर फ़ोर्स इंडेक्स
+indicator_ease_of_movement = ईज़ ऑफ़ मूवमेंट
+indicator_cmf = चाइकिन मनी फ़्लो
+indicator_mfi = मनी फ़्लो इंडेक्स
+
+# Indicator parameter summaries shown beside the names.
+params_volume = अप/डाउन वॉल्यूम · वैकल्पिक मूविंग एवरेज
+params_session_anchored = सेशन से एंकर्ड
+params_period_20 = पीरियड 20
+params_period_20_deviation_2 = पीरियड 20 · डेविएशन 2
+params_bollinger = पीरियड 14 · डेविएशन 2
+params_period_14 = पीरियड 14
+params_macd = फ़ास्ट 12 · स्लो 26 · सिग्नल 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = रो 48 · वैल्यू एरिया 70%
+params_alma = पीरियड 14 · ऑफ़सेट 0.85 · सिग्मा 6
+params_kama = पीरियड 10 · फ़ास्ट 2 · स्लो 30
+params_envelopes = पीरियड 14 · 2%
+params_multiplier_2 = पीरियड 14 · मल्टीप्लायर 2
+params_vwap_bands = सेशन से एंकर्ड · 1 स्टैंडर्ड डेविएशन
+params_multiplier_3 = पीरियड 14 · मल्टीप्लायर 3
+params_deviation_2_percent = डेविएशन 2%
+params_standard = स्टैंडर्ड सेटिंग्स
+params_prior_period_levels = पिछली अवधि के लेवल
+params_swing_points = बाएँ 5 · दाएँ 5
+params_utc_sessions = UTC सेशन
+params_utc_days = UTC दिन
+params_opening_range = 30 मिनट · UTC सेशन
+params_stochastic_rsi = RSI 14 · स्टोकेस्टिक 14
+params_historical_volatility = पीरियड 14 · 252 दिन
+params_trix = पीरियड 14 · सिग्नल 9
+params_kst = ROC 10 · 15 · 20 · 30 · सिग्नल 9
+params_tsi = लॉन्ग 25 · शॉर्ट 13 · सिग्नल 13
+params_mass_index = EMA 9 · योग 25
+params_coppock = लॉन्ग 14 · शॉर्ट 11 · स्मूदिंग 10
+params_ultimate_oscillator = पीरियड 7 · 14 · 28
+params_cumulative = क्यूम्यूलेटिव
+params_chaikin_oscillator = फ़ास्ट 3 · स्लो 10
+params_klinger = फ़ास्ट 34 · स्लो 55 · सिग्नल 13
+
+# Chart types.
+chart_type_candles = कैंडल
+chart_type_hollow_candles = हॉलो कैंडल
+chart_type_hollow_candles_bullish = हॉलो कैंडल: केवल बुलिश
+chart_type_hollow_candles_bearish = हॉलो कैंडल: केवल बेयरिश
+chart_type_footprint = फ़ुटप्रिंट
+chart_type_bars = बार
+chart_type_line = लाइन
+chart_type_line_with_markers = मार्कर वाली लाइन
+chart_type_area = एरिया
+chart_type_baseline = बेसलाइन
+chart_type_brushable_area = ब्रश करने योग्य एरिया
+
+# Icon-stamp drawing tool glyphs.
+stamp_check = चेक मार्क
+stamp_cross = क्रॉस मार्क
+stamp_star = तारा
+stamp_alert = अलर्ट
+stamp_info = जानकारी
+stamp_question = प्रश्न
+stamp_bolt = बिजली
+stamp_target = टारगेट
+
+# Chart legend rows and row controls.
+legend_waiting_for_order_flow = ऑर्डर फ़्लो की प्रतीक्षा है
+legend_volume_profile = वॉल्यूम प्रोफ़ाइल
+legend_big_trades = बड़े ट्रेड
+legend_order_book = ऑर्डर बुक
+legend_depth_heatmap = डेप्थ हीटमैप
+legend_loading = लोड हो रहा है
+legend_hide = छिपाएँ
+legend_show = दिखाएँ
+legend_settings = सेटिंग्स
+legend_remove = हटाएँ
+order_flow_cvd = CVD
+order_flow_delta = डेल्टा
+
+# Typed drawing-anchor input errors.
+drawing_anchor_price = कीमत संख्या के रूप में दर्ज करें
+drawing_anchor_time = समय YYYY-MM-DD HH:MM के रूप में दर्ज करें
+drawing_anchor_rejected = चार्ट उस जगह पॉइंट नहीं रख सकता
+
+# Chart capture export caption.
+export_created_with = Aeris से बनाया गया
+
+# Session plan price-line title.
+session_plan_line = प्लान · {label}
+
+# Read-only order book columns, banners and cell markers.
+book_column_pnl = P/L
+book_column_bid = बिड
+book_column_sell = बेचें
+book_column_price = कीमत
+book_column_buy = खरीदें
+book_column_ask = आस्क
+book_column_orders = ऑर्डर
+book_column_queue = कतार
+book_offline = ऑर्डर बुक ऑफ़लाइन · इंटरनेट डिस्कनेक्ट है
+book_reconnecting = ऑर्डर बुक फिर से कनेक्ट हो रही है · नए स्नैपशॉट की प्रतीक्षा है
+book_level_one_note = लेवल 1 · बेस्ट बिड/आस्क
+book_unavailable = ऑर्डर बुक उपलब्ध नहीं है
+book_waiting_snapshot = ऑर्डर बुक स्नैपशॉट की प्रतीक्षा है
+book_loading = ऑर्डर बुक लोड हो रही है…
+book_drag_buy = खरीदें
+book_drag_sell = बेचें
+book_position = पोज़ {quantity}
+book_own_order = आप {quantity}
+queues_loading = ऑर्डर कतारें लोड हो रही हैं
+queues_recovering = ऑर्डर कतारें रिकवर हो रही हैं · पूरी ऑर्डर इमेज की प्रतीक्षा है
+queues_unavailable = इस मार्केट के लिए ऑर्डर कतारें उपलब्ध नहीं हैं
+queues_limit_reached = ऑर्डर कतारों की सीमा पूरी · किसी दूसरी बुक पर कतार कॉलम बंद करें
+book_stale = ऑर्डर बुक पुरानी है · अंतिम सीक्वेंस {watermark}
+book_recovering = ऑर्डर बुक रिकवर हो रही है · {reason}
+recovery_awaiting_snapshot = स्नैपशॉट की प्रतीक्षा है
+recovery_sequence_gap = सीक्वेंस में अंतर
+recovery_crossed_book = क्रॉस्ड बुक
+recovery_invalid_update = अमान्य अपडेट

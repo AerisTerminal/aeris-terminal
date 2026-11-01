@@ -167,7 +167,15 @@ fn increment_display_precision(increment: i64, scale: u8) -> u8 {
 const fn chart_language(language: Language) -> ChartLanguage {
     match language {
         Language::English => ChartLanguage::English,
+        Language::German => ChartLanguage::German,
+        Language::Spanish => ChartLanguage::Spanish,
+        Language::French => ChartLanguage::French,
+        Language::Portuguese => ChartLanguage::Portuguese,
         Language::Russian => ChartLanguage::Russian,
+        Language::Hindi => ChartLanguage::Hindi,
+        Language::ChineseSimplified => ChartLanguage::ChineseSimplified,
+        Language::Japanese => ChartLanguage::Japanese,
+        Language::Korean => ChartLanguage::Korean,
     }
 }
 
@@ -435,8 +443,16 @@ fn fixed_value(value: i64, divisor: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProductPriceBars, fixed_value, increment_display_precision, price_display_precision,
+        ProductPriceBars, chart_language, fixed_value, increment_display_precision,
+        price_display_precision,
     };
+
+    #[test]
+    fn every_display_language_reaches_the_chart_as_itself() {
+        for language in aeris_localization::Language::ALL {
+            assert_eq!(chart_language(language).code(), language.code());
+        }
+    }
 
     #[test]
     fn exchange_time_projects_onto_any_bar_interval() {

@@ -1,0 +1,4 @@
+# Text, der von allen Oberflächen gemeinsam genutzt wird.
+cancel = Abbrechen
+items[one] = {count} Element
+items[other] = {count} Elemente

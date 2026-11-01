@@ -1,0 +1,75 @@
+# 런타임에서 게시하는 시장, 계정 및 지표 텍스트: 기본 지표 설정, 공식 시장 상황
+# 통계, 제공자 로그인 필드. 게시자가 작성한 텍스트(타사 지표 설정, 공식 발표
+# 제목, 통계 이름)는 게시된 그대로 표시되며 여기에 포함되지 않습니다.
+
+## 기본 지표 설정
+study_setting_period = 기간
+study_setting_period_description = 계산에 사용하는 입력 봉의 수입니다.
+study_setting_deviation = 편차
+study_setting_deviation_description = 밴드에 적용하는 표준편차 승수입니다.
+study_setting_fast_period = 단기 기간
+study_setting_fast_period_description = 단기 EMA 기간입니다.
+study_setting_slow_period = 장기 기간
+study_setting_slow_period_description = 장기 EMA 기간입니다.
+study_setting_signal_period = 시그널 기간
+study_setting_signal_period_description = 시그널 EMA 기간입니다.
+study_setting_k_period = %K 기간
+study_setting_k_period_description = 빠른 오실레이터의 조회 기간입니다.
+study_setting_d_period = %D 기간
+study_setting_d_period_description = 시그널 선의 평활 기간입니다.
+
+## 시장 상황 출처, 이벤트 및 통계
+context_source_federal_reserve = 연방준비제도(Fed)
+context_event_fomc_rate_decision = FOMC 금리 결정 및 기자회견
+context_event_eia_petroleum_status = EIA 주간 석유 현황 보고서
+context_metric_commercial_crude_stocks = 상업용 원유 재고
+context_metric_lower_48_gas_storage = 미국 본토 48개 주 천연가스 저장량
+context_metric_ten_year_treasury_yield = 미국 10년 국채 수익률
+context_metric_trade_weighted_dollar = 무역가중 미국 달러 지수
+context_metric_consumer_price_index = 소비자물가지수
+context_metric_nonfarm_payrolls = 비농업 부문 고용자 수
+context_metric_wasde_corn_production = WASDE 미국 옥수수 생산량
+context_metric_wasde_corn_exports = WASDE 미국 옥수수 수출량
+context_metric_wasde_corn_ending_stocks = WASDE 미국 옥수수 기말 재고
+context_metric_weekly_export_sales = {commodity} 주간 수출 판매
+context_unit_thousand_barrels = 천 배럴
+context_unit_billion_cubic_feet = 십억 입방피트
+context_unit_percent = 퍼센트
+context_unit_index = 지수
+context_unit_thousands_of_persons = 천 명
+context_unit_million_bushels = 백만 부셸
+context_unit_metric_tons = 미터톤
+context_region_conus_population_weighted = 미국 본토 인구 가중
+context_cot_producer_merchant = 생산자/상인
+context_cot_swap_dealer = 스왑 딜러
+context_cot_managed_money = 운용 자금
+context_cot_other_reportable = 기타 보고 대상
+
+## 제공자 로그인 필드
+login_field_server = 서버
+login_field_system = 시스템
+login_field_user_id = 사용자 ID
+login_field_password = 비밀번호
+## 계정 세션 세부 정보
+account_detail_signed_out = 로그아웃됨
+account_detail_restoring_saved_sign_in = 저장된 로그인 복원 중
+account_detail_signed_in_verifying_saved_session = 로그인됨; 저장된 세션 확인 중
+account_detail_signed_in = 로그인됨
+account_detail_signed_in_offline_reconnecting = 오프라인으로 로그인됨; 재연결 중
+account_detail_waiting_for_browser_authorization = 브라우저 인증 대기 중
+account_detail_completing_sign_in = 로그인 완료 중
+account_detail_sign_in_cancelled = 로그인이 취소됨
+account_detail_sign_in_timed_out = 로그인 시간이 초과됨; 다시 로그인하세요
+account_detail_sign_in_worker_could_not_start = 로그인 작업을 시작할 수 없음; 다시 로그인하세요
+account_detail_account_state_unavailable = 계정 상태를 사용할 수 없음
+account_detail_credential_storage_unavailable_sign_in_again = 자격 증명 저장소를 사용할 수 없음; 다시 로그인하세요
+account_detail_credential_storage_unavailable_retry_sign_in = 자격 증명 저장소를 사용할 수 없음; 로그인을 다시 시도하세요
+account_detail_saved_sign_in_expired = 저장된 로그인이 만료됨; 다시 로그인하세요
+account_detail_sign_in_expired = 로그인이 만료됨; 다시 로그인하세요
+account_detail_saved_sign_in_retire_failed = 저장된 로그인을 폐기할 수 없음; 자격 증명 저장소를 사용할 수 없음; 다시 로그인하세요
+account_detail_sign_in_expired_retire_failed = 로그인이 만료되었지만 저장된 자격 증명을 폐기할 수 없음; 다시 로그인하세요
+account_detail_sign_out_cleanup_attention = 로그아웃됨; 자격 증명 정리에 확인이 필요함
+account_detail_saved_sign_in_cleanup_unavailable = 저장된 로그인 정리를 사용할 수 없음; 로그인을 다시 시도하세요
+account_detail_restore_could_not_start = 저장된 로그인 복원을 시작할 수 없음; 다시 로그인하세요
+account_detail_saved_sign_in_unverified_connection = 저장된 로그인을 확인할 수 없음; 연결을 확인하고 다시 로그인하세요
+account_detail_saved_sign_in_unverified = 저장된 로그인을 확인할 수 없음; 다시 로그인하세요

@@ -1,0 +1,75 @@
+# ランタイムが公開する市場・口座・スタディのテキスト：標準搭載スタディの設定、公式の
+# 参考統計、プロバイダーのログイン項目。発行元が作成したテキスト（サードパーティ製スタディの設定、
+# 公式リリースのタイトルや統計名）は公開されたとおりに表示され、ここには含まれません。
+
+## 標準搭載スタディの設定
+study_setting_period = 期間
+study_setting_period_description = 計算に使用する入力バーの数です。
+study_setting_deviation = 偏差
+study_setting_deviation_description = バンドに適用する標準偏差の乗数です。
+study_setting_fast_period = 短期期間
+study_setting_fast_period_description = 短期 EMA の期間です。
+study_setting_slow_period = 長期期間
+study_setting_slow_period_description = 長期 EMA の期間です。
+study_setting_signal_period = シグナル期間
+study_setting_signal_period_description = シグナル EMA の期間です。
+study_setting_k_period = %K 期間
+study_setting_k_period_description = 短期オシレーターの参照期間です。
+study_setting_d_period = %D 期間
+study_setting_d_period_description = シグナルラインの平滑化期間です。
+
+## 市場の参考情報のソース、イベント、統計
+context_source_federal_reserve = 米連邦準備制度理事会（FRB）
+context_event_fomc_rate_decision = FOMC 政策金利発表と記者会見
+context_event_eia_petroleum_status = EIA 週間石油在庫統計
+context_metric_commercial_crude_stocks = 商業用原油在庫
+context_metric_lower_48_gas_storage = 米本土 48 州の天然ガス貯蔵量
+context_metric_ten_year_treasury_yield = 米 10 年国債利回り
+context_metric_trade_weighted_dollar = 貿易加重ドル指数
+context_metric_consumer_price_index = 消費者物価指数
+context_metric_nonfarm_payrolls = 非農業部門雇用者数
+context_metric_wasde_corn_production = WASDE 米国トウモロコシ生産量
+context_metric_wasde_corn_exports = WASDE 米国トウモロコシ輸出量
+context_metric_wasde_corn_ending_stocks = WASDE 米国トウモロコシ期末在庫
+context_metric_weekly_export_sales = {commodity} 週間輸出成約高
+context_unit_thousand_barrels = 千バレル
+context_unit_billion_cubic_feet = 十億立方フィート
+context_unit_percent = パーセント
+context_unit_index = 指数
+context_unit_thousands_of_persons = 千人
+context_unit_million_bushels = 百万ブッシェル
+context_unit_metric_tons = メートルトン
+context_region_conus_population_weighted = 米本土（人口加重）
+context_cot_producer_merchant = 生産者・商社
+context_cot_swap_dealer = スワップディーラー
+context_cot_managed_money = マネージドマネー
+context_cot_other_reportable = その他の報告対象者
+
+## プロバイダーのログイン項目
+login_field_server = サーバー
+login_field_system = システム
+login_field_user_id = ユーザー ID
+login_field_password = パスワード
+## アカウントセッションの詳細
+account_detail_signed_out = サインアウトしています
+account_detail_restoring_saved_sign_in = 保存済みのサインインを復元中
+account_detail_signed_in_verifying_saved_session = サインイン済み、保存済みのセッションを確認中
+account_detail_signed_in = サインイン済み
+account_detail_signed_in_offline_reconnecting = オフラインでサインイン中、再接続しています
+account_detail_waiting_for_browser_authorization = ブラウザーでの認証を待機中
+account_detail_completing_sign_in = サインインを完了中
+account_detail_sign_in_cancelled = サインインがキャンセルされました
+account_detail_sign_in_timed_out = サインインがタイムアウトしました。もう一度サインインしてください
+account_detail_sign_in_worker_could_not_start = サインイン処理を開始できませんでした。もう一度サインインしてください
+account_detail_account_state_unavailable = アカウントの状態を取得できません
+account_detail_credential_storage_unavailable_sign_in_again = 認証情報の保存先を利用できません。もう一度サインインしてください
+account_detail_credential_storage_unavailable_retry_sign_in = 認証情報の保存先を利用できません。サインインをやり直してください
+account_detail_saved_sign_in_expired = 保存済みのサインインの有効期限が切れました。もう一度サインインしてください
+account_detail_sign_in_expired = サインインの有効期限が切れました。もう一度サインインしてください
+account_detail_saved_sign_in_retire_failed = 保存済みのサインインを破棄できませんでした。認証情報の保存先を利用できません。もう一度サインインしてください
+account_detail_sign_in_expired_retire_failed = サインインの有効期限が切れましたが、保存済みの認証情報を破棄できませんでした。もう一度サインインしてください
+account_detail_sign_out_cleanup_attention = サインアウトしました。認証情報の削除に問題があります
+account_detail_saved_sign_in_cleanup_unavailable = 保存済みのサインインを削除できません。サインインをやり直してください
+account_detail_restore_could_not_start = 保存済みのサインインの復元を開始できませんでした。もう一度サインインしてください
+account_detail_saved_sign_in_unverified_connection = 保存済みのサインインを確認できませんでした。接続を確認して、もう一度サインインしてください
+account_detail_saved_sign_in_unverified = 保存済みのサインインを確認できませんでした。もう一度サインインしてください

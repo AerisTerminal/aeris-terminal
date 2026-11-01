@@ -1,0 +1,4 @@
+# Texte partagé par toutes les surfaces.
+cancel = Annuler
+items[one] = {count} élément
+items[other] = {count} éléments

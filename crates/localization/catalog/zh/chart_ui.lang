@@ -1,0 +1,190 @@
+# 图表界面：指标名称、图表类型、图例行及其控件、绘图图章、
+# 截图导出以及只读订单簿。
+
+# 旧版指标目录名称。
+indicator_volume = 成交量
+indicator_vwap = 成交量加权平均价
+indicator_sma = 简单移动平均线
+indicator_ema = 指数移动平均线
+indicator_wma = 加权移动平均线
+indicator_bollinger = 布林带
+indicator_rsi = 相对强弱指数
+indicator_macd = MACD
+indicator_stochastic = 随机指标
+indicator_atr = 平均真实波幅
+indicator_volume_profile = 成交量分布（可见范围）
+
+# Aeris Charts 内置指标名称。
+indicator_dema = 双指数移动平均线
+indicator_tema = 三重指数移动平均线
+indicator_smma = 平滑移动平均线（RMA）
+indicator_hma = 赫尔移动平均线
+indicator_alma = Arnaud Legoux 移动平均线
+indicator_kama = 考夫曼自适应移动平均线
+indicator_mcginley = McGinley 动态指标
+indicator_vwma = 成交量加权移动平均线
+indicator_linear_regression = 线性回归通道
+indicator_envelopes = 移动平均包络线
+indicator_donchian = 唐奇安通道
+indicator_keltner = 肯特纳通道
+indicator_atr_bands = ATR 通道
+indicator_vwap_bands = VWAP 通道
+indicator_parabolic_sar = 抛物线 SAR
+indicator_supertrend = SuperTrend
+indicator_ichimoku = 一目均衡表
+indicator_zigzag = 之字转向
+indicator_pivot_standard = 枢轴点（标准）
+indicator_pivot_fibonacci = 枢轴点（斐波那契）
+indicator_pivot_camarilla = 枢轴点（Camarilla）
+indicator_pivot_woodie = 枢轴点（Woodie）
+indicator_pivot_demark = 枢轴点（DeMark）
+indicator_swing_points = 波段高低点
+indicator_session_levels = 时段最高价和最低价
+indicator_previous_period_levels = 前日最高价和最低价
+indicator_opening_range = 开盘区间
+indicator_aroon = 阿隆指标
+indicator_awesome_oscillator = 动量震荡指标（AO）
+indicator_dpo = 区间震荡指标（DPO）
+indicator_chande_momentum = 钱德动量摆动指标
+indicator_bollinger_metrics = 布林 %B 和带宽
+indicator_standard_deviation = 标准差
+indicator_cci = 顺势指标（CCI）
+indicator_williams_r = 威廉指标 %R
+indicator_stochastic_rsi = 随机 RSI
+indicator_momentum = 动量
+indicator_roc = 变动率（ROC）
+indicator_adx_dmi = ADX 和 DMI
+indicator_choppiness = 震荡指数
+indicator_historical_volatility = 历史波动率
+indicator_trix = TRIX
+indicator_kst = 确然指标（KST）
+indicator_tsi = 真实强度指数（TSI）
+indicator_mass_index = 梅斯线
+indicator_vortex = 涡旋指标
+indicator_coppock = 估波曲线
+indicator_fisher = 费舍尔变换
+indicator_ultimate_oscillator = 终极震荡指标
+indicator_obv = 能量潮（OBV）
+indicator_accumulation_distribution = 累积/派发线
+indicator_price_volume_trend = 价量趋势
+indicator_chaikin_oscillator = 佳庆震荡指标
+indicator_klinger = 克林格震荡指标
+indicator_relative_volume = 相对成交量
+indicator_volume_oscillator = 成交量震荡指标
+indicator_elder_force = 埃尔德强力指数
+indicator_ease_of_movement = 简易波动指标
+indicator_cmf = 佳庆资金流
+indicator_mfi = 资金流量指数
+
+# 名称旁显示的指标参数摘要。
+params_volume = 涨/跌成交量 · 可选移动平均线
+params_session_anchored = 锚定交易时段
+params_period_20 = 周期 20
+params_period_20_deviation_2 = 周期 20 · 标准差 2
+params_bollinger = 周期 14 · 标准差 2
+params_period_14 = 周期 14
+params_macd = 快线 12 · 慢线 26 · 信号 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = 行数 48 · 价值区域 70%
+params_alma = 周期 14 · 偏移 0.85 · Sigma 6
+params_kama = 周期 10 · 快线 2 · 慢线 30
+params_envelopes = 周期 14 · 2%
+params_multiplier_2 = 周期 14 · 倍数 2
+params_vwap_bands = 锚定交易时段 · 1 倍标准差
+params_multiplier_3 = 周期 14 · 倍数 3
+params_deviation_2_percent = 偏差 2%
+params_standard = 标准设置
+params_prior_period_levels = 前一周期价位
+params_swing_points = 左侧 5 · 右侧 5
+params_utc_sessions = UTC 交易时段
+params_utc_days = UTC 日
+params_opening_range = 30 分钟 · UTC 交易时段
+params_stochastic_rsi = RSI 14 · 随机 14
+params_historical_volatility = 周期 14 · 252 天
+params_trix = 周期 14 · 信号 9
+params_kst = ROC 10 · 15 · 20 · 30 · 信号 9
+params_tsi = 长周期 25 · 短周期 13 · 信号 13
+params_mass_index = EMA 9 · 求和 25
+params_coppock = 长周期 14 · 短周期 11 · 平滑 10
+params_ultimate_oscillator = 周期 7 · 14 · 28
+params_cumulative = 累计
+params_chaikin_oscillator = 快线 3 · 慢线 10
+params_klinger = 快线 34 · 慢线 55 · 信号 13
+
+# 图表类型。
+chart_type_candles = K 线图
+chart_type_hollow_candles = 空心 K 线图
+chart_type_hollow_candles_bullish = 空心 K 线图：仅阳线
+chart_type_hollow_candles_bearish = 空心 K 线图：仅阴线
+chart_type_footprint = 足迹图
+chart_type_bars = 美国线
+chart_type_line = 折线图
+chart_type_line_with_markers = 带标记的折线图
+chart_type_area = 面积图
+chart_type_baseline = 基准线图
+chart_type_brushable_area = 可刷选面积图
+
+# 图章绘图工具图标。
+stamp_check = 对勾
+stamp_cross = 叉号
+stamp_star = 星形
+stamp_alert = 警示
+stamp_info = 信息
+stamp_question = 问号
+stamp_bolt = 闪电
+stamp_target = 靶心
+
+# 图表图例行及行控件。
+legend_waiting_for_order_flow = 正在等待订单流
+legend_volume_profile = 成交量分布
+legend_big_trades = 大单成交
+legend_order_book = 订单簿
+legend_depth_heatmap = 深度热力图
+legend_loading = 加载中
+legend_hide = 隐藏
+legend_show = 显示
+legend_settings = 设置
+legend_remove = 移除
+order_flow_cvd = CVD
+order_flow_delta = Delta
+
+# 绘图锚点输入错误。
+drawing_anchor_price = 请输入数字形式的价格
+drawing_anchor_time = 请按 YYYY-MM-DD HH:MM 格式输入时间
+drawing_anchor_rejected = 图表无法在该处放置此点
+
+# 图表截图导出说明文字。
+export_created_with = 由 Aeris 生成
+
+# 交易计划价格线标题。
+session_plan_line = 计划 · {label}
+
+# 只读订单簿的列、横幅和单元格标记。
+book_column_pnl = 盈亏
+book_column_bid = 买价
+book_column_sell = 卖出
+book_column_price = 价格
+book_column_buy = 买入
+book_column_ask = 卖价
+book_column_orders = 订单
+book_column_queue = 队列
+book_offline = 订单簿离线 · 网络已断开
+book_reconnecting = 订单簿正在重连 · 等待新快照
+book_level_one_note = 一档 · 最优买价/卖价
+book_unavailable = 订单簿不可用
+book_waiting_snapshot = 正在等待订单簿快照
+book_loading = 正在加载订单簿…
+book_drag_buy = 买入
+book_drag_sell = 卖出
+book_position = 持仓 {quantity}
+book_own_order = 我的 {quantity}
+queues_loading = 正在加载订单队列
+queues_recovering = 订单队列正在恢复 · 等待完整的订单快照
+queues_unavailable = 此市场不提供订单队列
+queues_limit_reached = 已达到订单队列上限 · 请关闭其他订单簿上的队列列
+book_stale = 订单簿数据过期 · 最后序列号 {watermark}
+book_recovering = 订单簿正在恢复 · {reason}
+recovery_awaiting_snapshot = 等待快照
+recovery_sequence_gap = 序列缺口
+recovery_crossed_book = 买卖价交叉
+recovery_invalid_update = 无效更新

@@ -1,0 +1,75 @@
+# Runtime-published market, account and study text: built-in study settings, official context
+# statistics and provider login fields. Publisher-authored text (third-party study settings,
+# official release titles and statistic names) is shown as published and never enters here.
+
+## Built-in study settings
+study_setting_period = पीरियड
+study_setting_period_description = गणना में उपयोग होने वाले इनपुट बार की संख्या।
+study_setting_deviation = डेविएशन
+study_setting_deviation_description = बैंड पर लागू स्टैंडर्ड-डेविएशन गुणक।
+study_setting_fast_period = फ़ास्ट पीरियड
+study_setting_fast_period_description = फ़ास्ट EMA पीरियड।
+study_setting_slow_period = स्लो पीरियड
+study_setting_slow_period_description = स्लो EMA पीरियड।
+study_setting_signal_period = सिग्नल पीरियड
+study_setting_signal_period_description = सिग्नल EMA पीरियड।
+study_setting_k_period = %K पीरियड
+study_setting_k_period_description = फ़ास्ट ऑसिलेटर के लिए लुकबैक विंडो।
+study_setting_d_period = %D पीरियड
+study_setting_d_period_description = सिग्नल लाइन के लिए स्मूदिंग विंडो।
+
+## Market context sources, events and statistics
+context_source_federal_reserve = Federal Reserve
+context_event_fomc_rate_decision = FOMC ब्याज दर निर्णय और प्रेस कॉन्फ़्रेंस
+context_event_eia_petroleum_status = EIA साप्ताहिक पेट्रोलियम स्टेटस रिपोर्ट
+context_metric_commercial_crude_stocks = कमर्शियल कच्चे तेल का स्टॉक
+context_metric_lower_48_gas_storage = Lower 48 वर्किंग नेचुरल गैस स्टोरेज
+context_metric_ten_year_treasury_yield = 10-वर्षीय ट्रेज़री यील्ड
+context_metric_trade_weighted_dollar = ट्रेड-वेटेड अमेरिकी डॉलर इंडेक्स
+context_metric_consumer_price_index = उपभोक्ता मूल्य सूचकांक (CPI)
+context_metric_nonfarm_payrolls = कुल नॉन-फ़ार्म पेरोल
+context_metric_wasde_corn_production = WASDE अमेरिकी मक्का उत्पादन
+context_metric_wasde_corn_exports = WASDE अमेरिकी मक्का निर्यात
+context_metric_wasde_corn_ending_stocks = WASDE अमेरिकी मक्का का अंतिम स्टॉक
+context_metric_weekly_export_sales = {commodity} की साप्ताहिक निर्यात बिक्री
+context_unit_thousand_barrels = हज़ार बैरल
+context_unit_billion_cubic_feet = अरब घन फ़ुट
+context_unit_percent = प्रतिशत
+context_unit_index = इंडेक्स
+context_unit_thousands_of_persons = हज़ार व्यक्ति
+context_unit_million_bushels = मिलियन बुशल
+context_unit_metric_tons = मीट्रिक टन
+context_region_conus_population_weighted = CONUS जनसंख्या-भारित
+context_cot_producer_merchant = प्रोड्यूसर/मर्चेंट
+context_cot_swap_dealer = स्वैप डीलर
+context_cot_managed_money = मैनेज्ड मनी
+context_cot_other_reportable = अन्य रिपोर्टेबल
+
+## Provider login fields
+login_field_server = सर्वर
+login_field_system = सिस्टम
+login_field_user_id = यूज़र ID
+login_field_password = पासवर्ड
+## Account session details
+account_detail_signed_out = साइन आउट
+account_detail_restoring_saved_sign_in = सेव किया गया साइन-इन बहाल हो रहा है
+account_detail_signed_in_verifying_saved_session = साइन इन; सेव किया गया सेशन जाँचा जा रहा है
+account_detail_signed_in = साइन इन
+account_detail_signed_in_offline_reconnecting = ऑफ़लाइन साइन इन; फिर से कनेक्ट हो रहा है
+account_detail_waiting_for_browser_authorization = ब्राउज़र में अनुमति की प्रतीक्षा है
+account_detail_completing_sign_in = साइन-इन पूरा हो रहा है
+account_detail_sign_in_cancelled = साइन-इन रद्द हुआ
+account_detail_sign_in_timed_out = साइन-इन का समय समाप्त; फिर से साइन इन करें
+account_detail_sign_in_worker_could_not_start = साइन-इन वर्कर शुरू नहीं हो सका; फिर से साइन इन करें
+account_detail_account_state_unavailable = अकाउंट की स्थिति उपलब्ध नहीं है
+account_detail_credential_storage_unavailable_sign_in_again = क्रेडेंशियल स्टोरेज उपलब्ध नहीं है; फिर से साइन इन करें
+account_detail_credential_storage_unavailable_retry_sign_in = क्रेडेंशियल स्टोरेज उपलब्ध नहीं है; साइन-इन दोबारा आज़माएँ
+account_detail_saved_sign_in_expired = सेव किया गया साइन-इन समाप्त हो गया; फिर से साइन इन करें
+account_detail_sign_in_expired = साइन-इन समाप्त हो गया; फिर से साइन इन करें
+account_detail_saved_sign_in_retire_failed = सेव किया गया साइन-इन हटाया नहीं जा सका; क्रेडेंशियल स्टोरेज उपलब्ध नहीं है; फिर से साइन इन करें
+account_detail_sign_in_expired_retire_failed = साइन-इन समाप्त हो गया, पर सेव किए गए क्रेडेंशियल हटाए नहीं जा सके; फिर से साइन इन करें
+account_detail_sign_out_cleanup_attention = साइन आउट; क्रेडेंशियल क्लीनअप पर ध्यान देना ज़रूरी है
+account_detail_saved_sign_in_cleanup_unavailable = सेव किए गए साइन-इन का क्लीनअप उपलब्ध नहीं है; साइन-इन दोबारा आज़माएँ
+account_detail_restore_could_not_start = सेव किया गया साइन-इन बहाल करना शुरू नहीं हो सका; फिर से साइन इन करें
+account_detail_saved_sign_in_unverified_connection = सेव किए गए साइन-इन की पुष्टि नहीं हो सकी; अपना कनेक्शन जाँचें और फिर से साइन इन करें
+account_detail_saved_sign_in_unverified = सेव किए गए साइन-इन की पुष्टि नहीं हो सकी; फिर से साइन इन करें

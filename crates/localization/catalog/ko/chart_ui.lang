@@ -1,0 +1,190 @@
+# 차트 화면: 지표 이름, 차트 유형, 범례 행과 컨트롤, 드로잉
+# 스탬프, 캡처 내보내기, 읽기 전용 호가창.
+
+# 레거시 지표 카탈로그 이름.
+indicator_volume = 거래량
+indicator_vwap = 거래량 가중 평균 가격
+indicator_sma = 단순 이동평균
+indicator_ema = 지수 이동평균
+indicator_wma = 가중 이동평균
+indicator_bollinger = 볼린저 밴드
+indicator_rsi = 상대강도지수
+indicator_macd = MACD
+indicator_stochastic = 스토캐스틱
+indicator_atr = 평균 진폭(ATR)
+indicator_volume_profile = 볼륨 프로파일(보이는 범위)
+
+# Aeris Charts 기본 지표 이름.
+indicator_dema = 이중 지수 이동평균
+indicator_tema = 삼중 지수 이동평균
+indicator_smma = 평활 이동평균(RMA)
+indicator_hma = 헐 이동평균
+indicator_alma = 아르노 르구 이동평균
+indicator_kama = 카우프만 적응형 이동평균
+indicator_mcginley = 맥긴리 다이내믹
+indicator_vwma = 거래량 가중 이동평균
+indicator_linear_regression = 선형 회귀 채널
+indicator_envelopes = 이동평균 엔벨로프
+indicator_donchian = 돈치안 채널
+indicator_keltner = 켈트너 채널
+indicator_atr_bands = ATR 밴드
+indicator_vwap_bands = VWAP 밴드
+indicator_parabolic_sar = 파라볼릭 SAR
+indicator_supertrend = 슈퍼트렌드
+indicator_ichimoku = 일목균형표
+indicator_zigzag = 지그재그
+indicator_pivot_standard = 피벗 포인트 표준
+indicator_pivot_fibonacci = 피벗 포인트 피보나치
+indicator_pivot_camarilla = 피벗 포인트 카마릴라
+indicator_pivot_woodie = 피벗 포인트 우디
+indicator_pivot_demark = 피벗 포인트 디마크
+indicator_swing_points = 스윙 고점 및 저점
+indicator_session_levels = 세션 고가 및 저가
+indicator_previous_period_levels = 전일 고가 및 저가
+indicator_opening_range = 시초 범위
+indicator_aroon = 아룬
+indicator_awesome_oscillator = 어썸 오실레이터
+indicator_dpo = 추세 제거 가격 오실레이터
+indicator_chande_momentum = 샹드 모멘텀 오실레이터
+indicator_bollinger_metrics = 볼린저 %B 및 밴드폭
+indicator_standard_deviation = 표준편차
+indicator_cci = 상품 채널 지수
+indicator_williams_r = 윌리엄스 %R
+indicator_stochastic_rsi = 스토캐스틱 RSI
+indicator_momentum = 모멘텀
+indicator_roc = 변화율
+indicator_adx_dmi = ADX 및 DMI
+indicator_choppiness = 초피니스 지수
+indicator_historical_volatility = 역사적 변동성
+indicator_trix = TRIX
+indicator_kst = KST(Know Sure Thing)
+indicator_tsi = 진정 강도 지수
+indicator_mass_index = 매스 인덱스
+indicator_vortex = 보텍스 지표
+indicator_coppock = 코폭 커브
+indicator_fisher = 피셔 변환
+indicator_ultimate_oscillator = 얼티밋 오실레이터
+indicator_obv = 온밸런스 볼륨
+indicator_accumulation_distribution = 매집/분산
+indicator_price_volume_trend = 가격 거래량 추세
+indicator_chaikin_oscillator = 차이킨 오실레이터
+indicator_klinger = 클링거 오실레이터
+indicator_relative_volume = 상대 거래량
+indicator_volume_oscillator = 거래량 오실레이터
+indicator_elder_force = 엘더 강도 지수
+indicator_ease_of_movement = 이동 용이성
+indicator_cmf = 차이킨 자금 흐름
+indicator_mfi = 자금 흐름 지수
+
+# 이름 옆에 표시되는 지표 매개변수 요약.
+params_volume = 상승/하락 거래량 · 선택적 이동평균
+params_session_anchored = 세션 기준
+params_period_20 = 기간 20
+params_period_20_deviation_2 = 기간 20 · 편차 2
+params_bollinger = 기간 14 · 편차 2
+params_period_14 = 기간 14
+params_macd = 단기 12 · 장기 26 · 시그널 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = 행 48 · 밸류 영역 70%
+params_alma = 기간 14 · 오프셋 0.85 · 시그마 6
+params_kama = 기간 10 · 단기 2 · 장기 30
+params_envelopes = 기간 14 · 2%
+params_multiplier_2 = 기간 14 · 승수 2
+params_vwap_bands = 세션 기준 · 표준편차 1
+params_multiplier_3 = 기간 14 · 승수 3
+params_deviation_2_percent = 편차 2%
+params_standard = 표준 설정
+params_prior_period_levels = 이전 기간 레벨
+params_swing_points = 왼쪽 5 · 오른쪽 5
+params_utc_sessions = UTC 세션
+params_utc_days = UTC 일
+params_opening_range = 30분 · UTC 세션
+params_stochastic_rsi = RSI 14 · 스토캐스틱 14
+params_historical_volatility = 기간 14 · 252일
+params_trix = 기간 14 · 시그널 9
+params_kst = ROC 10 · 15 · 20 · 30 · 시그널 9
+params_tsi = 장기 25 · 단기 13 · 시그널 13
+params_mass_index = EMA 9 · 합계 25
+params_coppock = 장기 14 · 단기 11 · 평활 10
+params_ultimate_oscillator = 기간 7 · 14 · 28
+params_cumulative = 누적
+params_chaikin_oscillator = 단기 3 · 장기 10
+params_klinger = 단기 34 · 장기 55 · 시그널 13
+
+# 차트 유형.
+chart_type_candles = 캔들
+chart_type_hollow_candles = 할로우 캔들
+chart_type_hollow_candles_bullish = 할로우 캔들: 상승만
+chart_type_hollow_candles_bearish = 할로우 캔들: 하락만
+chart_type_footprint = 풋프린트
+chart_type_bars = 바
+chart_type_line = 라인
+chart_type_line_with_markers = 마커 포함 라인
+chart_type_area = 영역
+chart_type_baseline = 기준선
+chart_type_brushable_area = 브러시 영역
+
+# 아이콘 스탬프 드로잉 도구 기호.
+stamp_check = 체크 표시
+stamp_cross = X 표시
+stamp_star = 별
+stamp_alert = 경고
+stamp_info = 정보
+stamp_question = 물음표
+stamp_bolt = 번개
+stamp_target = 목표
+
+# 차트 범례 행과 행 컨트롤.
+legend_waiting_for_order_flow = 오더 플로우 대기 중
+legend_volume_profile = 볼륨 프로파일
+legend_big_trades = 대량 체결
+legend_order_book = 호가창
+legend_depth_heatmap = 호가 히트맵
+legend_loading = 로딩 중
+legend_hide = 숨기기
+legend_show = 표시
+legend_settings = 설정
+legend_remove = 삭제
+order_flow_cvd = CVD
+order_flow_delta = 델타
+
+# 드로잉 기준점 입력 오류.
+drawing_anchor_price = 가격을 숫자로 입력하세요
+drawing_anchor_time = 시간을 YYYY-MM-DD HH:MM 형식으로 입력하세요
+drawing_anchor_rejected = 차트에서 해당 위치에 점을 놓을 수 없습니다
+
+# 차트 캡처 내보내기 캡션.
+export_created_with = Aeris로 생성됨
+
+# 세션 플랜 가격선 제목.
+session_plan_line = 플랜 · {label}
+
+# 읽기 전용 호가창 열, 배너, 셀 표시.
+book_column_pnl = 손익
+book_column_bid = 매수호가
+book_column_sell = 매도
+book_column_price = 가격
+book_column_buy = 매수
+book_column_ask = 매도호가
+book_column_orders = 주문
+book_column_queue = 대기열
+book_offline = 호가창 오프라인 · 인터넷 연결 끊김
+book_reconnecting = 호가창 재연결 중 · 새 스냅샷 대기 중
+book_level_one_note = 레벨 1 · 최우선 매수/매도호가
+book_unavailable = 호가창을 사용할 수 없음
+book_waiting_snapshot = 호가창 스냅샷 대기 중
+book_loading = 호가창 로딩 중…
+book_drag_buy = 매수
+book_drag_sell = 매도
+book_position = 포지션 {quantity}
+book_own_order = 내 주문 {quantity}
+queues_loading = 주문 대기열 로딩 중
+queues_recovering = 주문 대기열 복구 중 · 전체 주문 이미지 대기 중
+queues_unavailable = 이 시장에서는 주문 대기열을 사용할 수 없습니다
+queues_limit_reached = 주문 대기열 한도 도달 · 다른 호가창의 대기열 열을 닫으세요
+book_stale = 호가창 갱신 지연 · 마지막 시퀀스 {watermark}
+book_recovering = 호가창 복구 중 · {reason}
+recovery_awaiting_snapshot = 스냅샷 대기 중
+recovery_sequence_gap = 시퀀스 누락
+recovery_crossed_book = 호가 역전
+recovery_invalid_update = 잘못된 업데이트

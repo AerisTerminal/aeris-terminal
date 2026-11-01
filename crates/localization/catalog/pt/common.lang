@@ -1,0 +1,4 @@
+# Texto compartilhado por todas as telas.
+cancel = Cancelar
+items[one] = {count} item
+items[other] = {count} itens

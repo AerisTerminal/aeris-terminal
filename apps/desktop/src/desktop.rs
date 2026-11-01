@@ -537,7 +537,8 @@ const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 /// Hard ceiling that keeps pane-owned charts, market demand, persistence and
 /// worker queues bounded. Plan limits come from `account::plan_policy`.
 const CHART_PANE_CAPACITY: usize = 64;
-const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
+/// Wide enough for the longest translated row (Russian) beside its icon and price badge.
+const CHART_CONTEXT_MENU_WIDTH: f32 = 264.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = MENU_SEPARATOR_HEIGHT;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;

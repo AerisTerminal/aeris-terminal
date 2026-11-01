@@ -15,8 +15,18 @@ use std::{
 };
 
 /// Catalog languages in `Language` order, with the plural categories each must define.
-const LANGUAGES: [(&str, &[&str]); 2] =
-    [("en", &["one", "other"]), ("ru", &["one", "few", "many"])];
+const LANGUAGES: [(&str, &[&str]); 10] = [
+    ("en", &["one", "other"]),
+    ("de", &["one", "other"]),
+    ("es", &["one", "other"]),
+    ("fr", &["one", "other"]),
+    ("pt", &["one", "other"]),
+    ("ru", &["one", "few", "many"]),
+    ("hi", &["one", "other"]),
+    ("zh", &["other"]),
+    ("ja", &["other"]),
+    ("ko", &["other"]),
+];
 
 /// Every plural category in the generated form order.
 const CATEGORIES: [&str; 4] = ["one", "few", "many", "other"];

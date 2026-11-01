@@ -1,0 +1,4 @@
+# Texto compartido por todas las superficies.
+cancel = Cancelar
+items[one] = {count} elemento
+items[other] = {count} elementos

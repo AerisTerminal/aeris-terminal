@@ -1,0 +1,75 @@
+# 运行时发布的市场、账户和指标文本：内置指标设置、官方背景数据统计以及
+# 数据源登录字段。发布方撰写的文本（第三方指标设置、官方发布标题和统计名称）
+# 按发布原文显示，不会进入此处。
+
+## 内置指标设置
+study_setting_period = 周期
+study_setting_period_description = 计算所用的输入 K 线数量。
+study_setting_deviation = 标准差
+study_setting_deviation_description = 应用于通道的标准差倍数。
+study_setting_fast_period = 快线周期
+study_setting_fast_period_description = 快速 EMA 周期。
+study_setting_slow_period = 慢线周期
+study_setting_slow_period_description = 慢速 EMA 周期。
+study_setting_signal_period = 信号周期
+study_setting_signal_period_description = 信号 EMA 周期。
+study_setting_k_period = %K 周期
+study_setting_k_period_description = 快速震荡线的回溯窗口。
+study_setting_d_period = %D 周期
+study_setting_d_period_description = 信号线的平滑窗口。
+
+## 市场背景数据来源、事件和统计
+context_source_federal_reserve = 美联储
+context_event_fomc_rate_decision = FOMC 利率决议及新闻发布会
+context_event_eia_petroleum_status = EIA 每周石油状况报告
+context_metric_commercial_crude_stocks = 商业原油库存
+context_metric_lower_48_gas_storage = 美国本土 48 州天然气工作库存
+context_metric_ten_year_treasury_yield = 10 年期美国国债收益率
+context_metric_trade_weighted_dollar = 贸易加权美元指数
+context_metric_consumer_price_index = 消费者价格指数
+context_metric_nonfarm_payrolls = 非农就业总人数
+context_metric_wasde_corn_production = WASDE 美国玉米产量
+context_metric_wasde_corn_exports = WASDE 美国玉米出口
+context_metric_wasde_corn_ending_stocks = WASDE 美国玉米期末库存
+context_metric_weekly_export_sales = {commodity} 每周出口销售
+context_unit_thousand_barrels = 千桶
+context_unit_billion_cubic_feet = 十亿立方英尺
+context_unit_percent = 百分比
+context_unit_index = 指数
+context_unit_thousands_of_persons = 千人
+context_unit_million_bushels = 百万蒲式耳
+context_unit_metric_tons = 公吨
+context_region_conus_population_weighted = 美国本土人口加权
+context_cot_producer_merchant = 生产商/贸易商
+context_cot_swap_dealer = 掉期交易商
+context_cot_managed_money = 管理资金
+context_cot_other_reportable = 其他可报告持仓
+
+## 数据源登录字段
+login_field_server = 服务器
+login_field_system = 系统
+login_field_user_id = 用户 ID
+login_field_password = 密码
+## 账户会话详情
+account_detail_signed_out = 已退出登录
+account_detail_restoring_saved_sign_in = 正在恢复已保存的登录
+account_detail_signed_in_verifying_saved_session = 已登录；正在验证已保存的会话
+account_detail_signed_in = 已登录
+account_detail_signed_in_offline_reconnecting = 已离线登录；正在重新连接
+account_detail_waiting_for_browser_authorization = 正在等待浏览器授权
+account_detail_completing_sign_in = 正在完成登录
+account_detail_sign_in_cancelled = 登录已取消
+account_detail_sign_in_timed_out = 登录超时；请重新登录
+account_detail_sign_in_worker_could_not_start = 无法启动登录进程；请重新登录
+account_detail_account_state_unavailable = 账户状态不可用
+account_detail_credential_storage_unavailable_sign_in_again = 凭据存储不可用；请重新登录
+account_detail_credential_storage_unavailable_retry_sign_in = 凭据存储不可用；请重试登录
+account_detail_saved_sign_in_expired = 已保存的登录已过期；请重新登录
+account_detail_sign_in_expired = 登录已过期；请重新登录
+account_detail_saved_sign_in_retire_failed = 无法注销已保存的登录；凭据存储不可用；请重新登录
+account_detail_sign_in_expired_retire_failed = 登录已过期，但无法注销已保存的凭据；请重新登录
+account_detail_sign_out_cleanup_attention = 已退出登录；凭据清理需要处理
+account_detail_saved_sign_in_cleanup_unavailable = 无法清理已保存的登录；请重试登录
+account_detail_restore_could_not_start = 无法开始恢复已保存的登录；请重新登录
+account_detail_saved_sign_in_unverified_connection = 无法验证已保存的登录；请检查网络连接并重新登录
+account_detail_saved_sign_in_unverified = 无法验证已保存的登录；请重新登录

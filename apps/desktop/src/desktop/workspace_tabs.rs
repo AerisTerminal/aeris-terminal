@@ -1843,6 +1843,13 @@ impl TerminalApp {
         }
     }
 
+    /// Expands or collapses the profile menu's language dropdown.
+    pub(super) fn set_platform_language_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.overlays.set_platform_language_menu_open(open) {
+            cx.notify();
+        }
+    }
+
     /// Menus and drags that start in the frameless title bar keep it on screen until they end.
     fn frameless_title_bar_pinned(&self) -> bool {
         self.overlays
@@ -2273,6 +2280,7 @@ impl TerminalApp {
                 window_frame: self.chrome.preferences().window_frame,
                 drawing_toolbar_visible: self.chrome.preferences().drawing_toolbar.shown(),
                 language: self.chrome.preferences().language,
+                language_menu_open: self.overlays.platform_language_menu_open(),
                 attribution: self.held_provider_attribution(cx),
                 now_unix_seconds: self
                     .lifecycle

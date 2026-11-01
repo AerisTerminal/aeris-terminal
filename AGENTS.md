@@ -211,9 +211,15 @@ violations and missing verification explicitly, and never describe them as satis
   may call `aeris_localization::set_language`, applying the `LanguagePreference` persisted in the
   workspace chrome section (`system` follows the operating system; a language code pins it; unknown
   identifiers follow the system). `display_language_is_set_only_by_the_language_owner` in
-  `tools/naming_check` enforces the single owner. The platform face is the bundled Inter
-  (Regular/Medium/Bold), which covers Latin and Cyrillic in one family; Faculty Glyphic stays
-  brand-only. Prices and quantities keep the exchange's number format in every language.
+  `tools/naming_check` enforces the single owner. The display languages are the
+  `aeris_localization::Language` variants (English, German, Spanish, French, Brazilian Portuguese,
+  Russian, Hindi, Simplified Chinese, Japanese, Korean), each with its CLDR plural rule; the
+  profile menu's Language dropdown lists System plus each language under its own name, and the
+  chart engine follows the same language through `engine_bridge::chart_language`. The platform
+  face is the bundled Inter (Regular/Medium/Bold), which covers Latin and Cyrillic in one family;
+  Devanagari, Chinese, Japanese and Korean glyphs come from the operating system's font fallback
+  (DirectWrite, Core Text), so no CJK or Indic font is bundled. Faculty Glyphic stays brand-only.
+  Prices and quantities keep the exchange's number format in every language.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a
   second desktop-owned market-state model.
 - `aeris_contracts` holds only the persisted workspace schema: the prost messages in

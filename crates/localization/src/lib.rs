@@ -16,19 +16,47 @@ include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
 pub enum Language {
     #[default]
     English,
+    German,
+    Spanish,
+    French,
+    Portuguese,
     Russian,
+    Hindi,
+    ChineseSimplified,
+    Japanese,
+    Korean,
 }
 
 impl Language {
-    /// Every language in picker order; the order of the generated catalog columns.
-    pub const ALL: [Self; 2] = [Self::English, Self::Russian];
+    /// Every language in picker order (Latin, Cyrillic, Devanagari, then CJK scripts); the
+    /// order of the generated catalog columns.
+    pub const ALL: [Self; 10] = [
+        Self::English,
+        Self::German,
+        Self::Spanish,
+        Self::French,
+        Self::Portuguese,
+        Self::Russian,
+        Self::Hindi,
+        Self::ChineseSimplified,
+        Self::Japanese,
+        Self::Korean,
+    ];
 
-    /// The stable identifier stored in user preferences.
+    /// The stable identifier stored in user preferences (ISO 639-1).
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
             Self::English => "en",
+            Self::German => "de",
+            Self::Spanish => "es",
+            Self::French => "fr",
+            Self::Portuguese => "pt",
             Self::Russian => "ru",
+            Self::Hindi => "hi",
+            Self::ChineseSimplified => "zh",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
         }
     }
 
@@ -40,8 +68,9 @@ impl Language {
             .find(|language| language.code() == code)
     }
 
-    /// The language for an operating-system locale tag such as `ru-RU` or `en_US.UTF-8`;
-    /// a language without a catalog reads as English.
+    /// The language for an operating-system locale tag such as `ru-RU` or `en_US.UTF-8`,
+    /// read from its primary subtag (`zh-Hant-TW` reads as Simplified Chinese, `pt-PT` as
+    /// Portuguese); a language without a catalog reads as English.
     #[must_use]
     pub fn from_locale_tag(tag: &str) -> Self {
         let primary = tag
@@ -57,7 +86,15 @@ impl Language {
     pub const fn native_name(self) -> &'static str {
         match self {
             Self::English => "English",
+            Self::German => "Deutsch",
+            Self::Spanish => "Español",
+            Self::French => "Français",
+            Self::Portuguese => "Português",
             Self::Russian => "Русский",
+            Self::Hindi => "हिन्दी",
+            Self::ChineseSimplified => "简体中文",
+            Self::Japanese => "日本語",
+            Self::Korean => "한국어",
         }
     }
 
@@ -65,22 +102,25 @@ impl Language {
         self as usize
     }
 
-    const fn from_index(index: u8) -> Self {
-        match index {
-            1 => Self::Russian,
-            _ => Self::English,
-        }
+    fn from_index(index: u8) -> Self {
+        Self::ALL
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or_default()
     }
 
+    /// The CLDR plural category of a whole count. Spanish and French "many" applies only to
+    /// exact millions, which count text does not distinguish, so they use one/other.
     fn plural_category(self, count: u64) -> PluralCategory {
         match self {
-            Self::English if count == 1 => PluralCategory::One,
-            Self::English => PluralCategory::Other,
+            Self::English | Self::German | Self::Spanish if count == 1 => PluralCategory::One,
+            Self::French | Self::Portuguese | Self::Hindi if count <= 1 => PluralCategory::One,
             Self::Russian => match (count % 10, count % 100) {
                 (1, tens) if tens != 11 => PluralCategory::One,
                 (2..=4, tens) if !(12..=14).contains(&tens) => PluralCategory::Few,
                 _ => PluralCategory::Many,
             },
+            _ => PluralCategory::Other,
         }
     }
 }
@@ -98,7 +138,7 @@ static DISPLAY_LANGUAGE: AtomicU8 = AtomicU8::new(0);
 
 /// Sets the process's display language. Windows re-render to pick it up.
 pub fn set_language(language: Language) {
-    #[allow(clippy::cast_possible_truncation)] // `Language` has two variants.
+    #[allow(clippy::cast_possible_truncation)] // `Language` has ten variants.
     DISPLAY_LANGUAGE.store(language.index() as u8, Ordering::Relaxed);
 }
 
@@ -256,7 +296,22 @@ mod tests {
         assert_eq!(Language::from_locale_tag("ru_UA.UTF-8"), Language::Russian);
         assert_eq!(Language::from_locale_tag("RU"), Language::Russian);
         assert_eq!(Language::from_locale_tag("en-GB"), Language::English);
-        assert_eq!(Language::from_locale_tag("de-DE"), Language::English);
+        assert_eq!(Language::from_locale_tag("de-DE"), Language::German);
+        assert_eq!(Language::from_locale_tag("es-419"), Language::Spanish);
+        assert_eq!(Language::from_locale_tag("fr_CA"), Language::French);
+        assert_eq!(Language::from_locale_tag("pt-PT"), Language::Portuguese);
+        assert_eq!(Language::from_locale_tag("hi-IN"), Language::Hindi);
+        assert_eq!(
+            Language::from_locale_tag("zh-CN"),
+            Language::ChineseSimplified
+        );
+        assert_eq!(
+            Language::from_locale_tag("zh-Hant-TW"),
+            Language::ChineseSimplified
+        );
+        assert_eq!(Language::from_locale_tag("ja-JP"), Language::Japanese);
+        assert_eq!(Language::from_locale_tag("ko-KR"), Language::Korean);
+        assert_eq!(Language::from_locale_tag("it-IT"), Language::English);
         assert_eq!(Language::from_locale_tag(""), Language::English);
         for language in Language::ALL {
             assert_eq!(Language::from_code(language.code()), Some(language));
@@ -279,6 +334,43 @@ mod tests {
         assert_eq!(Language::English.plural_category(1) as usize, 0);
         assert_eq!(Language::English.plural_category(0) as usize, 3);
         assert_eq!(Language::English.plural_category(2) as usize, 3);
+    }
+
+    #[test]
+    fn other_languages_follow_their_cldr_integer_rules() {
+        use super::PluralCategory::{One, Other};
+        for language in [Language::German, Language::Spanish] {
+            assert_eq!(language.plural_category(1), One);
+            for other in [0, 2, 5, 21, 1_000_000] {
+                assert_eq!(language.plural_category(other), Other, "{other}");
+            }
+        }
+        for language in [Language::French, Language::Portuguese, Language::Hindi] {
+            assert_eq!(language.plural_category(0), One);
+            assert_eq!(language.plural_category(1), One);
+            for other in [2, 5, 11, 21] {
+                assert_eq!(language.plural_category(other), Other, "{other}");
+            }
+        }
+        for language in [
+            Language::ChineseSimplified,
+            Language::Japanese,
+            Language::Korean,
+        ] {
+            for count in [0, 1, 2, 5, 21] {
+                assert_eq!(language.plural_category(count), Other, "{count}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_display_language_index_round_trips() {
+        for language in Language::ALL {
+            #[allow(clippy::cast_possible_truncation)]
+            let index = language.index() as u8;
+            assert_eq!(Language::from_index(index), language);
+        }
+        assert_eq!(Language::from_index(u8::MAX), Language::English);
     }
 
     #[test]
