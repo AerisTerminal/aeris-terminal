@@ -477,7 +477,8 @@ pub(super) fn order_quantity_menu_layer(
                 .text_xs()
                 .text_color(gpui_color(theme.colors.danger))
                 .child(format!(
-                    "Enter a quantity above 0, up to {MAXIMUM_ORDER_QUANTITY}, with at most {MAXIMUM_ORDER_QUANTITY_DECIMALS} decimals"
+                    "Enter a quantity above 0, up to {}, with at most {MAXIMUM_ORDER_QUANTITY_DECIMALS} decimals",
+                    super::market_screener::grouped_decimal(&MAXIMUM_ORDER_QUANTITY.to_string())
                 )),
         );
     }

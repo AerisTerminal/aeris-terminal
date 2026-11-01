@@ -1560,10 +1560,13 @@ mod tests {
             None
         );
         assert_eq!(
-            aeris_desktop::trading::OrderQuantity::parse("999"),
-            aeris_desktop::trading::OrderQuantity::whole(999)
+            aeris_desktop::trading::OrderQuantity::parse("5000"),
+            aeris_desktop::trading::OrderQuantity::whole(5000)
         );
-        assert_eq!(aeris_desktop::trading::OrderQuantity::parse("1000"), None);
+        assert_eq!(
+            aeris_desktop::trading::OrderQuantity::parse("10000000001"),
+            None
+        );
     }
 
     #[test]

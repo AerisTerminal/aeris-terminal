@@ -15,8 +15,10 @@ const REQUEST_CAPACITY_NOTICE: &str = "Too many trading commands are waiting for
 pub const STALE_ORDER_NOTICE: &str = "Order changed before your edit; it was not modified";
 /// Allows a burst of global commands and venue notices between UI wakes without loss.
 pub const MAXIMUM_UNSCOPED_NOTICES: usize = 64;
-/// The largest quantity one order entry accepts.
-pub const MAXIMUM_ORDER_QUANTITY: u64 = 999;
+/// The largest quantity one order entry accepts: ten billion, so a market priced in fractions
+/// of a cent still trades in one order, while the exact value at
+/// [`MAXIMUM_ORDER_QUANTITY_DECIMALS`] still fits the trading owner's fixed point.
+pub const MAXIMUM_ORDER_QUANTITY: u64 = 10_000_000_000;
 /// The most fractional digits an order-entry quantity carries.
 pub const MAXIMUM_ORDER_QUANTITY_DECIMALS: u8 = 8;
 
@@ -158,6 +160,8 @@ pub enum OrderEntryRefusal {
     Incomplete,
     /// The quantity has more fractional digits than the instrument's quantity scale.
     QuantityTooPrecise { decimals: u8 },
+    /// The quantity does not fit the instrument's fixed point at its quantity scale.
+    QuantityTooLarge,
 }
 
 impl OrderEntryRefusal {
@@ -171,6 +175,7 @@ impl OrderEntryRefusal {
             Self::QuantityTooPrecise { decimals } => {
                 format!("This market takes quantities with at most {decimals} decimals")
             }
+            Self::QuantityTooLarge => "This quantity is too large for this market".to_string(),
         }
     }
 }
@@ -1447,8 +1452,12 @@ fn prepare_order_identity(
     ))
     .map_err(|_| OrderEntryRefusal::Incomplete)?;
     let quantity = quantity.fixed_point(terms.quantity_scale).ok_or(
-        OrderEntryRefusal::QuantityTooPrecise {
-            decimals: terms.quantity_scale,
+        if quantity.scale > terms.quantity_scale {
+            OrderEntryRefusal::QuantityTooPrecise {
+                decimals: terms.quantity_scale,
+            }
+        } else {
+            OrderEntryRefusal::QuantityTooLarge
         },
     )?;
     let provenance = aeris_trading::TradingProvenance {
@@ -1835,6 +1844,14 @@ mod tests {
         let minimum = order(&frame, "0.00001").expect("minimum crypto size");
         assert_eq!(minimum.quantity.units(), 1_000);
         assert_eq!(minimum.quantity.scale(), 8);
+        let largest = order(&frame, "10000000000").expect("largest order-entry quantity");
+        assert_eq!(largest.quantity.units(), 1_000_000_000_000_000_000);
+        frame.quantity_scale = 18;
+        assert_eq!(
+            order(&frame, "10").map(|order| order.quantity),
+            Err(OrderEntryRefusal::QuantityTooLarge),
+            "a quantity past the instrument's fixed point is refused as too large"
+        );
     }
 
     #[test]
@@ -1850,6 +1867,10 @@ mod tests {
             ("0.00000001", "0.00000001"),
             ("999", "999"),
             ("999.000", "999"),
+            ("5000", "5000"),
+            ("250000", "250000"),
+            ("10000000000", "10000000000"),
+            ("9999999999.99999999", "9999999999.99999999"),
         ] {
             assert_eq!(
                 OrderQuantity::parse(text).map(|quantity| quantity.to_string()),
@@ -1867,8 +1888,9 @@ mod tests {
             "1e3",
             "1,5",
             "1.5.0",
-            "999.5",
-            "1000",
+            "10000000000.5",
+            "10000000001",
+            "99999999999999999999",
             "0.000000001",
             "ten",
         ] {
@@ -1886,8 +1908,15 @@ mod tests {
         assert_eq!(quantity("1.5").stepped(false), quantity("0.5"));
         assert_eq!(quantity("0.5").stepped(false), quantity("0.5"));
         assert_eq!(OrderQuantity::ONE.stepped(false), OrderQuantity::ONE);
-        assert_eq!(quantity("998.5").stepped(true), quantity("999"));
-        assert_eq!(quantity("999").stepped(true), quantity("999"));
+        assert_eq!(quantity("999").stepped(true), quantity("1000"));
+        assert_eq!(
+            quantity("9999999999.5").stepped(true),
+            quantity("10000000000")
+        );
+        assert_eq!(
+            quantity("10000000000").stepped(true),
+            quantity("10000000000")
+        );
         assert_eq!(quantity("0.00001").chart_size(), Some(0.000_01));
     }
 

@@ -589,6 +589,26 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn ticket_field_accepts_order_quantities_past_a_thousand(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let ticket = cx.read(|cx| surface.read(cx).order_quantity.ticket_input().clone());
+        let quantity = |text| aeris_desktop::trading::OrderQuantity::parse(text).expect("quantity");
+
+        // Typed one character at a time, as a trader enters a large size for a cheap market.
+        for typed in ["5", "50", "500", "5000"] {
+            cx.update(|window, cx| {
+                ticket.update(cx, |input, cx| input.set_value(typed, window, cx));
+                surface.update(cx, WorkspaceSurface::apply_ticket_quantity_text);
+            });
+        }
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(surface.trading_pnl.order_entry.quantity, quantity("5000"));
+            assert!(!surface.order_quantity.ticket_invalid());
+        });
+    }
+
+    #[gpui::test]
     fn ticket_field_and_chart_menu_edit_one_order_quantity(cx: &mut TestAppContext) {
         let (surface, _requests, _publications, cx) = harness(cx);
         let (ticket, menu) = cx.read(|cx| {
@@ -642,7 +662,7 @@ mod timeframe_input {
             assert!(!surface.order_quantity.ticket_invalid());
         });
 
-        for rejected in ["1000", "0.000000001"] {
+        for rejected in ["10000000001", "0.000000001"] {
             cx.update(|window, cx| {
                 ticket.update(cx, |input, cx| input.set_value(rejected, window, cx));
                 surface.update(cx, WorkspaceSurface::apply_ticket_quantity_text);
