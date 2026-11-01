@@ -2226,13 +2226,22 @@ fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
         ),
         settings_group(
             "Executions",
-            [settings_switch_row(
-                ui,
-                "Execution marks",
-                Some("Marks where your orders filled"),
-                visibility.show_execution_marks,
-                ChartSettingsAction::ToggleExecutionMarks,
-            )],
+            [
+                settings_switch_row(
+                    ui,
+                    "Execution marks",
+                    Some("Marks where your orders filled"),
+                    visibility.show_execution_marks,
+                    ChartSettingsAction::ToggleExecutionMarks,
+                ),
+                settings_switch_row(
+                    ui,
+                    "Fill glow",
+                    Some("Lights the window edges when an order fills"),
+                    snapshot.fill_glow_enabled,
+                    ChartSettingsAction::ToggleFillGlow,
+                ),
+            ],
             ui.theme,
         ),
         settings_group(

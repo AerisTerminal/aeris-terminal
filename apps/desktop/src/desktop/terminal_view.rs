@@ -606,8 +606,15 @@ impl Render for TerminalApp {
                 self.rendered_screener_page(&terminal, window, cx)
             }
         };
+        let execution_glow = self
+            .notices
+            .toaster()
+            .execution_glow(Instant::now())
+            .filter(|_| self.chrome.preferences().fill_glow.shown())
+            .map(|glow| execution_glow::execution_glow_layer(glow, &self.theme));
         let fullscreen_focus = self.window.chrome_focus().clone();
-        page.track_focus(self.window.chrome_focus())
+        page.children(execution_glow)
+            .track_focus(self.window.chrome_focus())
             .on_key_down(cx.listener(Self::on_key_down))
             // Captured so a chart that consumes the release cannot leave a shortcut latched.
             .capture_key_up(cx.listener(|terminal, _, _, _| {

@@ -362,6 +362,8 @@ pub struct ChartChromePreferences {
     /// Window-relative logical origin the selected-drawing toolbar was dragged to; `None` is
     /// the default spot.
     pub drawing_context_toolbar_origin: Option<(f32, f32)>,
+    /// The window edge glow on a new fill.
+    pub fill_glow: ChromeVisibility,
 }
 
 const STAMP_FAVORITE_PREFIX: &str = "stamp:";
@@ -571,6 +573,7 @@ impl Default for ChartChromePreferences {
             trading_shortcuts: TradingShortcutMode::Confirm,
             chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
+            fill_glow: ChromeVisibility::Shown,
         }
     }
 }
@@ -606,6 +609,7 @@ impl ChartChromePreferences {
             drawing_context_toolbar_origin: workspace_chrome_point(
                 self.drawing_context_toolbar_origin,
             ),
+            fill_glow_off: !self.fill_glow.shown(),
         }
     }
 
@@ -651,6 +655,7 @@ impl ChartChromePreferences {
             ChromeVisibility::from_shown(state.chart_trade_buttons_visible);
         preferences.drawing_context_toolbar_origin =
             chrome_point_origin(state.drawing_context_toolbar_origin.as_ref());
+        preferences.fill_glow = ChromeVisibility::from_shown(!state.fill_glow_off);
         preferences
     }
 }
@@ -952,6 +957,7 @@ mod tests {
             trading_shortcuts: TradingShortcutMode::OneClick,
             chart_trade_buttons: ChromeVisibility::Hidden,
             drawing_context_toolbar_origin: Some((640.0, 96.5)),
+            fill_glow: ChromeVisibility::Shown,
         }
     }
 
@@ -1019,6 +1025,23 @@ mod tests {
     }
 
     #[test]
+    fn the_fill_glow_stays_on_for_documents_written_before_it_existed() {
+        let restored =
+            ChartChromePreferences::from_workspace_chrome(Some(&WorkspaceChromeState::default()));
+        assert!(restored.fill_glow.shown());
+        let off = ChartChromePreferences {
+            fill_glow: ChromeVisibility::Hidden,
+            ..ChartChromePreferences::default()
+        };
+        let state = off.to_workspace_chrome();
+        assert!(state.fill_glow_off);
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&state)).fill_glow,
+            ChromeVisibility::Hidden
+        );
+    }
+
+    #[test]
     fn chart_chrome_preferences_convert_to_and_from_the_workspace_document() {
         let hidden = hidden_chrome_preferences();
         let state = hidden.to_workspace_chrome();
@@ -1040,6 +1063,7 @@ mod tests {
                 trading_shortcuts: "one_click".to_string(),
                 chart_trade_buttons_visible: false,
                 drawing_context_toolbar_origin: Some(WorkspaceChromePoint { x: 640.0, y: 96.5 }),
+                fill_glow_off: false,
             },
             "the document form keeps the legacy identifiers"
         );

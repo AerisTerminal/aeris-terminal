@@ -941,6 +941,7 @@ mod tests {
                     x: 640.0,
                     y: 96.5,
                 }),
+                fill_glow_off: false,
             },
             "the fold carries the legacy values verbatim"
         );

@@ -346,9 +346,17 @@ pub(super) struct Toaster {
     dismissed_status: BTreeMap<ToastStack, &'static str>,
     /// The timer expiry a wake-up is already scheduled for.
     wake: Option<Instant>,
+    execution_glows: super::execution_glow::ExecutionGlows,
 }
 
 impl Toaster {
+    pub(super) fn execution_glow(
+        &self,
+        now: Instant,
+    ) -> Option<super::execution_glow::ExecutionGlow> {
+        self.execution_glows.active(now)
+    }
+
     #[cfg(test)]
     pub(super) fn notices(&self) -> &[UserNotice] {
         self.notices.notices()
@@ -834,6 +842,7 @@ impl Toaster {
                     let (title, description) =
                         fill_notice_text(fill, &snapshot.instruments, &snapshot.accounts);
                     self.push_fill(host, fill.side, title, description, now);
+                    self.execution_glows.start(now);
                 }
                 trading_store::TradingAnnouncement::Order { event, order } => {
                     if now_unix_nanos.saturating_sub(event.event_unix_nanos) > NEWS_FRESHNESS_NANOS

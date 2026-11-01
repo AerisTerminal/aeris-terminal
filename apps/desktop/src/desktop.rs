@@ -30,6 +30,7 @@ mod drawing_context_toolbar;
 mod drawing_settings_dialog;
 mod drawing_toolbar;
 mod engine_market_worker;
+mod execution_glow;
 mod frame_poll_gate;
 mod frame_scheduler;
 use frame_scheduler::{AppSource, DirtySet, FrameScheduler};
@@ -5265,6 +5266,8 @@ enum ChartSettingsAction {
     ToggleIndicatorLegendValues,
     /// Applies to every chart: the Buy / quantity / Sell bar under the symbol legend.
     ToggleChartTradeButtons,
+    /// Applies to the whole window: the edge glow on a new fill.
+    ToggleFillGlow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5297,6 +5300,7 @@ struct ChartSettingsSnapshot {
     time_zone: String,
     trading_visibility: ChartTradingVisibilitySettings,
     chart_trade_buttons_visible: bool,
+    fill_glow_enabled: bool,
     legend: ChartLegendOptions,
 }
 

@@ -185,6 +185,10 @@ pub struct WorkspaceChromeState {
     /// Window-relative logical origin the selected-drawing toolbar was dragged to.
     #[prost(message, optional, tag = "15")]
     pub drawing_context_toolbar_origin: Option<WorkspaceChromePoint>,
+    /// Turns off the window edge glow on a new fill. Stored as an opt-out so documents
+    /// written before the glow existed keep it on.
+    #[prost(bool, tag = "16")]
+    pub fill_glow_off: bool,
 }
 
 /// A window-relative logical position in the chrome preferences.

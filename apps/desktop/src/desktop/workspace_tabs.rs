@@ -1235,6 +1235,7 @@ impl TerminalApp {
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
             chart_trade_buttons_visible: self.chrome.preferences().chart_trade_buttons.shown(),
+            fill_glow_enabled: self.chrome.preferences().fill_glow.shown(),
             legend: surface.chart_legend_options(cx)?,
         })
     }
@@ -1525,6 +1526,11 @@ impl TerminalApp {
             self.set_chart_trade_buttons_visible(visible, cx);
             return;
         }
+        if matches!(action, ChartSettingsAction::ToggleFillGlow) {
+            let enabled = !self.chrome.preferences().fill_glow.shown();
+            self.set_fill_glow_enabled(enabled, cx);
+            return;
+        }
         if Self::apply_trading_visibility_action(&surface, action, cx)
             || Self::apply_legend_settings_action(&surface, action, cx)
             || Self::apply_order_flow_settings_action(&surface, action, cx)
@@ -1548,7 +1554,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleSymbolLegendValues
             | ChartSettingsAction::ToggleIndicatorLegend
             | ChartSettingsAction::ToggleIndicatorLegendValues
-            | ChartSettingsAction::ToggleChartTradeButtons => unreachable!(),
+            | ChartSettingsAction::ToggleChartTradeButtons
+            | ChartSettingsAction::ToggleFillGlow => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -1589,7 +1596,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleSymbolLegendValues
             | ChartSettingsAction::ToggleIndicatorLegend
             | ChartSettingsAction::ToggleIndicatorLegendValues
-            | ChartSettingsAction::ToggleChartTradeButtons => unreachable!(),
+            | ChartSettingsAction::ToggleChartTradeButtons
+            | ChartSettingsAction::ToggleFillGlow => unreachable!(),
         });
         cx.notify();
     }
@@ -3302,6 +3310,17 @@ impl TerminalApp {
                 });
             }
         }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
+    }
+
+    /// Turns the window edge glow on a new fill on or off and saves the choice.
+    pub(super) fn set_fill_glow_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let visibility = chart_chrome::ChromeVisibility::from_shown(enabled);
+        if self.chrome.preferences_mut().fill_glow == visibility {
+            return;
+        }
+        self.chrome.preferences_mut().fill_glow = visibility;
         self.save_chart_chrome_preferences(cx);
         cx.notify();
     }

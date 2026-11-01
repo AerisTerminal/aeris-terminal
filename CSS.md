@@ -67,6 +67,12 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   when there is no room.
 - Focus is one style everywhere: the control's 1px border turns `ring-primary` (no
   thicker ring, glow or background change).
+- The fill glow (`desktop/execution_glow.rs`) is the one glow. When an order fills,
+  `swatch-blue`, `swatch-red`, `swatch-amber` and `swatch-green` ease in along the window edges
+  as blurred inset shadows over a fine dot grid, travel clockwise and ease out over 1.4 s. Its
+  fading strength (the layer opacity and each dot's alpha) is animation, not a tint, and no other
+  UI may borrow it as a shade. It never shows under reduced motion, and the Trading settings'
+  Fill glow switch turns it off.
 - Typography uses the bundled DM Sans faces (Regular 400, Medium 500, Bold 700) for all platform
   text, numbers included, and the bundled Faculty Glyphic Regular face only for brand/display text.
   The normal platform weight (`--font-weight-normal`) is Regular 400; emphasis and strong text use
