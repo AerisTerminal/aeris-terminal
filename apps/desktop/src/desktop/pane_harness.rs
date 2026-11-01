@@ -3773,6 +3773,98 @@ fn pane_harness_interval_cover_waits_for_ready_after_snapshot(cx: &mut TestAppCo
     check_switch_cover_through_ready(true, true, cx);
 }
 
+/// A watchlist entry keeps the terms it was saved with, and a provider whose price increment
+/// follows the price level has moved on since. The switch adopts the runtime's bound terms, so
+/// the footprint is keyed by the increment the market trades at now.
+#[gpui::test]
+fn pane_harness_watchlist_switch_adopts_the_runtime_bound_price_increment(cx: &mut TestAppContext) {
+    let (mut harness, cx, _original, _) = open_with_seeded_tape(cx);
+    let mut saved = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    saved.instrument_id = "hyperliquid:perp:ETH".into();
+    saved.provider_symbol = "ETH".into();
+    saved.display_symbol = "ETH-USDC".into();
+    // The fixture tape trades at 100, which is off a grid of 3.
+    saved.price_increment = Some(3);
+    let mut current = saved.clone();
+    current.price_increment = Some(1);
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_installed_instrument(&saved, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("watchlist selection");
+    let mut descriptor = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .descriptor
+            .clone()
+            .expect("fixture descriptor")
+    });
+    descriptor.instrument = current.clone();
+    descriptor.display_symbol = current.display_symbol.clone();
+    let covering = harness.fixture_snapshot(&current, ChartInterval::Minute1, sequence, 13);
+    let ready = harness.fixture_readiness(
+        sequence,
+        aeris_market_runtime::SeriesLoadState::Live,
+        "watchlist series ready",
+    );
+    for event in [
+        PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::BoundDescriptor {
+            generation: sequence,
+            descriptor: Box::new(descriptor),
+            provider_display_name: "Hyperliquid".into(),
+        }),
+        PaneProjectionEvent::LocalCommandOutcome(LocalCommandOutcome::EngineSelection {
+            sequence,
+            succeeded: true,
+        }),
+        covering,
+        ready,
+        PaneProjectionEvent::RuntimeProjection(
+            aeris_desktop::market_worker::RuntimeProjection::event(
+                FixtureMarketEvents::default().trade_tape(
+                    aeris_desktop::test_support::fixture_trade_tape(&current, sequence, 1, 3),
+                ),
+            ),
+        ),
+    ] {
+        harness
+            .publications
+            .send(event)
+            .expect("watchlist switch event");
+    }
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 5);
+        assert_eq!(pane.product.as_ref(), Some(&current));
+    });
+    cx.run_until_parked();
+    let chart = cx.read(|cx| harness.pane.read(cx).chart.clone().expect("chart"));
+    assert_eq!(
+        applied_tape_ordinal(&chart, &current.instrument_id, 1, cx),
+        Some(3),
+        "the tape is drawn under the bound increment"
+    );
+    let order_flow_notices = cx.read(|cx| {
+        harness
+            .window
+            .read(cx)
+            .toaster
+            .notices()
+            .iter()
+            .filter(|notice| notice.key.kind == "order_flow")
+            .count()
+    });
+    assert_eq!(order_flow_notices, 0);
+}
+
 fn assert_chart_presentation(
     pane: &WorkspaceSurface,
     expected: &ChartAppearanceSettings,

@@ -4994,11 +4994,11 @@ impl WorkspaceSurface {
         self.restore_descriptor.clone_from(&self.descriptor);
         self.restore_provider_display_name
             .clone_from(&self.provider_display_name);
-        if self
+        let bound = self
             .pending_descriptor
             .as_ref()
-            .is_some_and(|(bound, _)| *bound == sequence)
-        {
+            .is_some_and(|(bound, _)| *bound == sequence);
+        if bound {
             self.descriptor = self
                 .pending_descriptor
                 .take()
@@ -5016,7 +5016,21 @@ impl WorkspaceSurface {
         if let Some(target) = self.chart_pane_controller.take_pending_target() {
             self.interval = target.interval;
             self.persistence.mark_dirty();
-            if let Some(product) = target.product {
+            if let Some(requested) = target.product {
+                // A watchlist or linked request carries terms saved when it was added; a
+                // provider whose price increment follows the price level has moved on since.
+                // The runtime's bound terms for this selection are the current ones.
+                let product = self
+                    .descriptor
+                    .as_ref()
+                    .map(|descriptor| &descriptor.instrument)
+                    .filter(|instrument| {
+                        bound
+                            && instrument.provider == requested.provider
+                            && instrument.instrument_id == requested.instrument_id
+                    })
+                    .cloned()
+                    .unwrap_or(requested);
                 // Selections only come from providers the menu lists.
                 if let Some(provider) = ProviderId::find(&product.provider)
                     && provider != self.provider
@@ -5836,7 +5850,8 @@ impl WorkspaceSurface {
                     "Aeris pane order-flow append awaited a covering window; the next reset restores it"
                 );
             }
-            Err(OrderFlowApplyError::Failed(_)) => {
+            Err(OrderFlowApplyError::Failed(error)) => {
+                diagnostic!("Aeris pane order-flow tape could not be applied: {error}");
                 Self::post_indicator_failure(
                     "order_flow",
                     "Order flow unavailable",
