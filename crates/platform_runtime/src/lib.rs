@@ -17,6 +17,7 @@ mod network_notifications;
 mod power_notifications;
 mod user_notifications;
 
+pub use aeris_platform_sys::folders::downloads_directory;
 pub use aeris_platform_sys::fs;
 pub use aeris_platform_sys::fs::replace_file as replace_file_atomically;
 pub use aeris_platform_sys::process;
@@ -43,7 +44,7 @@ pub use durable_container::{
     DurableFormat, DurableLoad, DurableNewerVersion, DurableRejection, DurableSource,
     MAXIMUM_QUARANTINED_COPIES,
 };
-pub use file_manager::reveal_in_file_manager;
+pub use file_manager::{open_file_in_default_app, reveal_in_file_manager};
 pub use http_client::CancellableHttpClient;
 #[cfg(any(test, feature = "live-gates"))]
 pub use live_market_gate::{

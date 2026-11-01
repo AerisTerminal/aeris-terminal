@@ -405,12 +405,25 @@ impl BrandAsset {
 
     #[must_use]
     pub fn path(self) -> SharedString {
-        let name = match self {
+        format!("{BRAND_ASSET_PREFIX}{}", self.file_name()).into()
+    }
+
+    /// The bundled SVG, for documents that carry the artwork outside the GPUI asset source.
+    #[must_use]
+    pub const fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::MainLogo => include_bytes!("../../assets/aeris_assets/logo.svg"),
+            Self::LogomarkDark => include_bytes!("../../assets/aeris_assets/logomark-dark.svg"),
+            Self::LogomarkWhite => include_bytes!("../../assets/aeris_assets/logomark-white.svg"),
+        }
+    }
+
+    const fn file_name(self) -> &'static str {
+        match self {
             Self::MainLogo => "logo.svg",
             Self::LogomarkDark => "logomark-dark.svg",
             Self::LogomarkWhite => "logomark-white.svg",
-        };
-        format!("{BRAND_ASSET_PREFIX}{name}").into()
+        }
     }
 }
 
@@ -673,12 +686,11 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
 }
 
 fn brand_asset(path: &str) -> Option<&'static [u8]> {
-    Some(match path.strip_prefix(BRAND_ASSET_PREFIX)? {
-        "logo.svg" => include_bytes!("../../assets/aeris_assets/logo.svg"),
-        "logomark-dark.svg" => include_bytes!("../../assets/aeris_assets/logomark-dark.svg"),
-        "logomark-white.svg" => include_bytes!("../../assets/aeris_assets/logomark-white.svg"),
-        _ => return None,
-    })
+    let name = path.strip_prefix(BRAND_ASSET_PREFIX)?;
+    BrandAsset::ALL
+        .into_iter()
+        .find(|asset| asset.file_name() == name)
+        .map(BrandAsset::bytes)
 }
 
 fn exchange_asset(path: &str) -> Option<&'static [u8]> {

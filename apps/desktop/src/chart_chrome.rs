@@ -666,17 +666,34 @@ impl ChartChromePreferences {
 #[derive(Clone)]
 pub struct DesktopPersistence {
     root: PathBuf,
+    reports: PathBuf,
 }
 
 impl DesktopPersistence {
+    /// Paths under one data root; trading reports stay in its `reports` folder until
+    /// [`Self::with_reports_directory`] names a folder the user browses.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        let reports = root.join("reports");
+        Self { root, reports }
+    }
+
+    /// Saves trading reports in `reports` instead of the data root.
+    #[must_use]
+    pub fn with_reports_directory(mut self, reports: PathBuf) -> Self {
+        self.reports = reports;
+        self
     }
 
     #[must_use]
     pub fn workspace_path(&self) -> PathBuf {
         self.root.join("workspace-state.pb")
+    }
+
+    /// Folder of the trading reports this instance generates.
+    #[must_use]
+    pub fn reports_directory(&self) -> PathBuf {
+        self.reports.clone()
     }
 }
 
@@ -771,6 +788,17 @@ mod tests {
         assert_eq!(
             persistence.workspace_path(),
             root.join("workspace-state.pb")
+        );
+        assert_eq!(persistence.reports_directory(), root.join("reports"));
+        let downloads = PathBuf::from("Downloads").join("Aeris Reports");
+        let browsed = persistence
+            .clone()
+            .with_reports_directory(downloads.clone());
+        assert_eq!(browsed.reports_directory(), downloads);
+        assert_eq!(
+            browsed.workspace_path(),
+            root.join("workspace-state.pb"),
+            "the workspace stays in the data root"
         );
         assert_eq!(
             chart_chrome_path(&root),

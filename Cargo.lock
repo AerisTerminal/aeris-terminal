@@ -271,6 +271,7 @@ dependencies = [
  "aeris_terminal_ui",
  "aeris_trading",
  "aeris_trading_runtime",
+ "base64 0.23.1",
  "chrono",
  "embed-resource",
  "getrandom 0.4.3",

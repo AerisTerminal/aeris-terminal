@@ -3,6 +3,7 @@
 //! Platform FFI is isolated below target-specific modules. Consumers never
 //! need to use `unsafe` to access these capabilities.
 
+pub mod folders;
 pub mod fs;
 pub mod network;
 pub mod power;

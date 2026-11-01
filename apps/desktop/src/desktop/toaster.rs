@@ -6,8 +6,10 @@
 //! - Collapsed, older toasts tuck behind the newest: each sits a little lower and narrower, takes
 //!   the front toast's height and hides its content. Hovering expands the stack into a list laid
 //!   out from each toast's measured height.
-//! - A toast's timer pauses while its stack is hovered or swiped and while the window is
-//!   inactive, so nothing disappears while the trader is reading it or away.
+//! - A toast's timer pauses while its stack is hovered or swiped, so nothing disappears while
+//!   the trader is reading it. It keeps running while another window is in front, so a notice
+//!   posted as the trader switches away (a report opening in the browser) still expires; the
+//!   window losing focus ends a hover the pointer can no longer end itself.
 //! - Swiping right dismisses a toast past a distance or with enough momentum; a swipe the wrong
 //!   way meets friction, a short one springs back, and a click dismisses.
 //!
@@ -39,7 +41,7 @@ const COLLAPSED_VISIBLE: usize = 3;
 /// Live toasts a stack holds; a newer one retires the oldest timed toast past this.
 const MAXIMUM_TOASTS: usize = 5;
 /// Height assumed for a toast until its first layout measures it.
-const ESTIMATED_HEIGHT: f32 = 58.0;
+const ESTIMATED_HEIGHT: f32 = 52.0;
 const MOVE_DURATION: Duration = Duration::from_millis(400);
 const EXIT_DURATION: Duration = Duration::from_millis(250);
 const SPRING_BACK_DURATION: Duration = Duration::from_millis(200);
@@ -56,6 +58,10 @@ const SWIPE_VELOCITY: f32 = 0.11;
 /// A press that travels less than this is a click.
 const CLICK_SLOP: f32 = 3.0;
 const ICON_SIZE: f32 = 16.0;
+/// The title's line; the icon and the action button centre on it.
+const TITLE_LINE_HEIGHT: f32 = 18.0;
+/// Lets the small action button overhang the title line instead of making it taller.
+const ACTION_OVERHANG: f32 = 3.0;
 /// A fill or order event first reported this long after it happened is history the owner
 /// caught up on after a reconnect or restart, not news.
 const NEWS_FRESHNESS_NANOS: i64 = 60_000_000_000;
@@ -339,7 +345,7 @@ pub(super) struct Toaster {
     next_id: u64,
     hovered: Option<ToastStack>,
     swipe: Option<Swipe>,
-    /// Timers run only while the window is active; it counts as inactive until the first tick.
+    /// Whether the window was active at the last tick; it counts as inactive until the first.
     window_active: bool,
     reduce_motion: bool,
     /// A chart condition the trader dismissed stays dismissed until it changes or clears.
@@ -959,12 +965,17 @@ impl Toaster {
         }
     }
 
-    /// Advances timers and exits. Timers run only while their stack is collapsed and the
+    /// Advances timers and exits. Timers run while their stack is collapsed, whether or not the
     /// window is active. Returns whether anything changed.
     fn tick(&mut self, now: Instant, window_active: bool, reduce_motion: bool) -> bool {
         self.reduce_motion = reduce_motion;
+        let deactivated = self.window_active && !window_active;
         self.window_active = window_active;
         let mut changed = false;
+        // The pointer may leave through another window's surface without a hover-out here.
+        if deactivated && self.hovered.take().is_some() {
+            changed = true;
+        }
         if !window_active && let Some(swipe) = self.swipe.take() {
             // The release may land in another window; spring back rather than stay held.
             if let Some(index) = self.index_of(swipe.toast) {
@@ -1004,7 +1015,7 @@ impl Toaster {
     fn sync_timers(&mut self, now: Instant) -> Vec<usize> {
         let mut expired = Vec::new();
         for index in 0..self.toasts.len() {
-            let held = !self.window_active || self.is_expanded(self.toasts[index].stack);
+            let held = self.is_expanded(self.toasts[index].stack);
             let toast = &mut self.toasts[index];
             if !toast.is_live() {
                 continue;
@@ -1262,17 +1273,19 @@ fn toast_body(
 ) -> Div {
     let colors = theme.colors;
     let (icon, icon_color) = tone_icon(tone, theme);
+    let title_line = px(TITLE_LINE_HEIGHT);
     div()
         .flex()
-        .items_center()
+        .items_start()
         .gap_2()
-        .px_4()
-        .py_3()
+        .px_3()
+        .py_2()
         .child(
-            Icon::new(icon.path())
-                .color(gpui_color(icon_color))
-                .with_size(px(ICON_SIZE))
-                .flex_none(),
+            div().flex().flex_none().items_center().h(title_line).child(
+                Icon::new(icon.path())
+                    .color(gpui_color(icon_color))
+                    .with_size(px(ICON_SIZE)),
+            ),
         )
         .child(
             div()
@@ -1280,23 +1293,32 @@ fn toast_body(
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap_0p5()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_default))
-                        .child(title),
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .line_height(title_line)
+                                .font_weight(platform_font_weight(TypographyRole::Strong))
+                                .text_color(gpui_color(colors.text_default))
+                                .child(title),
+                        )
+                        .children(action.map(|action| {
+                            div().flex_none().my(px(-ACTION_OVERHANG)).child(action)
+                        })),
                 )
                 .children(description.map(|description| {
                     div()
                         .text_xs()
-                        .font_features(platform_tabular_numerals())
                         .text_color(gpui_color(colors.text_secondary))
                         .child(description)
                 })),
         )
-        .children(action)
 }
 
 /// A chart condition shown in the middle of a chart, drawn like a toast.
@@ -2287,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn timers_pause_while_hovered_or_the_window_is_inactive() {
+    fn timers_pause_while_hovered_and_run_while_the_window_is_inactive() {
         let start = Instant::now();
         let mut toaster = Toaster::default();
         let id = toast(&mut toaster, stack(1), start);
@@ -2304,23 +2326,27 @@ mod tests {
             "a hovered stack holds its toasts"
         );
 
-        let left = hovered + Duration::from_secs(30);
-        toaster.set_hovered(stack(1), false, left);
-        toaster.tick(left, false, false);
-        toaster.tick(left + Duration::from_secs(30), false, false);
+        let away = hovered + Duration::from_secs(30);
         assert!(
-            toaster.toasts[0].is_live(),
-            "an inactive window holds them too"
+            toaster.tick(away, false, false),
+            "the window losing focus ends the hover"
         );
-
-        let back = left + Duration::from_secs(30);
-        toaster.tick(back, true, false);
-        toaster.tick(back + Duration::from_secs(3), true, false);
+        assert_eq!(toaster.hovered, None);
+        toaster.tick(away + Duration::from_secs(3), false, false);
         assert!(toaster.toasts[0].is_live(), "four seconds remain");
-        let expiry = back + Duration::from_secs(4);
-        assert!(toaster.tick(expiry, true, false));
-        assert!(!toaster.toasts[0].is_live());
-        assert!(toaster.tick(expiry + EXIT_DURATION, true, false));
+        toaster.wake_fired(start + FILL_LIFETIME);
+        assert_eq!(
+            toaster.claim_wake(),
+            Some(away + Duration::from_secs(4)),
+            "the expiry is scheduled while another window is in front"
+        );
+        let expiry = away + Duration::from_secs(4);
+        assert!(toaster.tick(expiry, false, false));
+        assert!(
+            !toaster.toasts[0].is_live(),
+            "it expires behind another window"
+        );
+        assert!(toaster.tick(expiry + EXIT_DURATION, false, false));
         assert_eq!(toaster.index_of(id), None, "removed once its exit has run");
     }
 

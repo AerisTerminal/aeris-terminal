@@ -2239,6 +2239,15 @@ impl AerisChartView {
         Some(format!("{:02}:{:02}", parts.hour, parts.minute))
     }
 
+    /// UTC offset of a supported IANA zone at a UTC instant, for host surfaces such as the
+    /// trading report that group times by the chart's calendar days and hours.
+    #[must_use]
+    pub fn time_zone_offset_seconds(time_zone: &str, utc_seconds: i64) -> Option<i32> {
+        let parts =
+            aeris_charts_engine::ChartTimeZone::parse(time_zone)?.local_parts(utc_seconds)?;
+        Some(parts.offset_seconds)
+    }
+
     /// Applies a selected IANA display time zone and records it as durable presentation state.
     ///
     /// # Errors

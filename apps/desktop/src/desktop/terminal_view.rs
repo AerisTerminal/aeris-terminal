@@ -776,6 +776,7 @@ impl TerminalApp {
         let keyboard_shortcuts = self.keyboard_shortcuts_layer(&terminal);
         let trading_confirmation = self.trading_confirmation_layer(&terminal);
         let layouts_dialog = self.layouts_dialog_layer(&terminal, cx);
+        let trading_report = self.trading_report_layer(&terminal, cx);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
         let header = self.rendered_header(&terminal, &active, cx);
@@ -808,7 +809,8 @@ impl TerminalApp {
                 .children(keyboard_shortcuts)
                 .children(command_palette)
                 .children(trading_confirmation)
-                .children(layouts_dialog);
+                .children(layouts_dialog)
+                .children(trading_report);
         }
         self.page_root()
             .children(title_bar)
@@ -835,6 +837,7 @@ impl TerminalApp {
             .children(command_palette)
             .children(trading_confirmation)
             .children(layouts_dialog)
+            .children(trading_report)
     }
 }
 

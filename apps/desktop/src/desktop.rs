@@ -84,6 +84,7 @@ mod terminal_view;
 mod time_sales_panel;
 mod toaster;
 mod trading_hotkeys;
+mod trading_report;
 mod update;
 mod volume_dialog;
 mod window_state;
@@ -5672,8 +5673,20 @@ fn start_desktop_persistence(
             "The desktop data folder could not be opened.",
         );
     });
-    chart_chrome::DesktopPersistence::new(root)
+    let persistence = chart_chrome::DesktopPersistence::new(root);
+    // A validation run keeps every file it writes inside its own root.
+    let validation = aeris_platform_runtime::active_data_root()
+        .is_ok_and(aeris_platform_runtime::DataRoot::is_validation);
+    match aeris_platform_runtime::downloads_directory() {
+        Some(downloads) if !validation => {
+            persistence.with_reports_directory(downloads.join(TRADING_REPORTS_FOLDER))
+        }
+        _ => persistence,
+    }
 }
+
+/// The folder in the user's Downloads that trading reports are saved in.
+const TRADING_REPORTS_FOLDER: &str = "Aeris Reports";
 
 fn compose_desktop_services(
     market: aeris_market_runtime::MarketService,

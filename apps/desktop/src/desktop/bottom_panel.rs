@@ -62,7 +62,7 @@ pub(super) enum TradeHistoryAccountFilter {
 }
 
 impl TradeHistoryAccountFilter {
-    fn includes(&self, account_id: &aeris_trading::TradingAccountId) -> bool {
+    pub(super) fn includes(&self, account_id: &aeris_trading::TradingAccountId) -> bool {
         match self {
             Self::All => true,
             Self::Account(account_key) => account_id.as_str() == account_key,
@@ -340,6 +340,10 @@ pub(super) struct BottomPanelState {
     positions: OpenPositions,
     scroll: UniformListScrollHandle,
     positions_scroll: UniformListScrollHandle,
+    /// The open trading report dialog.
+    pub(super) report: Option<trading_report::ReportDialog>,
+    /// A report is being generated on a background thread.
+    pub(super) report_running: bool,
 }
 
 impl Default for BottomPanelState {
@@ -354,6 +358,8 @@ impl Default for BottomPanelState {
             positions: OpenPositions::default(),
             scroll: UniformListScrollHandle::new(),
             positions_scroll: UniformListScrollHandle::new(),
+            report: None,
+            report_running: false,
         }
     }
 }
@@ -531,6 +537,18 @@ impl BottomPanelState {
         self.history.refresh_older_rows(&self.filter);
         self.history.summaries = account_summaries(&self.history.account_pnl, &self.filter).into();
         self.positions.rows = position_rows(&self.positions.positions, &self.filter).into();
+    }
+
+    pub(super) const fn account_filter(&self) -> &TradeHistoryAccountFilter {
+        &self.filter
+    }
+
+    pub(super) fn report_accounts(&self) -> &[aeris_trading::TradingAccount] {
+        &self.history.accounts
+    }
+
+    pub(super) fn report_symbols(&self) -> Arc<BTreeMap<aeris_instruments::InstrumentId, String>> {
+        Arc::clone(&self.history.symbols)
     }
 
     fn shows_account_column(&self) -> bool {
@@ -1029,6 +1047,28 @@ fn bottom_panel_tab_bar(
         .child(bottom_panel_tabs(terminal, state, theme))
         .child(div().flex_1())
         .child(count_label)
+        .when(state.tab == BottomPanelTab::TradeHistory, |bar| {
+            bar.child(trading_report_button(terminal, state, theme))
+        })
+}
+
+fn trading_report_button(
+    terminal: &Entity<TerminalApp>,
+    state: &BottomPanelState,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    let open_terminal = terminal.clone();
+    Button::new("trading_report_open", theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
+        .label("Report")
+        .aria_label("Create a trading report")
+        .disabled(state.report_running)
+        .on_click(move |_, window, cx| {
+            open_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.open_trading_report_dialog(window, terminal_cx);
+            });
+        })
 }
 
 fn bottom_panel_tabs(
